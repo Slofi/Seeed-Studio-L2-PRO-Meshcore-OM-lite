@@ -281,6 +281,23 @@ void omFrameEnd() {
 
 bool omTouch(uint16_t& x, uint16_t& y) { return s_display.getTouch(&x, &y) != 0; }
 
+// ---------------------------------------------------------------------------- screenshot
+
+bool omFrameSize(int& width, int& height) {
+  if (s_frame.getBuffer() == nullptr) return false;
+  width = (int)s_frame.width();
+  height = (int)s_frame.height();
+  return width > 0 && height > 0;
+}
+
+uint16_t omFramePixel(int x, int y) {
+  const uint16_t stored = ((const uint16_t*)s_frame.getBuffer())[(size_t)y * s_frame.width() + (size_t)x];
+  // The push above sends the stored words as they lie in memory when the probe found them swapped;
+  // the host wants the native value (low byte first). Undo the sprite's order here, once, so the
+  // screenshot tool never has to know which way this panel happens to store colour.
+  return s_frameNeedsSwap ? (uint16_t)((stored >> 8) | (stored << 8)) : stored;
+}
+
 // A plain I2C sweep. Its output is the first thing to read when a rail or a device is silent:
 // 0x21 expander, 0x2C backlight driver, 0x48 battery ADC, 0x18 codec, 0x5D touch.
 void i2cScan() {

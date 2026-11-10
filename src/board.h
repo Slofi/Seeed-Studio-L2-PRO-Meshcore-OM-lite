@@ -103,4 +103,12 @@ void omFrameEnd();
 // Touch always reads the real panel, never the frame buffer.
 bool omTouch(uint16_t& x, uint16_t& y);
 
+// Screenshot support (tools/shot.py over USB). omFrameSize() is false when there is no frame buffer,
+// i.e. when the app is drawing straight to the panel and there is nothing to capture.
+// omFramePixel() returns the colour AS DRAWN, in native RGB565: the panel's wire byte order is
+// compensated with the same boot-probe flag the push uses, so a host that reads the low byte first
+// gets real colours whatever order the sprite happens to store. Top row first, x to the right.
+bool omFrameSize(int& width, int& height);
+uint16_t omFramePixel(int x, int y);
+
 }  // namespace om

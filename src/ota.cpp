@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: MIT
-// OM Lite USB OTA — update the firmware over the USB CDC port, no BOOT/RESET dance.
+// OM Lite USB commands on the CDC port: OTA, and a screenshot so the screen can be checked without a
+// photo.
 //
-// Host -> device: "OMOTA1" (6) + size u32 LE + md5 (16 raw) + <size> image bytes.
-// The image is written with Update.h and the device reboots itself on success. The magic is only
-// looked for at the start of a transfer, so ordinary serial logs are unaffected.
+// Host -> device, OTA: "OMOTA1" (6) + size u32 LE + md5 (16 raw) + <size> image bytes.
+// The image is written with Update.h and the device reboots itself on success.
+// Host -> device, screenshot: "OMSHOT" (6). Device answers "OMSHOT1 <w> <h> <bytes>\n" and then the
+// off-screen frame as native RGB565 little-endian, row by row from the top left; or "OMSHOT0 no
+// frame\n" when there is no frame buffer. See tools/shot.py.
+// The magics are only looked for at the start of a transfer, so ordinary serial logs are unaffected.
 #include "ota.h"
 
 #include <Update.h>
+
+#include "board.h"
 
 namespace om {
 namespace {
 
 constexpr char kMagic[6] = {'O', 'M', 'O', 'T', 'A', '1'};
+constexpr char kShotMagic[6] = {'O', 'M', 'S', 'H', 'O', 'T'};
 bool s_active = false;
 
 bool readExact(uint8_t* dst, size_t len, uint32_t timeoutMs) {
@@ -29,6 +36,53 @@ bool readExact(uint8_t* dst, size_t len, uint32_t timeoutMs) {
   return true;
 }
 
+// One six-byte prefix matcher: exactly the state machine the OTA reader has always used, unchanged.
+// It advances on a matching byte and, on a miss, restarts at 1 if this byte could begin the magic
+// again, otherwise at 0. Two matchers are fed the same byte stream independently, which is how a
+// second command is added without altering what the OTA path does.
+struct Magic {
+  const char* text;
+  uint8_t match;
+};
+
+bool feed(Magic& m, char c) {
+  if (c == m.text[m.match]) {
+    if (++m.match < 6) return false;
+    m.match = 0;
+    return true;
+  }
+  m.match = (c == m.text[0]) ? 1 : 0;
+  return false;
+}
+
+// Send the off-screen frame. In 256-byte chunks, the size of the CDC's TX ring buffer, so a write
+// queues one ring at a time and blocks only while that ring drains into USB; no per-chunk ACK from
+// the host, so the mesh loop stalls for about the transfer and no longer. The panel's byte order is
+// undone in board.cpp, so what goes on the wire is the colour as drawn.
+void sendScreenshot() {
+  int width = 0, height = 0;
+  if (!omFrameSize(width, height)) {
+    Serial.println("OMSHOT0 no frame");
+    return;
+  }
+  Serial.printf("OMSHOT1 %d %d %u\n", width, height, (unsigned)((uint32_t)width * height * 2));
+  uint8_t chunk[256];
+  size_t used = 0;
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      const uint16_t px = omFramePixel(x, y);
+      chunk[used++] = (uint8_t)(px & 0xFF);
+      chunk[used++] = (uint8_t)(px >> 8);
+      if (used == sizeof(chunk)) {
+        Serial.write(chunk, used);
+        used = 0;
+      }
+    }
+  }
+  if (used) Serial.write(chunk, used);
+  Serial.flush();
+}
+
 }  // namespace
 
 bool otaActive() { return s_active; }
@@ -36,23 +90,37 @@ bool otaActive() { return s_active; }
 void otaPoll() {
   if (s_active) return;
 
-  // Scan for the magic ONE BYTE AT A TIME. The old version read six bytes and threw them away when
+  // Scan for either magic ONE BYTE AT A TIME. The old version read six bytes and threw them away when
   // they did not match, which leaves 1-5 bytes behind on a partial write - and since the reader then
   // always takes six, the stream stays misaligned for ever and no later upload is ever recognised
   // (observed: the device printed heartbeats and ignored every header until it was reset).
-  // A prefix state machine recovers from any garbage, including that residue.
-  static uint8_t match = 0;
+  // A prefix state machine recovers from any garbage, including that residue. The OTA machine is the
+  // same one as before; the screenshot machine is a second copy fed the identical bytes.
+  static Magic ota = {kMagic, 0};
+  static Magic shot = {kShotMagic, 0};
   bool gotMagic = false;
+  bool gotShot = false;
   while (Serial.available() > 0) {
     const int c = Serial.read();
     if (c < 0) break;
-    if ((char)c == kMagic[match]) {
-      if (++match < 6) continue;
-      match = 0;
+    const bool isOta = feed(ota, (char)c);
+    const bool isShot = feed(shot, (char)c);
+    if (isShot && !isOta) {
+      ota.match = 0;   // the bytes of one magic must not count towards the other
+      gotShot = true;
+      break;
+    }
+    if (isOta) {
+      shot.match = 0;
       gotMagic = true;
       break;
     }
-    match = ((char)c == kMagic[0]) ? 1 : 0;
+  }
+  // A screenshot leaves nothing to read afterwards; anything the host sent later waits in the FIFO for
+  // the next poll, so the OTA reader is exactly where it was.
+  if (gotShot) {
+    sendScreenshot();
+    return;
   }
   if (!gotMagic) return;   // nothing (or only part of a magic) arrived: never start an upload
 

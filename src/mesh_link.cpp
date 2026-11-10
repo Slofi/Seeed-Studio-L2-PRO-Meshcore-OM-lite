@@ -39,11 +39,14 @@
 #include "channels.h"
 #include "crash_report.h"
 #include "mesh_migration.h"
+#include "mesh_path.h"
 #include "mesh_text.h"
+#include "seq_ring.h"
 #include "radio_fault.h"
 #include "target.h"
 #include "timekeeper.h"
 #include "ui/dm_delivery.h"
+#include "ui/dm_ring.h"
 #include "ui/new_node.h"
 #include "ui/node_menu.h"
 
@@ -53,6 +56,9 @@ static_assert(om::kMeshTextMax == MAX_TEXT_LEN, "mesh_text.h must follow BaseCha
 static_assert(om::kMeshNameMax == sizeof(ContactInfo::name), "mesh_text.h must follow ContactInfo::name");
 static_assert(om::kMeshPathMax == MAX_PATH_SIZE, "mesh_text.h must follow MeshCore.h MAX_PATH_SIZE");
 static_assert(om::kMeshPubKey == PUB_KEY_SIZE, "mesh_text.h must follow MeshCore.h PUB_KEY_SIZE");
+// EST-344: the path decoder's two upstream constants (Packet.h / ContactInfo.h).
+static_assert(om::kPathBytesMax == MAX_PATH_SIZE, "mesh_path.h must follow MeshCore.h MAX_PATH_SIZE");
+static_assert(om::kOutPathUnknown == OUT_PATH_UNKNOWN, "mesh_path.h must follow ContactInfo.h OUT_PATH_UNKNOWN");
 // EST-342: BaseChatMesh::composeMsgPacket() puts a 4-byte timestamp and one attempt byte before the
 // DM text; the composer budget (mesh_text.h) must keep counting exactly those bytes.
 static_assert(om::kMeshDmFrameBytes == 5, "BaseChatMesh's direct text frame layout changed");
@@ -97,8 +103,10 @@ struct Msg {
 };
 constexpr int kMsgRing = 32;
 Msg s_msgs[kMsgRing];
-uint32_t s_msgSeq = 0;
-int s_msgCount = 0;
+// Message `seq` lives in slot `seq % kMsgRing`; SeqRing is the ONE allocation path (EST-344). The
+// old slotFor() was a second rule (newest-1 based) and the own-repeat counter assumed a third, so a
+// repeat was looked up in the wrong slot. Reads and writes now share SeqRing::slotOf().
+SeqRing<kMsgRing> s_msgRing;
 uint8_t s_unread[8] = {0};
 uint32_t s_storeSerial = 0;   // changes on every stored message (channel or DM)
 
@@ -171,8 +179,9 @@ bool favouriteSet(const uint8_t* key, bool on) {
   return true;
 }
 
+// Index 0 is the oldest message still in the ring; the slot rule is SeqRing's, not a second copy.
 int slotFor(int idx) {
-  return (int)((s_msgSeq - (uint32_t)s_msgCount + (uint32_t)idx) % (uint32_t)kMsgRing);
+  return SeqRing<kMsgRing>::slotOf(s_msgRing.firstSeq() + (uint32_t)idx);
 }
 
 // --- per-contact timestamps ----------------------------------------------------------------------
@@ -250,7 +259,7 @@ class OmMeshTables : public SimpleMeshTables {
       pkt->calculatePacketHash(h);
       for (int i = 0; i < kOwnSlots; ++i) {
         if (s_own[i].seq == 0 || memcmp(s_own[i].hash, h, MAX_HASH_SIZE) != 0) continue;
-        const int slot = (int)(s_own[i].seq % (uint32_t)kMsgRing);
+        const int slot = SeqRing<kMsgRing>::slotOf(s_own[i].seq);
         if (s_msgs[slot].seq == s_own[i].seq && s_msgs[slot].repeats < 255) {
           ++s_msgs[slot].repeats;
         }
@@ -273,115 +282,47 @@ class OmMeshTables : public SimpleMeshTables {
 };
 
 // --- direct messages -----------------------------------------------------------------------------
-// Stored here (not in MeshCore) because the UI owns the presentation: one thread per contact,
-// the same seq / wall / real / hops / SNR rules as channel messages, an unread count per thread.
-// Sending goes through BaseChatMesh::sendMessage(), the companion's own path; the ACK arrives at the
-// Listener and the delivery table keeps the per-message state (EST-342).
-struct DmMsg {
-  uint8_t thread;
-  uint8_t mine;
-  uint8_t state;     // om::ui::DmState
-  uint8_t wallReal;
-  uint8_t ackReal;
-  int8_t hops;
-  int8_t snr4;
-  uint8_t pathHashSize;
-  uint8_t pathCount;
-  uint32_t seq;
-  uint32_t ts;       // uptime seconds when stored
-  uint32_t wall;     // system-clock seconds then
-  uint32_t ackWall;  // system-clock seconds when the ACK arrived
-  uint32_t wireTs;   // the timestamp in the packet (resends reuse it)
-  char name[kMeshNameCap];
-  char text[kMeshTextCap];
-  uint8_t path[MAX_PATH_SIZE];
-};
-constexpr int kDmRing = 32;
-DmMsg s_dms[kDmRing];
-uint32_t s_dmSeq = 0;
-int s_dmMsgCount = 0;
-uint32_t s_dmSerial = 0;   // changes on store, send, ACK and timeout, for the screen and the sound
-uint32_t s_dmRecvSerial = 0;   // arrives only: the DM chime must not ring for our own send
-
-struct DmThread {
-  uint8_t key[PUB_KEY_SIZE];
-  char name[kMeshNameCap];
-  uint16_t unread;
-  uint32_t lastWall;
-  bool used;
-};
-constexpr int kDmThreads = 16;
-DmThread s_dmThreads[kDmThreads];
-int s_dmThreadCount = 0;
+// The store itself (threads + the 32-message ring + the ONE allocation path) lives in ui/dm_ring.h,
+// plain C++ and host-tested: EST-344's overwrite came from storeDm() allocating one slot and writing
+// another, which no screen-level test could have caught. This file only adapts it to MeshCore: a
+// received packet fills the allocated message, sendMessage()/ACK update it by sequence (EST-342).
+using ui::DmMsg;   // the ring's message layout (ui/dm_ring.h), also the facade's MeshDm
+om::ui::DmRing s_dmRing;
 
 // The sent DMs waiting for an ACK. The companion's own timeout (est_timeout from sendMessage) is
 // what decides "not confirmed", and the same 4-byte hash proves "delivered".
 om::ui::DmDeliveryTable s_dmDelivery;
 
-int findDmThread(const uint8_t* key) {
-  for (int i = 0; i < kDmThreads; ++i) {
-    if (s_dmThreads[i].used && memcmp(s_dmThreads[i].key, key, PUB_KEY_SIZE) == 0) return i;
-  }
-  return -1;
-}
-
 int ensureDmThread(const ContactInfo& from) {
-  int idx = findDmThread(from.id.pub_key);
-  if (idx >= 0) return idx;
-  for (int i = 0; i < kDmThreads; ++i) {
-    if (!s_dmThreads[i].used) {
-      s_dmThreads[i].used = true;
-      memcpy(s_dmThreads[i].key, from.id.pub_key, PUB_KEY_SIZE);
-      snprintf(s_dmThreads[i].name, sizeof(s_dmThreads[i].name), "%s", from.name);
-      s_dmThreads[i].unread = 0;
-      s_dmThreads[i].lastWall = 0;
-      ++s_dmThreadCount;
-      ++s_dmSerial;
-      return i;
-    }
-  }
-  return -1;   // table full: the message is still counted in the ring, just without a thread
+  return s_dmRing.ensureThread(from.id.pub_key, from.name);
 }
 
 // The contact behind a thread, so a send can use MeshCore's own ContactInfo.
 bool contactForThread(int thread, ContactInfo* out) {
-  if (thread < 0 || thread >= kDmThreads || !s_dmThreads[thread].used || out == nullptr) return false;
+  const om::ui::DmThread* t = s_dmRing.thread(thread);
+  if (t == nullptr || !t->used || out == nullptr) return false;
   const int total = the_mesh.getTotalContactSlots();
   for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
     ContactInfo ci;
     if (!the_mesh.getContactByIdx((uint32_t)idx, ci)) continue;
     if (ci.type == ADV_TYPE_NONE || ci.name[0] == 0) continue;
-    if (memcmp(ci.id.pub_key, s_dmThreads[thread].key, PUB_KEY_SIZE) != 0) continue;
+    if (memcmp(ci.id.pub_key, t->key, PUB_KEY_SIZE) != 0) continue;
     *out = ci;
     return true;
   }
   return false;
 }
 
-DmMsg* findDmBySeq(uint32_t seq) {
-  if (seq == 0) return nullptr;
-  for (int i = 0; i < kDmRing; ++i) {
-    if (s_dms[i].seq == seq) return &s_dms[i];
-  }
-  return nullptr;
-}
-
 void setDmState(uint32_t seq, om::ui::DmState state) {
-  DmMsg* m = findDmBySeq(seq);
-  if (m == nullptr || m->state == (uint8_t)state) return;
-  m->state = (uint8_t)state;
-  ++s_dmSerial;
+  if (!s_dmRing.setState(seq, (uint8_t)state)) return;
   Serial.printf("[mc] DM seq %lu: %s\n", (unsigned long)seq, om::ui::dmStateToken(state));
 }
 
 void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
   const int thread = ensureDmThread(from);
-  DmMsg& m = s_dms[s_dmSeq % (uint32_t)kDmRing];
-  memset(&m, 0, sizeof(m));
-  m.thread = (uint8_t)(thread < 0 ? 0xFF : thread);   // 0xFF: no thread free, still in the ring
-  m.mine = 0;
+  // THE allocation, shared with meshDmSend(): seq = newest + 1, slot = seq % ring, committed here.
+  DmMsg& m = *s_dmRing.alloc((uint8_t)(thread < 0 ? om::ui::kDmNoThread : thread), false);
   m.state = (uint8_t)om::ui::DmState::Delivered;   // received: nothing to confirm
-  m.seq = ++s_dmSeq;
   m.ts = millis() / 1000;
   m.wall = timeKeeper().now();
   m.wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
@@ -400,15 +341,8 @@ void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
   }
   snprintf(m.name, sizeof(m.name), "%s", from.name);
   snprintf(m.text, sizeof(m.text), "%s", text ? text : "");
-  if (s_dmMsgCount < kDmRing) ++s_dmMsgCount;
-  ++s_dmSerial;
-  ++s_dmRecvSerial;
-  if (thread >= 0) {
-    DmThread& t = s_dmThreads[thread];
-    if (t.unread < 0xFFFF) ++t.unread;
-    t.lastWall = m.wall;
-    snprintf(t.name, sizeof(t.name), "%s", from.name);
-  }
+  s_dmRing.bumpRecvSerial();
+  if (thread >= 0) s_dmRing.noteReceived(thread, from.name, m.wall);
   Serial.printf("[mc] DM from %s: %s (hops %d snr %.2f)\n", from.name, text ? text : "",
                 (int)m.hops, (double)m.snr4 / 4.0);
 }
@@ -416,7 +350,7 @@ void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
 // Resend one DM with the next attempt (the companion app's retry): the same text and the same wire
 // timestamp, so the recipient sees one message, and a new frame hash, so the ACK matches that frame.
 bool resendDm(uint32_t seq, uint8_t attempt) {
-  DmMsg* m = findDmBySeq(seq);
+  DmMsg* m = s_dmRing.find(seq);
   if (m == nullptr) return false;
   ContactInfo ci;
   if (!contactForThread(m->thread, &ci)) {
@@ -533,13 +467,8 @@ class OmListener : public MyMesh::Listener {
     uint32_t seq = 0;
     uint32_t rtt = 0;
     if (!s_dmDelivery.ack(ack_crc, millis(), &seq, &rtt)) return;
-    DmMsg* m = findDmBySeq(seq);
-    if (m != nullptr) {
-      m->state = (uint8_t)om::ui::DmState::Delivered;
-      m->ackWall = timeKeeper().now();
-      m->ackReal = timeKeeper().realSinceBoot() ? 1 : 0;
-      ++s_dmSerial;
-    }
+    // The ACK update goes through the ring too: same seq -> slot rule as the list (EST-344).
+    s_dmRing.markDelivered(seq, timeKeeper().now(), timeKeeper().realSinceBoot());
     Serial.printf("[mc] DM seq %lu delivered in %lu ms\n", (unsigned long)seq, (unsigned long)rtt);
   }
 
@@ -630,10 +559,11 @@ class OmListener : public MyMesh::Listener {
     }
 
     snprintf(s_lastText, sizeof(s_lastText), "%s", text ? text : "");
-    const int slot = slotFor(s_msgCount);
-    Msg& m = s_msgs[slot];
+    // The one allocation: seq = newest + 1, slot = seq % ring (EST-344).
+    const uint32_t seq = s_msgRing.alloc();
+    Msg& m = s_msgs[SeqRing<kMsgRing>::slotOf(seq)];
     memset(&m, 0, sizeof(m));
-    m.seq = s_msgSeq + 1;
+    m.seq = seq;
     m.ch = (uint8_t)channelIdx;
     m.mine = 0;
     m.ts = millis() / 1000;
@@ -663,8 +593,6 @@ class OmListener : public MyMesh::Listener {
       snprintf(m.name, sizeof(m.name), "?");
     }
     snprintf(m.text, sizeof(m.text), "%s", body);
-    if (s_msgCount < kMsgRing) ++s_msgCount;
-    ++s_msgSeq;
     ++s_storeSerial;
     if (channelIdx < 8) ++s_unread[channelIdx];
     const bool muted = mcChannelMuted(channelIdx);
@@ -1153,63 +1081,63 @@ bool meshLinkReloadChannels() {
 }
 
 // --- message accessors ---------------------------------------------------------------------------
-int meshMsgCount() { return s_msgCount; }
+int meshMsgCount() { return s_msgRing.count(); }
 uint32_t meshMsgSerial() { return s_storeSerial; }
 
 const char* meshMsgText(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return "";
+  if (idx < 0 || idx >= s_msgRing.count()) return "";
   return s_msgs[slotFor(idx)].text;
 }
 
 int meshMsgChannel(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return -1;
+  if (idx < 0 || idx >= s_msgRing.count()) return -1;
   return s_msgs[slotFor(idx)].ch;
 }
 
 const char* meshMsgName(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return "";
+  if (idx < 0 || idx >= s_msgRing.count()) return "";
   return s_msgs[slotFor(idx)].name;
 }
 
 bool meshMsgMine(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return false;
+  if (idx < 0 || idx >= s_msgRing.count()) return false;
   return s_msgs[slotFor(idx)].mine != 0;
 }
 
 uint32_t meshMsgTs(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return 0;
+  if (idx < 0 || idx >= s_msgRing.count()) return 0;
   return s_msgs[slotFor(idx)].ts;
 }
 
 uint32_t meshMsgWallTs(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return 0;
+  if (idx < 0 || idx >= s_msgRing.count()) return 0;
   return s_msgs[slotFor(idx)].wall;
 }
 
 bool meshMsgWallReal(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return false;
+  if (idx < 0 || idx >= s_msgRing.count()) return false;
   return s_msgs[slotFor(idx)].wallReal != 0;
 }
 
 uint32_t meshMsgSeq(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return 0;
+  if (idx < 0 || idx >= s_msgRing.count()) return 0;
   return s_msgs[slotFor(idx)].seq;
 }
 
 int meshMsgHops(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return -1;
+  if (idx < 0 || idx >= s_msgRing.count()) return -1;
   return s_msgs[slotFor(idx)].hops;
 }
 
 int meshMsgSnrQ(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return 0;
+  if (idx < 0 || idx >= s_msgRing.count()) return 0;
   return s_msgs[slotFor(idx)].snr4;
 }
 
 const uint8_t* meshMsgPath(int idx, uint8_t* hashSize, uint8_t* count) {
   if (hashSize) *hashSize = 1;
   if (count) *count = 0;
-  if (idx < 0 || idx >= s_msgCount) return nullptr;
+  if (idx < 0 || idx >= s_msgRing.count()) return nullptr;
   const Msg& m = s_msgs[slotFor(idx)];
   if (m.pathCount == 0) return nullptr;
   if (hashSize) *hashSize = m.pathHashSize;
@@ -1218,7 +1146,7 @@ const uint8_t* meshMsgPath(int idx, uint8_t* hashSize, uint8_t* count) {
 }
 
 int meshMsgHeardRepeats(int idx) {
-  if (idx < 0 || idx >= s_msgCount) return 0;
+  if (idx < 0 || idx >= s_msgRing.count()) return 0;
   return s_msgs[slotFor(idx)].repeats;
 }
 
@@ -1232,63 +1160,27 @@ void meshClearUnread(int channelIdx) {
 }
 
 // --- direct messages -----------------------------------------------------------------------------
-int meshDmCount() { return s_dmThreadCount; }
+int meshDmCount() { return s_dmRing.threadCount(); }
 
 const char* meshDmName(int idx) {
-  if (idx < 0 || idx >= kDmThreads) return "";
-  if (!s_dmThreads[idx].used) return "";
-  return s_dmThreads[idx].name;
+  const om::ui::DmThread* t = s_dmRing.thread(idx);
+  return (t != nullptr && t->used) ? t->name : "";
 }
 
-int meshDmUnread(int idx) {
-  if (idx < 0 || idx >= kDmThreads) return 0;
-  if (!s_dmThreads[idx].used) return 0;
-  return (int)s_dmThreads[idx].unread;
-}
+int meshDmUnread(int idx) { return s_dmRing.unread(idx); }
 
-bool meshDmAvailable() { return s_dmThreadCount > 0; }
+bool meshDmAvailable() { return s_dmRing.threadCount() > 0; }
 
-uint32_t meshDmSerial() { return s_dmSerial; }
+uint32_t meshDmSerial() { return s_dmRing.serial(); }
 
-uint32_t meshDmRecvSerial() { return s_dmRecvSerial; }
+uint32_t meshDmRecvSerial() { return s_dmRing.recvSerial(); }
 
-void meshDmClearUnread(int thread) {
-  if (thread >= 0 && thread < kDmThreads && s_dmThreads[thread].used) {
-    s_dmThreads[thread].unread = 0;
-  }
-}
+void meshDmClearUnread(int thread) { s_dmRing.clearUnread(thread); }
 
 int meshDmList(int thread, MeshDm* out, int max) {
-  if (out == nullptr || max <= 0 || thread < 0 || thread >= kDmThreads) return 0;
-  int n = 0;
-  // Walk by sequence (oldest first), not by physical slot: the ring wraps. Start at the oldest
-  // message still in the ring, not at 1: the sequence grows for the life of the boot.
-  const uint32_t first = s_dmSeq > (uint32_t)kDmRing ? s_dmSeq - (uint32_t)kDmRing + 1 : 1;
-  for (uint32_t seq = first; seq <= s_dmSeq && n < max; ++seq) {
-    const DmMsg& m = s_dms[seq % (uint32_t)kDmRing];
-    if (m.seq != seq || m.thread != (uint8_t)thread) continue;
-    MeshDm& d = out[n++];
-    memset(&d, 0, sizeof(d));
-    snprintf(d.name, sizeof(d.name), "%s", m.name);
-    snprintf(d.text, sizeof(d.text), "%s", m.text);
-    d.mine = m.mine != 0;
-    d.state = m.state;
-    d.seq = m.seq;
-    d.ts = m.ts;
-    d.wall = m.wall;
-    d.wallReal = m.wallReal != 0;
-    d.ackWall = m.ackWall;
-    d.ackReal = m.ackReal != 0;
-    d.hops = m.hops;
-    d.snr4 = m.snr4;
-    if (m.pathCount > 0 && m.pathHashSize > 0 &&
-        (int)m.pathCount * (int)m.pathHashSize <= MAX_PATH_SIZE) {
-      d.pathHashSize = m.pathHashSize;
-      d.pathCount = m.pathCount;
-      memcpy(d.path, m.path, (size_t)m.pathCount * m.pathHashSize);
-    }
-  }
-  return n;
+  // The ring walks its own live sequence range (firstSeq..newest) and reads slot seq % ring, so the
+  // list and the allocator can never disagree (EST-344). MeshDm is DmMsg itself.
+  return s_dmRing.list(thread, out, max);
 }
 
 bool meshDmOpenByName(const char* name, int* threadOut) {
@@ -1321,14 +1213,12 @@ bool meshDmSend(int thread, const char* text) {
     Serial.println("[mc] DM send: no contact for that thread");
     return false;
   }
-  const uint32_t seq = s_dmSeq + 1;
   const uint32_t wireTs = the_mesh.getRTCClock()->getCurrentTime();
-  DmMsg& m = s_dms[seq % (uint32_t)kDmRing];
-  memset(&m, 0, sizeof(m));
-  m.thread = (uint8_t)thread;
-  m.mine = 1;
+  // THE same allocation storeDm() uses: seq = newest + 1, slot = seq % ring, committed here. The
+  // reply that arrives next gets the following sequence, so it cannot overwrite this message.
+  DmMsg& m = *s_dmRing.alloc((uint8_t)thread, true);
+  const uint32_t seq = m.seq;
   m.state = (uint8_t)om::ui::DmState::Sending;
-  m.seq = seq;
   m.ts = millis() / 1000;
   m.wall = timeKeeper().now();
   m.wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
@@ -1344,17 +1234,11 @@ bool meshDmSend(int thread, const char* text) {
     // Not a radio fault: MeshCore refused to compose (packet pool / tables). An unanswered DM is
     // also not a fault; only the radio's own failures set the mark.
     m.state = (uint8_t)om::ui::DmState::Failed;
-    if (s_dmMsgCount < kDmRing) ++s_dmMsgCount;
-    ++s_dmSeq;
-    ++s_dmSerial;
     Serial.println("[mc] DM send: sendMessage failed");
     return false;
   }
   s_dmDelivery.begin(seq, ack, est, millis());
-  if (s_dmMsgCount < kDmRing) ++s_dmMsgCount;
-  ++s_dmSeq;
-  ++s_dmSerial;
-  s_dmThreads[thread].unread = 0;
+  s_dmRing.clearUnread(thread);
   Serial.printf("[mc] DM to %s (%d B) -> %s, ack %08lx, timeout %lu ms\n", ci.name, len,
                 rc == MSG_SEND_SENT_FLOOD ? "flood" : "direct", (unsigned long)ack,
                 (unsigned long)est);
@@ -1371,14 +1255,15 @@ void fillContact(const ContactInfo& ci, MeshContact& mc) {
   mc = MeshContact{};
   snprintf(mc.name, sizeof(mc.name), "%s", ci.name);
   mc.type = ci.type;
-  mc.path_len = ci.out_path_len;
+  // Out_path_len is MeshCore's ENCODED byte (hash size in the top 2 bits, count in the low 6); the
+  // UI gets the decoded hop count, never the raw value (EST-344, mesh_path.h).
+  mc.path_hops = (int8_t)om::pathHopCount(ci.out_path_len);
   mc.lastmod = ci.lastmod;
   mc.has_key = true;
   memcpy(mc.pub_key, ci.id.pub_key, PUB_KEY_SIZE);
   bool fav = false;
   isFavouriteKey(ci.id.pub_key, &fav);
   mc.favourite = fav;
-  if (ci.out_path_len > MAX_PATH_SIZE) mc.path_len = OUT_PATH_UNKNOWN;
   // The companion's Listener does not carry the advert packet, so there is no advert SNR: the Info
   // page leaves the row out instead of inventing one (EST-342).
   mc.adv_snr4 = 0;
@@ -1435,16 +1320,19 @@ bool meshContactPathText(const char* name, char* out, size_t cap) {
     break;
   }
   if (!found) return false;
-  if (ci.out_path_len == 0) {
+  // One decoder for the encoded out_path_len (EST-344). The hash size is per-contact (what the path
+  // actually arrived with), not our current prefs; the raw byte is never divided or printed.
+  const PathSpec spec = decodeOutPathLen(ci.out_path_len);
+  if (!spec.known) {
+    snprintf(out, cap, "--");
+    return true;
+  }
+  if (spec.count == 0) {
     snprintf(out, cap, "direct");
     return true;
   }
-  if (ci.out_path_len == OUT_PATH_UNKNOWN || ci.out_path_len > MAX_PATH_SIZE) {
-    snprintf(out, cap, "unknown");
-    return true;
-  }
-  const int hashSize = (int)meshPathHashBytes();
-  const int count = (int)ci.out_path_len / hashSize;
+  const int hashSize = (int)spec.hashSize;
+  const int count = (int)spec.count;
   size_t n = 0;
   for (int i = 0; i < count; ++i) {
     if (i > 0 && n + 3 < cap) {
@@ -1567,14 +1455,18 @@ MeshPingState meshPingState(uint32_t* rttMs, char* nameOut, size_t nameCap) {
 bool meshNodeTrace(const char* name) {
   ContactInfo ci;
   if (!s_ready || !findContactByName(name, &ci)) return false;
-  if (ci.out_path_len == OUT_PATH_UNKNOWN) {
+  // The trace takes an explicit path; sendDirect() for TRACE appends path_len BYTES to the payload
+  // (not MeshCore's encoded byte), so decode the contact's path first. The old code passed the
+  // encoded out_path_len straight in, which for a 2B one-hop path (0x41) appended 65 bytes.
+  const PathSpec spec = decodeOutPathLen(ci.out_path_len);
+  if (!spec.known) {
     // A trace is a directed packet; upstream's CMD_SEND_TRACE_PATH also takes an explicit path, so
     // there is nothing to aim at until a path is known.
     Serial.printf("[mc] trace %s: no path known\n", ci.name);
     return false;
   }
   const uint32_t tag = the_mesh.getRTCClock()->getCurrentTimeUnique();
-  const uint8_t flags = (uint8_t)((meshPathHashBytes() - 1) & 0x03);
+  const uint8_t flags = (uint8_t)((spec.hashSize - 1) & 0x03);
   mesh::Packet* pkt = the_mesh.createTrace(tag, 0, flags);
   if (pkt == nullptr) {
     Serial.println("[mc] trace: no packet");
@@ -1586,9 +1478,10 @@ bool meshNodeTrace(const char* name) {
   s_traceDeadlineMs = s_traceSentMs + 12000;   // a trace must come back through every hop
   s_tracePending = true;
   ++s_traceSerial;
-  the_mesh.sendDirect(pkt, ci.out_path, ci.out_path_len);
-  Serial.printf("[mc] trace %s: %u path byte(s), tag %08lx\n", ci.name, (unsigned)ci.out_path_len,
-                (unsigned long)tag);
+  const uint8_t pathBytes = (uint8_t)(spec.count * spec.hashSize);
+  the_mesh.sendDirect(pkt, ci.out_path, pathBytes);
+  Serial.printf("[mc] trace %s: %u byte(s), %u hop(s), tag %08lx\n", ci.name, (unsigned)pathBytes,
+                (unsigned)spec.count, (unsigned long)tag);
   return true;
 }
 
@@ -1670,16 +1563,18 @@ bool meshLinkSend(int channelIdx, const char* text) {
     Serial.println("[mc] send: no such channel");
     return false;
   }
-  tables.beginOwnSend(s_msgSeq + 1);
+  // The own-send marker and the stored message must share one sequence: nextSeq() is what alloc()
+  // will return (EST-344).
+  tables.beginOwnSend(s_msgRing.nextSeq());
   const bool ok = the_mesh.sendGroupMessage(meshNow(), cd.channel, the_mesh.getNodeName(), text,
                                             (int)strlen(text));
   tables.endOwnSend(ok);
   Serial.printf("[mc] sendGroupMessage -> %d\n", (int)ok);
   if (ok) {
-    const int slot = slotFor(s_msgCount);
-    Msg& m = s_msgs[slot];
+    const uint32_t seq = s_msgRing.alloc();
+    Msg& m = s_msgs[SeqRing<kMsgRing>::slotOf(seq)];
     memset(&m, 0, sizeof(m));
-    m.seq = s_msgSeq + 1;
+    m.seq = seq;
     m.ch = (uint8_t)channelIdx;
     m.mine = 1;
     m.ts = millis() / 1000;
@@ -1688,8 +1583,6 @@ bool meshLinkSend(int channelIdx, const char* text) {
     m.hops = -1;
     snprintf(m.name, sizeof(m.name), "%s", the_mesh.getNodeName());
     snprintf(m.text, sizeof(m.text), "%s", text);
-    if (s_msgCount < kMsgRing) ++s_msgCount;
-    ++s_msgSeq;
     ++s_storeSerial;
   }
   return ok;

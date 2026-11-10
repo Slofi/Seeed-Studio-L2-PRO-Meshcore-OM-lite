@@ -132,6 +132,12 @@ lgfx::LovyanGFX* om_display();
 bool omFrameInit();   // allocate the frame buffer (call once, at boot)
 bool omFrameBegin();
 void omFrameEnd();
+// An overlay drawn on the finished frame, once, right before omFrameEnd() pushes it. The UI registers
+// the toast here (EST-344): then EVERY framed redraw carries it, no screen can paint over it, and a
+// new one is live on the very next frame instead of surviving on the panel until the next repaint.
+// The callback must only draw; it runs with the frame open.
+using omFrameOverlay = void (*)(lgfx::LovyanGFX* d, uint32_t nowMs);
+void omFrameSetOverlay(omFrameOverlay fn);
 // Touch always reads the real panel, never the frame buffer.
 bool omTouch(uint16_t& x, uint16_t& y);
 

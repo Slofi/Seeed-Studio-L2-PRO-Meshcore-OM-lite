@@ -10,6 +10,7 @@
 #include "ui/fonts.h"
 #include "ui/icons.h"
 #include "ui/status_cells.h"
+#include "ui/toast.h"
 #include "ui/text_wrap.h"
 
 namespace om {
@@ -327,6 +328,15 @@ void drawToast(lgfx::LovyanGFX* d, const Layout& L, const char* text) {
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(kInk, kPanel2);
   d->drawString(text, box.x + box.w / 2, box.y + box.h / 2);
+}
+
+// The frame overlay (EST-344): the toast state lives in ui/toast.h; this only decides whether the
+// current time is inside the toast and draws it. Every framed redraw reaches it through
+// omFrameEnd(), which is what keeps it on the screen for its whole life instead of one frame.
+void drawToastOverlay(lgfx::LovyanGFX* d, uint32_t nowMs) {
+  const ToastState& t = toastState();
+  if (!t.visible(nowMs)) return;
+  drawToast(d, l2(), t.text);
 }
 
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread, bool newNodeDot) {

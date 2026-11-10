@@ -4,6 +4,8 @@
 
 #include <Arduino.h>
 
+#include "ui/dm_ring.h"   // the DM store itself (plain C++, host-tested): EST-344
+
 #if defined(OM_ENABLE_MESH)
 namespace om {
 bool meshLinkBegin();
@@ -56,25 +58,10 @@ uint32_t meshDmSerial();               // changes on every DM stored, sent or de
 uint32_t meshDmRecvSerial();
 void meshDmClearUnread(int thread);
 
-// One stored DM, copied out (the ring may shift while the screen draws).
-struct MeshDm {
-  char name[32];               // the sender's MeshCore name (the partner's, for ours)
-  char text[161];
-  bool mine;
-  uint8_t state;               // om::ui::DmState as a plain byte (0 sending, 1 delivered, 2 not
-                               // confirmed, 3 failed); the facade stays free of UI headers
-  uint32_t seq;
-  uint32_t ts;                 // uptime seconds
-  uint32_t wall;               // system-clock seconds
-  bool wallReal;
-  uint32_t ackWall;            // when the ACK arrived (0 = none yet)
-  bool ackReal;
-  int8_t hops;
-  int8_t snr4;
-  uint8_t pathHashSize;
-  uint8_t pathCount;
-  uint8_t path[64];
-};
+// One stored DM, copied out (the ring may shift while the screen draws). It is the ring's own
+// message struct (ui/dm_ring.h), so there is exactly one layout and one allocation path. `state` is
+// om::ui::DmState as a plain byte; the facade stays free of UI headers.
+using MeshDm = ui::DmMsg;
 // Oldest first, at most max. Returns how many of this thread's messages are in the ring.
 int meshDmList(int thread, MeshDm* out, int max);
 
@@ -138,12 +125,13 @@ const char* meshPathHashLabel();       // "1B" / "2B" / "3B", for Settings > Rad
 
 // --- node DB for the Nodes screen -----------------------------------------------------------------
 // The MeshCore contact table, read-only. type is MeshCore's ADV_TYPE_* (1 chat/client, 2 repeater,
-// 3 room, 4 sensor). path_len is ContactInfo::out_path_len in bytes (0 = direct, 0xFF = unknown);
-// this firmware does not get a per-contact RSSI from MeshCore, so the UI must not invent one.
+// 3 room, 4 sensor). path_hops is ContactInfo::out_path_len DECODED (mesh_path.h): the hop count
+// (0 = direct) or -1 for OUT_PATH_UNKNOWN; the raw encoded byte is never handed to the UI.
+// This firmware does not get a per-contact RSSI from MeshCore, so the UI must not invent one.
 struct MeshContact {
   char name[32];
   uint8_t type;
-  uint8_t path_len;
+  int8_t path_hops;
   uint32_t lastmod;      // MeshCore RTC seconds when it was last heard
   uint32_t lastmodUp;    // uptime seconds at that moment (0 = loaded from flash, unknown)
   bool lastmodReal;      // the clock was a real source when lastmod was written
@@ -168,8 +156,9 @@ bool meshContactByName(const char* name, MeshContact* out);
 // Name one packet-path hash: the repeater whose public key starts with these bytes, copied into buf.
 // "" when no known repeater matches (MeshCore's path hash is the first 1..3 bytes of the pub_key).
 const char* meshPathHopName(const uint8_t* hash, uint8_t len, char* buf, size_t cap);
-// The path to reach a contact as text: "direct", "unknown", or the named/hex hops joined by " > ".
-// False when there is no such contact.
+// The path to reach a contact as text: "direct", "--" when unknown, or the named/hex hops joined by
+// " > ". Decoded through mesh_path.h (hash size and hop count from the encoded byte), never from a
+// raw out_path_len. False when there is no such contact.
 bool meshContactPathText(const char* name, char* out, size_t cap);
 // Cheap change detector: count, names, types and lastmod. Changes when the list would change.
 uint32_t meshContactSignature();

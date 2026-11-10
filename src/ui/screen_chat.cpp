@@ -470,7 +470,9 @@ void drawSheetHead(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m,
 
   char hops[24];
   char snr[28];
-  if (m.hops < 0) snprintf(hops, sizeof(hops), "local echo");
+  // A channel message we sent is a local echo; a DM is not (it went direct), so an unknown hop
+  // count reads "--" there, matching the Nodes surfaces (EST-344).
+  if (m.hops < 0) snprintf(hops, sizeof(hops), m.dm ? "--" : "local echo");
   else snprintf(hops, sizeof(hops), "%d hop%s", (int)m.hops, m.hops == 1 ? "" : "s");
   if (m.hops < 0 || m.snrq == 0) snprintf(snr, sizeof(snr), "SNR --");
   else snprintf(snr, sizeof(snr), "SNR %.1f dB", (double)m.snrq / 4.0);

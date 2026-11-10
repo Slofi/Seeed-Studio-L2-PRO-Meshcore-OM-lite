@@ -1335,3 +1335,68 @@ companion code). Nothing in `lib/` was touched, `.git` untouched, nothing commit
 - `status`: mesh up, "OM Lite", 2B, 5 channels, 13 contacts, clock GPS. `nodes`: 13 lines; `ERA-3 (SI)` shows `hops=32` (raw encoded path length, not decoded: fix next).
 - `send "Don't Panic" ...` 12:37: ERA-3 on gandalf logged it (OverMesh DB, read only): channel 2, path `c2aa`, path_hash_size 2, one hop, SNR 7.75. **2B confirmed by Claude as well.**
 - `dm "ERA-3 (SI)" ...` 12:38: state `sending -> delivered` (ACK), ERA-3 logged a DM from `564f7689850a` (our identity).
+
+## 2026-11-10 12:55 (DeepSeek): EST-344 — DM ring overwrite, toast overlay, decoded hops
+
+Built on `5e8cdd1`. Read the end of this log first. Nothing in `lib/` was touched, `.git` untouched, nothing
+committed.
+
+- **1. The DM ring had two slot rules.** `storeDm()` picked `s_dms[s_dmSeq % 32]` and THEN set
+  `m.seq = ++s_dmSeq`, so a received DM with seq N landed in slot (N-1) % 32; `meshDmSend()` and
+  `meshDmList()` used slot N % 32. The reply overwrote the message before it and the list never found it —
+  exactly Filip's "the DM disappears when the reply comes back". The store now lives in
+  `src/ui/dm_ring.h` (plain C++, no Arduino): threads, the 32-message ring, **one** `alloc()` that commits
+  `seq = newest + 1, slot = seq % ring`, `list()` (walks firstSeq..newest, reads slot seq % ring), the ACK
+  update (`markDelivered`/`setState`) and the serials. `storeDm()` and `meshDmSend()` both call that one
+  alloc; `MeshDm` is the ring's `DmMsg` itself, so the layout cannot drift. `mesh_link.cpp` keeps only the
+  MeshCore adapter (packet fields, sendMessage, Listener).
+- **2. The channel ring had the same class of bug.** `slotFor()` used a second rule (`newest-1` based) and
+  the heard-repeat counter used a third (`seq % ring`), so repeats were looked up in the wrong slot and never
+  counted. Both rings now use `src/seq_ring.h` (`SeqRing<N>`: `alloc()`, `slotOf()`, `firstSeq()`); channel
+  stores allocate through it, `slotFor()` reads `firstSeq()+idx` through the same `slotOf()`, and the
+  own-send marker uses `nextSeq()` (the sequence `alloc()` will commit) and `slotOf()`.
+- **3. Toast is part of the frame.** `ui/toast.h` is the pure state (text, deadline, `visible`, one-shot
+  `expire`, a newer toast replaces the older one). `omFrameEnd()` (`board.cpp`) now calls a registered
+  overlay (`omFrameSetOverlay`) on the finished frame, right before the push, so every framed redraw
+  (`redrawCurrentScreen`, Nodes/Info/Chat and the framed settings pages) carries it and no later repaint can
+  erase it. The old screens that draw straight to the panel (`drawChannelSettings`, `drawNameEditor`,
+  `drawMapTab`, `drawRptrTab`, map/RPTR settings) end with `drawDirectToast()`, the same overlay last.
+  `showToast()`/the radio-fault toast now set the state and trigger one redraw; expiry (`expire()`) triggers
+  the one redraw without it. New-node, ping, trace and radio-fault toasts all use this path.
+- **4. One hop decoder.** `src/mesh_path.h`: `decodeOutPathLen(raw)` = hash size `(raw >> 6) + 1` (4 is
+  reserved by `Packet::isValidPathLen`), hop count `raw & 63`, `0xFF` = `OUT_PATH_UNKNOWN`, and the
+  count*size <= 64 check; `pathHopCount()` returns -1 for unknown, `pathHopsText()` gives "direct"/"N hops"/
+  "--". The Nodes row note is "direct"/"path N hops"/"path --"; the node sheet and Info page use
+  `meshContactPathText()`, now decoding the hash size **per contact** instead of dividing by our current
+  preference; the `nodes` command prints `hops=1` / `hops=--` (never the raw byte); the DM sheet header
+  shows "--" (not "local echo") when a DM's hops are unknown. The same decode fixed **Trace**: `sendDirect()`
+  for a TRACE appends `path_len` *bytes*, so the old code sent the encoded byte (65 bytes for a 2B one-hop
+  path); it now sends `count * hashSize` bytes with `hashSize-1` in the flags.
+- **Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS. RAM **151,368 B** of
+  327,680 (46.2 %, previous 151,224, **+144 B**), flash **946,117 B** of 6,553,600 (14.4 %, previous
+  946,053, **+64 B**), `firmware.bin` **946,480 B** (previous 946,416, **+64 B**). The ring refactor is
+  size-neutral; the small cost is the overlay registration and the toast state.
+- **Tests**: `test/host/run.sh` exit 0 (15 C++ binaries + 4 python checks). New `test_est344.cpp`:
+  - DM ring: our send (seq 1), the reply (seq 2) must not take seq 1's slot, two more arrive, the list is
+    every message in order with the right sender/mine, the other thread is untouched, ACK update by seq,
+    then 60 more to **wrap** the ring: the newest 32 come back in order, seq 1 is gone, seq 64 is there.
+  - `SeqRing<32>`: seq/slot rule, 32 live seqs -> 32 distinct slots, firstSeq after the wrap, reset.
+  - Toast: fresh/active/expired (deadline inclusive of the "over" side), exactly one expiry event, newer
+    replaces older with its own deadline, empty/zero-duration refused, clear(), and millis() wrap-safety.
+  - Path: 1B (1/3 hops), 2B (1/2), 3B (2), direct 0, 0xFF unknown, reserved hash size 4, 40x2 > 64 refused,
+    63x1 allowed, and the display texts.
+- **Could not check** (no device in the sandbox): the glass and the air. Claude/Filip need to flash and
+  check: a DM both ways and its reply staying on screen (this was the bug), the new-node pop-up staying up
+  across the Nodes screen's 1 s repaints and vanishing after 3 s, the fault/ping toasts, `tools/cmd.py nodes`
+  showing `hops=1` for ERA-3 (was 32), and a trace. Also unproven on hardware: the overlay on the map tab
+  (direct draw) and on the keyboard sheet (framed).
+- **One wording note:** the ticket's "DM header" is the message-sheet header (the open DM's `DM · hops ·
+  SNR` line); the contact's own path is shown on the Nodes row, the node sheet and the Info page. If Claude
+  meant a second header somewhere, it is not in this tree — say so and it is a small follow-up.
+- **Next step**: Claude flashes this image and re-runs the EST-343 on-air script (`nodes`, `dm`, `msgs`), then
+  the RPTR tab and the remaining MeshCore features.
+
+## 2026-11-10 12:59 (Claude): EST-344 on the device, DM round trip proven by USB commands
+- Built in the sandbox (exit 0, RAM 151,368 B, flash 946,117 B), tests exit 0, reviewed binary flashed (946,480 B). `nodes`: hops now decoded (`--` unknown, ERA-3 `0`).
+- `dm "ERA-3 (SI)" ping` 12:57 -> `delivered`; the OM bot's reply arrived 12:58; `msgs` lists BOTH (seq 1 ours delivered, seq 2 ERA-3's) and `status` shows dm=1 unread=1. Driven by `tap`/`drag`: Chat tab, header dropdown, scroll, DM row: the thread shows "ping / delivered 12:57" and the PONG under it (`docs/shots/2026-11-10-1259-dm-thread.png`); the unread badge cleared on opening.
+- Open: the selector's last row (the DM row) cannot be scrolled fully into view: its second line stays under the pinned "Manage channels" row (`docs/shots/2026-11-10-1259-selector-dm.png`); the max scroll does not count the pinned row. ERA-3 `hops=0` while OverMesh logged our messages over one repeater (c2aa): the stored out path may be direct after the ACK path return; not investigated. New-node pop-up: needs a real new node (Filip). The emoji placeholder box is visible in the bot's reply.

@@ -29,7 +29,8 @@ BIN11="$(mktemp /tmp/om-lite-fade.XXXXXX)"
 BIN12="$(mktemp /tmp/om-lite-crash.XXXXXX)"
 BIN13="$(mktemp /tmp/om-lite-dm.XXXXXX)"
 BIN14="$(mktemp /tmp/om-lite-usbcmd.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14"' EXIT
+BIN15="$(mktemp /tmp/om-lite-est344.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -84,6 +85,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_dm.cpp \
 # "Don't Panic", arguments, and the refusal of everything not on the list).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_usb_cmd.cpp \
   ../../src/usb_cmd_logic.cpp -o "$BIN14"
+# EST-344: the DM ring's one allocation path (send, reply, two more, wrap), the channel ring's shared
+# sequence rule, the toast overlay state and MeshCore's encoded out_path_len (1B/2B/3B/unknown).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est344.cpp -o "$BIN15"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -96,3 +100,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_usb_cmd.cpp \
 "$BIN12"
 "$BIN13"
 "$BIN14"
+"$BIN15"

@@ -51,6 +51,11 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread,
 // mark to say which of the three things is wrong. The caller keeps the text and the time.
 void drawToast(lgfx::LovyanGFX* d, const Layout& L, const char* text);
 
+// The overlay every frame ends with (EST-344): the active toast, drawn last, or nothing. Registered
+// once with omFrameSetOverlay(), so redrawCurrentScreen and each screen's own draw all carry it
+// without remembering. `nowMs` comes from the frame push (millis()).
+void drawToastOverlay(lgfx::LovyanGFX* d, uint32_t nowMs);
+
 // The unread badge: one widget for every count that sits on red. `box` comes from countBadgeRect()
 // (13 px circle for one digit, 19x13 pill for "9+"); `ring` is the surface colour behind it, drawn
 // as a 1 px separator. The digits are the pixel face of ui/badge_font.h, never a smooth font.

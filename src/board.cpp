@@ -228,8 +228,11 @@ lgfx::LGFX_Sprite s_frame;
 int s_frameDepth = 0;
 constexpr uint16_t kProbeGold = 0xED89;   // #e8b04f in RGB565, the theme colour
 bool s_frameNeedsSwap = false;            // set from the boot probe
+omFrameOverlay s_frameOverlay = nullptr;  // the toast, drawn last before every push (EST-344)
 
 }  // namespace
+
+void omFrameSetOverlay(omFrameOverlay fn) { s_frameOverlay = fn; }
 
 lgfx::LovyanGFX* om_display() {
   if (s_frameDepth > 0 && s_frame.getBuffer() != nullptr) return &s_frame;
@@ -275,6 +278,10 @@ void omFrameEnd() {
   if (s_frameDepth == 0) return;
   if (--s_frameDepth > 0) return;          // an inner view: the outer one still owns the push
   if (s_frame.getBuffer() == nullptr) return;
+  // The frame is finished: draw the overlay (the toast) LAST, on top of every screen, then push.
+  // This is the one point every redraw path passes through, so a later frame cannot erase it
+  // (EST-344). It runs only on the outer frame, after a complete screen.
+  if (s_frameOverlay != nullptr) s_frameOverlay(&s_frame, (uint32_t)millis());
   // One pushImage is capped by the 16-bit SPI transfer (~64 KB, ~100 rows at 320 px): push in
   // 16-row slices, exactly as the map canvas does.
   const uint16_t* px = (const uint16_t*)s_frame.getBuffer();

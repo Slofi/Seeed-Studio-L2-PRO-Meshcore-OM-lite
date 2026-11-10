@@ -405,7 +405,7 @@ void drawToastOverlay(lgfx::LovyanGFX* d, uint32_t nowMs) {
   drawToast(d, l2(), t.text);
 }
 
-void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread, bool newNodeDot) {
+void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m) {
   const Rect& bar = L.tabbar;
   d->fillRect(bar.x, bar.y, bar.w, bar.h, kBar);
   d->drawFastHLine(bar.x, bar.y, bar.w, kLine);
@@ -413,7 +413,7 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread, boo
   for (int i = 0; i < kTabCount; ++i) {
     const Tab t = (Tab)i;
     const Rect r = L.tab(t);
-    const bool on = (t == active);
+    const bool on = (t == m.active);
     if (on) {
       d->fillRect(r.x, r.y, r.w, r.h, kSelBg);
       d->fillRect(r.x, r.y, r.w, kTabTopLine, kAcc);
@@ -433,16 +433,16 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread, boo
   // The unread count sits on the Chat icon, top-right, on the badge widget (theme.h holds its
   // geometry). The ring is the bar colour, so the circle separates from the icon under it. EST-364:
   // the box is as wide as the text the face draws (one digit, two, or "99+").
-  if (unread > 0) {
+  if (m.unread > 0) {
     char badgeChars[4];
-    const int chars = badgeText(unread, badgeChars, (int)sizeof(badgeChars));
-    if (chars > 0) drawCountBadge(d, countBadgeRect(L.tab(Tab::Chat), chars), unread, kBar);
+    const int chars = badgeText(m.unread, badgeChars, (int)sizeof(badgeChars));
+    if (chars > 0) drawCountBadge(d, countBadgeRect(L.tab(Tab::Chat), chars), m.unread, kBar);
   }
 
   // EST-342: a small gold dot on the Nodes tab while a contact added since the screen was last
   // opened is still unseen. It is not a count, so it is a dot, and it sits in the same corner the
   // Chat badge uses.
-  if (newNodeDot) {
+  if (m.newNodeDot) {
     const Rect tab = L.tab(Tab::Nodes);
     const int cx = tab.x + tab.w / 2 + kBadgeCxOfs;
     const int cy = tab.y + kBadgeTop + kBadgeD / 2;

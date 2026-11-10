@@ -25,12 +25,13 @@ struct NodesView {
   int count = 0;
   int selected = -1;
   int scroll = 0;
-  int unread = 0;
+  // EST-365: the tab bar's badge, built by the shell's one currentTabBar() call. A screen never
+  // passes a count to drawTabBar() itself, so the RPTR page cannot drop it again.
+  TabBarModel tabs;
   // The one-line header above the list: "<N> nodes heard", plus "<M> in the last hour" only when
   // the timestamps are real (main computes both from the contact table).
   int heardLastHour = 0;
   bool heardLastHourKnown = false;
-  bool newNodeDot = false;   // a contact was added since this screen was last opened
   // EST-342: the long-press sheet. A menu (rows built by nodeMenuRows) or a trace result; nullptr
   // and no trace means the sheet is closed. The shell fills these from the contact table.
   const NodeMenuRow* menu = nullptr;

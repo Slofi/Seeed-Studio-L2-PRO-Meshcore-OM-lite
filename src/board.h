@@ -167,6 +167,9 @@ bool omFrameFlush();       // push the held frame now; true when one was pending
 uint8_t omFrameMeanLuma(int step);
 uint16_t omFramePushCount();
 uint32_t omFrameLastPushUs();
+// EST-365: how long the last outer frame took from omFrameBegin() to the moment its push started
+// (the draw + the overlay, not the SPI push). The loop attributes the difference to Draw.
+uint32_t omFrameLastComposeUs();
 // Touch always reads the real panel, never the frame buffer.
 bool omTouch(uint16_t& x, uint16_t& y);
 

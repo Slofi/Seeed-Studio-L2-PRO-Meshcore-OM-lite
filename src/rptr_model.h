@@ -107,6 +107,9 @@ struct Found {
   // a parseable answer came back; `anon.valid && anon.count == 0` is a real "none".
   bool regionsAsked = false;
   AnonRegions anon;
+  // EST-365: the anonymous owner/name read. `nameAsked` stops a second request for the same scan;
+  // the name lands in `name` when the answer comes, so the row stops saying "unnamed".
+  bool nameAsked = false;
 };
 
 struct FoundList {
@@ -141,6 +144,20 @@ struct FoundList {
 // that are not a legal name and not "*" are dropped (`clean` goes false). Returns false only when
 // there are fewer than the 4 clock bytes, i.e. when the reply cannot be this answer at all.
 bool anonRegionsParse(const uint8_t* buf, int len, AnonRegions* out);
+
+// The anonymous request types simple_repeater handles (examples/simple_repeater/MyMesh.cpp):
+// 0x01 regions, 0x02 owner/name, 0x03 clock. Only a DIRECT request is answered.
+constexpr uint8_t kAnonReqRegions = 0x01;
+constexpr uint8_t kAnonReqOwner = 0x02;
+constexpr uint8_t kAnonReqClock = 0x03;
+
+// The ANON_REQ owner answer: [clock 4 LE]["<node_name>\n<owner_info>"] with no NUL inside `len`.
+// MyMesh strips the 4-byte tag before the listener, so the buffer starts at the clock, exactly like
+// the regions answer. `name` is the first line, `owner` the rest of that line (optional); both are
+// trimmed and made from printable bytes. False when there is no first line, i.e. the reply cannot
+// be an owner answer. A name longer than the receiver's buffer is truncated by the caller.
+bool anonOwnerParse(const uint8_t* buf, int len, char* name, size_t nameCap, char* owner,
+                    size_t ownerCap);
 
 // --------------------------------------------------------------------------------------------- login
 // MeshCore's login answer, decoded. The repeater's reply is

@@ -10,6 +10,7 @@
 #include "target.h"
 
 #include "board.h"
+#include "radio_stats.h"
 #include "radio_fault.h"
 #include "timekeeper.h"
 
@@ -57,6 +58,19 @@ mesh::LocalIdentity radio_new_identity() {
 // MeshCore queues a packet and reports success before the SX1262 transmits. startSendRaw() is the
 // RadioLib answer, isSendComplete() catches a TX that never finishes, onSendFinished() clears the
 // mark after a real transmission (EST-337's rule: a failed TX must still set it).
+int OmSX1262Wrapper::recvRaw(uint8_t* bytes, int sz) {
+  const int len = CustomSX1262Wrapper::recvRaw(bytes, sz);
+  if (len > 0) {
+    // The RSSI/SNR are the chip's values for the packet just read (the same ones upstream's
+    // logRxRaw() reports). The wall clock and its "real" flag come from the one timekeeper, so a
+    // packet heard before a clock sync is not dated 2024.
+    om::radio::noteRawPacket(bytes, len, (int)lroundf(getLastRSSI()),
+                             (int)lroundf(getLastSNR() * 4.0f), om::timeKeeper().now(),
+                             om::timeKeeper().realSinceBoot(), millis());
+  }
+  return len;
+}
+
 bool OmSX1262Wrapper::startSendRaw(const uint8_t* bytes, int len) {
   const bool ok = CustomSX1262Wrapper::startSendRaw(bytes, len);
   if (!ok) {

@@ -123,7 +123,7 @@ void nodesScreenDraw(const NodesView& view) {
   }
 
   drawStatusBar(d, L, view.status);
-  drawTabBar(d, L, Tab::Nodes, view.unread, view.newNodeDot);
+  drawTabBar(d, L, view.tabs);
   drawNodeSheet(d, view);   // over the tab bar, like the chat's message sheet
 
   // The old tabs share this frame and never set a font of their own; leave them the 12 px default.

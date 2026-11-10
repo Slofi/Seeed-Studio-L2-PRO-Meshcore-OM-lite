@@ -5,6 +5,7 @@
 #include <Arduino.h>
 
 #include "history/history_log.h"
+#include "radio_stats.h"
 #include "ui/dm_ring.h"   // the DM store itself (plain C++, host-tested): EST-344
 
 #if defined(OM_ENABLE_MESH)
@@ -241,5 +242,11 @@ bool meshPhoneChangeTake(uint8_t* change);
 // from our chat. `channelIdx` is MeshCore's slot (what the app sends).
 void meshPhoneChannelSent(uint8_t channelIdx, const char* text);
 void meshPhoneDmSent(const uint8_t* prefix, uint8_t prefixLen, const char* text);
+
+// --- EST-365: upstream's own radio counters ------------------------------------------------------
+// Filled from the RadioLib wrapper (noise floor, packets recv/sent, receive errors, RX boosted gain
+// read back from the chip) and MeshCore's Dispatcher (flood/direct counts, airtime) plus the seen
+// table's duplicate counters. The model in radio_stats.h adds the history the chip does not keep.
+bool meshRadioStats(radio::UpstreamCounters* out);
 }
 #endif  // OM_ENABLE_MESH

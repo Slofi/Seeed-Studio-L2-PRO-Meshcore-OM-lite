@@ -528,7 +528,7 @@ void chatScreenDraw(const ChatView& v) {
   if (v.osk) drawSheet(d, v, g);
   else drawCompose(d, v, g);
   // The sheet covers the bottom edge, so the tab bar is not drawn while it is open (mock .kb-open).
-  if (!v.osk) drawTabBar(d, L, Tab::Chat, v.unread, v.newNodeDot);
+  if (!v.osk) drawTabBar(d, L, v.tabs);
   // The message sheet is last: the mock's bottom sheet sits over the tab bar.
   if (v.menuMsg >= 0) drawMessageSheet(d, v);
 

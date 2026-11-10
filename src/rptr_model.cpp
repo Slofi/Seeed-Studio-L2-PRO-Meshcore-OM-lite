@@ -365,6 +365,55 @@ bool anonRegionsParse(const uint8_t* buf, int len, AnonRegions* out) {
   return true;
 }
 
+// ---------------------------------------------------------------------------------------- anon owner
+bool anonOwnerParse(const uint8_t* buf, int len, char* name, size_t nameCap, char* owner,
+                    size_t ownerCap) {
+  if (name != nullptr && nameCap > 0) name[0] = 0;
+  if (owner != nullptr && ownerCap > 0) owner[0] = 0;
+  if (buf == nullptr || name == nullptr || nameCap == 0) return false;
+  if (len <= 4) return false;   // clock only, no name line
+  const int bodyLen = len - 4;
+  int end = bodyLen;
+  for (int i = 0; i < bodyLen; ++i) {
+    if (buf[4 + i] == 0) {
+      end = i;
+      break;
+    }
+  }
+  int lineEnd = 0;
+  while (lineEnd < end && buf[4 + lineEnd] != '\n') ++lineEnd;
+  int start = 0;
+  while (start < lineEnd && (buf[4 + start] == ' ' || buf[4 + start] == '\t')) ++start;
+  int stop = lineEnd;
+  while (stop > start && (buf[4 + stop - 1] == ' ' || buf[4 + stop - 1] == '\t' ||
+                          buf[4 + stop - 1] == '\r')) {
+    --stop;
+  }
+  if (stop <= start) return false;
+  size_t at = 0;
+  for (int i = start; i < stop && at + 1 < nameCap; ++i) {
+    const unsigned char c = buf[4 + i];
+    name[at++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+  }
+  name[at] = 0;
+  if (owner != nullptr && ownerCap > 0 && lineEnd < end) {
+    int os = lineEnd + 1;
+    int oe = end;
+    while (os < oe && (buf[4 + os] == ' ' || buf[4 + os] == '\t')) ++os;
+    while (oe > os && (buf[4 + oe - 1] == ' ' || buf[4 + oe - 1] == '\t' ||
+                       buf[4 + oe - 1] == '\r')) {
+      --oe;
+    }
+    size_t oa = 0;
+    for (int i = os; i < oe && oa + 1 < ownerCap; ++i) {
+      const unsigned char c = buf[4 + i];
+      owner[oa++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+    }
+    owner[oa] = 0;
+  }
+  return name[0] != 0;
+}
+
 // --------------------------------------------------------------------------------------- neighbours
 int neighboursParse(const char* text, NeighbourList* out) {
   if (out == nullptr) return 0;

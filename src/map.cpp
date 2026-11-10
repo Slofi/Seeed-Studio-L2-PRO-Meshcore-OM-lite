@@ -15,6 +15,7 @@
 
 #include "board.h"
 #include "psram_alloc.h"
+#include "radio_stats.h"
 #include "ui/rgb565.h"
 #include "ui/theme.h"
 
@@ -415,6 +416,7 @@ void canvasFill(uint16_t* c, int w, int x, int y, int rw, int rh, uint16_t color
 
 
 void mapRender() {
+  const uint32_t renderStartUs = micros();   // EST-365: the tile decode + composite, named in `radio`
   auto* d = om_display();
   if (!s_ready) {
     d->fillRect(0, 0, kViewW, kViewH, kMapBg);
@@ -484,6 +486,7 @@ void mapRender() {
                   ty0, ty1);
   }
   Serial.printf("[map] z%d%s %.5f,%.5f -> %d tiles\n", s_z, mag ? " (2x)" : "", s_cLat, s_cLon, drawn);
+  om::radio::addPart(om::radio::Part::MapDecode, micros() - renderStartUs);
 }
 
 }  // namespace om

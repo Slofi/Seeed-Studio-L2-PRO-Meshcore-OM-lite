@@ -2436,6 +2436,32 @@ bool meshLinkSend(int channelIdx, const char* text) {
   return ok;
 }
 
+// EST-365: the numbers `radio` and Settings > About show. Every field is upstream's own counter;
+// nothing here is estimated. The boosted-gain value is a chip register read (0x08AC), not a cached
+// preference, so a stored value that never reached the chip cannot lie.
+bool meshRadioStats(radio::UpstreamCounters* out) {
+  if (out == nullptr) return false;
+  *out = radio::UpstreamCounters();
+  if (!s_ready) return false;
+  out->noiseFloor = radio_driver.getNoiseFloor();
+  out->lastRssi = (int)lroundf(radio_driver.getLastRSSI());
+  out->lastSnr4 = (int)lroundf(radio_driver.getLastSNR() * 4.0f);
+  out->rxPackets = radio_driver.getPacketsRecv();
+  out->txPackets = radio_driver.getPacketsSent();
+  out->crcErrors = radio_driver.getPacketsRecvErrors();
+  out->duplicates = tables.getNumDirectDups() + tables.getNumFloodDups();
+  out->recvFlood = the_mesh.getNumRecvFlood();
+  out->recvDirect = the_mesh.getNumRecvDirect();
+  out->sentFlood = the_mesh.getNumSentFlood();
+  out->sentDirect = the_mesh.getNumSentDirect();
+  out->txAirMs = (uint32_t)the_mesh.getTotalAirTime();
+  out->rxAirMs = (uint32_t)the_mesh.getReceiveAirTime();
+  out->boosted = radio_driver.getRxBoostedGainMode();
+  out->boostedKnown = true;
+  out->valid = true;
+  return true;
+}
+
 }  // namespace om
 
 #endif  // OM_ENABLE_MESH

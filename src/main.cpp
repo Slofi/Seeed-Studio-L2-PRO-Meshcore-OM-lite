@@ -31,6 +31,8 @@
 #include "target.h"
 #include "timekeeper.h"
 #include "touch_gate.h"
+#include "msg_order.h"
+#include "radio_stats.h"
 #include "usb_cmd.h"
 #include "usb_cmd_logic.h"
 #include "usb_frames.h"
@@ -475,6 +477,12 @@ static void saveTimeFloor() {
 
 // ----------------------------------------------------------------------------- Map (EST-351)
 static void buildStatus(om::ui::StatusModel& s);
+static int unreadTotal();
+// EST-365: the ONE source of the tab bar's badge. Every screen's view carries the returned model,
+// so a screen can no longer pass its own count (the RPTR page passed 0 and lost the badge).
+static om::ui::TabBarModel currentTabBar(om::ui::Tab active) {
+  return om::ui::tabBarModel(active, unreadTotal(), g_newNodeDot);
+}
 // The tiles and the pan live in map.cpp; the chrome is ui/screen_map.cpp. This builds the ONE view
 // the drawing and the hit test share, from the real contact table and our own fix.
 static bool g_mapLock = false;          // follow our own position
@@ -488,6 +496,7 @@ static const char* contactTypeName(uint8_t type) {
 static void buildMapView(om::ui::MapView& v) {
   v = om::ui::MapView();
   buildStatus(v.status);
+  v.tabs = currentTabBar(om::ui::Tab::Map);
   v.zoom = om::mapZoom();
   v.locked = g_mapLock;
   v.hasFix = g_gps.valid;
@@ -739,10 +748,9 @@ static void buildNodesView(om::ui::NodesView& view) {
   view.count = g_nodeCount;
   view.selected = g_nodeSel;
   view.scroll = g_nodeScroll;
-  view.unread = unreadTotal();
+  view.tabs = currentTabBar(om::ui::Tab::Nodes);
   view.heardLastHour = g_nodeLastHour;
   view.heardLastHourKnown = g_nodeLastHourKnown;
-  view.newNodeDot = g_newNodeDot;
   if (g_nodeTraceOpen) {
     view.trace = &g_nodeTrace;
     view.menuTitle = g_nodeTraceTitle;
@@ -1086,8 +1094,7 @@ static void buildChatView(om::ui::ChatView& v) {
     v.menuSenderHasPos = v.menuSenderKnown && contact.has_pos;
     v.menuInDm = m.dm;
   }
-  v.unread = unreadTotal();
-  v.newNodeDot = g_newNodeDot;
+  v.tabs = currentTabBar(om::ui::Tab::Chat);
 }
 
 // One draw path for every caller: build, clamp, draw, and remember the numbers a new message needs.
@@ -2370,6 +2377,7 @@ static void buildRptrView(om::ui::RptrView& v) {
   // docs/est362-login-crash.log), which is why the next build panicked.
   v.reset();
   buildStatus(v.status);
+  v.tabs = currentTabBar(om::ui::Tab::Rptr);
   v.list = g_rptrList;
   v.page = g_rptrPage;
   v.scroll = g_rptrScroll;
@@ -3079,6 +3087,26 @@ static void buildSettingsRows() {
       snprintf(v, sizeof(v), "%u B", (unsigned)ESP.getFreeHeap());
       setAdd(om::ui::SetRowKind::Value, A_None, "Free heap", v);
       setAdd(om::ui::SetRowKind::Value, A_None, "SD card", g_sdOk ? "mounted" : "absent");
+      // EST-365: what the radio hears, on the About page the ticket names. The noise floor is the
+      // chip's own value (sampled every 5 s); packets heard counts every raw reception, including
+      // the flood repeats this node does not process.
+      {
+        om::radio::UpstreamCounters c;
+        const bool radioUp = om::meshRadioStats(&c);
+        const om::radio::Snapshot sn = om::radio::snapshot();
+        const int noise = sn.noise.samples > 0 ? sn.noise.last : (radioUp ? c.noiseFloor : 0);
+        if (sn.noise.samples > 0) {
+          snprintf(v, sizeof(v), "%d dBm (%d/%d)", noise, sn.noise.min, sn.noise.avg);
+        } else {
+          snprintf(v, sizeof(v), "%d dBm", noise);
+        }
+        setAdd(om::ui::SetRowKind::Value, A_None, "Noise floor", v);
+        snprintf(v, sizeof(v), "%lu (dup %lu)", (unsigned long)sn.packetsHeard,
+                 (unsigned long)(radioUp ? c.duplicates : 0));
+        setAdd(om::ui::SetRowKind::Value, A_None, "Packets heard", v);
+        setAdd(om::ui::SetRowKind::Value, A_None, "Radio gain",
+               radioUp && c.boostedKnown ? (c.boosted ? "boosted" : "power save") : "--");
+      }
       break;
     }
 
@@ -4333,6 +4361,7 @@ void setup() {
   Serial.printf("[om] board: %s\n", g_boardOk ? "ok" : "FAILED");
   om::useAppFont(om::om_display());   // the app font is the default everywhere
   om::omFrameInit();
+  om::radio::begin(millis());   // EST-365: the noise window and the loop histogram start clean
   // The toast is a frame overlay, not a second push: omFrameEnd() draws it last on every redraw
   // (EST-344). Register it once, before any screen can be drawn.
   om::omFrameSetOverlay(om::ui::drawToastOverlay);
@@ -4876,18 +4905,36 @@ static void redrawCurrentScreen() {
 }
 
 void loop() {
+  // EST-365: one pass timer, and one bucket per block the ticket names. The parts are measured
+  // around the calls below; endPass() charges the remainder to Other, so a long pass always names
+  // the block that took it (radio prints loop_worst=... by=...).
+  const uint32_t passStartUs = micros();
+  om::radio::beginPass(passStartUs);
+  const uint16_t passPush0 = om::omFramePushCount();
   // EST-349: the ONE history flush point, on the loop task and outside every other path. A send, a
   // MeshCore callback or a USB command only enqueues a record; the card is touched here and nowhere
   // else. One (two under pressure) record per pass: a card write never sits in the packet path.
-  om::history::loop();
+  {
+    const uint32_t t = micros();
+    om::history::loop();
+    om::radio::addPart(om::radio::Part::History, micros() - t);
+  }
   // EST-354: Wi-Fi is polled, never waited on: the driver's scan and the supplicant's connect are
   // serviced here, and the model's timeouts are checked on the same pass. The status bar, a packet
   // and the history flush keep their own cadence.
-  om::wifiLoop();
+  {
+    const uint32_t t = micros();
+    om::wifiLoop();
+    om::radio::addPart(om::radio::Part::Wifi, micros() - t);
+  }
   // EST-356: the Bluetooth switch and its transport. The transport's receive pump runs inside
   // MyMesh::loop() (it is MyMesh's serial interface); this only applies the switch, the PIN and the
   // connected/disconnected state, and prints the heap when both radios are up.
-  om::bleLoop();
+  {
+    const uint32_t t = micros();
+    om::bleLoop();
+    om::radio::addPart(om::radio::Part::Ble, micros() - t);
+  }
   static uint32_t lastBeat = 0;
   static bool screenOn = true;
   static bool sleepPending = false;   // the backlight is fading out; the panel is still awake
@@ -5029,6 +5076,7 @@ void loop() {
     }
   }
 
+  const uint32_t gpsStartUs = micros();
   om::gpsPoll(g_gps);
   om::targetSetGpsFix(g_gps.lat, g_gps.lon, g_gps.valid);   // MeshCore adverts/telemetry
   // Feed the GPS time to the one clock. RMC repeats every second; timekeeper refreshes the source's
@@ -5047,6 +5095,7 @@ void loop() {
       }
     }
   }
+  om::radio::addPart(om::radio::Part::Gps, micros() - gpsStartUs);
   // Every toast (fault, new node, ping, trace) expires on one rule: clear it, then redraw once so the
   // frame is pushed without it. expire() answers true exactly once (EST-344).
   if (om::ui::toastState().expire(millis())) {
@@ -5140,13 +5189,17 @@ void loop() {
 
   // Touch is a gesture: press, drag, release. A drag scrolls (picker rows, settings pixels) or
   // pans the map, and NEVER selects; only a release without a drag is a tap.
-  om::otaPoll();   // first: the mesh loop can block for seconds and overrun the CDC FIFO
-  // EST-350: a USB command that arrived in otaPoll() is EXECUTED here, on the loop task and outside
-  // the reader's frame, just like the screen's own paths and history::loop() above. The frame
-  // handler only copies it into one slot (ota.cpp), because the SD stack does not fit inside the
-  // reader's call chain (see docs/PROGRESS.md: 1,136 B otaPoll + 304 B frame handler + the command's
-  // own 1,632 B, on an 8,192 B loop-task stack).
-  om::otaCommandPoll();
+  {
+    const uint32_t t = micros();
+    om::otaPoll();   // first: the mesh loop can block for seconds and overrun the CDC FIFO
+    // EST-350: a USB command that arrived in otaPoll() is EXECUTED here, on the loop task and outside
+    // the reader's frame, just like the screen's own paths and history::loop() above. The frame
+    // handler only copies it into one slot (ota.cpp), because the SD stack does not fit inside the
+    // reader's call chain (see docs/PROGRESS.md: 1,136 B otaPoll + 304 B frame handler + the command's
+    // own 1,632 B, on an 8,192 B loop-task stack).
+    om::otaCommandPoll();
+    om::radio::addPart(om::radio::Part::Usb, micros() - t);
+  }
   // EST-354: one redraw when the Wi-Fi state a screen draws has changed (the status icon, the
   // Settings page, a finished scan). Never while the password sheet is open: a background frame
   // must not move the keys under the finger.
@@ -5169,10 +5222,28 @@ void loop() {
     }
   }
 #if defined(OM_ENABLE_MESH)
-  om::meshLinkLoop();
+  {
+    const uint32_t t = micros();
+    om::meshLinkLoop();
+    om::radio::addPart(om::radio::Part::Mesh, micros() - t);
+  }
   // EST-358: follow the repeater session's answers (a login result, a CLI reply, the status card)
   // and the discovery window. It only redraws the screens it owns, and only when they are up.
-  rptrPump();
+  {
+    const uint32_t t = micros();
+    rptrPump();
+    om::radio::addPart(om::radio::Part::Rptr, micros() - t);
+  }
+  // EST-365: sample the chip's noise floor every few seconds. It is upstream's own value; the
+  // radio_stats window keeps the min/avg over the last three minutes.
+  {
+    static uint32_t lastNoisePoll = 0;
+    if (millis() - lastNoisePoll >= om::radio::kNoisePeriodMs) {
+      lastNoisePoll = millis();
+      om::radio::UpstreamCounters c;
+      if (om::meshRadioStats(&c)) om::radio::noteNoise(c.noiseFloor, millis());
+    }
+  }
 
   // EST-356: the phone changed a store through MyMesh (channels, radio, name). One toast says so and
   // the redraw rebuilds the screen from the same stores, so the change is visible at once.
@@ -5765,6 +5836,18 @@ void loop() {
       }
     }
   }
+  // EST-365: charge the frame (compose then SPI push) to the pass it happened in. A frame composes
+  // inside the block that drew it, so the tile decode is taken out of Draw to keep the parts from
+  // double-counting it; the push has its own measured number from board.cpp.
+  if (om::omFramePushCount() != passPush0) {
+    const uint32_t pushUs = om::omFrameLastPushUs();
+    const uint32_t composeUs = om::omFrameLastComposeUs();   // draw + overlay, push excluded
+    om::radio::addPart(om::radio::Part::FramePush, pushUs);
+    const uint32_t mapUs = om::radio::passPartUs(om::radio::Part::MapDecode);
+    const uint32_t drawUs = composeUs > mapUs ? composeUs - mapUs : 0;
+    om::radio::addPart(om::radio::Part::Draw, drawUs);
+  }
+  om::radio::endPass(micros(), millis());
   // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels over the 300 ms
   // fade-in (150 ms out); otherwise keep the old 20 ms loop (mesh, touch, draw). EST-355: a screen
   // change's 40 ms out and 60 ms in need the same ~1 ms cadence.
@@ -5880,12 +5963,26 @@ int cmdPrintNodes() {
 // the whole history; refs only carry scalars, and each DM text is resolved at print time from the
 // one shared copy buffer, which keeps this out of RAM.
 struct CmdMsgRef {
-  uint32_t ts;
+  uint32_t wall;
   uint32_t seq;
+  uint8_t wallReal;
   uint8_t dm;
   uint8_t thread;
   uint16_t index;
 };
+
+// EST-365: the dump is ordered by the rule in msg_order.h, not by the uptime stamp. A restored
+// message carries the uptime of the boot it was recorded in, so sorting by it put the restored
+// history (19:11, uptime ~5 h) after the new arrivals (20:38, uptime ~2 min).
+om::MsgOrderKey cmdMsgKey(const CmdMsgRef& r) {
+  om::MsgOrderKey k;
+  k.wall = r.wall;
+  k.wallReal = r.wallReal != 0;
+  k.seq = r.seq;
+  k.dm = r.dm != 0;
+  k.thread = r.thread;
+  return k;
+}
 
 int cmdPrintMsgs(int want) {
   if (want < 0) want = 10;
@@ -5894,8 +5991,9 @@ int cmdPrintMsgs(int want) {
   int n = 0;
   for (int i = 0; i < om::meshMsgCount() && n < 64; ++i) {
     CmdMsgRef& r = refs[n++];
-    r.ts = om::meshMsgTs(i);
+    r.wall = om::meshMsgWallTs(i);
     r.seq = om::meshMsgSeq(i);
+    r.wallReal = om::meshMsgWallReal(i) ? 1 : 0;
     r.dm = 0;
     r.thread = 0;
     r.index = (uint16_t)i;
@@ -5904,18 +6002,21 @@ int cmdPrintMsgs(int want) {
     const int k = om::meshDmList(t, g_dmScratch, om::ui::kMaxChatMsgs);
     for (int j = 0; j < k && n < 64; ++j) {
       CmdMsgRef& r = refs[n++];
-      r.ts = g_dmScratch[j].ts;
+      r.wall = g_dmScratch[j].wall;
       r.seq = g_dmScratch[j].seq;
+      r.wallReal = g_dmScratch[j].wallReal ? 1 : 0;
       r.dm = 1;
       r.thread = (uint8_t)t;
       r.index = 0;
     }
   }
-  // Insertion sort by uptime, stable on equal stamps: the two rings can share a second.
+  // Insertion sort by the one cross-boot rule (msg_order.h): real wall time first, this boot's
+  // sequence as the stable tie-break; uptime is never a key. Newest last, exactly as the screens.
   for (int i = 1; i < n; ++i) {
     const CmdMsgRef key = refs[i];
+    const om::MsgOrderKey keyOrder = cmdMsgKey(key);
     int j = i - 1;
-    while (j >= 0 && refs[j].ts > key.ts) {
+    while (j >= 0 && om::msgOrderBefore(keyOrder, cmdMsgKey(refs[j]))) {
       refs[j + 1] = refs[j];
       --j;
     }
@@ -5971,7 +6072,9 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
   // text is made printable so a stray control byte cannot split the log, and it is printed before
   // the parser edits the line in place.
   char logged[om::usb::kMaxCommandBytes + 1];
-  cmdSafe(logged, sizeof(logged), text);
+  // EST-365: `rptr login <name> <password>` is logged in its redacted form; the password can never
+  // reach the serial, a reply or an error line. Every other command is printed as before.
+  om::usb::redactCommand(text, logged, sizeof(logged));
   Serial.printf("[cmd] > %s\n", logged[0] != 0 ? logged : "(empty)");
 
   const om::usb::Command cmd = om::usb::parseCommand(text);
@@ -6277,6 +6380,49 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
                  cmd.text, asked ? 1 : 0, om::rptrRegionsBusy() ? 1 : 0);
         return;
       }
+      // EST-365: `rptr login <name> <password>`, through the screen's own path. The password is
+      // filtered like the sheet filters it, handed to rptrLoginStart() (which stores it only when
+      // the login succeeds, the screen's remember rule), and zeroed here. No reply field ever
+      // carries it; the serial log above is the redacted form.
+      if (strcmp(cmd.target, "login") == 0) {
+        if (!om::meshLinkReady()) {
+          cmdError(reply, cap, "mesh down");
+          return;
+        }
+        if (cmd.text == nullptr || cmd.text[0] == 0 || cmd.text2 == nullptr) {
+          cmdError(reply, cap, "args");
+          return;
+        }
+        char pw[om::rptr::kPasswordMax + 1] = "";
+        if (om::rptr::passwordFilter(cmd.text2, pw, sizeof(pw)) <= 0) {
+          cmdError(reply, cap, "password");
+          return;
+        }
+        const om::rptr::LoginMachine& lm = om::rptrLogin();
+        if (om::rptrLoggedIn() && strcmp(om::rptrCurrentName(), cmd.text) == 0) {
+          snprintf(reply, cap, "[cmd] ok rptr login name=\"%s\" result=%s rtt=%lu", cmd.text,
+                   om::rptr::loginStateText(lm.state), (unsigned long)lm.rttMs);
+          memset(pw, 0, sizeof(pw));
+          return;
+        }
+        if (lm.busy() && strcmp(om::rptrCurrentName(), cmd.text) == 0) {
+          snprintf(reply, cap, "[cmd] ok rptr login name=\"%s\" result=sending rtt=0",
+                   cmd.text);
+          memset(pw, 0, sizeof(pw));
+          return;
+        }
+        const bool sent = om::rptrLoginStart(cmd.text, pw);
+        memset(pw, 0, sizeof(pw));
+        if (!sent) {
+          snprintf(reply, cap,
+                   "[cmd] error rptr login name=\"%s\": no such repeater contact, run rptr scan "
+                   "first",
+                   cmd.text);
+          return;
+        }
+        snprintf(reply, cap, "[cmd] ok rptr login name=\"%s\" result=sent rtt=0", cmd.text);
+        return;
+      }
       // rptr status <name>
       const char* name = cmd.text;
       if (!om::rptrLoggedIn() || strcmp(om::rptrCurrentName(), name) != 0) {
@@ -6313,11 +6459,72 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
           (unsigned long)st.clock, (unsigned long)st.rttMs);
       snprintf(reply, cap,
                "[cmd] ok rptr status name=\"%s\" uptime=%lu battery_mv=%u airtime=%lu rx=%lu "
-               "tx=%lu noise=%d snr4=%d firmware=%u rtt_ms=%lu",
+               "tx=%lu noise=%d snr4=%d firmware=%u rtt_ms=%lu login=%s",
                name, (unsigned long)st.uptimeSec, (unsigned)st.battMv,
                (unsigned long)st.airtimeSec, (unsigned long)st.rxPackets,
                (unsigned long)st.txPackets, (int)st.noiseFloor, (int)st.lastSnr4,
-               (unsigned)st.fwLevel, (unsigned long)st.rttMs);
+               (unsigned)st.fwLevel, (unsigned long)st.rttMs,
+               om::rptr::loginStateText(om::rptrLogin().state));
+      return;
+    }
+
+    // EST-365: what the L2 hears. The numbers are upstream's own counters (meshRadioStats) plus the
+    // model's noise window and reception ring; the loop histogram names the slowest block. One
+    // answer line terminates the data lines for cmd.py, exactly like `nodes`.
+    case om::usb::Kind::Radio: {
+      om::radio::UpstreamCounters c;
+      const bool up = om::meshRadioStats(&c);
+      const om::radio::Snapshot snap = om::radio::snapshot();
+      if (cmd.target != nullptr && strcmp(cmd.target, "packets") == 0) {
+        const int n = om::radio::packetCount();
+        for (int i = n - 1; i >= 0; --i) {   // oldest first, newest last
+          om::radio::PacketSample p;
+          if (!om::radio::packetAt(i, &p)) continue;
+          char when[24];
+          cmdStamp(when, sizeof(when), p.atWall, p.atMs / 1000, p.atWallReal);
+          char hash[9] = "--------";
+          if (p.hashValid) {
+            snprintf(hash, sizeof(hash), "%02x%02x%02x%02x", p.hash[0], p.hash[1], p.hash[2],
+                     p.hash[3]);
+          }
+          Serial.printf(
+              "[pkt] at=%s type=%s route=%s from=%s rssi=%d snr=%d.%02d path=%u size=%u len=%u\n",
+              when, om::radio::payloadTypeName(p.type), om::radio::routeName(p.route), hash,
+              (int)p.rssi, (int)(p.snr4 / 4),
+              (int)(((p.snr4 < 0 ? -p.snr4 : p.snr4) % 4) * 25), p.pathCount, p.pathHashSize,
+              (unsigned)p.len);
+        }
+        snprintf(reply, cap, "[cmd] ok radio packets %d", n);
+        return;
+      }
+      const int noise = snap.noise.samples > 0 ? snap.noise.last : c.noiseFloor;
+      // The USB reply buffer is 384 B, so the line is compact; the bucket boundaries are the
+      // kHistogramBoundsUs list in radio_stats.h (1,2,5,10,20,50,100,200,500 ms, then "lots").
+      char hist[128];
+      int at = 0;
+      hist[0] = 0;
+      static const char* const kBucketNames[om::radio::kHistogramBuckets] = {
+          "1", "2", "5", "10", "20", "50", "100", "200", "500", "lots"};
+      for (int i = 0; i < om::radio::kHistogramBuckets && at < (int)sizeof(hist); ++i) {
+        at += snprintf(hist + at, sizeof(hist) - (size_t)at, "%s%s:%lu", i == 0 ? "" : ",",
+                       kBucketNames[i], (unsigned long)om::radio::histogramBucket(i));
+      }
+      snprintf(reply, cap,
+               "[cmd] ok radio noise=%d min=%d avg=%d n=%d rssi=%d snr=%d.%02d pkts=%lu "
+               "heard=%lu dup=%lu crc=%lu tx=%lu air=%lu rxa=%lu rxf=%lu rxd=%lu txf=%lu "
+               "txd=%lu gain=%s loop_worst=%lu by=%s minute=%lu minute_by=%s last=%lu hist=%s",
+               noise, snap.noise.min, snap.noise.avg, snap.noise.samples, c.lastRssi,
+               c.lastSnr4 / 4, ((c.lastSnr4 < 0 ? -c.lastSnr4 : c.lastSnr4) % 4) * 25,
+               (unsigned long)c.rxPackets, (unsigned long)snap.packetsHeard,
+               (unsigned long)c.duplicates, (unsigned long)c.crcErrors,
+               (unsigned long)c.txPackets, (unsigned long)(c.txAirMs / 1000),
+               (unsigned long)(c.rxAirMs / 1000), (unsigned long)c.recvFlood,
+               (unsigned long)c.recvDirect, (unsigned long)c.sentFlood,
+               (unsigned long)c.sentDirect,
+               !up ? "?" : (c.boostedKnown ? (c.boosted ? "boosted" : "power") : "?"),
+               (unsigned long)snap.worstUs, om::radio::partName(snap.worstPart),
+               (unsigned long)snap.worstMinuteUs, om::radio::partName(snap.worstMinutePart),
+               (unsigned long)snap.lastPassUs, hist);
       return;
     }
 

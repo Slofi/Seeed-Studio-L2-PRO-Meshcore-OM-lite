@@ -28,6 +28,10 @@ struct RptrItem {
 
 struct RptrView {
   StatusModel status;
+  // EST-365: the tab bar's badge. The RPTR page used to pass a literal 0 to drawTabBar, which is
+  // why the unread badge vanished on this tab only; the shell fills this for the list and every
+  // page state through the same currentTabBar() call.
+  TabBarModel tabs;
   bool list = true;                 // the list is showing; otherwise `page`
   rptr::Page page = rptr::Page::List;
 

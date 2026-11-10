@@ -67,8 +67,8 @@ struct ChatView {
   bool menuSenderHasPos = false;
   bool menuSenderHasKey = false;   // the sender's public key is known: a DM can be encrypted to
   bool menuInDm = false;           // the sheet is already open inside that sender's DM thread
-  int unread = 0;           // chat badge on the tab bar
-  bool newNodeDot = false;  // EST-342: a contact was added since Nodes was last opened
+  // EST-365: the tab bar's badge (and the gold new-node dot), built by the shell once per view.
+  TabBarModel tabs;
 };
 
 void chatScreenDraw(const ChatView& v);

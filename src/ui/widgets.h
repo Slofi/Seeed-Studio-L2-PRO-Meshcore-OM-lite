@@ -7,6 +7,7 @@
 
 #include "layout.h"
 #include "radio_fault.h"
+#include "tab_bar.h"
 #include "theme.h"
 #include "ui/icons.h"
 
@@ -46,8 +47,7 @@ struct RowModel {
 
 // Status bar and tab bar.
 void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m);
-void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread,
-                bool newNodeDot = false);
+void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m);
 
 // One-line toast above the tab bar (theme.h kToastH / kToastMargin). Used by a tap on the radio fault
 // mark to say which of the three things is wrong. The caller keeps the text and the time.

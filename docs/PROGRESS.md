@@ -3411,3 +3411,136 @@ The glass: that the card's two columns really end clear of the icon, the 40x40 t
 - Built in the sandbox (exit 0, RAM 153,504 B, flash 2,768,629 B), tests exit 0, reviewed binary flashed (2,768,992 B).
 - Login admin (1440 ms); status at the first try (8 s deadline): 3.57 V 48 %, noise -119 dBm, up 4h 07m; read-backs in order (`get name`, 46.042633, 14.5014524, radio, 22, on, clock 20:01 UTC = 21:01 local, regions `*^ F`, `default scope is si`). Page (`docs/shots/2026-11-10-2101-argus-fixed.png`): "Logged in", Clock 21:01 (local), Position 46.04263, 14.50145, Radio 869.618 MHz SF8 BW 62.5. The refresh icon has its own gutter. Badge shows "32" (two digits).
 - Note for Filip: Argus's default scope reads `si` (he wants it unscoped for travel); home is `*`.
+
+## 2026-11-10 21:22 (DeepSeek): EST-365, the badge on RPTR, the msgs order, radio stats, names, USB login
+Built in the sandbox (build exit 0; RAM **154,528 B**, flash **2,776,877 B**, `firmware.bin` **2,777,248 B**,
+so +1,024 B RAM and +8,248 B flash on EST-364). `sh test/host/run.sh` exit 0 (29 g++ programs plus
+6 python checks; `test_est365` and `test_tab_bar_calls.py` are new).
+
+### 1. The unread badge on the RPTR page (and the Map page)
+- Root cause: the RPTR page called `drawTabBar(..., Tab::Rptr, 0, false)` and so did the Map page;
+  Nodes and Chat passed their own `unread` field. The widget was right, the call sites were not.
+- The bar no longer takes a count: `ui/tab_bar.h` holds the one `TabBarModel` (active tab, unread,
+  new-node dot). Every view carries one (`NodesView`, `ChatView`, `MapView`, `RptrView`), and
+  `main.cpp` fills it in ONE place, `currentTabBar()`, from `unreadTotal()` and `g_newNodeDot`. The
+  RPTR list, every RPTR page, the confirmation pop-up and the Map all draw `drawTabBar(d, layout,
+  v.tabs)`. No screen can pass a different count again; the old signature is gone.
+- Tests: `test_est365.cpp` walks all four tabs x counts 0/1/9/10/32/99/100/250 x dot on/off, plus a
+  negative count. `test_tab_bar_calls.py` is the call-site guard: every `drawTabBar()` call in
+  `src/` must pass a `.tabs` model, `main.cpp` must have the one `currentTabBar()` and one assignment
+  per tab, and all four screens must still draw the bar.
+
+### 2. `msgs` listed stale messages last
+- Root cause, as suspected: the dump merged the two rings and sorted by `meshMsgTs()` (uptime). A
+  message restored from the card carries the uptime of the boot it was recorded in (19:11, ~5 h),
+  while the new arrivals at 20:38 had ~2 min, so the restored history sorted last.
+- New `src/msg_order.h` is the one cross-boot rule: a REAL wall time first (the field the screens
+  print), then this boot's sequence as the tie-break. Uptime is never a key. A non-real 2024 stamp
+  sorts with the unknown-clock entries, never after 2026. `cmdPrintMsgs()` builds the key per ring
+  entry and insertion-sorts with `msgOrderBefore()`.
+- Test: the 20:38 run recreated (restored 19:11/19:12 with 5 h uptime, new 20:37/20:38 with 2 min)
+  must print 19:11, 19:12, 20:37, 20:38; plus the no-clock case (sequence keeps restore first), a
+  fake 2024 stamp, and equal wall seconds.
+
+### 3. Radio stats (`radio`, `radio packets`, Settings > About)
+- `src/radio_stats.h/.cpp` (plain C++, host-tested) keeps what upstream does not: a noise-floor
+  window (one sample every 5 s, last 36 = 3 minutes, with last/min/avg) and the last 20 raw
+  receptions (time, payload type, route, first 4 payload bytes as `from`, RSSI, SNR, path length).
+  The RX boosted-gain value is read back from the chip (register 0x08AC, upstream's own
+  `getRxBoostedGainMode()`), not from prefs.
+- Upstream's own counters are read in `mesh_link.cpp` `meshRadioStats()`: radio wrapper
+  `getPacketsRecv/Sent/RecvErrors`, `getNoiseFloor`, `getLastRSSI/SNR`, Dispatcher flood/direct
+  counts and `getTotalAirTime()/getReceiveAirTime()`, and the seen-table duplicate counters. No
+  lib/ file was edited.
+- Every raw reception is recorded in `OmSX1262Wrapper::recvRaw()` (our class in `src/target.*`),
+  so adverts and flood repeats this node does not process still count as "heard". No behaviour
+  change, no second SPI read.
+- `radio` prints one line: `noise/min/avg/n`, last RSSI/SNR, `pkts/heard/dup/crc/tx`, `air/rxa`,
+  flood/direct RX/TX, `gain=boosted|power`, `loop_worst/by`, `minute/minute_by`, `last`, `hist`.
+  `radio packets` prints up to 20 `[pkt] at=... type=... route=... from=... rssi=... snr=...
+  path=... len=...` lines, oldest first. The USB reply buffer grew from 384 to 512 B for this line.
+- Settings > About (General) now shows **Noise floor** (`-117 dBm (-119/-117)` once the window has
+  samples), **Packets heard** (`<count> (dup <n>)`) and **Radio gain**.
+
+### 4. Loop latency
+- The loop now times the blocks the ticket names (`history`, `wifi`, `ble`, `gps`, `usb`, `mesh`,
+  `rptr`, `map`, `draw`, `push`); the remainder is `other`, so the parts add up to the pass. The
+  frame compose is measured in `board.cpp` from `omFrameBegin()` to just before the SPI push
+  (`omFrameLastComposeUs()`), and the push has its own `omFrameLastPushUs()`. The tile decode is
+  charged to `map` and taken out of `draw`, so nothing is counted twice.
+- A 10-bucket histogram (1, 2, 5, 10, 20, 50, 100, 200, 500 ms, then longer) and the worst pass per
+  60 s window are kept; `radio` prints `loop_worst=<us> by=<part> minute=<us> minute_by=<part>`.
+  The pass is timed from `loop()` entry to just before its final `delay(20)`, so the number is WORK
+  time, not the 20 ms idle period.
+  Nothing was changed in behaviour: no device run was possible in the sandbox, so there is no
+  measured stall to report yet. The threshold for action stays one SF8/BW62.5 packet
+  (`kOnePacketUs` = 300,000 us, roughly 0.3-1 s of air); if `radio` reports a pass over that, the
+  `by=` field names the block and PROGRESS.md must carry the proposed fix.
+
+### 5. Unnamed repeaters
+- A discovery answer carries a key, not a name. `simple_repeater` answers ANON_REQ type **0x02**
+  (`ANON_REQ_TYPE_OWNER`) with `<node_name>\n<owner_info>`; this is the upstream path read from
+  `examples/simple_repeater/MyMesh.cpp` (the same shape as the regions read at 0x01).
+- After a discovery answer for a 0-hop, full-key repeater with no known name, `rptr_link.cpp` queues
+  one owner request (one anonymous request on the air at a time, never during a login; an open
+  page's regions read preempts it). The reply is matched on the sender's full key and the tag; the
+  first line becomes the row's name and the list/subtitle stop saying "unnamed 86a8ee". A timeout
+  keeps the hex name and logs it. A name is not written into the contact table, so logging in to a
+  previously unnamed repeater still needs its advert to arrive first.
+- `anonOwnerParse()` is host-tested with name+owner, name only, clock-only, empty first line and a
+  truncated buffer.
+
+### 6. `rptr login <name> <password>`
+- Parser: `rptr login <name> <password>` (both may be quoted), stored as `text`/`text2`; missing
+  password is `args`. Execution calls **`om::rptrLoginStart()`**, the screen's own Log in path, after
+  the same `passwordFilter()` the sheet uses. The password is zeroed immediately and never appears
+  in a reply. The remember rule is unchanged: `rptr_link` stores the password only when the login
+  answer says OK, exactly as for the glass.
+- The command is asynchronous: it returns `result=sent` (or `admin`/`guest` when the same repeater
+  is already logged in, or `sending`). The answer arrives in the normal loop and `rptr status <name>`
+  now carries `login=<state>` plus the status data, so a reviewer can see `login=admin`.
+- Serial logging goes through `usb::redactCommand()`: any command whose first two words are
+  `rptr login` logs `rptr login name="<name>" (password hidden)`, whatever follows (extra words, a
+  malformed quote). Tests cover plain, quoted, extra-word and ordinary commands.
+
+### Tests (host, `sh test/host/run.sh` exit 0)
+- New `test/host/test_est365.cpp`: every tab/page state through `TabBarModel`; the `msgs` order
+  across a reboot (restored ring plus new arrivals); the noise window (5 s period, min/avg, bounded
+  ring); the reception ring decoded from real MeshCore raw headers (flood, transport-flood, short
+  frame); the loop histogram and per-part attribution (a 120 ms push-named pass, a per-minute
+  rollover); `anonOwnerParse`; `radio` / `radio packets` / `rptr login` parsing and password
+  redaction.
+- New `test/host/test_tab_bar_calls.py`: the call-site guard described in 1.
+- `run.sh` links the new `radio_stats.cpp` and runs both.
+
+### Could not check (no device in the sandbox)
+The glass: the badge on the RPTR list and every RPTR page at 1:1, the two new About rows, and that
+the RPTR subtitle switches from "unnamed 86a8ee" to the real name. The radio: whether `gain=` says
+`boosted` or `power` on the L2 (this is the first time the chip register is read back; if it says
+`power`, that is a concrete candidate for "the L2 hears fewer messages than ERA-2/ERA-3", but this
+ticket changes no radio behaviour). The loop numbers: there is no device run, so no worst pass has
+been observed; `radio` is the measurement. The owner query depends on the repeater running
+`simple_repeater` with the 0x02 handler (Argus and the `db744b` node are expected to).
+
+### Next step for Claude (USB, one reader on the port)
+1. Flash `firmware.bin` (2,777,248 B). Boot must still print `[rptr] sizes: ...` and `board=ok mesh=up`.
+2. Badge: send a few messages, then `cmd.py tap 280 227` (RPTR tab) and `shot.py`: the red badge on
+   the Chat icon must show the same count as on Nodes, on the list and on a repeater page
+   (`tap 120 70` for the first row). Map must show it too.
+3. `cmd.py msgs 8`: the last line must be the NEWEST arrival (20:38-era), not a restored 19:11 one;
+   run it right after receiving a fresh channel message.
+4. `cmd.py radio`: read `noise`, `min`, `avg`, `pkts`, `heard`, `dup`, `crc`, `tx`, `gain` and
+   `loop_worst/by`. Then `cmd.py radio packets`: up to 20 `[pkt]` lines, newest last.
+5. `cmd.py tap 307 12` (gear) and scroll General to ABOUT: **Noise floor**, **Packets heard**,
+   **Radio gain**.
+6. RPTR tab: after the auto scan, an unnamed answer must log `[rptr] name -> unnamed <hex>: owner
+   request sent` and then `[rptr] name <- "<name>"`; `shot.py` must show the name instead of
+   "unnamed <hex>". If it times out, the row keeps the hex and the log says so.
+7. `cmd.py rptr login "Argus mobile RPTR" <password>`: the `[cmd] >` line must read
+   `rptr login name="Argus mobile RPTR" (password hidden)` and the answer `result=sent`; wait a few
+   seconds, then `cmd.py rptr status "Argus mobile RPTR"` must show `login=admin`. The password must
+   not appear in any line, including the `[cmd] >` line and `status`.
+
+## 2026-11-10 21:55 (Claude): EST-365 on the device
+- Built in the sandbox (exit 0, RAM 154,528 B, flash 2,776,877 B), tests exit 0, password paths read (the USB command line is redacted before it is logged; the stored password only feeds the login), reviewed binary flashed (2,777,248 B).
+- Badge on the Map and RPTR tabs: shown ("32", "33"). `msgs` now ends with the newest (seq 55 at 20:52 after restore). `radio`: gain=boosted, noise -85 dBm (min -85; the average -73 still includes the first samples after boot), RX 4 / CRC 3 in the first minute, `radio packets` lists type, route, sender hash, RSSI/SNR, path. loop_worst 317 ms "by=usb" (my commands). 3 minutes of log: no restart (an earlier "uptime 46 s" reading was the same boot; my misread of the timing).

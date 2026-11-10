@@ -52,6 +52,10 @@ class OmSX1262Wrapper : public CustomSX1262Wrapper {
   bool startSendRaw(const uint8_t* bytes, int len) override;
   bool isSendComplete() override;
   void onSendFinished() override;
+  // EST-365: every raw packet the radio hands up passes here, including adverts and flood repeats
+  // this node does not process. That is what "packets heard" means, and it is upstream's own
+  // recvRaw() (no second SPI read, no behaviour change).
+  int recvRaw(uint8_t* bytes, int sz) override;
 
  private:
   static constexpr uint32_t kTxTimeoutMs = 15000;   // longer than any legal packet's airtime

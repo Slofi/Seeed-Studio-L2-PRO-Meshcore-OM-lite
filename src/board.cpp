@@ -239,6 +239,8 @@ bool s_holdPush = false;
 bool s_framePending = false;
 uint16_t s_pushCount = 0;
 uint32_t s_pushUs = 0;
+uint32_t s_frameStartUs = 0;
+uint32_t s_composeUs = 0;
 
 }  // namespace
 
@@ -246,6 +248,7 @@ void omFrameSetOverlay(omFrameOverlay fn) { s_frameOverlay = fn; }
 
 uint16_t omFramePushCount() { return s_pushCount; }
 uint32_t omFrameLastPushUs() { return s_pushUs; }
+uint32_t omFrameLastComposeUs() { return s_composeUs; }
 
 lgfx::LovyanGFX* om_display() {
   if (s_frameDepth > 0 && s_frame.getBuffer() != nullptr) return &s_frame;
@@ -316,7 +319,10 @@ bool omFrameColourProbe(uint16_t native, uint16_t& stored, uint16_t& back) {
 bool omFrameInit() { return ensureFrameBuffer(); }
 
 bool omFrameBegin() {
-  if (s_frameDepth == 0) ensureFrameBuffer();
+  if (s_frameDepth == 0) {
+    ensureFrameBuffer();
+    s_frameStartUs = micros();   // EST-365: one compose time per outer frame
+  }
   ++s_frameDepth;
   return s_frame.getBuffer() != nullptr;
 }
@@ -356,6 +362,7 @@ void omFrameEnd() {
   // This is the one point every redraw path passes through, so a later frame cannot erase it
   // (EST-344). It runs only on the outer frame, after a complete screen.
   if (s_frameOverlay != nullptr) s_frameOverlay(&s_frame, (uint32_t)millis());
+  s_composeUs = micros() - s_frameStartUs;   // draw + overlay, measured just before the push
   // EST-355: the screen-change transition holds this one push, measures the composed frame and makes
   // the push itself (omFrameFlush) with the light off. The hold is one shot, so any other redraw
   // during the transition still pushes normally.

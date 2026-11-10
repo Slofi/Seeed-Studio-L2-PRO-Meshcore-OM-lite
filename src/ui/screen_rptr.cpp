@@ -362,6 +362,8 @@ void RptrView::reset() {
   // StatusModel's own defaults, so a reset view is identical to a fresh RptrView() before buildStatus.
   status.batteryPct = -1;
   status.clock = "--:--";
+  // EST-365: the bar's active tab is this screen's; the badge itself is filled by the shell.
+  tabs.active = Tab::Rptr;
 }
 
 // The guard: this model must stay a static. If it grows past the cap, the RPTR redesign has to move it
@@ -391,7 +393,7 @@ void rptrScreenDraw(const RptrView& v) {
     // The sheet covers the tab bar, exactly like the chat composer's (Filip, S459).
     drawSheet(d, v);
   } else {
-    drawTabBar(d, l2(), Tab::Rptr, 0, false);
+    drawTabBar(d, l2(), v.tabs);
   }
   drawStatusBar(d, l2(), v.status);
   om::useAppFont(d);

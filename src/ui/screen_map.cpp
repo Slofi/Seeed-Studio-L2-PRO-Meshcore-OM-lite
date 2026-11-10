@@ -161,7 +161,7 @@ void mapScreenDraw(const MapView& v) {
   }
 
   drawStatusBar(d, l2(), v.status);
-  drawTabBar(d, l2(), Tab::Map, 0, false);
+  drawTabBar(d, l2(), v.tabs);
   om::useAppFont(d);
   omFrameEnd();
 }

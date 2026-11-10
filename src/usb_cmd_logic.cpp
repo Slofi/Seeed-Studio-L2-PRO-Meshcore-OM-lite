@@ -2,6 +2,7 @@
 // The OMCMD1 command parser. Plain C++ only; see usb_cmd_logic.h for the rules.
 #include "usb_cmd_logic.h"
 
+#include <stdio.h>
 #include <string.h>
 
 namespace om {
@@ -213,6 +214,19 @@ Command parseCommand(char* line) {
     }
     return c;
   }
+  // EST-365: `radio` or `radio packets`. The data line(s) are printed first and the one answer
+  // line terminates them, exactly like `nodes` and `msgs`.
+  if (strcmp(verb, "radio") == 0) {
+    c.kind = Kind::Radio;
+    const char* sub = cur.next();
+    if (sub != nullptr && strcmp(sub, "packets") != 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
   if (strcmp(verb, "history") == 0) {
     c.kind = Kind::History;
     c.target = cur.next();
@@ -309,6 +323,21 @@ Command parseCommand(char* line) {
       if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
       return c;
     }
+    // EST-365: the reviewer's door to the logged-in RPTR pages. `rptr login <name> <password>`
+    // goes through rptrLoginStart(), the screen's own path; the reply and the log never carry the
+    // password (main.cpp logs the redactedCommand() form).
+    if (strcmp(sub, "login") == 0) {
+      c.target = sub;
+      c.text = cur.next();    // the repeater's contact name
+      c.text2 = cur.next();   // the password, not echoed or stored by the parser
+      if (cur.bad() || c.text == nullptr || c.text[0] == 0 || c.text2 == nullptr ||
+          c.text2[0] == 0) {
+        c.error = cur.bad() ? "quote" : "args";
+        return c;
+      }
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
     if (strcmp(sub, "status") == 0) {
       c.target = sub;
       c.text = cur.next();
@@ -374,6 +403,54 @@ Command parseCommand(char* line) {
   // never reaches a handler.
   c.error = "unknown";
   return c;
+}
+
+// EST-365: the log-safe form. Deliberately built from the TOKENS, not by hiding a slice of the raw
+// line: whatever follows the name (an extra word, a malformed quote, a too-long line) is discarded
+// with the password, so no spelling of `rptr login` can print it.
+void redactCommand(const char* line, char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return;
+  out[0] = 0;
+  if (line == nullptr) return;
+  // Find the first two words by hand, without tokenize()'s output limit: a line with many extra
+  // words must still be recognised as `rptr login` and lose everything after the name.
+  const char* p = line;
+  while (*p == ' ' || *p == '\t') ++p;
+  const char* w1 = p;
+  while (*p != 0 && *p != ' ' && *p != '\t') ++p;
+  const size_t w1Len = (size_t)(p - w1);
+  while (*p == ' ' || *p == '\t') ++p;
+  const char* w2 = p;
+  while (*p != 0 && *p != ' ' && *p != '\t') ++p;
+  const size_t w2Len = (size_t)(p - w2);
+  const bool isLogin = w1Len == 4 && w2Len == 5 && strncmp(w1, "rptr", 4) == 0 &&
+                       strncmp(w2, "login", 5) == 0;
+  if (isLogin) {
+    while (*p == ' ' || *p == '\t') ++p;
+    const char* name = p;
+    size_t nameLen = 0;
+    if (*p == '"') {
+      ++name;
+      while (name[nameLen] != 0 && name[nameLen] != '"') ++nameLen;
+    } else {
+      while (p[nameLen] != 0 && p[nameLen] != ' ' && p[nameLen] != '\t') ++nameLen;
+    }
+    char safe[80];
+    size_t at = 0;
+    for (size_t i = 0; i < nameLen && at + 1 < sizeof(safe); ++i) {
+      const unsigned char ch = (unsigned char)name[i];
+      safe[at++] = (ch < 0x20 || ch == 0x7F || ch == '"') ? '\'' : (char)ch;
+    }
+    safe[at] = 0;
+    snprintf(out, cap, "rptr login name=\"%s\" (password hidden)", safe);
+    return;
+  }
+  size_t at = 0;
+  for (const char* q = line; *q != 0 && at + 1 < cap; ++q) {
+    const unsigned char ch = (unsigned char)*q;
+    out[at++] = (ch < 0x20 || ch == 0x7F || ch == '"') ? '\'' : (char)ch;
+  }
+  out[at] = 0;
 }
 
 }  // namespace usb

@@ -28,7 +28,8 @@ enum class Kind : uint8_t {
   KeyWake,  // key wake
   Wifi,     // wifi status | scan | on | off   (EST-354; never a password)
   Ble,      // ble status | on | off   (EST-356; never the pairing PIN)
-  Rptr,     // rptr scan | rptr status <name> | rptr regions [name]  (never a password)
+  Rptr,     // rptr scan | rptr status <name> | rptr regions [name] | rptr login <name> <pw>
+  Radio,    // radio | radio packets   (EST-365: what the L2 hears, and the loop histogram)
   Play,     // play <event> [sound-id]   (EST-359/361: hear the device's shared library)
 };
 
@@ -38,6 +39,7 @@ struct Command {
   Kind kind = Kind::Unknown;
   const char* target = nullptr;   // channel name, contact name or public-key prefix
   const char* text = nullptr;     // the send/DM text, already unquoted when it was quoted
+  const char* text2 = nullptr;    // EST-365: `rptr login <name> <password>`, the second word
   int nums[5] = {0, 0, 0, 0, 0};
   int numCount = 0;
   int count = -1;                 // msgs [n]: -1 when n was not given
@@ -53,6 +55,12 @@ int tokenize(char* line, const char** out, int maxOut);
 // line, an unknown verb and a malformed argument list all come back with `error` set, so a host
 // gets one honest answer and nothing goes on the air.
 Command parseCommand(char* line);
+
+// EST-365: what the serial may log for a command. `rptr login <name> <password>` becomes
+// `rptr login name="<name>" (password hidden)`; nothing else is changed except that control bytes
+// and the double quote that would break the field become apostrophes. The password can never reach
+// the log, a reply or an error line.
+void redactCommand(const char* line, char* out, size_t cap);
 
 }  // namespace usb
 }  // namespace om

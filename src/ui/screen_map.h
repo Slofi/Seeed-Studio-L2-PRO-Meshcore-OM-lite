@@ -23,6 +23,8 @@ struct MapView {
   bool callout = false;      // a marker is selected
   char calloutTitle[32] = "";
   char calloutLine[64] = "";
+  // EST-365: the tab bar's badge, from the shell's one currentTabBar() call.
+  TabBarModel tabs;
 };
 
 // The chrome for this view. Drawing and the tap test both come from this one call.

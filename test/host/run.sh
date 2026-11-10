@@ -47,6 +47,7 @@ BIN26="$(mktemp /tmp/om-lite-est360.XXXXXX)"
 BIN27="$(mktemp /tmp/om-lite-est362.XXXXXX)"
 BIN28="$(mktemp /tmp/om-lite-est363.XXXXXX)"
 BIN29="$(mktemp /tmp/om-lite-est364.XXXXXX)"
+BIN30="$(mktemp /tmp/om-lite-est365.XXXXXX)"
 trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
@@ -227,3 +228,13 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est364.cpp \
   ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp \
   ../../src/timekeeper.cpp -o "$BIN29"
 "$BIN29"
+
+# EST-365: the tab bar badge has one source (a source-level call-site check, plus the C++ model in
+# test_est365); the `msgs` order across a reboot; the noise window, the last-20 reception ring and the
+# loop histogram with per-part attribution; the anonymous owner/name answer for an unnamed repeater;
+# and the `radio` / `rptr login` command surface, including that no log form carries the password.
+python3 -B test_tab_bar_calls.py
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est365.cpp \
+  ../../src/radio_stats.cpp ../../src/rptr_model.cpp ../../src/usb_cmd_logic.cpp \
+  ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN30"
+"$BIN30"

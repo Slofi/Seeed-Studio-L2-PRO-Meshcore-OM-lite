@@ -60,6 +60,21 @@ int s_regionsQueue[kMaxFound] = {};
 int s_regionsQueueLen = 0;
 int s_regionsQueuePos = 0;
 
+// --- EST-365: the anonymous owner/name read ------------------------------------------------------
+// A discovery answer carries a key, not a name. simple_repeater answers ANON_REQ type 0x02 with
+// "<node_name>\n<owner_info>" (handleAnonOwnerReq), so an unnamed direct responder is asked the same
+// way the regions read does it: one 0-hop DIRECT request, matched on the sender's full key and the
+// tag. One anonymous request is on the air at a time (regions or owner), never during a login.
+bool s_namePending = false;
+uint8_t s_nameKey[PUB_KEY_SIZE] = {};
+uint32_t s_nameTag = 0;
+int s_nameRow = -1;
+uint32_t s_nameSentMs = 0;
+uint32_t s_nameDeadlineMs = 0;
+int s_nameQueue[kMaxFound] = {};
+int s_nameQueueLen = 0;
+int s_nameQueuePos = 0;
+
 char s_pendingPassword[kPasswordMax + 1] = "";   // held only until the answer, never logged
 char s_currentName[kNameMax + 1] = "";
 uint8_t s_currentKey[PUB_KEY_SIZE] = {};
@@ -226,6 +241,17 @@ bool fromRegionsTarget(const ContactInfo& from) {
 // repeater that is not in our table gets MeshCore's own temporary anon slot, as the companion's
 // CMD_SEND_ANON_REQ handler does.
 bool regionsStartOne(int idx) {
+  // The page's anonymous regions read has priority over a background name query: both are one
+  // request on the same air, and the regions answer is what the open page is waiting for. The name
+  // queue stays; nameNext() resumes it once the regions answer or timeout clears the flag.
+  if (s_namePending) {
+    if (s_nameRow >= 0 && s_nameRow < s_found.count) {
+      s_found.rows[s_nameRow].nameAsked = false;   // a later pass may ask again
+    }
+    s_namePending = false;
+    s_nameRow = -1;
+    Serial.println("[rptr] regions needs the air, the name query is dropped");
+  }
   if (s_regionsPending || idx < 0 || idx >= s_found.count) return false;
   if (!meshLinkReady()) return false;
   if (s_login.busy() || s_login.loggedIn()) return false;   // the answer must not be mistaken for a login
@@ -285,6 +311,79 @@ void regionsNext() {
   s_regionsQueuePos = 0;
 }
 
+// One owner/name request on a scan row. Mirrors regionsStartOne: only a full-key, 0-hop answer can
+// be asked (the request is a zero-hop DIRECT and the reply must come straight back).
+bool nameStartOne(int idx) {
+  if (s_namePending || idx < 0 || idx >= s_found.count) return false;
+  if (!meshLinkReady()) return false;
+  if (s_login.busy() || s_login.loggedIn()) return false;   // not while a session is open
+  if (s_regionsPending) return false;                       // one anonymous request at a time
+  Found& f = s_found.rows[idx];
+  if (f.keyLen < kPubKeyBytes || f.hops != 0 || f.name[0] != 0) return false;
+
+  ContactInfo ci;
+  ContactInfo* known = rptrMesh().lookupContactByPubKey(f.key, PUB_KEY_SIZE);
+  if (known != nullptr) {
+    ci = *known;
+  } else {
+    memset(&ci, 0, sizeof(ci));
+    memcpy(ci.id.pub_key, f.key, PUB_KEY_SIZE);
+    ci.type = ADV_TYPE_NONE;
+    ci.lastmod = rptrMesh().getRTCClock()->getCurrentTime();
+    if (!rptrMesh().addContact(ci)) {
+      Serial.printf("[rptr] name: no contact slot for %s\n", "?");
+      return false;
+    }
+  }
+  ci.out_path_len = 0;
+  memset(ci.out_path, 0, sizeof(ci.out_path));
+
+  // ANON_REQ payload: type 0x02 (owner/name) + reply path length 0.
+  uint8_t data[2] = {kAnonReqOwner, 0x00};
+  uint32_t tag = 0;
+  uint32_t est = 0;
+  const int rc = rptrMesh().sendAnonReq(ci, data, sizeof(data), tag, est);
+  if (rc == MSG_SEND_FAILED) {
+    Serial.println("[rptr] name: send failed");
+    return false;
+  }
+  memcpy(s_nameKey, f.key, PUB_KEY_SIZE);
+  s_nameTag = tag;
+  s_nameRow = idx;
+  s_nameSentMs = millis();
+  s_nameDeadlineMs = s_nameSentMs + est + kRegionsExtraMs;
+  s_namePending = true;
+  f.nameAsked = true;
+  ++s_found.serial;
+  char hex[16];
+  hexPrefix(f.prefix, 6, hex, sizeof(hex));
+  Serial.printf("[rptr] name -> unnamed %s: owner request sent, deadline %lu ms\n", hex,
+                (unsigned long)(est + kRegionsExtraMs));
+  return true;
+}
+
+void nameNext() {
+  if (s_namePending) return;
+  while (s_nameQueuePos < s_nameQueueLen) {
+    const int idx = s_nameQueue[s_nameQueuePos++];
+    if (nameStartOne(idx)) return;
+  }
+  s_nameQueueLen = 0;
+  s_nameQueuePos = 0;
+}
+
+// Queue one unnamed direct responder. Called from the discovery answer, when the row is full-key
+// and 0-hop; a second answer for the same row does not queue it twice.
+void nameQueueAdd(int idx) {
+  if (idx < 0 || idx >= s_found.count) return;
+  if (s_found.rows[idx].nameAsked) return;
+  for (int i = 0; i < s_nameQueueLen; ++i) {
+    if (s_nameQueue[i] == idx) return;
+  }
+  if (s_nameQueueLen >= kMaxFound) return;
+  s_nameQueue[s_nameQueueLen++] = idx;
+}
+
 }  // namespace
 
 bool rptrLinkBegin() {
@@ -305,6 +404,20 @@ bool rptrLinkBegin() {
 void rptrLinkLoop() {
   const uint32_t now = millis();
   s_found.tick(now);
+  nameNext();   // EST-365: one unnamed responder at a time; guarded against login/regions
+  if (s_namePending && (int32_t)(now - s_nameDeadlineMs) >= 0) {
+    const int idx = s_nameRow;
+    s_namePending = false;
+    s_nameRow = -1;
+    if (idx >= 0 && idx < s_found.count) {
+      char hex[16];
+      hexPrefix(s_found.rows[idx].prefix, 6, hex, sizeof(hex));
+      Serial.printf("[rptr] name <- unnamed %s: no answer within %lu ms, keeping the hex name\n",
+                    hex, (unsigned long)(now - s_nameSentMs));
+    }
+    ++s_found.serial;
+    nameNext();
+  }
   if (s_login.tick(now)) {
     Serial.printf("[rptr] login to %s: no answer within %lu ms\n", s_currentName,
                   (unsigned long)(now - s_login.sentMs));
@@ -374,6 +487,11 @@ bool rptrScanStart() {
   s_regionsRow = -1;
   s_regionsQueueLen = 0;
   s_regionsQueuePos = 0;
+  // EST-365: the same for the owner/name queue; the new rows start unnamed.
+  s_namePending = false;
+  s_nameRow = -1;
+  s_nameQueueLen = 0;
+  s_nameQueuePos = 0;
   Serial.printf("[rptr] scan: discover request tag %08lx, listening %lu ms\n", (unsigned long)tag,
                 (unsigned long)kScanWindowMs);
   return true;
@@ -436,6 +554,9 @@ bool rptrOnControlData(const mesh::Packet* pkt) {
   if (at >= 0) {
     s_found.rows[at].heardWall = timeKeeper().now();
     s_found.rows[at].heardReal = timeKeeper().realSinceBoot();
+    // EST-365: a discovery answer has no name. Ask this 0-hop responder for its owner/name line
+    // (ANON_REQ 0x02) once the scan machinery is free; the row keeps the hex until it answers.
+    if (name[0] == 0 && keyLen >= kPubKeyBytes && hops == 0) nameQueueAdd(at);
   }
   char hex[16];
   hexPrefix(key, usable, hex, sizeof(hex));
@@ -617,6 +738,28 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
                     bool* handled) {
   if (handled) *handled = false;
   if (data == nullptr || len == 0) return;
+
+  // EST-365: the anonymous owner/name answer. It starts at the repeater's clock (MyMesh stripped the
+  // 4-byte tag) and its first line is the node name; matched by tag and by the sender's full key.
+  if (s_namePending && tag == s_nameTag && memcmp(from.id.pub_key, s_nameKey, PUB_KEY_SIZE) == 0) {
+    char name[kNameMax + 1] = "";
+    char owner[kOwnerMax + 1] = "";
+    const bool ok = anonOwnerParse(data, (int)len, name, sizeof(name), owner, sizeof(owner));
+    const int idx = s_nameRow;
+    s_namePending = false;
+    s_nameRow = -1;
+    if (ok && idx >= 0 && idx < s_found.count) {
+      snprintf(s_found.rows[idx].name, sizeof(s_found.rows[idx].name), "%s", name);
+      ++s_found.serial;
+      Serial.printf("[rptr] name <- \"%s\"%s%s\n", name, owner[0] ? " owner " : "", owner);
+    } else {
+      Serial.printf("[rptr] name answer did not parse (%d bytes), keeping the hex name\n", (int)len);
+      ++s_found.serial;
+    }
+    if (handled) *handled = true;
+    nameNext();
+    return;
+  }
 
   // The login answer. sendLogin() does not set MyMesh's own pending_login (that path belongs to the
   // phone's CMD_SEND_LOGIN), so the answer arrives here. Its first four bytes are the repeater's

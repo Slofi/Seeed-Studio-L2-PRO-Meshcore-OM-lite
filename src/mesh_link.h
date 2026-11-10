@@ -32,6 +32,22 @@ int meshHistoryOlder(int channelIdx, int thread, uint32_t beforeLogId, history::
 // [hist] lines were printed, or -1 when no such chat exists.
 int meshHistoryDump(const char* chat, int n);
 
+// --- EST-367: a chat's own view, not the shared 32-message arrival ring ---------------------------
+// The newest `cap` messages of a chat's own log (a channel, or a DM thread when thread >= 0), oldest
+// first. One seek to the end of the file plus one backwards 4 KB window: the log is never scanned.
+// Returns how many were written, or -1 when there is no such chat.
+int meshHistoryNewest(int channelIdx, int thread, history::Msg* out, int cap);
+// That chat's newest stored message (sender, text, clocks), for the selector's preview line. False
+// when the chat has stored nothing yet.
+bool meshChatSummary(int channelIdx, int thread, history::ChatSummary* out);
+// How many messages the chat really has on the volume (.log + .old). Only the `chats` check asks:
+// it reads the file once, so the boot and open paths never call it.
+int meshHistoryCardMessages(int channelIdx, int thread, bool* complete = nullptr);
+// The open chat's seen point moved to the newest message its view actually showed. Returns the
+// unread left in the chat (0 when the view reached the newest stored message), and keeps the RAM
+// unread counter (the badge, the selector) in step with the store.
+int meshHistoryMarkSeen(int channelIdx, int thread, uint32_t throughLogId);
+
 // Recent channel traffic for the UI (oldest first).
 int meshMsgCount();
 uint32_t meshMsgSerial();   // monotonic: changes on every stored CHANNEL message, even when the ring is full

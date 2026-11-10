@@ -99,6 +99,18 @@ void drawPageRow(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::UiRow&
     drawTextEllipsis(d, FontRole::MonoMeta, ink, bg, r.value.x, r.value.y + 6, r.value.w,
                      row.value);
   }
+  // EST-367: a row that reports progress (the neighbour discovery's 60 s window) carries a thin bar
+  // along its floor. 255 means "no bar", so every other row is untouched.
+  if (row.progress <= 100) {
+    const int16_t barX = r.label.x;
+    const int16_t barW = (int16_t)(r.body.w - barX - 10);
+    const int16_t barY = (int16_t)(r.body.bottom() - 5);
+    if (barW > 0) {
+      d->fillRect(barX, barY, barW, 3, kLine);
+      const int16_t fill = (int16_t)((int32_t)barW * row.progress / 100);
+      if (fill > 0) d->fillRect(barX, barY, fill, 3, kAcc);
+    }
+  }
   if (row.stepKeys) {
     smallKey(d, r.keyA, "-", false);
     smallKey(d, r.keyB, "+", false);
@@ -121,18 +133,20 @@ void drawCard(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut
   d->fillRoundRect(card.x, card.y, card.w, card.h, kRadius, kPanel);
   d->drawRoundRect(card.x, card.y, card.w, card.h, kRadius, kLine);
   // EST-364: the column width comes from the layout, which keeps the refresh gutter out of it, so a
-  // value can never run under the icon.
-  const int16_t colW = a.cardColW;
+  // value can never run under the icon. EST-367: the line each cell is drawn on comes from the layout
+  // too (kRptrCardPad), so the first row can never sit on the card's top border again.
   for (int i = 0; i < s.cellCount && i < 6; ++i) {
     const int col = i % 2;
     const int row = i / 2;
-    const int16_t x = (int16_t)(card.x + 8 + col * colW);
-    const int16_t y = (int16_t)(card.y + 3 + row * kRptrCardRowH);
-    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, x, y, colW - 4, s.cells[i].label);
+    const RptrCardCell cell = rptrCardCellAt(a, col, row);
+    const int16_t x = cell.x;
+    const int16_t y = (int16_t)(cell.cy - scroll);
+    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, x, y, a.cardColW - 4,
+                     s.cells[i].label);
     // The value on the same line, right-aligned to the cell. A state ("no answer yet") is dim: it is
     // not a reading the repeater sent.
-    drawTextRight(d, FontRole::MonoMeta, s.cells[i].dim ? kDimmer : kInk, kPanel,
-                  (int16_t)(x + colW - 6), y, s.cells[i].value);
+    drawTextRight(d, FontRole::MonoMeta, s.cells[i].dim ? kDimmer : kInk, kPanel, cell.valueRight,
+                  y, s.cells[i].value);
   }
   // The refresh icon: a small open ring with an arrowhead, in its own gutter at the card's top right
   // corner (a.refreshTap is the 40x40 finger target around it, never inside a value column).

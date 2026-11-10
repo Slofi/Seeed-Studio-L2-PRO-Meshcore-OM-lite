@@ -217,14 +217,18 @@ void drawMessages(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   if (v.msgCount <= 0) {
     if (v.chatCount <= 0) {
       drawEmptyState(d, g.msgs, "No channels", "Add one from Manage channels.");
+    } else if (v.loading) {
+      // EST-367: the chat's own newest page is on its way from the card. Never "No messages yet"
+      // while the answer is still being read.
+      drawEmptyState(d, g.msgs, "Loading messages...", "Reading this chat's own history.");
     } else {
       drawEmptyState(d, g.msgs, "No messages yet", "");
     }
     return;
   }
-  int16_t heights[kMaxChatMsgs];
-  int16_t tops[kMaxChatMsgs];
-  const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
+  int16_t heights[kChatViewMsgs];
+  int16_t tops[kChatViewMsgs];
+  const int n = chatMsgHeights(v, heights, kChatViewMsgs);
   msgSpans(g.msgs, heights, n, v.scroll, tops);
   d->setClipRect(g.msgs.x, g.msgs.y, g.msgs.w, g.msgs.h);
   for (int i = 0; i < n; ++i) {
@@ -651,8 +655,8 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
     return r;
   }
   if (g.msgs.contains(x, y)) {
-    int16_t heights[kMaxChatMsgs];
-    const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
+    int16_t heights[kChatViewMsgs];
+    const int n = chatMsgHeights(v, heights, kChatViewMsgs);
     const int i = msgAt(g.msgs, heights, n, v.scroll, y);
     if (i >= 0) {
       r.index = i;
@@ -676,9 +680,9 @@ bool chatSenderNameRect(const ChatView& v, int msgIndex, Rect* out) {
   lgfx::LovyanGFX* d = om_display();
   if (d == nullptr) return false;
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
-  int16_t heights[kMaxChatMsgs];
-  int16_t tops[kMaxChatMsgs];
-  const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
+  int16_t heights[kChatViewMsgs];
+  int16_t tops[kChatViewMsgs];
+  const int n = chatMsgHeights(v, heights, kChatViewMsgs);
   if (msgIndex >= n) return false;
   msgSpans(g.msgs, heights, n, v.scroll, tops);
   const int nameW = textWidth(d, FontRole::MonoMeta, v.msgs[msgIndex].name);
@@ -688,15 +692,15 @@ bool chatSenderNameRect(const ChatView& v, int msgIndex, Rect* out) {
 }
 
 int chatContentHeight(const ChatView& v) {
-  int16_t heights[kMaxChatMsgs];
-  const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
+  int16_t heights[kChatViewMsgs];
+  const int n = chatMsgHeights(v, heights, kChatViewMsgs);
   return msgContentHeight(heights, n);
 }
 
 int chatMaxScroll(const ChatView& v) {
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
-  int16_t heights[kMaxChatMsgs];
-  const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
+  int16_t heights[kChatViewMsgs];
+  const int n = chatMsgHeights(v, heights, kChatViewMsgs);
   return msgMaxScroll(g.msgs, heights, n);
 }
 

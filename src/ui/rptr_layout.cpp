@@ -123,6 +123,18 @@ int rptrPageMaxScroll(const RptrPageLayout& a, int rowCount) {
   return total > a.body.h ? total - (int)a.body.h : 0;
 }
 
+// EST-367: the card's cells. Three 14 px row bands inside a 44 px card, so the padding is 1 px at the
+// TOP and 1 px at the BOTTOM; both texts are middle-datum, which is why the first row can no longer
+// draw over the card's top line.
+RptrCardCell rptrCardCellAt(const RptrPageLayout& a, int col, int row) {
+  RptrCardCell c;
+  if (a.card.empty() || col < 0 || col > 1 || row < 0 || row > 2) return c;
+  c.x = (int16_t)(a.card.x + kRptrCardPadX + col * a.cardColW);
+  c.valueRight = (int16_t)(c.x + a.cardColW - kRptrCardValuePad);
+  c.cy = (int16_t)(a.card.y + kRptrCardPad + row * kRptrCardRowH + kRptrCardRowH / 2);
+  return c;
+}
+
 RptrRowRects rptrPageRowRects(const RptrPageLayout& a, const rptr::UiRow& row, int index,
                               int scroll) {
   RptrRowRects out;

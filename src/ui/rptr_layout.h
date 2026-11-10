@@ -23,6 +23,12 @@ constexpr int16_t kRptrPageRowH = 30;   // a page row: label + value (or one lin
 constexpr int16_t kRptrBackW = 62;
 constexpr int16_t kRptrCardH = 44;      // the status card (2 columns x 3 rows)
 constexpr int16_t kRptrCardRowH = 14;
+// EST-367 (Filip): the card's first row was drawn with its centre at card.y + 3, so an 11 px glyph
+// started above the card's top line while the bottom had air. The padding is now the SAME above row
+// 0 and below row 2, and the cell's line comes from rptrCardCellAt(), not from the drawing.
+constexpr int16_t kRptrCardPad = (kRptrCardH - 3 * kRptrCardRowH) / 2;   // 1 px, top == bottom
+constexpr int16_t kRptrCardPadX = 8;      // the label's inset from the card's side
+constexpr int16_t kRptrCardValuePad = 6;  // the value's inset from the column's right edge
 // EST-364: the refresh icon used to be drawn on top of the right column's values ("-119 dBm" ran
 // under it in docs/shots/2026-11-10-2034-argus-logged-in.png). It now has a gutter of its own at the
 // card's right edge, outside both value columns, and a 40x40 finger target.
@@ -96,6 +102,15 @@ struct RptrPageLayout {
 // passes what buildScreen() produced.
 RptrPageLayout rptrPageLayoutFor(const Layout& L, bool hasCard, bool hasBanner, bool hasApply,
                                  bool big, bool console);
+
+// EST-367: one cell of the status card. Both texts are drawn with a middle datum on `cy`, so this is
+// the line they sit on; the card's padding is inside the layout (kRptrCardPad), never in the drawing.
+struct RptrCardCell {
+  int16_t x = 0;           // the label's left edge
+  int16_t valueRight = 0;  // the value's right edge
+  int16_t cy = 0;          // the line both texts are centred on (at scroll 0)
+};
+RptrCardCell rptrCardCellAt(const RptrPageLayout& a, int col, int row);
 
 // A page row's pieces. `stepKeys` adds the -/+ pair, `key` the one small key at the right, `arrow`
 // the ">" (a key too). The body is the whole row.

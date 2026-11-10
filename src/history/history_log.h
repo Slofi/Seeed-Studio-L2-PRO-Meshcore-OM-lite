@@ -338,6 +338,33 @@ struct Meta {
   uint16_t unread = 0;
 };
 
+// EST-367: how many messages are still unread once the seen point moved to `seenLogId`. A chat's log
+// ids are consecutive (one per stored message, our own sends included), so the distance is the count
+// of messages newer than the seen point. The normal open loads the NEWEST page, so seenLogId is the
+// newest stored id and this is 0; a load that fell short leaves the messages it did not show unread.
+// Never more than what was unread before (an id we did not mark cannot ADD unread).
+inline uint16_t unreadAfterSeen(uint16_t unreadBefore, uint32_t maxLogId, uint32_t seenLogId) {
+  if (seenLogId >= maxLogId) return 0;
+  const uint32_t left = maxLogId - seenLogId;
+  const uint16_t capped = left > 0xFFFFu ? 0xFFFFu : (uint16_t)left;
+  return capped > unreadBefore ? unreadBefore : capped;
+}
+
+// EST-367: a chat's newest stored message, kept in RAM (PSRAM on the device, with the other scratch)
+// so the selector's preview and the page's "newest on the card" come from the chat's OWN log instead
+// of the 32-message arrival ring, which a busy channel evicts. Filled lazily once from the tail and
+// then kept by appendMsg(), so it costs one small read per chat after boot.
+struct ChatSummary {
+  bool has = false;
+  bool wallReal = false;
+  bool mine = false;
+  uint32_t logId = 0;
+  uint32_t wall = 0;
+  uint32_t uptime = 0;
+  char name[kMeshNameCap] = "";
+  char text[kMeshTextCap] = "";
+};
+
 inline int encodeMetaPayload(const Meta& m, uint8_t* out, int cap) {
   if (cap < 6) return -1;
   put32(out + 0, m.seenLogId);
@@ -497,6 +524,7 @@ constexpr int kPendingUpdates = 16;    // updates met before their message while
 constexpr int kWindowBytes = 4096;     // one backwards read
 constexpr int kWindowRefs = 256;       // the smallest record is 16 B, so 4096/16 = 256
 constexpr int kMetaSearchWindows = 4;  // how far back the last Meta is looked for (16 KB)
+constexpr uint32_t kCountBudgetBytes = 256UL * 1024UL;   // the `chats` count's cap per file (EST-367)
 
 // One queued write: the slot and the already-encoded record. appendMsg/appendUpdate/markSeen copy
 // into this queue and return; only flushStep() (history::loop, loop task) touches the volume. The
@@ -510,6 +538,8 @@ struct HistoryQueuedRecord {
 constexpr size_t kQueueBytes = sizeof(HistoryQueuedRecord) * (size_t)kQueueRecords;
 constexpr size_t kScanBytes = sizeof(Msg) * (size_t)kScanRing;
 constexpr size_t kOffsBytes = sizeof(uint16_t) * (size_t)kWindowRefs;
+// EST-367: one summary per chat slot (the selector's preview, no card read per draw).
+constexpr size_t kSummaryBytes = sizeof(ChatSummary) * (size_t)kMaxChatSlots;
 
 // The store's working memory, supplied by the caller so the firmware can place every large buffer in
 // PSRAM and the host test can use the stack. Nothing here is static RAM on the device (EST-349).
@@ -519,10 +549,19 @@ struct HistoryScratch {
   uint8_t* window = nullptr;    // kWindowBytes
   Msg* scan = nullptr;          // kScanRing
   uint16_t* offs = nullptr;     // kWindowRefs
+  ChatSummary* summaries = nullptr;   // EST-367: kMaxChatSlots, the selector's preview per chat
   bool complete() const {
     return queue != nullptr && queueSlots >= kQueueRecords && window != nullptr &&
-           scan != nullptr && offs != nullptr;
+           scan != nullptr && offs != nullptr && summaries != nullptr;
   }
+};
+
+// EST-367: what the last backwards read cost, so an open can SAY how fast it was (the ticket's
+// "measure the open time with a full 2 MB log"). `windows` is the number of 4 KB backwards reads:
+// the newest page of a chat is a seek to the end plus one window, never a scan of the file.
+struct ReadStats {
+  uint32_t windows = 0;
+  uint32_t bytes = 0;
 };
 
 struct HistoryConfig {
@@ -561,6 +600,7 @@ class HistoryStore {
     scan_ = scratch.scan;
     window_ = scratch.window;
     offs_ = scratch.offs;
+    summaries_ = scratch.summaries;
     primary_ = primary;
     fallback_ = fallback;
     primaryCfg_ = primaryCfg;
@@ -612,6 +652,7 @@ class HistoryStore {
     sc.window = (uint8_t*)malloc((size_t)kWindowBytes);
     sc.scan = (Msg*)malloc(kScanBytes);
     sc.offs = (uint16_t*)malloc(kOffsBytes);
+    sc.summaries = (ChatSummary*)malloc(kSummaryBytes);
     begin(primary, fallback, primaryCfg, fallbackCfg, sc, nowUs, log);
   }
 
@@ -731,6 +772,9 @@ class HistoryStore {
     if (rn < 0) return 0;
     if (!enqueue(slot, rec, rn)) return 0;
     s.maxLogId = id;
+    // EST-367: the preview and "newest on the card" follow the chat's own log, so a message stored
+    // here is also what the selector shows before the card is read again.
+    if (summaries_ != nullptr) setSummary(summaries_[slot], m);
     if (!m.mine()) {
       Meta meta;
       meta.seenLogId = s.seenLogId;
@@ -798,6 +842,63 @@ class HistoryStore {
   uint16_t scanUnread() const { return scanUnread_; }
   uint32_t scanSeen() const { return scanSeen_; }
 
+  // EST-367: the last backwards read (windows / bytes), for the measured open time.
+  const ReadStats& readStats() const { return readStats_; }
+
+  // EST-367: this chat's newest stored message, from its own log. A summary is filled on first use
+  // (one backwards window from the END of the file, never a scan), then kept current by appendMsg().
+  // nullptr when the chat has no stored message (or history is off).
+  const ChatSummary* summary(int slot) {
+    if (!ready_ || slot < 0 || slot >= kMaxChatSlots || !slots_[slot].used) return nullptr;
+    if (summaries_ == nullptr) return nullptr;
+    ChatSummary& c = summaries_[slot];
+    if (!c.has) fillSummary(slot, c);
+    return c.has ? &c : nullptr;
+  }
+
+  uint16_t slotUnread(int slot) const {
+    return (slot >= 0 && slot < kMaxChatSlots) ? slots_[slot].unread : 0;
+  }
+  uint32_t slotSeen(int slot) const {
+    return (slot >= 0 && slot < kMaxChatSlots) ? slots_[slot].seenLogId : 0;
+  }
+
+  // EST-367: the user saw this chat up to `logId` (the newest message the view actually loaded). The
+  // messages newer than that stay unread; the normal open shows the newest page, so it is 0. Returns
+  // true when the seen point moved (a Meta record is queued; nothing is written here).
+  bool markSeenThrough(int slot, uint32_t logId) {
+    if (!ready_ || slot < 0 || slot >= kMaxChatSlots || !slots_[slot].used || logId == 0) return false;
+    Slot& s = slots_[slot];
+    if (logId > s.maxLogId) logId = s.maxLogId;
+    if (logId <= s.seenLogId) return true;   // nothing newer was shown
+    const uint16_t left = unreadAfterSeen(s.unread, s.maxLogId, logId);
+    Meta meta;
+    meta.seenLogId = logId;
+    meta.unread = left;
+    uint8_t mp[8];
+    const int mn = encodeMetaPayload(meta, mp, (int)sizeof(mp));
+    uint8_t rec[kHeaderBytes + 8];
+    const int rn = encodeRecord(Type::Meta, mp, mn, rec, (int)sizeof(rec));
+    if (rn < 0 || !enqueue(slot, rec, rn)) return false;
+    s.seenLogId = logId;
+    s.unread = left;
+    return true;
+  }
+
+  // EST-367 rule 6 (the `chats` USB check): how many Msg records this chat really has on the volume,
+  // .log plus .old. ONE forward read of each file, on the loop task, only when the check asks: the
+  // boot and open paths never call it. A torn tail ends the count, exactly like the readers stop there.
+  // The scan stops after kCountBudgetBytes per file so the check can never freeze the loop on a 2 MB
+  // log; `complete` false means the answer is a lower bound (the line prints it with a '+').
+  int countMessages(int slot, bool* complete = nullptr) {
+    if (complete != nullptr) *complete = true;
+    if (!ready_ || slot < 0 || slot >= kMaxChatSlots || !slots_[slot].used) return 0;
+    bool done = true;
+    const int n = countFile(slots_[slot], false, &done) + countFile(slots_[slot], true, &done);
+    if (complete != nullptr) *complete = done;
+    return n;
+  }
+
   // --- flushing -----------------------------------------------------------------------------------
   // Writes at most `maxRecords` queued records. Called from the mesh loop, so the worst single call
   // is one open + one write + flush + close; status().worstFlushUs measures it.
@@ -834,8 +935,76 @@ class HistoryStore {
     if (log_ != nullptr && text != nullptr) log_(text);
   }
 
+  // EST-367: the summary's fields come from the message itself (bounded copies, no allocation).
+  void setSummary(ChatSummary& c, const Msg& m) {
+    c = ChatSummary{};
+    c.has = true;
+    c.logId = m.logId;
+    c.wall = m.wall;
+    c.wallReal = m.wallReal();
+    c.uptime = m.uptime;
+    c.mine = m.mine();
+    const int nameLen = boundedLen(m.name, kMeshNameCap - 1);
+    memcpy(c.name, m.name, (size_t)nameLen);
+    c.name[nameLen] = 0;
+    const int textLen = boundedLen(m.text, kMeshTextCap - 1);
+    memcpy(c.text, m.text, (size_t)textLen);
+    c.text[textLen] = 0;
+  }
+
+  // One backwards window over the tail, through the same collect() the open uses: no scan.
+  void fillSummary(int slot, ChatSummary& c) {
+    if (collect(slot, 0xFFFFFFFFu, 1, false) <= 0) return;
+    setSummary(c, scan_[0]);
+  }
+
+  // Forward read of one file, counting Msg records. Only the diagnostics (`chats`) call this.
+  int countFile(const Slot& s, bool old, bool* complete) {
+    char path[64];
+    buildPath(s, old ? ".old" : ".log", path, sizeof(path));
+    HistoryFile* f = vol_->openRead(path);
+    if (f == nullptr) return 0;
+    int counted = 0;
+    uint32_t base = 0;      // the file offset of window_[0]
+    uint32_t readBytes = 0; // this file's share of the budget
+    int carry = 0;          // bytes of a record that crossed the window's end
+    bool stop = false;
+    while (!stop) {
+      if (readBytes >= kCountBudgetBytes) {
+        if (complete != nullptr) *complete = false;   // a lower bound: the '+' in the `chats` line
+        break;
+      }
+      const int got = f->read(window_ + carry, kWindowBytes - carry);
+      if (got <= 0) break;   // EOF: whatever is left in `carry` is the torn tail
+      readBytes += (uint32_t)got;
+      const int have = carry + got;
+      int at = 0;
+      while (at + kHeaderBytes <= have) {
+        RecordRef ref;
+        if (decodeRecordAt(window_ + at, have - at, base + (uint32_t)at, &ref) < 0) {
+          // A record may simply CROSS the window's end: fewer bytes left here than the longest
+          // record can be is an incomplete record, not a torn one. Anything longer that still does
+          // not decode is the torn tail and ends the count, exactly like the readers.
+          if (have - at >= kMaxRecord) stop = true;
+          break;
+        }
+        if (ref.type == Type::Msg) ++counted;
+        at += (int)ref.len;
+      }
+      base += (uint32_t)at;
+      carry = have - at;
+      if (carry > 0) memmove(window_, window_ + at, (size_t)carry);
+      if (carry >= kWindowBytes) break;   // cannot happen: kMaxRecord < kWindowBytes
+    }
+    f->close();
+    return counted;
+  }
+
   void dropAll() {
     for (int i = 0; i < kMaxChatSlots; ++i) slots_[i] = Slot{};
+    if (summaries_ != nullptr) {
+      for (int i = 0; i < kMaxChatSlots; ++i) summaries_[i] = ChatSummary{};
+    }
     slotCount_ = 0;
     totalBytes_ = 0;
     if (queue_ != nullptr) {
@@ -869,6 +1038,8 @@ class HistoryStore {
       // scanDirectory() ran at begin() and listed every existing log, so a slot created later has no
       // file and its first record is id 1. Mark it scanned: nothing here may touch the card.
       s.scanned = true;
+      // EST-367: a reused slot starts with no summary, so a stale preview cannot survive the slot.
+      if (summaries_ != nullptr) summaries_[i] = ChatSummary{};
       snprintf(s.id, sizeof(s.id), "%s", id);
       snprintf(s.name, sizeof(s.name), "%s", name != nullptr ? name : "");
       if (key != nullptr) {
@@ -1005,6 +1176,7 @@ class HistoryStore {
     scanCount_ = 0;
     scanUnread_ = 0;
     scanSeen_ = 0;
+    readStats_ = ReadStats{};
     if (!ready_ || slot < 0 || slot >= kMaxChatSlots || !slots_[slot].used) return 0;
     Slot& s = slots_[slot];
     if (!s.scanned && !scanTail(s)) return 0;
@@ -1028,6 +1200,8 @@ class HistoryStore {
       bool tornOk = false;
       if (readWindow(s, old, end, &start, &len, &tornOk) < 0) break;
       ++windows;
+      ++readStats_.windows;
+      readStats_.bytes += (uint32_t)len;
       int validEnd = 0;
       const int first = findWindowStart(window_, len, tornOk, &validEnd);
       if (first < 0) break;
@@ -1423,6 +1597,8 @@ class HistoryStore {
       s.headerWritten = false;
       s.needsRepair = false;
       s.repairBytes = 0;
+      // EST-367: a different volume has different messages; every summary is read again on demand.
+      if (summaries_ != nullptr) summaries_[i] = ChatSummary{};
     }
     scanDirectory();
     scanAllTails();
@@ -1460,6 +1636,8 @@ class HistoryStore {
 
   uint8_t* window_ = nullptr;
   uint16_t* offs_ = nullptr;
+  ChatSummary* summaries_ = nullptr;   // EST-367: the selector's per-chat preview
+  ReadStats readStats_{};              // EST-367: the last backwards read's windows / bytes
   uint32_t records_ = 0;
   uint32_t worstFlushUs_ = 0;
   uint32_t dropped_ = 0;

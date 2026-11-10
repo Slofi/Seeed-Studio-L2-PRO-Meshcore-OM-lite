@@ -22,6 +22,7 @@ enum class Kind : uint8_t {
   Status,   // status
   Nodes,    // nodes
   Msgs,     // msgs [n]
+  Chats,    // chats   (EST-367: unread vs what each chat's own view shows vs the card)
   History,  // history <chat> [n]   (EST-348: the stored log on the card)
   Tap,      // tap <x> <y>
   Drag,     // drag <x0> <y0> <x1> <y1> <ms>

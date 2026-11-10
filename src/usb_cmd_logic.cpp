@@ -200,6 +200,12 @@ Command parseCommand(char* line) {
     if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
     return c;
   }
+  // EST-367: the per-chat visibility check (`chats`). No arguments: it reports every chat.
+  if (strcmp(verb, "chats") == 0) {
+    c.kind = Kind::Chats;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
   if (strcmp(verb, "msgs") == 0) {
     c.kind = Kind::Msgs;
     const char* word = cur.next();

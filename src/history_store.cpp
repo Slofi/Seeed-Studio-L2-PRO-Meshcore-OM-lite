@@ -165,19 +165,25 @@ bool allocScratch() {
   s_scratch.window = (uint8_t*)ps_malloc((size_t)kWindowBytes);
   s_scratch.scan = (Msg*)ps_malloc(kScanBytes);
   s_scratch.offs = (uint16_t*)ps_malloc(kOffsBytes);
+  s_scratch.summaries = (ChatSummary*)ps_malloc(kSummaryBytes);
   const bool allPsram = s_scratch.queue != nullptr && s_scratch.window != nullptr &&
-                        s_scratch.scan != nullptr && s_scratch.offs != nullptr;
+                        s_scratch.scan != nullptr && s_scratch.offs != nullptr &&
+                        s_scratch.summaries != nullptr;
   if (!allPsram) {
     // A board whose PSRAM did not come up: internal heap is better than no history at all.
     if (s_scratch.queue == nullptr) s_scratch.queue = (HistoryQueuedRecord*)malloc(kQueueBytes);
     if (s_scratch.window == nullptr) s_scratch.window = (uint8_t*)malloc((size_t)kWindowBytes);
     if (s_scratch.scan == nullptr) s_scratch.scan = (Msg*)malloc(kScanBytes);
     if (s_scratch.offs == nullptr) s_scratch.offs = (uint16_t*)malloc(kOffsBytes);
+    if (s_scratch.summaries == nullptr) s_scratch.summaries = (ChatSummary*)malloc(kSummaryBytes);
   }
-  Serial.printf("[hist] working memory %u B in %s (queue %u, window %u, scan %u, offs %u)\n",
-                (unsigned)(kQueueBytes + (size_t)kWindowBytes + kScanBytes + kOffsBytes),
+  Serial.printf("[hist] working memory %u B in %s (queue %u, window %u, scan %u, offs %u, "
+                "summaries %u)\n",
+                (unsigned)(kQueueBytes + (size_t)kWindowBytes + kScanBytes + kOffsBytes +
+                           kSummaryBytes),
                 allPsram ? "PSRAM" : "PSRAM + internal RAM", (unsigned)kQueueBytes,
-                (unsigned)kWindowBytes, (unsigned)kScanBytes, (unsigned)kOffsBytes);
+                (unsigned)kWindowBytes, (unsigned)kScanBytes, (unsigned)kOffsBytes,
+                (unsigned)kSummaryBytes);
   return s_scratch.complete();
 }
 

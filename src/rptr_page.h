@@ -75,6 +75,9 @@ struct UiRow {
   // a small gold dot, so the user sees WHICH field is unsaved, not only that Apply is there.
   bool changed = false;
   char key[4] = "";       // draw one small key with this text ("x" to remove)
+  // EST-367: 0..100 draws a thin progress bar inside this row (the neighbour discovery's 60 s
+  // window); 255 means no bar.
+  uint8_t progress = 255;
 };
 
 constexpr int kUiRowCap = 26;
@@ -254,6 +257,14 @@ struct ScreenIn {
   const Draft* draft = nullptr;
   const RegionList* regions = nullptr;
   const NeighbourList* neighbours = nullptr;
+  // EST-367: the neighbour discovery's 60 s window (nullptr = no scan started this session), and the
+  // monotonic clock its progress and seconds-left are measured against.
+  const NeighbourScan* scan = nullptr;
+  uint32_t nowMs = 0;
+  // The wall clock, so a neighbour's "heard 42 s ago" can be shown as the time it was heard (the
+  // house rule: a time beats an age). nowReal says whether the clock was a real source.
+  uint32_t nowWall = 0;
+  bool nowReal = false;
   const AnonFacts* anon = nullptr;
   const char* home = nullptr;          // nullptr = not read yet, "" not used, "*" anywhere
   const char* defaultScope = nullptr;  // nullptr = not read yet, "" = none

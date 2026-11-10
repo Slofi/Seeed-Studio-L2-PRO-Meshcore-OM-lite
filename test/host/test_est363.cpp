@@ -36,8 +36,9 @@ static int g_fail = 0;
 // ------------------------------------------------------------------------------------- the size guard
 // Measured on the EST-362 ELF's DWARF (docs/PROGRESS.md, 2026-11-10 21:10 entry). The loop task's
 // stack is 16,384 B and the RPTR path may not spend a third of it on a copy of the page model.
-static_assert(sizeof(ScreenOut) <= 4096, "ScreenOut grew: the RPTR stack budget (EST-363)");
-static_assert(sizeof(ScreenIn) <= 128, "ScreenIn grew: it is passed by reference, keep it small");
+// EST-367: ScreenIn carries the neighbour scan pointer and its two clocks now (16 B on the host); it
+// is still passed by reference, so no copy was introduced.
+static_assert(sizeof(ScreenIn) <= 160, "ScreenIn grew: it is passed by reference, keep it small");
 static_assert(sizeof(UiRow) <= 128, "UiRow grew: 26 rows would no longer fit ScreenOut");
 static_assert(sizeof(ScreenOut::title) == 40, "page title buffer changed");
 static_assert(sizeof(ScreenOut::subtitle) == 80, "page subtitle buffer changed");

@@ -191,19 +191,35 @@ static om::ui::ChatEntry* g_chats = nullptr;   // PSRAM, allocUiBuffers()
 static int g_chatCount = 0;
 static int g_channelCount = 0;
 static int g_dmCount = 0;
-// EST-348: the paging window. The newest 32 messages come from the RAM ring; up to 32 older ones
-// (in pages of 16) from the card. EST-349: the window itself is PSRAM (allocHistoryPage at boot), so
-// no ~9 KB of it is static RAM.
-constexpr int kHistPageLoad = 16;
-constexpr int kHistWindow = 32;
-static om::history::Msg* g_histPage = nullptr;
-static bool g_histPageOk = false;
-static int g_histPageCount = 0;   // messages in g_histPage, oldest first
-static bool g_histMore = true;    // an older page may exist
-static int g_histChat = -1;       // the chat the buffer belongs to
-static constexpr int kChatMsgsCap = om::ui::kMaxChatMsgs + kHistWindow;
+// EST-367: one chat's own view. The 32-message RAM ring is only the ARRIVAL buffer now (a busy
+// channel evicts a quiet one); the view is a PSRAM copy of that chat's own newest page(s) from its
+// log, plus the arrivals that are newer than the newest stored message in it.
+//   - g_viewMsgs holds up to kChatViewCap messages, oldest first (the newest page when it opens,
+//     older pages prepended while the finger scrolls up). EST-349: PSRAM, one boot-time allocation.
+//   - g_viewLoading is the deferred open: the tap sets it, the loop's history step loads the page so
+//     a slow card never stalls the gesture, and the first frame says "Loading messages".
+//   - g_chatShown remembers, per chat, what its view held when it was opened and how long that took:
+//     the `chats` USB check reads it (EST-367 rule 6).
+static om::history::Msg* g_viewMsgs = nullptr;   // PSRAM, allocUiBuffers()
+static int g_viewCount = 0;                      // messages in g_viewMsgs, oldest first
+static int g_viewChat = -1;                      // the chat the buffer belongs to
+static bool g_viewLoading = false;               // the open's newest-page load is still to run
+static bool g_viewMore = true;                   // an older page may exist
+static constexpr int kChatMsgsCap = om::ui::kChatViewCap + om::ui::kMaxChatMsgs;
 static om::ui::ChatMsgView* g_chatMsgs = nullptr;   // PSRAM, allocUiBuffers()
 static int g_chatMsgCount = 0;
+struct ChatShown {
+  char key[om::ui::kChatNameCap] = "";   // the chat this row is about (names are what the list shows)
+  int shown = -1;                        // the per-view count after the open's load; -1 = not opened
+  uint32_t newestLogId = 0;              // the newest stored message the view showed
+  uint32_t newestWall = 0;               // its clocks, for the `chats` line
+  uint32_t newestUp = 0;
+  bool newestReal = false;
+  uint32_t openUs = 0;                   // how long the open's load took
+  uint32_t windows = 0;                  // its backwards reads
+  uint32_t bytes = 0;
+};
+static ChatShown g_chatShown[om::ui::kMaxChats];
 // One copy buffer for the DM ring, shared by refreshChats() and refreshChatMessages(): they run one
 // after the other inside buildChatView(), never nested, so one copy of the ring is enough. Two
 // copies cost ~9 KB of RAM each (EST-342).
@@ -281,22 +297,26 @@ static void allocUiBuffers() {
   const size_t nodesB = sizeof(om::ui::NodeItem) * (size_t)kNodeCap;
   const size_t chatsB = sizeof(om::ui::ChatEntry) * (size_t)om::ui::kMaxChats;
   const size_t chatMsgsB = sizeof(om::ui::ChatMsgView) * (size_t)kChatMsgsCap;
+  // EST-367: one chat's own view (its newest page plus the older pages the finger asks for).
+  const size_t viewMsgsB = sizeof(om::history::Msg) * (size_t)om::ui::kChatViewCap;
   const size_t dmB = sizeof(om::MeshDm) * (size_t)om::ui::kMaxChatMsgs;
   const size_t setB = sizeof(om::ui::SettingRow) * (size_t)kSetRowsCap;
   const size_t contactsB = sizeof(om::MeshContact) * (size_t)kNodeCap;
   g_nodes = om::psramArray<om::ui::NodeItem>(kNodeCap);
   g_chats = om::psramArray<om::ui::ChatEntry>(om::ui::kMaxChats);
   g_chatMsgs = om::psramArray<om::ui::ChatMsgView>(kChatMsgsCap);
+  g_viewMsgs = om::psramArray<om::history::Msg>(om::ui::kChatViewCap);
   g_dmScratch = om::psramArray<om::MeshDm>(om::ui::kMaxChatMsgs);
   g_setRows = om::psramArray<om::ui::SettingRow>(kSetRowsCap);
   g_contactScratch = om::psramArray<om::MeshContact>(kNodeCap);
-  const uint32_t total = (uint32_t)(nodesB + chatsB + chatMsgsB + dmB + setB + contactsB);
-  const bool ok = g_nodes && g_chats && g_chatMsgs && g_dmScratch && g_setRows && g_contactScratch;
-  Serial.printf("[mem] ui buffers %u B in %s: nodes %u, chats %u, chat msgs %u, dm scratch %u, "
-                "set rows %u, contacts %u\n",
+  const uint32_t total = (uint32_t)(nodesB + chatsB + chatMsgsB + viewMsgsB + dmB + setB + contactsB);
+  const bool ok = g_nodes && g_chats && g_chatMsgs && g_viewMsgs && g_dmScratch && g_setRows &&
+                  g_contactScratch;
+  Serial.printf("[mem] ui buffers %u B in %s: nodes %u, chats %u, chat msgs %u, chat view %u, "
+                "dm scratch %u, set rows %u, contacts %u\n",
                 (unsigned)total, ok ? "PSRAM" : "INTERNAL (PSRAM refused)",
-                (unsigned)nodesB, (unsigned)chatsB, (unsigned)chatMsgsB, (unsigned)dmB,
-                (unsigned)setB, (unsigned)contactsB);
+                (unsigned)nodesB, (unsigned)chatsB, (unsigned)chatMsgsB, (unsigned)viewMsgsB,
+                (unsigned)dmB, (unsigned)setB, (unsigned)contactsB);
   // EST-363: the RPTR page model's sizes, printed once at boot next to the other UI memory. Both
   // structs live in statics (g_rptrViewStore); copies of them were what the EST-362 stack could not
   // hold. The numbers are checked against the EST-362 ELF's DWARF in docs/PROGRESS.md.
@@ -821,11 +841,30 @@ static void refreshChats() {
   }
   g_channelCount = g_chatCount;
 
-  // The last message of each channel, for the selector's preview line (sender, start of text, age).
-  // The ring is oldest first, so the latest write wins.
+  // The last message of each chat, for the selector's preview line (sender, start of text, time).
+  // EST-367: it comes from the CHAT'S OWN LOG (`meshChatSummary`), not the shared arrival ring: a
+  // busy channel evicted a quiet one from that ring, which is how a chat with 26 unread messages
+  // looked empty. A message that arrived but whose record is still queued has no id yet, so the ring
+  // may still fill the preview for that one; anything older than the stored newest never overrides.
+  uint32_t lastId[om::ui::kMaxChats];
+  for (int i = 0; i < om::ui::kMaxChats; ++i) lastId[i] = 0;
+  for (int i = 0; i < g_channelCount; ++i) {
+    om::history::ChatSummary sum;
+    if (!om::meshChatSummary(i, -1, &sum)) continue;
+    om::ui::ChatEntry& c = g_chats[i];
+    c.hasLast = true;
+    c.lastTs = sum.uptime;
+    c.lastWall = sum.wall;
+    c.lastWallReal = sum.wallReal;
+    snprintf(c.lastFrom, sizeof(c.lastFrom), "%s", sum.name);
+    snprintf(c.lastText, sizeof(c.lastText), "%s", sum.text);
+    lastId[i] = sum.logId;
+  }
   for (int i = 0; i < om::meshMsgCount(); ++i) {
     const int chan = om::meshMsgChannel(i);
     if (chan < 0 || chan >= g_channelCount) continue;
+    const uint32_t id = om::meshMsgLogId(i);
+    if (id != 0 && id <= lastId[chan]) continue;
     om::ui::ChatEntry& c = g_chats[chan];
     c.hasLast = true;
     c.lastTs = om::meshMsgTs(i);
@@ -833,26 +872,41 @@ static void refreshChats() {
     c.lastWallReal = om::meshMsgWallReal(i);
     snprintf(c.lastFrom, sizeof(c.lastFrom), "%s", om::meshMsgName(i));
     snprintf(c.lastText, sizeof(c.lastText), "%s", om::meshMsgText(i));
+    lastId[chan] = id;
   }
 
   // Direct messages come from the facade, never from a placeholder list. The entry keeps the thread
   // index, so the open chat and the send path never have to guess from the position in the list.
   for (int i = 0; i < om::meshDmCount() && g_chatCount < om::ui::kMaxChats; ++i) {
+    const int chat = g_chatCount;
     om::ui::ChatEntry& c = g_chats[g_chatCount++];
     c = om::ui::ChatEntry();
     snprintf(c.name, sizeof(c.name), "DM: %s", om::meshDmName(i));
     c.dm = true;
     c.thread = i;   // threads are allocated in order and only ever added: the used ones are packed
     c.unread = (uint16_t)om::meshDmUnread(i);
+    om::history::ChatSummary sum;
+    if (om::meshChatSummary(-1, i, &sum)) {
+      c.hasLast = true;
+      c.lastTs = sum.uptime;
+      c.lastWall = sum.wall;
+      c.lastWallReal = sum.wallReal;
+      snprintf(c.lastFrom, sizeof(c.lastFrom), "%s", sum.name);
+      snprintf(c.lastText, sizeof(c.lastText), "%s", sum.text);
+      lastId[chat] = sum.logId;
+    }
+    // The same "newer or not stored yet" rule as a channel's preview.
     const int n = om::meshDmList(i, g_dmScratch, om::ui::kMaxChatMsgs);
     if (n > 0) {
       const om::MeshDm& last = g_dmScratch[n - 1];
-      c.hasLast = true;
-      c.lastTs = last.ts;
-      c.lastWall = last.wall;
-      c.lastWallReal = last.wallReal;
-      snprintf(c.lastFrom, sizeof(c.lastFrom), "%s", last.name);
-      snprintf(c.lastText, sizeof(c.lastText), "%s", last.text);
+      if (last.logId == 0 || last.logId > lastId[chat]) {
+        c.hasLast = true;
+        c.lastTs = last.ts;
+        c.lastWall = last.wall;
+        c.lastWallReal = last.wallReal;
+        snprintf(c.lastFrom, sizeof(c.lastFrom), "%s", last.name);
+        snprintf(c.lastText, sizeof(c.lastText), "%s", last.text);
+      }
     }
   }
   g_dmCount = g_chatCount - g_channelCount;
@@ -872,122 +926,150 @@ static int chatThread(int chat) {
   return g_chats[chat].thread;
 }
 
-// EST-349: the paging window is PSRAM, allocated once at boot (setup, before the first chat draw).
-// Without PSRAM paging is simply off: the RAM ring still shows the newest 32 messages.
-static void allocHistoryPage() {
-  if (g_histPage != nullptr) return;
-  g_histPage = (om::history::Msg*)ps_malloc(sizeof(om::history::Msg) * (size_t)kHistWindow);
-  if (g_histPage == nullptr) {
-    g_histPageOk = false;
-    g_histMore = false;
-    Serial.println("[hist] page buffer: no PSRAM, paging is off");
+// EST-367: the deferred open. The tap only marks the chat; this runs from the loop's history step,
+// so a card that takes milliseconds never sits inside a gesture, and the frame drawn right after the
+// tap says "Loading messages". The newest page is one seek to the end of the chat's log plus one
+// backwards 4 KB window, never a scan. The measured numbers (time, windows, bytes) are logged here
+// and kept for the `chats` USB check.
+static void chatViewStep() {
+  if (!g_viewLoading) return;
+  if (g_viewChat != g_chatSel) {   // the finger moved on before the step ran
+    g_viewLoading = false;
     return;
   }
-  memset(g_histPage, 0, sizeof(om::history::Msg) * (size_t)kHistWindow);
-  g_histPageOk = true;
-  Serial.printf("[hist] page buffer %d x %u B in PSRAM\n", kHistWindow,
-                (unsigned)sizeof(om::history::Msg));
+  g_viewLoading = false;
+  if (g_viewMsgs == nullptr) return;
+  const int chan = chatChannel(g_chatSel);
+  const int thread = chatThread(g_chatSel);
+  const uint32_t t0 = micros();
+  const int n = om::meshHistoryNewest(chan, thread, g_viewMsgs, om::ui::kChatNewestPage);
+  const uint32_t dt = micros() - t0;
+  g_viewCount = n > 0 ? n : 0;
+  g_viewMore = n == om::ui::kChatNewestPage;   // a full page may have more behind it
+  const om::history::ReadStats& rs = om::history::store().readStats();
+  ChatShown& cs = g_chatShown[g_chatSel];
+  snprintf(cs.key, sizeof(cs.key), "%s", g_chats[g_chatSel].name);
+  cs.shown = g_viewCount;
+  cs.newestLogId = g_viewCount > 0 ? g_viewMsgs[g_viewCount - 1].logId : 0;
+  cs.newestWall = 0;
+  cs.newestUp = 0;
+  cs.newestReal = false;
+  if (g_viewCount > 0) {
+    const om::history::Msg& nm = g_viewMsgs[g_viewCount - 1];
+    cs.newestWall = nm.wall;
+    cs.newestUp = nm.uptime;
+    cs.newestReal = nm.wallReal();
+  }
+  cs.openUs = dt;
+  cs.windows = rs.windows;
+  cs.bytes = rs.bytes;
+  char name[64];
+  snprintf(name, sizeof(name), "%s", g_chats[g_chatSel].name);
+  Serial.printf("[hist] open \"%s\": %d msg(s) from %s in %lu.%03lu ms (%lu window(s), %lu B)\n",
+                name, g_viewCount, thread >= 0 ? "the DM log" : "the card",
+                (unsigned long)(dt / 1000u), (unsigned long)(dt % 1000u),
+                (unsigned long)rs.windows, (unsigned long)rs.bytes);
 }
 
-// EST-348: pull one page of older messages from the card into the fixed window. Called when the
-// finger pulls past the oldest message in RAM; the caller redraws and clamps afterwards. The
-// window is 32 messages in pages of 16, so the chat can be read 32 messages further back than the
-// RAM ring (64 in total) without any RAM that grows with the log.
-static void loadOlderHistoryPage() {
-  if (!g_histPageOk || g_histPage == nullptr) {
-    g_histMore = false;
+// EST-367: one page of older messages, prepended in front of the view. Called when the finger pulls
+// past the oldest message; the caller redraws and clamps afterwards. The stored block moves to the
+// back first and the older page is read into the front, so the two never overlap (EST-348's trick).
+static void loadOlderChatPage() {
+  if (g_viewMsgs == nullptr) {
+    g_viewMore = false;
     return;
   }
-  if (!g_histMore || g_histPageCount >= kHistWindow) {
-    g_histMore = false;
+  if (!g_viewMore || g_viewCount >= om::ui::kChatViewCap) {
+    g_viewMore = false;
     return;
   }
   const int chan = chatChannel(g_chatSel);
   const int thread = chatThread(g_chatSel);
   if (chan < 0 && thread < 0) return;
-  uint32_t before = 0;
-  if (g_histPageCount > 0) {
-    before = g_histPage[0].logId;
-  } else {
-    // The RAM ring's oldest is the first RAM entry of the view built by refreshChatMessages().
-    if (g_chatMsgCount <= g_histPageCount) return;
-    before = g_chatMsgs[g_histPageCount].logId;
-  }
+  if (g_viewCount <= 0) return;   // nothing to page behind yet (the open's load has not run)
+  const uint32_t before = g_viewMsgs[0].logId;
   if (before == 0) return;
-  int want = kHistPageLoad;
-  if (g_histPageCount + want > kHistWindow) want = kHistWindow - g_histPageCount;
+  int want = om::ui::kChatOlderPage;
+  if (g_viewCount + want > om::ui::kChatViewCap) want = om::ui::kChatViewCap - g_viewCount;
   if (want <= 0) {
-    g_histMore = false;
+    g_viewMore = false;
     return;
   }
-  // The current page moves to the back; the older page lands in front of it.
-  memmove(g_histPage + want, g_histPage, (size_t)g_histPageCount * sizeof(g_histPage[0]));
-  const int n = om::meshHistoryOlder(chan, thread, before, g_histPage, want);
+  memmove(g_viewMsgs + want, g_viewMsgs, (size_t)g_viewCount * sizeof(g_viewMsgs[0]));
+  const int n = om::meshHistoryOlder(chan, thread, before, g_viewMsgs, want);
   if (n <= 0) {
-    memmove(g_histPage, g_histPage + want, (size_t)g_histPageCount * sizeof(g_histPage[0]));
-    g_histMore = false;
+    memmove(g_viewMsgs, g_viewMsgs + want, (size_t)g_viewCount * sizeof(g_viewMsgs[0]));
+    g_viewMore = false;
     Serial.printf("[hist] %s: no older messages\n", thread >= 0 ? "DM" : om::mcChannelName(chan));
     return;
   }
   if (n < want) {
-    memmove(g_histPage + n, g_histPage + want, (size_t)g_histPageCount * sizeof(g_histPage[0]));
+    memmove(g_viewMsgs + n, g_viewMsgs + want, (size_t)g_viewCount * sizeof(g_viewMsgs[0]));
   }
-  g_histPageCount += n;
-  g_histMore = n == want && g_histPageCount < kHistWindow;
-  Serial.printf("[hist] page: %d older message(s), %d in the window\n", n, g_histPageCount);
+  g_viewCount += n;
+  g_viewMore = n == want && g_viewCount < om::ui::kChatViewCap;
+  Serial.printf("[hist] page: %d older message(s), %d in the view\n", n, g_viewCount);
+}
+
+// One stored history message as the screen draws it. A stored message gets a synthetic seq with the
+// top bit set: the log id is stable across reboots and cannot collide with this boot's per-ring
+// sequence numbers, so REPLY / the message sheet still resolve to the tapped message.
+static void addStoredMsg(const om::history::Msg& h, bool dm, const char* chanName) {
+  if (g_chatMsgCount >= kChatMsgsCap) return;
+  om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
+  m.seq = 0x80000000u | (h.logId & 0x7FFFFFFFu);
+  m.logId = h.logId;
+  m.name = h.name;
+  m.text = h.text;
+  m.chanName = chanName;
+  m.ts = h.uptime;
+  m.wall = h.wall;
+  m.wallReal = h.wallReal();
+  m.hops = h.hops;
+  m.snrq = h.snr4;
+  m.mine = h.mine();
+  m.dm = dm;
+  m.delivery = h.delivery;
+  m.ackWall = h.ackWall;
+  m.ackReal = h.ackReal();
+  // Clear first: the view entry is reused, and a stale path would name the wrong repeaters.
+  m.path = nullptr;
+  m.pathHashSize = 1;
+  m.pathHashCount = 0;
+  if (h.pathLen > 0) {
+    m.path = h.path;
+    m.pathHashSize = h.pathHashSize;
+    m.pathHashCount = h.pathCount;
+  }
+  m.repeats = h.repeats;
 }
 
 static void refreshChatMessages() {
-  // The page buffer belongs to one chat. A switch (or a closed chat) drops it: its messages are
-  // older than that chat's RAM ring and would be wrong for another chat.
-  if (g_histChat != g_chatSel) {
-    g_histChat = g_chatSel;
-    g_histPageCount = 0;
-    g_histMore = true;
+  // The view belongs to one chat. A switch drops it and asks the loop for that chat's own newest
+  // page: the tap must not wait for a card read (chatViewStep logs how long it took).
+  if (g_viewChat != g_chatSel) {
+    g_viewChat = g_chatSel;
+    g_viewCount = 0;
+    g_viewLoading = true;
+    g_viewMore = true;
   }
   g_chatMsgCount = 0;
   const int chan = chatChannel(g_chatSel);
   const int thread = chatThread(g_chatSel);
-
-  // EST-348: page messages first (oldest), then the RAM ring. A paged message gets a synthetic seq
-  // with the top bit set: the log id is stable across reboots and cannot collide with this boot's
-  // per-ring sequence numbers, so REPLY / the message sheet still resolve to the tapped message.
-  for (int i = 0; i < g_histPageCount && g_chatMsgCount < kChatMsgsCap; ++i) {
-    const om::history::Msg& h = g_histPage[i];
-    om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
-    m.seq = 0x80000000u | (h.logId & 0x7FFFFFFFu);
-    m.logId = h.logId;
-    m.name = h.name;
-    m.text = h.text;
-    m.chanName = thread >= 0 ? "DM" : om::mcChannelName(chan);
-    m.ts = h.uptime;
-    m.wall = h.wall;
-    m.wallReal = h.wallReal();
-    m.hops = h.hops;
-    m.snrq = h.snr4;
-    m.mine = h.mine();
-    m.dm = thread >= 0;
-    m.delivery = h.delivery;
-    m.ackWall = h.ackWall;
-    m.ackReal = h.ackReal();
-    // Clear first: the view entry is reused, and a stale path would name the wrong repeaters.
-    m.path = nullptr;
-    m.pathHashSize = 1;
-    m.pathHashCount = 0;
-    if (h.pathLen > 0) {
-      m.path = h.path;
-      m.pathHashSize = h.pathHashSize;
-      m.pathHashCount = h.pathCount;
-    }
-    m.repeats = h.repeats;
-  }
+  const uint32_t newestStored = g_viewCount > 0 ? g_viewMsgs[g_viewCount - 1].logId : 0;
 
   if (thread >= 0) {
     // One thread: the facade copies the ring into the shared buffer, and the view points into it
     // (stable for this draw: the mesh is not pumped between buildChatView and chatScreenDraw).
     const int n = om::meshDmList(thread, g_dmScratch, om::ui::kMaxChatMsgs);
-    for (int i = 0; i < n; ++i) {
+    uint32_t ids[om::ui::kMaxChatMsgs];
+    for (int i = 0; i < n; ++i) ids[i] = g_dmScratch[i].logId;
+    const om::ui::LiveTail tail = om::ui::chatLiveTail(ids, n, newestStored);
+    const int first = om::ui::chatViewFirstKept(g_viewCount, tail.count, kChatMsgsCap);
+    for (int i = first; i < g_viewCount; ++i) addStoredMsg(g_viewMsgs[i], true, "DM");
+    for (int i = tail.first; i < n; ++i) {
       const om::MeshDm& dm = g_dmScratch[i];
+      if (g_chatMsgCount >= kChatMsgsCap) break;
       om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
       m.seq = dm.seq;
       m.logId = dm.logId;
@@ -1017,8 +1099,25 @@ static void refreshChatMessages() {
     return;
   }
   if (chan < 0) return;
-  for (int i = 0; i < om::meshMsgCount() && g_chatMsgCount < kChatMsgsCap; ++i) {
+
+  // The channel's own stored page(s) first (oldest), then only the arrivals that are NEWER than the
+  // newest stored message: the shared ring is an arrival buffer, never the chat's source of truth.
+  const int ring = om::meshMsgCount();
+  uint32_t ids[om::ui::kMaxChatMsgs];
+  int ringIdx[om::ui::kMaxChatMsgs];
+  int n = 0;
+  for (int i = 0; i < ring && n < om::ui::kMaxChatMsgs; ++i) {
     if (om::meshMsgChannel(i) != chan) continue;
+    ids[n] = om::meshMsgLogId(i);
+    ringIdx[n] = i;
+    ++n;
+  }
+  const om::ui::LiveTail tail = om::ui::chatLiveTail(ids, n, newestStored);
+  const int first = om::ui::chatViewFirstKept(g_viewCount, tail.count, kChatMsgsCap);
+  for (int i = first; i < g_viewCount; ++i) addStoredMsg(g_viewMsgs[i], false, om::mcChannelName(chan));
+  for (int k = tail.first; k < n; ++k) {
+    if (g_chatMsgCount >= kChatMsgsCap) break;
+    const int i = ringIdx[k];
     om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
     m.seq = om::meshMsgSeq(i);
     m.logId = om::meshMsgLogId(i);
@@ -1053,6 +1152,7 @@ static void buildChatView(om::ui::ChatView& v) {
   v.selector = g_selector;
   v.msgs = g_chatMsgs;
   v.msgCount = g_chatMsgCount;
+  v.loading = g_viewLoading;
   v.scroll = g_chatScroll;
   v.nowSec = millis() / 1000;
   v.nowWall = om::timeKeeper().now();
@@ -1098,8 +1198,34 @@ static void buildChatView(om::ui::ChatView& v) {
   v.tabs = currentTabBar(om::ui::Tab::Chat);
 }
 
+// EST-367 rule 5: the open chat's seen point follows what its view actually loaded and shows. The
+// normal open loads the newest page, which is the newest stored message, so unread goes to 0 exactly
+// as before; a chat whose load fell short (no card, a torn window, nothing loaded) keeps its unread
+// instead of being cleared for messages nobody saw. Unread itself stays defined as "messages newer
+// than the seen point" (history::unreadAfterSeen): older messages still on the card were read in an
+// earlier session, so they are not counted again.
+static void markOpenChatRead() {
+  if (g_viewLoading || g_selector || g_viewChat != g_chatSel) return;
+  const int chan = chatChannel(g_chatSel);
+  const int thread = chatThread(g_chatSel);
+  if (chan < 0 && thread < 0) return;
+  uint32_t newest = g_viewCount > 0 ? g_viewMsgs[g_viewCount - 1].logId : 0;
+  if (thread < 0) {
+    // The arrival ring may already hold a stored message newer than the page that was loaded.
+    for (int i = om::meshMsgCount() - 1; i >= 0; --i) {
+      if (om::meshMsgChannel(i) != chan) continue;
+      const uint32_t id = om::meshMsgLogId(i);
+      if (id > newest) newest = id;
+      break;
+    }
+  }
+  if (newest == 0) return;   // nothing loaded: nothing to mark read
+  om::meshHistoryMarkSeen(chan, thread, newest);
+}
+
 // One draw path for every caller: build, clamp, draw, and remember the numbers a new message needs.
 static void drawChat() {
+  markOpenChatRead();
   om::ui::ChatView v;
   buildChatView(v);
   g_chatMaxScroll = om::ui::chatMaxScroll(v);
@@ -1128,16 +1254,15 @@ static void openChannelList() {
 static void chatSelectChat(int chat) {
   if (chat < 0 || chat >= g_chatCount) return;
   g_chatSel = chat;
-  const int chan = chatChannel(chat);
-  if (chan >= 0) om::meshClearUnread(chan);
-  const int thread = chatThread(chat);
-  if (thread >= 0) om::meshDmClearUnread(thread);   // EST-342: reading a DM clears its count
   g_chatScroll = 0;
   g_selScroll = 0;
-  // EST-348: a new chat starts with no paged history in the buffer.
-  g_histChat = chat;
-  g_histPageCount = 0;
-  g_histMore = true;
+  // EST-367: a new chat starts with NO view and no mark-as-read. The view asks the loop for that
+  // chat's own newest page (chatViewStep), and drawChat marks read only through what it loaded: an
+  // unread count can no longer drop for a chat whose screen stayed empty.
+  g_viewChat = chat;
+  g_viewCount = 0;
+  g_viewLoading = true;
+  g_viewMore = true;
   g_selector = false;
   g_kb.showLetters();   // leaving a page does not follow the next open (which resets anyway)
   g_emojiScroll = 0;
@@ -1612,6 +1737,10 @@ static om::rptr::Facts g_rptrFacts;
 static om::rptr::Draft g_rptrDraft;
 static om::rptr::RegionList g_rptrRegions;
 static om::rptr::NeighbourList g_rptrNeighbours;
+// EST-367: the neighbour discovery window. `discover.neighbors` goes out, the page shows the 60 s
+// progress, and `neighbors` is read when the window ends (or at once on a repeater that does not
+// know the command). The model owns the timing; rptrPump only calls tick().
+static om::rptr::NeighbourScan g_rptrNbr;
 static om::rptr::AnonFacts g_rptrAnon;
 static char g_rptrHome[32] = "";
 static bool g_rptrHomeKnown = false;
@@ -1726,6 +1855,7 @@ static void rptrClearSession() {
   g_rptrFacts.reset();
   g_rptrRegions = om::rptr::RegionList();
   g_rptrNeighbours = om::rptr::NeighbourList();
+  g_rptrNbr.cancel();
   g_rptrAnon = om::rptr::AnonFacts();
   g_rptrHome[0] = 0;
   g_rptrHomeKnown = false;
@@ -2221,8 +2351,27 @@ static void rptrTakeReply(const om::RptrReply& rep) {
       g_rptrFacts.clock = epoch;
       g_rptrFacts.hasClock = true;
     }
+  } else if (strcmp(cmd, om::rptr::kCliNeighboursDiscover) == 0) {
+    // EST-367: the answer to `discover.neighbors`. "OK - Discover sent" keeps the 60 s window (the
+    // slave's table fills while the page shows the progress); anything else means this firmware does
+    // not take the command, so the table is read at once and the page says why.
+    bool readNow = false;
+    if (!g_rptrNbr.onDiscoverAnswer(rep.text, millis(), &readNow)) {
+      if (readNow) {
+        rptrLog(">", om::rptr::kCliNeighboursRead);
+        rptrQueue(om::rptr::kCliNeighboursRead, kRptrOutRead);
+        snprintf(g_rptrResult, sizeof(g_rptrResult), "No discovery here, reading the table");
+      } else {
+        om::rptr::answerPlainText(rep.text, g_rptrResult, sizeof(g_rptrResult));
+      }
+      g_rptrResultOk = false;
+      g_rptrResultPending = false;
+      g_rptrDirty = true;
+    }
+    read = false;   // not a value read-back: nothing to sync from it
   } else if (strcmp(cmd, om::rptr::kCliNeighboursRead) == 0) {
     om::rptr::neighboursParse(rep.text, &g_rptrNeighbours);
+    g_rptrNbr.onTable(g_rptrNeighbours.valid);
     if (!g_rptrNeighbours.valid) {
       // Not a neighbour answer (an error or an unknown command): never turn it into "empty".
       om::rptr::answerPlainText(rep.text, g_rptrResult, sizeof(g_rptrResult));
@@ -2278,6 +2427,18 @@ static void rptrPumpOutbox() {
     }
     Serial.printf("[rptr] no answer to %s within %lu ms\n", g_rptrInFlight,
                   (unsigned long)(g_rptrInFlightDeadlineMs - g_rptrInFlightMs));
+    // EST-367: a discover that never answers is the same fallback as "unknown command": read the
+    // repeater's table now instead of waiting out the 60 s window for a scan it never started.
+    if (strcmp(g_rptrInFlight, om::rptr::kCliNeighboursDiscover) == 0 &&
+        g_rptrNbr.phase == om::rptr::NbrScanPhase::Discovering) {
+      bool readNow = false;
+      g_rptrNbr.onDiscoverTimeout(&readNow);
+      if (readNow) {
+        rptrLog(">", om::rptr::kCliNeighboursRead);
+        rptrQueue(om::rptr::kCliNeighboursRead, kRptrOutRead);
+        snprintf(g_rptrResult, sizeof(g_rptrResult), "No answer, reading the table it has");
+      }
+    }
     // EST-364: a line we gave up on leaves the reply order too, and any position pair in progress is
     // dropped: the next answer cannot be trusted to belong to the command it is labelled with.
     om::rptrForgetPending(g_rptrInFlight);
@@ -2392,6 +2553,27 @@ static void rptrPump() {
       }
     }
   }
+  // EST-367: the neighbour discovery window. While it runs the page redraws once a second (the bar
+  // and the seconds left); when the model says the window is over, `neighbors` goes out ONCE. Nothing
+  // here waits: tick() is a comparison on millis().
+  if (g_rptrNbr.running()) {
+    bool readNow = false;
+    g_rptrNbr.tick(millis(), &readNow);
+    if (readNow) {
+      rptrLog(">", om::rptr::kCliNeighboursRead);
+      rptrQueue(om::rptr::kCliNeighboursRead, kRptrOutRead);
+      snprintf(g_rptrResult, sizeof(g_rptrResult), "Reading the neighbour table");
+      g_rptrResultOk = true;
+      g_rptrResultPending = false;
+      g_rptrDirty = true;
+    }
+    static uint32_t lastNbrDraw = 0;
+    if (!g_rptrList && g_rptrPage == om::rptr::Page::Neighbours &&
+        millis() - lastNbrDraw >= 1000) {
+      lastNbrDraw = millis();
+      g_rptrDirty = true;
+    }
+  }
   // Every read-back and every Apply answer changes what the open page shows; one redraw per pass.
   if (g_rptrDirty) {
     g_rptrDirty = false;
@@ -2455,6 +2637,12 @@ static void rptrBuildPage(om::ui::RptrView& v) {
   in.draft = &g_rptrDraft;
   in.regions = &g_rptrRegions;
   in.neighbours = &g_rptrNeighbours;
+  // EST-367: the discovery window's state and the clocks its progress and the neighbours' heard
+  // times are measured with.
+  in.scan = &g_rptrNbr;
+  in.nowMs = millis();
+  in.nowWall = om::timeKeeper().now();
+  in.nowReal = om::timeKeeper().realSinceBoot();
   in.anon = &g_rptrAnon;
   in.home = g_rptrHomeKnown ? g_rptrHome : nullptr;
   in.defaultScope = g_rptrDefaultKnown ? g_rptrDefault : nullptr;
@@ -2828,16 +3016,18 @@ static void rptrPageRowTapped(const om::rptr::UiRow& row, bool key, int dir) {
       rptrRemoveRegion(row.label);
       break;
     case om::rptr::Act::Discover:
-      // EST-366 (rule 5): the old path sent `discover.neighbors`, which CommonCLI v1.18.0 does not
-      // know (there is no discovery command in the CLI at all) and never read the table, so a blank
-      // page was the only possible answer. `neighbors` IS the repeater's neighbour table; it is a
-      // read, answered like every other CLI line. The table is filled by zero-hop adverts the
-      // repeater itself heard, so nothing this device can send makes it grow faster.
+      // EST-367: `discover.neighbors` IS a repeater command in v1.18.0 (simple_repeater's own
+      // MyMesh.cpp handleCommand, not CommonCLI): it answers "OK - Discover sent", sends a zero-hop
+      // node discover, and the repeater's neighbour table fills over about 60 s. So the button sends
+      // it, the page shows that window as progress, and rptrPump sends `neighbors` when it ends. A
+      // repeater that answers "unknown command" (or nothing) falls back to reading its table now.
       g_rptrNeighbours = om::rptr::NeighbourList();
-      rptrLog(">", om::rptr::kCliNeighboursRead);
-      rptrQueue(om::rptr::kCliNeighboursRead, kRptrOutRead);
-      snprintf(g_rptrResult, sizeof(g_rptrResult), "Reading the repeater's neighbour table");
+      g_rptrNbr.start(millis());
+      rptrLog(">", om::rptr::kCliNeighboursDiscover);
+      rptrQueue(om::rptr::kCliNeighboursDiscover, kRptrOutRead);
+      snprintf(g_rptrResult, sizeof(g_rptrResult), "Asking the repeater to discover neighbours");
       g_rptrResultOk = true;
+      g_rptrResultPending = false;
       break;
     case om::rptr::Act::MapPick:
       // EST-366 (rule 6): open the map centred on the repeater's draft position (or our GPS, or the
@@ -4700,7 +4890,6 @@ void setup() {
   // pumped between meshLinkBegin and here, so nothing is missed. EST-349: the page window is
   // allocated in PSRAM before the first chat can be drawn.
   om::crashCheckpoint("[om] history");
-  allocHistoryPage();
   if (!om::meshHistoryBegin(g_sdOk)) Serial.println("[hist] store not ready (no SD, no SPIFFS)");
 #endif
   drawHome();
@@ -5259,6 +5448,16 @@ void loop() {
   // frame belong to it (redrawCurrentScreen has the same rule for the toast and the clock paths).
   const bool uiDrawOk = screenOn && !g_change.active();
 
+  // EST-367: the chat open's own step. The tap only marked the chat; the newest page of that chat's
+  // log is read HERE, on the loop task, so a slow card never sits inside the gesture. The numbers are
+  // logged (and kept for the `chats` check) and the screen is redrawn with them.
+  if (g_viewLoading) {
+    const uint32_t t = micros();
+    chatViewStep();
+    om::radio::addPart(om::radio::Part::History, micros() - t);
+    if (uiDrawOk && g_tab == 1 && !g_settings && !g_kb.open) drawChat();
+  }
+
   static uint32_t lastBatt = 0;
   static bool lowBattWarned = false;   // EST-359: one low-battery sound per crossing, re-armed above 20%
   if (millis() - lastBatt > 10000) {
@@ -5657,10 +5856,8 @@ void loop() {
     if (msgSerial != lastSeenMsg || dmSerial != lastSeenDm) {
       lastSeenMsg = msgSerial;
       lastSeenDm = dmSerial;
-      const int chan = chatChannel(g_chatSel);
-      if (chan >= 0) om::meshClearUnread(chan);
-      const int thread = chatThread(g_chatSel);
-      if (thread >= 0) om::meshDmClearUnread(thread);
+      // EST-367: no blanket clear here. drawChat() marks read exactly through the newest message the
+      // view loaded and shows (markOpenChatRead), so a chat that showed nothing keeps its unread.
       // Deliberately do NOT close the message sheet here: it holds the message id, so buildChatView
       // resolves it to the same message after the ring shifts. It closes only when that message
       // has actually fallen out of the 32-message ring.
@@ -5723,12 +5920,13 @@ void loop() {
         } else if (!g_drag && !g_acted) {
           handleTap(g_sx, g_sy, false);
         }
-        // EST-348: a pull PAST the oldest message in RAM asks the card for the next page. The clamp
-        // below then runs against the taller content; the scroll is measured from the bottom, so the
-        // page's newest messages appear where the finger already is (no jump).
+        // EST-348/367: a pull PAST the oldest message the view holds asks the chat's own log for the
+        // next older page. The clamp below then runs against the taller content; the scroll is
+        // measured from the bottom, so the page's newest messages appear where the finger already is
+        // (no jump).
         if (g_tab == 1 && !g_settings && !g_kb.open && !g_selector &&
             g_chatScroll > g_chatMaxScroll) {
-          loadOlderHistoryPage();
+          loadOlderChatPage();
           drawChat();
         }
         // A rubber band needs a spring: clamp the chat back into range when the finger lifts. The
@@ -5759,12 +5957,8 @@ void loop() {
                 g_chatScroll = clamped;
                 redraw = true;
               }
-              // Back at the newest message: the paged window is no longer needed.
-              if (clamped == 0 && g_histPageCount > 0) {
-                g_histPageCount = 0;
-                g_histMore = true;
-                redraw = true;
-              }
+              // Back at the newest message: nothing to reset. EST-367's view keeps what it loaded (the
+              // newest page) so returning from a scroll never re-reads the card.
             }
           }
           if (redraw) drawChat();
@@ -6267,6 +6461,80 @@ om::MsgOrderKey cmdMsgKey(const CmdMsgRef& r) {
   return k;
 }
 
+// EST-367 rule 6: the check Claude runs after every flash. One line per chat:
+//   name, the badge's unread, what that chat's own view held when it opened (how long the load took),
+//   how many messages are really on the card, and the newest time on the card vs the newest time the
+//   view showed. A chat whose view and log disagree ends with MISMATCH:
+//   unread > 0 while it showed nothing, or the card holds a newer message than the view showed.
+int cmdPrintChats() {
+  refreshChats();
+  const uint32_t nowWall = om::timeKeeper().now();
+  const uint32_t nowUp = millis() / 1000;
+  const bool nowReal = om::timeKeeper().realSinceBoot();
+  int mismatches = 0;
+  for (int i = 0; i < g_chatCount; ++i) {
+    const int chan = chatChannel(i);
+    const int thread = chatThread(i);
+    om::history::ChatSummary sum;
+    const bool haveCard = om::meshChatSummary(chan, thread, &sum);
+    const uint32_t cardNewest = haveCard ? sum.logId : 0;
+    // The count: ONE forward read of this chat's files, capped at 256 KB per file so the check can
+    // never freeze the loop on a full 2 MB log. `card_complete` false makes the number a lower bound,
+    // printed with a '+' (the count is a diagnostic; the MISMATCH rule uses ids and times, not it).
+    const uint32_t t0 = micros();
+    bool cardComplete = true;
+    const int card = om::meshHistoryCardMessages(chan, thread, &cardComplete);
+    const uint32_t cardUs = micros() - t0;
+    const ChatShown& cs = g_chatShown[i];
+    const bool opened = cs.shown >= 0 && strcmp(cs.key, g_chats[i].name) == 0;
+    int shown = opened ? cs.shown : -1;
+    uint32_t shownNewest = opened ? cs.newestLogId : 0;
+    uint32_t shownWall = opened ? cs.newestWall : 0;
+    uint32_t shownUp = opened ? cs.newestUp : 0;
+    bool shownReal = opened && cs.newestReal;
+    // The chat open right now: its live view is the truth, not the memory of its open.
+    if (i == g_chatSel && !g_viewLoading && g_viewChat == g_chatSel) {
+      shown = g_viewCount;
+      shownNewest = g_viewCount > 0 ? g_viewMsgs[g_viewCount - 1].logId : 0;
+      shownWall = g_viewCount > 0 ? g_viewMsgs[g_viewCount - 1].wall : 0;
+      shownUp = g_viewCount > 0 ? g_viewMsgs[g_viewCount - 1].uptime : 0;
+      shownReal = g_viewCount > 0 && g_viewMsgs[g_viewCount - 1].wallReal();
+    }
+    const int unread = g_chats[i].unread;
+    const bool bad = opened && om::ui::chatViewMismatch(shown, unread, cardNewest, shownNewest);
+    if (bad) ++mismatches;
+    char cardAt[16] = "-";
+    char shownAt[16] = "-";
+    if (cardNewest != 0) {
+      om::ui::stampText(cardAt, sizeof(cardAt),
+                        om::ui::Stamp{sum.wall, sum.uptime, sum.wallReal}, nowWall, nowUp, nowReal,
+                        om::ui::StampForm::Clock);
+    }
+    if (shownNewest != 0) {
+      om::ui::stampText(shownAt, sizeof(shownAt), om::ui::Stamp{shownWall, shownUp, shownReal},
+                        nowWall, nowUp, nowReal, om::ui::StampForm::Clock);
+    }
+    char name[64];
+    cmdSafe(name, sizeof(name), g_chats[i].name);
+    char shownText[8];
+    if (shown < 0) snprintf(shownText, sizeof(shownText), "-");
+    else snprintf(shownText, sizeof(shownText), "%d", shown);
+    char open[64] = "";
+    if (opened) {
+      snprintf(open, sizeof(open), " open_ms=%lu.%03lu windows=%lu", (unsigned long)(cs.openUs / 1000u),
+               (unsigned long)(cs.openUs % 1000u), (unsigned long)cs.windows);
+    }
+    char cardText[12];
+    snprintf(cardText, sizeof(cardText), "%d%s", card, cardComplete ? "" : "+");
+    Serial.printf("[chat] \"%s\" unread=%d shown=%s card=%s card_read_ms=%lu.%03lu newest_card=%s "
+                  "newest_shown=%s%s%s\n",
+                  name, unread, shownText, cardText, (unsigned long)(cardUs / 1000u),
+                  (unsigned long)(cardUs % 1000u), cardAt, shownAt, open,
+                  bad ? " MISMATCH" : "");
+  }
+  return mismatches;
+}
+
 int cmdPrintMsgs(int want) {
   if (want < 0) want = 10;
   if (want > 64) want = 64;
@@ -6466,6 +6734,14 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
     case om::usb::Kind::Msgs: {
       const int count = cmdPrintMsgs(cmd.count);
       snprintf(reply, cap, "[cmd] ok msgs %d", count);
+      return;
+    }
+
+    case om::usb::Kind::Chats: {
+      // EST-367 rule 6: one [chat] line per chat, then one answer line. MISMATCH on a line means the
+      // chat's own view and its log disagree (see cmdPrintChats).
+      const int bad = cmdPrintChats();
+      snprintf(reply, cap, "[cmd] ok chats %d mismatches=%d", g_chatCount, bad);
       return;
     }
 

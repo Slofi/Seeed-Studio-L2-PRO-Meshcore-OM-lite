@@ -14,6 +14,7 @@
 
 #include "ui/chat_layout.h"
 #include "ui/chat_model.h"
+#include "ui/chat_view.h"   // EST-367: kChatViewMsgs, the size of one chat's own view
 #include "ui/message_sheet.h"
 #include "ui/widgets.h"
 
@@ -33,6 +34,9 @@ struct ChatView {
   bool selector = false;              // the dropdown is open
   const ChatMsgView* msgs = nullptr;
   int msgCount = 0;
+  // EST-367: the chat's own newest page is being read from the card (the deferred open). The first
+  // frame after the tap says so instead of "No messages yet".
+  bool loading = false;
   int scroll = 0;           // px scrolled up from the newest message (0 = at the bottom)
   uint32_t nowSec = 0;      // monotonic uptime; chat ages survive a clock sync
   uint32_t nowWall = 0;     // the system clock now (real only when nowReal)

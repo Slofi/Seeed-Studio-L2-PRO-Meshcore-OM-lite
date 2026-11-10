@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>   // EST-367: the neighbour scan compares the discover answer here (strncmp/strstr)
 
 namespace om {
 namespace rptr {
@@ -253,6 +254,132 @@ struct NeighbourList {
   bool valid = false;        // a reply was parsed (an empty list is a real answer)
 };
 int neighboursParse(const char* text, NeighbourList* out);
+
+// ------------------------------------------------------------------------ neighbour discovery (EST-367)
+// `discover.neighbors` IS a repeater command in MeshCore v1.18.0, implemented in
+// examples/simple_repeater/MyMesh.cpp handleCommand (not in CommonCLI, which is why the EST-366 grep
+// missed it): it answers "OK - Discover sent", sends a zero-hop node discover and fills the
+// repeater's own neighbour table over about 60 s. `neighbors` then reads that table. The scan below
+// is exactly that sequence and the ONE rule the shell follows:
+//
+//   start()  -> send `discover.neighbors` and show the window
+//   tick()   -> once the window is over, ask for `neighbors` (exactly once)
+//   answer   -> the table on the page
+//
+// A repeater whose firmware does not know the command (an `unknown command` answer), or one that
+// never answers, falls back to reading the table at once, with a note that says so. Nothing here
+// waits or sleeps: the shell calls tick() from its own loop.
+constexpr uint32_t kNeighbourScanWindowMs = 60000;
+
+enum class NbrScanPhase : uint8_t {
+  Idle = 0,
+  Discovering,   // the discover went out; the 60 s window is running
+  Reading,       // `neighbors` was sent; the table is on its way
+  Done,          // the table was read
+  Unsupported,   // this repeater does not take discover.neighbors (or did not answer)
+};
+
+struct NeighbourScan {
+  NbrScanPhase phase = NbrScanPhase::Idle;
+  bool fallback = false;        // the repeater did not take the discover: the table was read alone
+  uint32_t startedMs = 0;
+  uint32_t windowMs = kNeighbourScanWindowMs;
+
+  void start(uint32_t nowMs) {
+    phase = NbrScanPhase::Discovering;
+    fallback = false;
+    startedMs = nowMs;
+    windowMs = kNeighbourScanWindowMs;
+  }
+  void cancel() { *this = NeighbourScan(); }
+  bool running() const { return phase == NbrScanPhase::Discovering || phase == NbrScanPhase::Reading; }
+  bool settled() const { return phase == NbrScanPhase::Done || phase == NbrScanPhase::Unsupported; }
+
+  // The answer to `discover.neighbors`. True when it was the repeater's OK (the window keeps
+  // running); false when the repeater refused it, and then `readNow` asks for the table at once.
+  bool onDiscoverAnswer(const char* text, uint32_t nowMs, bool* readNow) {
+    (void)nowMs;
+    if (readNow != nullptr) *readNow = false;
+    if (phase != NbrScanPhase::Discovering) return false;
+    if (isDiscoverOk(text)) return true;
+    fallback = true;
+    phase = NbrScanPhase::Unsupported;
+    if (readNow != nullptr) *readNow = true;
+    return false;
+  }
+
+  // No answer to the discover at all (the CLI's own deadline ran out): same fallback.
+  void onDiscoverTimeout(bool* readNow) {
+    if (readNow != nullptr) *readNow = phase == NbrScanPhase::Discovering;
+    if (phase != NbrScanPhase::Discovering) return;
+    fallback = true;
+    phase = NbrScanPhase::Unsupported;
+  }
+
+  // The 60 s window is over: true exactly once, when `neighbors` must be sent.
+  bool tick(uint32_t nowMs, bool* readNow) {
+    if (readNow != nullptr) *readNow = false;
+    if (phase != NbrScanPhase::Discovering) return false;
+    if ((int32_t)(nowMs - startedMs) < (int32_t)windowMs) return false;
+    phase = NbrScanPhase::Reading;
+    if (readNow != nullptr) *readNow = true;
+    return true;
+  }
+
+  // The `neighbors` answer arrived (valid = it really was the table).
+  void onTable(bool valid) {
+    if (valid) {
+      phase = NbrScanPhase::Done;
+      return;
+    }
+    fallback = true;
+    phase = NbrScanPhase::Unsupported;
+  }
+
+  // Seconds left in the window (0 once it is over), for the row's value.
+  int secondsLeft(uint32_t nowMs) const {
+    if (phase != NbrScanPhase::Discovering) return 0;
+    const int32_t elapsed = (int32_t)(nowMs - startedMs);
+    if (elapsed >= (int32_t)windowMs) return 0;
+    const int32_t left = (int32_t)windowMs - elapsed;
+    return (int)(left / 1000) + (left % 1000 != 0 ? 1 : 0);
+  }
+
+  // 0..100 of the window that has passed.
+  int progressPercent(uint32_t nowMs) const {
+    if (phase == NbrScanPhase::Discovering) {
+      const int32_t elapsed = (int32_t)(nowMs - startedMs);
+      if (elapsed <= 0) return 0;
+      if (elapsed >= (int32_t)windowMs) return 100;
+      return (int)((int64_t)elapsed * 100 / (int64_t)windowMs);
+    }
+    return 100;
+  }
+
+  // One sentence for the page, "" when there is nothing to say.
+  const char* note() const {
+    if (phase == NbrScanPhase::Discovering) return "Discover sent, listening 60 s for the table";
+    if (phase == NbrScanPhase::Reading) return "Reading the repeater's neighbour table";
+    if (fallback) return "This repeater does not know discover.neighbors, this is its own table";
+    return "";
+  }
+
+  // "OK - Discover sent" (the OK may be followed by anything, the first word is what counts).
+  static bool isDiscoverOk(const char* text) {
+    if (text == nullptr) return false;
+    const char* p = text;
+    while (*p == ' ' || *p == '\t' || *p == '>' || *p == '\r' || *p == '\n') ++p;
+    return strncmp(p, "OK", 2) == 0 && (p[2] == 0 || p[2] == ' ' || p[2] == '-' || p[2] == '\r' ||
+                                        p[2] == '\n' || p[2] == '\t');
+  }
+
+  // "Err - unknown command" / "unknown command": this firmware has no such command.
+  static bool isUnknownCommand(const char* text) {
+    if (text == nullptr) return false;
+    return strstr(text, "unknown command") != nullptr || strstr(text, "Unknown command") != nullptr ||
+           strstr(text, "unknown cmd") != nullptr;
+  }
+};
 
 // ------------------------------------------------------------------------------------------- regions
 // The repeater's `region` reply is RegionMap::exportTo(): one line per region, indented by depth,

@@ -1865,6 +1865,56 @@ int meshHistoryOlder(int channelIdx, int thread, uint32_t beforeLogId, history::
   return n;
 }
 
+// EST-367: the history slot of a chat, whichever kind it is. -1 when the chat does not exist.
+int histSlotOf(int channelIdx, int thread) {
+  if (thread >= 0) return histDmSlot(thread);
+  if (channelIdx >= 0) return histChannelSlot(channelIdx);
+  return -1;
+}
+
+int meshHistoryNewest(int channelIdx, int thread, history::Msg* out, int cap) {
+  if (out == nullptr || cap <= 0) return -1;
+  const int slot = histSlotOf(channelIdx, thread);
+  if (slot < 0) return -1;
+  history::HistoryStore& hs = history::store();
+  const int n = hs.loadNewest(slot, cap);
+  for (int i = 0; i < n; ++i) out[i] = hs.scanMsg(i);
+  return n;
+}
+
+bool meshChatSummary(int channelIdx, int thread, history::ChatSummary* out) {
+  if (out == nullptr) return false;
+  const int slot = histSlotOf(channelIdx, thread);
+  if (slot < 0) return false;
+  const history::ChatSummary* c = history::store().summary(slot);
+  if (c == nullptr) return false;
+  *out = *c;
+  return true;
+}
+
+int meshHistoryCardMessages(int channelIdx, int thread, bool* complete) {
+  const int slot = histSlotOf(channelIdx, thread);
+  if (slot < 0) return -1;
+  return history::store().countMessages(slot, complete);
+}
+
+int meshHistoryMarkSeen(int channelIdx, int thread, uint32_t throughLogId) {
+  const int slot = histSlotOf(channelIdx, thread);
+  if (slot < 0) return -1;
+  history::store().markSeenThrough(slot, throughLogId);
+  const int left = (int)history::store().slotUnread(slot);
+  // The badge and the selector read the RAM counters; they follow the store's seen point, so they
+  // can never say unread for messages the view has marked read (or the other way round).
+  if (thread >= 0) {
+    om::ui::DmThread* t = s_dmRing != nullptr ? s_dmRing->thread(thread) : nullptr;
+    if (t != nullptr && t->used) t->unread = left > 0xFFFF ? 0xFFFF : (uint16_t)left;
+  } else if (channelIdx >= 0 && channelIdx < mcChannelCount()) {
+    const int at = unreadEntryFor(mcChannel(channelIdx).hash, true);
+    if (at >= 0) s_unread[at].count = left > 255 ? 255 : (uint8_t)left;
+  }
+  return left;
+}
+
 int meshHistoryDump(const char* chat, int n) {
   if (chat == nullptr || *chat == 0) return -1;
   history::HistoryStore& hs = history::store();

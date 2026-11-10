@@ -3716,3 +3716,137 @@ yet. No SSH host was involved.
 - **Argus's regions, read logged in** (multi-line answer now parsed): `*^ F`, `si F`, `eu F`, `europe F` = home `*`, floods allowed for si, eu, europe; `lj` is gone. `region default` = `<null>`. `region home` (no argument) timed out once (8 s) and the order re-synced.
 - **Neighbours: DS's conclusion was wrong.** `discover.neighbors` IS a repeater command in v1.18.0, implemented in examples/simple_repeater/MyMesh.cpp handleCommand (not in CommonCLI, which is why the grep missed it): it sends a zero-hop node-discover request and fills the repeater's neighbour table over ~60 s; `neighbors` then reads the table. The reference is now in `reference/meshcore-repeater-v1.18.0/`.
 - Filip: the status card's top edge draws outside its border (the bottom is fine).
+
+## 2026-11-10 22:45 (DeepSeek): EST-367, each chat shows its own messages (and two RPTR fixes)
+Ticket: the 22:15 data-visibility bug Filip hit (opening #slovenija with 26 unread showed nothing,
+#slovenia showed 3, the unread count dropped anyway), discover-neighbours as a real repeater command,
+and the status card's first row drawing on its top border.
+
+### 1. A chat's view is that chat's own log, not the shared ring
+- The 32-message RAM ring in `mesh_link` is now only the ARRIVAL buffer. When a chat opens, its own
+  newest page (32 messages) is read from its log with ONE seek to the end of the file and one or two
+  backwards 4 KB windows (`loadNewest`); nothing scans the log. `src/ui/chat_view.h` is the new plain
+  model and `src/main.cpp` holds the buffer.
+- The open is deferred: the tap only marks the chat, the loop's history step (`chatViewStep`, right
+  after `uiDrawOk`) does the read, and the frame drawn between the two says "Loading messages...".
+  So a slow card never sits inside a gesture or inside the mesh pump.
+- The view = the stored page(s) (oldest first) + the arrival ring's messages for that chat that are
+  NEWER than the newest stored one (or have no log id yet, i.e. still queued). A busy channel can no
+  longer evict a quiet one: `chatLiveTail()`/`chatViewFirstKept()` are the two rules, host-tested.
+- Scrolling up prepends an older page (16) as before, now into the same PSRAM buffer
+  (`kChatViewCap` = 96 stored + the 32-entry arrival tail = `kChatViewMsgs` 128 entries).
+  The message band, the hit test and the height arithmetic all grew to that size (they were capped
+  at 32, which would have hidden the older pages).
+- PSRAM: +27,648 B (96 x `history::Msg`) +6,784 B (per-chat summaries) +4,608 B (chat view entries
+  64 -> 128 x `ChatMsgView`). Internal RAM +880 B (`g_chatShown`, the `chats` check's memory).
+- SPIFFS fallback: the same path (same store, same volume interface), so it shows what the fallback
+  holds. A chat whose log has nothing stored yet shows the live ring only, exactly as before.
+
+### 2. The preview and the unread counts come from the same per-chat source
+- `HistoryStore` now keeps a `ChatSummary` per slot: the chat's newest stored message (sender, whole
+  text, clocks). It is filled lazily with one backwards read and kept current by `appendMsg`.
+- `refreshChats()` builds every selector row from that summary (`meshChatSummary`), not from the
+  shared ring. The ring only overrides a preview when it holds something newer (or not stored yet).
+- Unread is unchanged in meaning: the number of messages newer than the chat's seen point
+  (`unreadAfterSeen`: `maxLogId - seenLogId`, never more than what was already counted). The RAM
+  counters (badge, selector) are set from the store after each mark, so they cannot disagree.
+
+### 3. Mark-as-read only for what was loaded and shown
+- `markOpenChatRead()` runs on every Chat draw and moves the seen point to the newest message the
+  view actually holds (the newest stored page plus any newer stored arrival). `meshHistoryMarkSeen`
+  sets the RAM counters from that. The old blanket `meshClearUnread` on open and on every arriving
+  message is gone (the Settings "Clear unread" button still clears everything on purpose).
+- The normal open loads the newest page, which IS the newest message of the chat, so unread goes to
+  0 as before. A load that fell short (no card, a torn window, nothing loaded) leaves the messages it
+  did not show unread, and the count no longer drops for a screen that stayed empty.
+- Older messages still on the card were read in an earlier session (the seen point is past them), so
+  they are not counted again; unread is never a "unseen since boot" count.
+
+### 4. `chats`: the check to run after every flash (EST-367 rule 6)
+- New USB command, one `[chat]` line per chat then one answer line:
+  `[chat] "#slovenija" unread=0 shown=28 card=28 card_read_ms=3.1 newest_card=20:45 newest_shown=20:45 open_ms=1.2 windows=1`
+  - `shown` is the per-view count after the open's load (`-` = never opened since boot); the chat
+    open right now reports its live view.
+  - `card` is the number of message records in its `.log` + `.old` (one forward read, only this
+    command does it; the line says how long it took). It is exact up to 256 KB per file; a bigger log
+    stops there and the number carries a `+` (a lower bound), so the check can never freeze the loop.
+  - `newest_card` / `newest_shown` are clock times (`-` when the clock was not real then).
+  - A line ends with `MISMATCH` when unread > 0 while nothing was shown, or the card holds a newer
+    message than the view showed. The answer line carries `mismatches=N`.
+- `open_ms`/`windows` are the measured open of that chat, so a slow card is visible in the same check.
+
+### 5. Discover neighbours (RPTR)
+- `discover.neighbors` is a real simple_repeater command in v1.18.0 (MyMesh.cpp handleCommand; the
+  reference is in `reference/meshcore-repeater-v1.18.0/`). The button (now "Scan neighbours") sends
+  it, the page shows a 60 s progress row ("Scanning, 53 s left" plus a thin gold bar), and when the
+  window ends `rptrPump` sends `neighbors` ONCE and the table appears.
+- A repeater that answers `unknown command`, answers something else, or does not answer at all
+  (the CLI deadline) falls back to reading `neighbors` at once, and the page says why ("This
+  repeater does not know discover.neighbors, this is its own table").
+- The whole sequence is a plain model (`rptr::NeighbourScan`, 5 phases, no waits or sleeps) and is
+  host-tested: OK keeps the window, unknown falls back, the tick fires exactly once at 60 s.
+- Neighbour rows show the heard time as a clock time now (`SNR -6.5, 20:41`), with the age only when
+  the clock was not real at that moment (Filip's rule, the same formatter as everywhere).
+
+### 6. Status card: top padding equals the bottom
+- The drawing put row 0's centre at `card.y + 3`, so an 11 px glyph drew on (and above) the card's top
+  line while the bottom had air. The layout now owns it: `kRptrCardPad` = (44 - 3x14)/2 = 1 px above
+  row 0 and below row 2, and `rptrCardCellAt()` hands the cell's line to the drawing.
+- Measured: first row's centre 8 px below the card's top, last row's centre 8 px above its bottom.
+
+### Build and tests
+- `pio run -e om_lite_l2` exit 0 (two runs, the second after the last edit): **RAM 155,608 B**
+  (47.5% of 327,680), **flash 2,790,817 B** (42.6% of 6,553,600), `firmware.bin` 2,791,184 B.
+- `sh test/host/run.sh` exit 0. New `test/host/test_est367.cpp` (own in-memory volume):
+  - a quiet chat (28 messages) whose entries a busy chat (40) evicted from the shared ring still
+    opens with all 28 from its own log; the arrival-tail rule adds only what is newer, dedupes and
+    keeps the newest when the buffer is full; the summary names the quiet chat's newest message
+    while the ring holds none of it, and a fresh store over the same volume fills the same summary;
+  - the 2,043,023 B log opens in **2 windows, 8,192 B read, 0-1 ms on the host** (windows and bytes are
+    counted, so "not a scan" is measured, not claimed); a 5-message log uses no more windows;
+  - unread vs shown: the full page clears it, a partial load keeps `maxLogId - shownId` (never more
+    than before), and it survives a reload;
+  - `chatViewMismatch` fires exactly for "unread > 0 and shown == 0" and "card newer than shown";
+  - the card cells are inside the border with equal padding (8 == 8);
+  - the neighbour scan: OK keeps the 60 s window, the tick reads once at 60,000 ms, `-none-`/error
+    shapes, the unknown-command fallback and the no-answer fallback;
+  - the `chats` verb parses (and takes no argument).
+- Existing tests updated only where the ticket changed a rule: EST-363's `ScreenIn` size cap 128 ->
+  160 B (EST-367 added the scan pointer and two clocks to it; still passed by reference, no copy).
+
+### Could not check (no device in the sandbox)
+The glass: that the quiet chat's 28 messages really appear, the "Loading messages..." first frame,
+the scroll-up paging into the older pages, the selector preview of a quiet chat, the 60 s progress
+bar on Neighbours, and the card's new top padding at 1:1. The radio: what Argus/Trnovo II answer to
+`discover.neighbors` now (the parse and the state machine are proven; the answer is not). The
+measured open time on a real 2 MB card log (the host number is 0-1 ms because the volume is RAM; the
+device prints its own `[hist] open ... in X ms (N windows, B bytes)`). No SSH host was involved.
+
+### Next step for Claude (one reader on the USB port)
+1. Flash `firmware.bin` (2,791,184 B). Boot log must contain
+   `[hist] working memory ... summaries 6784` and `[mem] ui buffers ... chat view 27648`.
+2. `tools/cmd.py chats` BEFORE opening anything: every chat one line, all `shown=-` (never opened),
+   `mismatches=0`. This is the baseline.
+3. `tools/cmd.py tap 120 227` (Chat tab), `tools/shot.py`: the open chat must show messages, and the
+   selector preview line of a chat with unread must name its newest sender (e.g. TehiLL RAK).
+4. `tools/cmd.py tap 160 37` (the header) opens the selector, `tools/shot.py`, then tap the row
+   whose name is `#slovenija` (rows start at y=64, 30 px each: row n centre is 79 + 30n).
+   `tools/shot.py`: the 28 messages must be there, the newest at the bottom, and its time must match
+   `tools/cmd.py history "#slovenija" 3` (the newest ids/texts/times on the card).
+5. `tools/cmd.py chats` again: `#slovenija` must now be `shown=28 unread=0 newest_card=20:45
+   newest_shown=20:45` with `open_ms`/`windows` small, and NO `MISMATCH` on any line. A line with
+   `shown=0 unread>0` or `newest_card` newer than `newest_shown` is the bug back.
+6. Do the same for `#slovenia` (3 messages) and a DM if one has unread: each must show its own
+   messages, not the busy channel's.
+7. Scroll up in #slovenija (`tools/cmd.py drag 160 190 160 90 500`, then `shot.py`): older pages must
+   prepend (the 28 are all of it, so the drag must snap back with no blank gap).
+8. RPTR: log in, open Neighbours, tap "Scan neighbours": the log must show
+   `[rptr] cli -> ... discover.neighbors`, the page must show the progress row for 60 s, then
+   `[rptr] cli -> ... neighbors` and the table (or the "does not know" note if Argus's firmware is
+   older). `shot.py` at ~5 s and at ~70 s.
+9. Status card: `shot.py` must show the first row clear of the card's top border, the same 8 px above
+   as the last row has below.
+
+## 2026-11-10 22:45 (Claude): EST-367 on the device
+- Built in the sandbox (exit 0, RAM 155,608 B, flash 2,790,817 B), tests exit 0, reviewed binary flashed (2,791,184 B).
+- `chats` after boot: 6 chats, `mismatches=0` (card counts: #slovenija 28, Don't Panic 23, #test 10, #slovenia 3, DM 2). Opened #slovenija through the dropdown (taps): `shown=28 card=28 newest_card=20:45 newest_shown=20:45 open_ms=16.049 windows=1`; the screen shows the 20:41-20:45 messages with emoji (`docs/shots/2026-11-10-2242-slovenija.png`). Neighbours discovery and the card border: Filip / next Argus run.

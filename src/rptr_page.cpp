@@ -2,6 +2,8 @@
 // EST-362: the RPTR interaction model's implementation. Plain arithmetic and text, host-tested.
 #include "rptr_page.h"
 
+#include "ui/age.h"   // EST-367: the one "is this stamp real" rule (neighbour times)
+
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -310,10 +312,12 @@ void ScreenOut::reset() {
 // EST-363's size guard. The loop task's stack is 16,384 B (main.cpp kLoopStackSize); this model is a
 // static (RptrView::screen inside g_rptrViewStore) and must never be copied wholesale again. Sizes
 // measured on the EST-362 ELF's DWARF: ScreenOut 3,812 B, UiRow 98 B, ScreenIn 60 B. The caps leave a
-// little room to grow but stop the kind of growth that forces a copy back onto the stack.
+// little room to grow but stop the kind of growth that forces a copy back onto the stack. EST-367
+// added the neighbour scan pointer and the two clocks ScreenIn needs (the progress and the neighbours'
+// heard times), 16 B on the host: the cap moved with it, and no copy was introduced.
 static_assert(sizeof(ScreenOut) <= 4096, "ScreenOut over 4 KB: check the RPTR stack budget (EST-363)");
 static_assert(sizeof(UiRow) <= 128, "UiRow over 128 B: 26 rows would no longer fit ScreenOut");
-static_assert(sizeof(ScreenIn) <= 128, "ScreenIn over 128 B: it is passed by reference, keep it small");
+static_assert(sizeof(ScreenIn) <= 160, "ScreenIn over 160 B: it is passed by reference, keep it small");
 // The row text buffers the drawing reads; a change here is a change to every row's fit.
 static_assert(sizeof(UiRow::label) == 24, "row label buffer changed");
 static_assert(sizeof(UiRow::value) == 64, "row value buffer changed");
@@ -660,10 +664,23 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
 
     case Page::Neighbours: {
       copyText(out->title, sizeof(out->title), "Neighbours");
-      // EST-366 (rule 5): `discover.neighbors` is not a CommonCLI command (v1.18.0 has no discovery
-      // in the CLI at all) and the page never followed it with the actual read, so nothing came back.
-      // The button now reads the repeater's OWN neighbour table: `neighbors`.
-      addRow(out, "Refresh neighbours", "read the table", Act::Discover);
+      // EST-367: the button now runs the repeater's own discovery (`discover.neighbors`, a real
+      // simple_repeater command in v1.18.0: it sends a zero-hop discover and its table fills over
+      // about 60 s), shows that window as a progress row, then reads the table with `neighbors`.
+      // A repeater that does not know the command falls back to reading its table at once, and the
+      // banner says so.
+      addRow(out, "Scan neighbours", "discover, then read", Act::Discover);
+      const NeighbourScan* scan = in.scan;
+      if (scan != nullptr && scan->phase == NbrScanPhase::Discovering) {
+        char v[32];
+        snprintf(v, sizeof(v), "%d s left", scan->secondsLeft(in.nowMs));
+        addRow(out, "Scanning", v, Act::None);
+        out->rows[out->count - 1].progress = (uint8_t)scan->progressPercent(in.nowMs);
+      } else if (scan != nullptr && scan->phase == NbrScanPhase::Reading) {
+        addRow(out, "Scanning", "reading the table", Act::None);
+        out->rows[out->count - 1].progress = 100;
+      }
+      if (scan != nullptr) copyText(out->banner, sizeof(out->banner), scan->note());
       const NeighbourList* list = in.neighbours;
       if (list == nullptr || !list->valid) {
         addRow(out, "Neighbours", "not read", Act::None);
@@ -674,12 +691,22 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       } else {
         for (int i = 0; i < list->count && out->count < kUiRowCap; ++i) {
           const Neighbour& nb = list->rows[i];
-          char v[48];
+          char v[56];
           char snr[12];
-          char ago[20];
+          const int32_t ago = nb.secsAgo < 0 ? 0 : nb.secsAgo;
           snrText(snr, sizeof(snr), nb.snr4);
-          agoText(ago, sizeof(ago), nb.secsAgo < 0 ? 0 : nb.secsAgo);
-          snprintf(v, sizeof(v), "SNR %s, %s", snr, ago);
+          // "heard ago as a time" (Filip's rule): the reply says how many seconds ago, so the page
+          // shows the clock time when the clock is real and only falls back to an age otherwise.
+          const uint32_t heardAt = in.nowWall - (uint32_t)ago;
+          if (in.nowReal && in.nowWall > (uint32_t)ago && om::ui::stampIsReal(heardAt)) {
+            char at[16];
+            clockText(at, sizeof(at), heardAt);
+            snprintf(v, sizeof(v), "SNR %s, %s", snr, at);
+          } else {
+            char txt[20];
+            agoText(txt, sizeof(txt), ago);
+            snprintf(v, sizeof(v), "SNR %s, %s", snr, txt);
+          }
           addRow(out, nb.name[0] ? nb.name : "?", v, Act::None);
         }
       }

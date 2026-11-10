@@ -12,6 +12,7 @@
 #include <lgfx/v1/panel/Panel_NV3031B.hpp>
 
 #include "fonts.h"
+#include "frame_metrics.h"   // the one luma rule (EST-355): the change dip's brightness numbers
 #include "gps_mode.h"
 #include "timekeeper.h"
 #include "ui/layout.h"   // clampTouchToScreen: the same edge rule the hit tests use
@@ -231,9 +232,11 @@ constexpr uint16_t kProbeGold = 0xED89;   // #e8b04f in RGB565, the theme colour
 bool s_frameNeedsSwap = false;            // set from the boot probe
 omFrameOverlay s_frameOverlay = nullptr;  // the toast, drawn last before every push (EST-344)
 
-// EST-353: the screen-change push. Armed by the caller, consumed by the next outer push, which is
-// made with the display off and prints its own duration.
-bool s_screenChange = false;
+// EST-355: a completed frame whose push the caller will perform itself (omFrameFlush). The hold is
+// one shot: it applies to the next outer omFrameEnd and is cleared there. `s_framePending` says a
+// frame is composed and waiting, so a second compose cannot silently replace it.
+bool s_holdPush = false;
+bool s_framePending = false;
 uint16_t s_pushCount = 0;
 uint32_t s_pushUs = 0;
 
@@ -241,7 +244,6 @@ uint32_t s_pushUs = 0;
 
 void omFrameSetOverlay(omFrameOverlay fn) { s_frameOverlay = fn; }
 
-void omFrameScreenChange() { s_screenChange = true; }
 uint16_t omFramePushCount() { return s_pushCount; }
 uint32_t omFrameLastPushUs() { return s_pushUs; }
 
@@ -319,6 +321,33 @@ bool omFrameBegin() {
   return s_frame.getBuffer() != nullptr;
 }
 
+namespace {
+
+// The one push of a finished frame. Five slices of 48 rows: 320 x 48 x 2 = 30,720 B stays under the
+// SPI peripheral's `SPI_MS_DATA_BITLEN` cap of 0x3FFFF bits = 32,767 B per DMA transfer (a 64-row
+// slice would be 40,960 B and split into two transfers with a 1 ms wait between them,
+// `Bus_SPI::writeBytes`), and 240 = 5 x 48 exactly. Each slice is one contiguous DMA (the sprite is
+// pushed raw, `no_convert`). 153,600 B of pixels at 4 bits per clock and 75 MHz is 4.10 ms of wire
+// time (see cfg.freq_write above); omFrameLastPushUs() is what the bus really does.
+uint32_t pushFrame() {
+  const uint16_t* px = (const uint16_t*)s_frame.getBuffer();
+  // The panel is configured with setSwapBytes(true) (it wants swapped bytes on the wire). If the
+  // sprite stored swapped words too, the panel's second swap turns gold green: compensate only when
+  // the boot probe says the two orders differ.
+  if (s_frameNeedsSwap) s_display.setSwapBytes(false);
+  const uint32_t startUs = micros();
+  for (int yy = 0; yy < 240; yy += 48) {
+    s_display.pushImage(0, yy, 320, 48, px + (size_t)yy * 320);
+  }
+  const uint32_t pushUs = micros() - startUs;
+  if (s_frameNeedsSwap) s_display.setSwapBytes(true);
+  s_pushUs = pushUs;
+  ++s_pushCount;
+  return pushUs;
+}
+
+}  // namespace
+
 void omFrameEnd() {
   if (s_frameDepth == 0) return;
   if (--s_frameDepth > 0) return;          // an inner view: the outer one still owns the push
@@ -327,32 +356,47 @@ void omFrameEnd() {
   // This is the one point every redraw path passes through, so a later frame cannot erase it
   // (EST-344). It runs only on the outer frame, after a complete screen.
   if (s_frameOverlay != nullptr) s_frameOverlay(&s_frame, (uint32_t)millis());
-  const uint16_t* px = (const uint16_t*)s_frame.getBuffer();
-  // EST-353: a whole-screen change is pushed with the display off, then the display is turned on
-  // again on a complete frame. See board.h for why the diagonal appears and why a faster push
-  // cannot remove it.
-  const bool screenChange = s_screenChange;
-  s_screenChange = false;
-  if (screenChange) panelDisplay(false);
-  // The panel is configured with setSwapBytes(true) (it wants swapped bytes on the wire). If the
-  // sprite stored swapped words too, the panel's second swap turns gold green: compensate only when
-  // the boot probe says the two orders differ.
-  if (s_frameNeedsSwap) s_display.setSwapBytes(false);
-  // EST-353: slices of 48 rows. 320 x 48 x 2 = 30,720 B, the largest slice that stays under the
-  // SPI peripheral's 0x3FFFF-bit (32,767 B) DMA cap, and 240 = 5 x 48 exactly: five transfers
-  // instead of the fifteen 16-row ones, so the push (and the blank) is as short as the bus allows.
-  // 153,600 B of pixels at 4 bits per clock and 75 MHz is 4.10 ms of wire time (see board.cpp's
-  // cfg.freq_write); the log line says what the bus really does.
-  const uint32_t startUs = micros();
-  for (int yy = 0; yy < 240; yy += 48) {
-    s_display.pushImage(0, yy, 320, 48, px + (size_t)yy * 320);
+  // EST-355: the screen-change transition holds this one push, measures the composed frame and makes
+  // the push itself (omFrameFlush) with the light off. The hold is one shot, so any other redraw
+  // during the transition still pushes normally.
+  if (s_holdPush) {
+    s_holdPush = false;
+    s_framePending = true;
+    return;
   }
-  const uint32_t pushUs = micros() - startUs;
-  if (s_frameNeedsSwap) s_display.setSwapBytes(true);
-  if (screenChange) panelDisplay(true);
-  s_pushUs = pushUs;
-  ++s_pushCount;
-  if (screenChange) Serial.printf("[ui] frame push %lu us\n", (unsigned long)pushUs);
+  (void)pushFrame();
+}
+
+void omFrameHoldPush(bool hold) { s_holdPush = hold; }
+
+bool omFramePending() { return s_framePending; }
+
+bool omFrameFlush() {
+  if (!s_framePending || s_frame.getBuffer() == nullptr) return false;
+  s_framePending = false;
+  (void)pushFrame();
+  return true;
+}
+
+uint8_t omFrameMeanLuma(int step) {
+  if (s_frame.getBuffer() == nullptr) return 0;
+  if (step < 1) step = 1;
+  const int w = (int)s_frame.width();
+  const int h = (int)s_frame.height();
+  const uint16_t* px = (const uint16_t*)s_frame.getBuffer();
+  uint32_t sum = 0;
+  uint32_t count = 0;
+  // The same native-value read the screenshot uses: the sprite stores the panel's byte order, and
+  // brightness must not depend on which way this panel happens to keep colour.
+  for (int y = step / 2; y < h; y += step) {
+    const uint16_t* row = px + (size_t)y * (size_t)w;
+    for (int x = step / 2; x < w; x += step) {
+      const uint16_t stored = row[x];
+      sum += lumaFromRgb565(s_frameNeedsSwap ? ui::rgb565FrameRead(stored) : stored);
+      ++count;
+    }
+  }
+  return meanLumaFromSum(sum, count);
 }
 
 bool omTouch(uint16_t& x, uint16_t& y) {

@@ -58,6 +58,10 @@ Preferences s_prefs;
 wifi::SavedStore s_saved;
 wifi::ScanList s_scan;
 wifi::Machine s_machine;
+// EST-355: the scan a user asked for, and the driver's permission to run it. The request and the
+// driver call are separated because the driver refuses a scan for a moment after the switch goes on
+// (the device evidence: the first scan failed, the second found 12 networks).
+wifi::ScanGate s_scanGate;
 
 bool s_enabled = false;        // the user's switch, persisted in NVS
 bool s_driverUp = false;
@@ -222,6 +226,7 @@ void startConnect(const char* ssid, const char* password, bool autoAttempt, uint
   s_autoActive = autoAttempt;
   stopNtp();
   s_ntpDone = false;
+  s_scanGate.clear();   // EST-355: a pending scan request is not serviced while the station connects
 
   // begin() is the non-blocking call: it hands the credentials to the supplicant and returns; the
   // loop polls WiFi.status() and the model's timeout. Nothing here waits for an association.
@@ -272,6 +277,9 @@ void startDriver(uint32_t nowMs) {
   }
   WiFi.setSleep(true);            // modem sleep, the default; the LoRa radio is unaffected
   s_driverUp = true;
+  // The station is up as far as we are concerned; a scan asked for now waits for kScanReadyMs
+  // (wifi_model.h) so the driver does not refuse it while its own bring-up is still running.
+  s_scanGate.driverUp(nowMs);
 
   s_scan.clear();
   s_autoNext = 0;
@@ -298,6 +306,7 @@ void stopDriver() {
   stopNtp();
   clearPendingPass();
   s_autoActive = false;
+  s_scanGate.driverDown();
   WiFi.disconnect(true, false);
   WiFi.mode(WIFI_OFF);
   s_driverUp = false;
@@ -319,6 +328,7 @@ void wifiBegin() {
   s_enabled = s_prefs.getBool("on", false);
   loadStore();
   s_machine.reset();
+  s_scanGate.reset();
   s_serial = 1;
   // The radio itself is not touched here: the ESP32 boots with Wi-Fi off, and a switch that is off
   // must not allocate the driver at all. The first wifiLoop() applies a saved "on".
@@ -349,16 +359,13 @@ bool wifiStartScan() {
   if (s_machine.connecting()) return false;  // one operation at a time; the connect has its timeout
   s_scan.clear();
   WiFi.scanDelete();
-  const int16_t started = WiFi.scanNetworks(true, false);
-  if (started == WIFI_SCAN_FAILED) {
-    s_machine.failed("scan failed", millis());
-    bump();
-    Serial.println("[wifi] scan could not start");
-    return false;
-  }
+  // EST-355: the request is recorded, not started. wifiLoop() asks the driver as soon as it is ready
+  // (kScanReadyMs after the switch went on, and retried if the driver refuses) so the switch-on path
+  // can never show "Failed: scan failed" for a scan the driver was not ready for yet.
+  s_scanGate.request(millis());
   s_machine.beginScan(millis());
   bump();
-  Serial.println("[wifi] scan started");
+  Serial.println("[wifi] scan requested");
   return true;
 }
 
@@ -426,6 +433,28 @@ void wifiLoop() {
           break;
 
         case wifi::Phase::Scanning: {
+          // EST-355: the request and the driver call are separate. `pending` means the driver has not
+          // accepted a start yet: wait until it is ready, and retry a refusal instead of failing the
+          // page. Only the last attempt becomes Failed("scan failed").
+          if (s_scanGate.pending()) {
+            if (!s_scanGate.due(nowMs)) break;
+            const int16_t started = WiFi.scanNetworks(true, false);
+            if (started == WIFI_SCAN_FAILED) {
+              if (s_scanGate.retry(nowMs)) {
+                Serial.printf("[wifi] scan start refused (try %d of %d), retrying in %lu ms\n",
+                              s_scanGate.attempts(), wifi::kScanAttempts,
+                              (unsigned long)wifi::kScanRetryMs);
+              } else {
+                s_machine.failed("scan failed", nowMs);
+                bump();
+                Serial.println("[wifi] scan failed: the driver refused every try");
+              }
+            } else {
+              s_scanGate.started();
+              Serial.println("[wifi] scan started");
+            }
+            break;
+          }
           const int16_t n = WiFi.scanComplete();
           if (n >= 0) {
             for (int16_t i = 0; i < n; ++i) {
@@ -439,10 +468,18 @@ void wifiLoop() {
             bump();
             Serial.printf("[wifi] scan done: %d visible, %d rows\n", (int)n, s_scan.count());
           } else if (n == WIFI_SCAN_FAILED) {
+            // A started scan the driver aborted: the same retry rule, so one bad moment does not
+            // leave the page on "Failed".
             WiFi.scanDelete();
-            s_machine.failed("scan failed", nowMs);
-            bump();
-            Serial.println("[wifi] scan failed");
+            if (s_scanGate.retry(nowMs)) {
+              Serial.printf("[wifi] scan aborted (try %d of %d), retrying in %lu ms\n",
+                            s_scanGate.attempts(), wifi::kScanAttempts,
+                            (unsigned long)wifi::kScanRetryMs);
+            } else {
+              s_machine.failed("scan failed", nowMs);
+              bump();
+              Serial.println("[wifi] scan failed");
+            }
           }
           break;
         }

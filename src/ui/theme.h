@@ -81,6 +81,37 @@ constexpr int16_t kRowH       = 30;
 constexpr int16_t kStatusPadX = 6;
 constexpr int16_t kStatusGap  = 6;
 
+// ----------------------------------------------------------------------- the screen-change dip
+// EST-355. A tab switch used to be one push into a panel that scans the same RAM it is being
+// written to, so the scan pointer and the write pointer cross along a diagonal (board.h has the
+// whole mechanism, EST-353). DISPOFF/DISPON around the push did not hide it on this panel (Filip,
+// 2026-11-10 ~16:30: "it is still visible on the switches"), so the light itself is taken down for
+// the push: nothing the panel scans while the frame is being written is visible. The three
+// durations are here, not in board.cpp, so they can be tuned after Filip looks at the glass.
+//
+// Only a change whose old and new frames differ strongly in brightness gets the dip: the tear is
+// there on every push, but it is SEEN only when the two frames differ strongly in brightness (Filip,
+// 16:35: "the map has a bright background colour making it visible; other pages have the same
+// coloured background"). An instant switch keeps its push and no blink.
+constexpr uint32_t kChangeOutMs = 40;     // light down: the wake path's gamma curve (fade.h), fast
+// One full panel refresh at the frame rate the panel is configured for (~60 Hz -> 16.7 ms). The L2
+// wires no TE line (board.h), so the frame phase cannot be read: this is the ~60 Hz assumption, not
+// a measurement. It is the pause between "the push has ended" and "the light may come up", so the
+// panel has scanned the new frame at least once before anything is lit.
+constexpr uint32_t kChangeSettleMs = 17;
+constexpr uint32_t kChangeInMs = 60;      // light up: the same curve, slower so it reads as a fade
+// The dip rule. Luma is 0..255 (frame_metrics.h); 32 is about an eighth of the range, far above the
+// few units that separate two dark pages (a gold label, a toast) and far below what one of the
+// map's topo tiles adds.
+constexpr uint8_t kChangeLumaDelta = 32;
+// The brightness sample grid: every 15th pixel in both axes = 21 x 16 = 336 samples per frame. Cheap
+// enough to take twice per change, dense enough that no page can hide its background between them.
+constexpr int16_t kChangeLumaStep = 15;
+// How long after a change ends a finger that is already down is swallowed (touch is not read while
+// the change runs, so a finger that lands inside it must lift before it can tap, the same rule the
+// wake gate applies).
+constexpr uint32_t kChangeGateMs = 40;
+
 // The new top bar (EST-337): time on the left, then from the right edge the gear, battery, GPS and
 // the status icons that appear only when they are on. The clock is always five mono glyphs ("08:53"
 // or "--:--"), so its width is fixed by the mono advance (6 px) and the fault mark's slot does not

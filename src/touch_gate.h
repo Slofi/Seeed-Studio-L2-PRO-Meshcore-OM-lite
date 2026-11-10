@@ -22,7 +22,9 @@ class TouchGate {
   static constexpr uint32_t kGateMs = 300;
 
   // The screen woke at nowMs; downAtWake says a finger was already on the glass at that moment.
-  void onWake(uint32_t nowMs, bool downAtWake);
+  // gateMs is how long a NEW press is refused; the wake path uses kGateMs and a screen change
+  // (EST-355) passes its own short window, so both use this one rule.
+  void onWake(uint32_t nowMs, bool downAtWake, uint32_t gateMs = kGateMs);
 
   // One sample per loop. Returns true when this sample may be treated as touch input; the caller
   // keeps its own press/release edge detection on top. `down` is the raw panel state.
@@ -38,6 +40,7 @@ class TouchGate {
   bool latch_ = false;      // this press must lift before anything counts
   bool prevDown_ = false;
   uint32_t wakeMs_ = 0;
+  uint32_t gateMs_ = kGateMs;
 };
 
 // Tap-away for overlays (EST-339). Filip: "tapping away from the keyboard should hide it. It does,

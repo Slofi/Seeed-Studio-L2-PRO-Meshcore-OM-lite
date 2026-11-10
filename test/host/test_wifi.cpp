@@ -10,7 +10,10 @@
 //     connected, failed), the two timeouts (with millis() wrap), and that a scan never turns into a
 //     connection by itself;
 //   * the OMCMD1 `wifi` command: status / scan / on / off are accepted, a missing or unknown
-//     subcommand and extra arguments are refused, and no word can ask for a stored password.
+//     subcommand and extra arguments are refused, and no word can ask for a stored password;
+//   * EST-355: the ORDER of a scan after the switch goes on, which the device got wrong (the first
+//     scan failed while the driver's station was still coming up): the driver is not asked at once,
+//     a refusal is retried (not turned into Failed), and only the last of three tries fails.
 #include <stdio.h>
 #include <string.h>
 
@@ -138,6 +141,72 @@ static void testScanList() {
     l.addOrMerge(ssid, -20 - i, true);
   }
   check(l.count() == kMaxScan, "the scan list is bounded");
+}
+
+// EST-355: the ORDER of a scan after the switch goes on. The device showed the first scan failing
+// with "scan failed" and the second finding 12 networks, so the request must wait for the driver and a
+// refusal must be retried instead of turned into Failed.
+static void testScanGate() {
+  ScanGate g;
+  g.reset();
+  check(!g.pending(), "no scan is pending at boot");
+  check(!g.due(0), "nothing is due without a request");
+
+  // The switch goes on at t = 1000 and the user taps Scan on the SAME pass: the driver's station is
+  // still coming up, so the driver is not asked yet.
+  g.driverUp(1000);
+  g.request(1000);
+  check(g.pending(), "the request is remembered");
+  check(!g.due(1000), "the driver is not asked at once after the switch");
+  check(!g.due(1000 + kScanReadyMs - 1), "not one ms before it is ready");
+  check(g.due(1000 + kScanReadyMs), "asked once the station had kScanReadyMs");
+
+  // The first try is refused (what the device saw). It retries, it does not fail.
+  check(g.retry(1250), "a refusal is retried");
+  check(g.pending(), "still pending after a refusal");
+  check(!g.due(1250), "not again in the same pass");
+  check(!g.due(1250 + kScanRetryMs - 1), "the retry waits kScanRetryMs");
+  check(g.due(1250 + kScanRetryMs), "the retry is due after kScanRetryMs");
+
+  // The second try is accepted: the request is satisfied and the machine keeps polling the driver.
+  g.started();
+  check(!g.pending(), "an accepted start satisfies the request");
+  check(!g.due(9999), "and nothing is due afterwards");
+
+  // A scan asked for long after the switch goes straight to the driver: no wait.
+  g.request(60000);
+  check(g.due(60000), "a scan asked for later starts at once");
+
+  // Every try refused: the attempts run out and only then does the caller say Failed.
+  ScanGate h;
+  h.reset();
+  h.driverUp(0);
+  h.request(0);
+  check(h.due(kScanReadyMs), "first attempt due");
+  check(h.retry(kScanReadyMs), "attempt 1 refused, retried");
+  check(h.due(kScanReadyMs + kScanRetryMs), "second attempt due");
+  check(h.retry(kScanReadyMs + kScanRetryMs), "attempt 2 refused, retried");
+  check(h.due(kScanReadyMs + 2 * kScanRetryMs), "third attempt due");
+  check(!h.retry(kScanReadyMs + 2 * kScanRetryMs), "attempt 3 refused: no more tries");
+  check(!h.pending(), "and the request is dropped so the page can say Failed");
+
+  // The switch going off forgets the request; a refused start is never an error on its own.
+  ScanGate k;
+  k.reset();
+  k.driverUp(10);
+  k.request(10);
+  k.driverDown();
+  check(!k.pending(), "the switch going off drops a pending request");
+  check(!k.due(10000), "and nothing is due without a driver");
+
+  // millis() wrap: the wait is a subtraction, so it survives the rollover.
+  ScanGate w;
+  w.reset();
+  const uint32_t beforeWrap = 0xFFFFFF00u;
+  w.driverUp(beforeWrap);
+  w.request(beforeWrap);
+  check(!w.due(beforeWrap), "not ready across the wrap either");
+  check(w.due(beforeWrap + kScanReadyMs), "ready after the wrap (unsigned subtraction)");
 }
 
 static void testMachineTransitions() {
@@ -351,12 +420,14 @@ int main() {
   testSavedStore();
   testScanList();
   testMachineTransitions();
+  testScanGate();
   testPasswordKeyboard();
   testWifiCommand();
   if (g_fail) {
-    printf("est354: %d failure(s)\n", g_fail);
+    printf("est354/355: %d failure(s)\n", g_fail);
     return 1;
   }
-  printf("est354: saved networks, scan list, Wi-Fi state machine and the wifi command ok\n");
+  printf("est354/355: saved networks, scan list, Wi-Fi state machine, the scan's order and the "
+         "wifi command ok\n");
   return 0;
 }

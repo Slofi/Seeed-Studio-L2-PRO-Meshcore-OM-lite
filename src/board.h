@@ -139,23 +139,32 @@ void omFrameEnd();
 using omFrameOverlay = void (*)(lgfx::LovyanGFX* d, uint32_t nowMs);
 void omFrameSetOverlay(omFrameOverlay fn);
 
-// --- EST-353: a screen change is the one frame that is pushed into a display that is off ---
+// --- EST-353/EST-355: why the diagonal is there, and what hides it ---
 // Every push goes into the panel's RAM while the panel scans that same RAM out. The NV3031B scans in
 // its native PORTRAIT memory order (MADCTL MV is set for our landscape rotation), i.e. down our
 // frame's columns, while the push streams down the frame's rows: the two pointers cross along a
 // diagonal, and everything scanned before the write arrives keeps the OLD pixels for that frame.
 // A faster push cannot remove that line, it only changes its slope, and the panel wires no TE line
-// (the L2 facts in board.h and the panel config have no TE pin, and the bus has no MISO), so the
-// frame phase cannot be read. The one moment the panel is certainly not scanning is DISPOFF. So a
-// caller that replaces the WHOLE screen arms this: the next push is made with the display off and
-// the display is turned on again on a frame that is complete (the same rule the wake path uses,
-// EST-336). An ordinary redraw (a toast, a pan, a scroll) does not arm it: its content is the same
-// image except for the part that moved, so the same crossing is invisible, and blanking every push
-// would make the panel flash continuously.
+// (the L2 facts above and the panel config have no TE pin, and the bus has no MISO), so the frame
+// phase cannot be read.
 //
-// It also makes the push measurable: the armed push prints one line, `[ui] frame push N us`, and
-// omFramePushCount() lets the caller prove that a screen change really was ONE push.
-void omFrameScreenChange();
+// EST-353 tried DISPOFF/DISPON around the push. On this panel the tear was still visible afterwards
+// (Filip, 2026-11-10 ~16:30), so EST-355 does what cannot depend on the panel's timing instead: the
+// BACKLIGHT is taken down for the push (screen_change.h drives it from the loop, out/settle/in in
+// theme.h). The display itself stays ON: DISPOFF/DISPON are not sent any more.
+//
+// Two calls make that possible without duplicating the push path: omFrameHoldPush(true) composes a
+// frame but leaves its push to omFrameFlush(), so the caller can measure the composed frame first
+// (omFrameMeanLuma, the dip rule in frame_metrics.h) and push with the light already off. An ordinary
+// redraw (a toast, a pan, a scroll, a key) never holds its push: its pixels are the same image except
+// for the part that moved, so the crossing is invisible there and dipping every push would make the
+// panel flash continuously.
+void omFrameHoldPush(bool hold);
+bool omFramePending();     // a frame is composed and its push has not happened yet
+bool omFrameFlush();       // push the held frame now; true when one was pending
+// The mean perceived brightness of the current frame, 0..255, from a grid of samples every `step`
+// pixels in both axes (theme.h kChangeLumaStep). Costs a few hundred PSRAM reads.
+uint8_t omFrameMeanLuma(int step);
 uint16_t omFramePushCount();
 uint32_t omFrameLastPushUs();
 // Touch always reads the real panel, never the frame buffer.

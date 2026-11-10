@@ -24,8 +24,11 @@ void wifiLoop();           // service the switch, scan, connect and NTP; never b
 void wifiSetEnabled(bool on);
 bool wifiIsEnabled();
 
-// Starts an asynchronous scan. True when a scan is running (or one was already running). A completed
-// scan's list is in wifiScanCount()/wifiScanAt(), strongest first.
+// Asks for an asynchronous scan. True when the request is accepted (or a scan is already running); a
+// completed scan's list is in wifiScanCount()/wifiScanAt(), strongest first. EST-355: the request is
+// recorded and the driver is asked from wifiLoop() once it is ready (a moment after the switch goes
+// on) with retries, so a scan asked for right after switching Wi-Fi on is not failed by the driver's
+// own bring-up.
 bool wifiStartScan();
 bool wifiIsScanning();
 int wifiScanCount();

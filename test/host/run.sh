@@ -39,7 +39,8 @@ BIN18="$(mktemp /tmp/om-lite-settings.XXXXXX)"
 BIN19="$(mktemp /tmp/om-lite-history.XXXXXX)"
 BIN20="$(mktemp /tmp/om-lite-est351.XXXXXX)"
 BIN21="$(mktemp /tmp/om-lite-wifi.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21"' EXIT
+BIN22="$(mktemp /tmp/om-lite-est355.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -126,8 +127,15 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est351.cpp \
 # EST-354: the saved Wi-Fi network list (add, replace, forget, five at most), the scan list, the
 # asynchronous state machine (off / scanning / connecting / connected / failed, both timeouts and
 # millis() wrap) and the `wifi` USB command (no word reads or carries a password).
+# EST-355 adds the scan's order: a scan asked for right after the switch goes on waits for the driver
+# and a refusal is retried, so the switch-on path cannot show "Failed: scan failed".
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_wifi.cpp \
   ../../src/usb_cmd_logic.cpp ../../src/ui/chat_layout.cpp -o "$BIN21"
+# EST-355: the screen-change backlight transition (fade out -> one push -> settle -> fade in), the
+# coalescing of a second change during the dip, the touches consumed by it, and the dip rule itself
+# (the map on either side, or a brightness difference above the threshold).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est355.cpp \
+  ../../src/screen_change.cpp ../../src/fade.cpp ../../src/touch_gate.cpp -o "$BIN22"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -147,3 +155,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_wifi.cpp \
 "$BIN19"
 "$BIN20"
 "$BIN21"
+"$BIN22"

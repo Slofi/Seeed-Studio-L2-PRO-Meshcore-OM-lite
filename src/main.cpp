@@ -17,10 +17,12 @@
 #include "mesh_link.h"
 #include "channels.h"
 #include "fade.h"
+#include "frame_metrics.h"
 #include "history_store.h"
 #include "ota.h"
 #include "radio.h"
 #include "radio_fault.h"
+#include "screen_change.h"
 #include "target.h"
 #include "timekeeper.h"
 #include "touch_gate.h"
@@ -241,6 +243,18 @@ static bool g_spent = false;
 // the non-blocking ramp loop() ticks, one I2C write per tick. The level is reset to kScreenBrightness
 // after boardBegin().
 static om::FadeRamp g_fade;
+
+// EST-355: a full screen change (a tab, or any path that replaces the whole screen) either pushes at
+// once or takes the light down for the push, when the old and new frames differ strongly in
+// brightness. The machine is screen_change.h; g_change is the one instance. The touches are the wake
+// path's own TouchGate: no tap is read while a change runs, and when it ends the gate is armed with
+// the change's short window, so a finger that is already down must lift first.
+static om::ScreenChange g_change;
+static uint8_t g_changeOldLuma = 0;     // the visible frame's mean brightness when the change began
+// The mean brightness of each tab's last frame, measured from its own pixels when it was pushed. The
+// dip decision compares the frame on the glass with the last frame of the tab being entered.
+static uint8_t g_tabLuma[4] = {0, 0, 0, 0};
+static bool g_tabLumaKnown[4] = {false, false, false, false};
 
 // Nodes tab state. The rows are copied out of mesh_link's contact table, never sample data.
 static om::ui::NodeItem g_nodes[64];
@@ -1193,8 +1207,10 @@ static bool chatOpenDmFor(const char* name) {
   for (int i = g_channelCount; i < g_chatCount; ++i) {
     if (g_chats[i].dm && g_chats[i].thread == thread) {
       chatSelectChat(i);
-      g_tab = 1;
-      drawChat();
+      // EST-355: Nodes -> Chat is a full screen change like any tab switch (both pages are dark, so
+      // the dip rule keeps it instant, but it goes through the one path and logs its line).
+      if (g_tab != 1) showTab(1);
+      else drawChat();
       return true;
     }
   }
@@ -3006,16 +3022,126 @@ void setup() {
   if (!om::meshHistoryBegin(g_sdOk)) Serial.println("[hist] store not ready (no SD, no SPIFFS)");
 #endif
   drawHome();
+  // EST-355: the first screen is on the glass now, so its brightness is known before the first
+  // change is asked for.
+  g_tabLuma[0] = om::omFrameMeanLuma(om::ui::kChangeLumaStep);
+  g_tabLumaKnown[0] = true;
+}
+
+// EST-355: one line per screen change, the numbers the ticket asks for. `out` is the fade-out the
+// change really spent, `push` the measured frame push, `settle` the one panel frame waited after it,
+// `in` the fade-in.
+static void logScreenChange() {
+  Serial.printf("[ui] change: out %lu ms, push %lu us, settle %lu ms, in %lu ms\n",
+                (unsigned long)g_change.outMs(), (unsigned long)g_change.pushUs(),
+                (unsigned long)g_change.settleMs(), (unsigned long)g_change.inMs());
+}
+
+// Ask for a screen change from fromTab to toTab. The dip decision is made here, from the frame that is
+// on the glass (its pixels, sampled now) and the last frame measured for the tab being entered, plus
+// the map rule: the map's tiles are the one bright background this firmware has, so a switch to or
+// from it always dips (frame_metrics.h).
+static void beginScreenChange(int fromTab, int toTab) {
+  const uint32_t now = millis();
+  g_changeOldLuma = om::omFrameMeanLuma(om::ui::kChangeLumaStep);
+  const bool mapInvolved = (fromTab == 2 || toTab == 2);
+  const bool measured = g_tabLumaKnown[toTab];
+  const uint8_t newLuma = measured ? g_tabLuma[toTab] : 0;
+  const bool dip = om::screenChangeNeedsDip(g_changeOldLuma, newLuma, mapInvolved,
+                                            om::ui::kChangeLumaDelta);
+  const int from = g_fade.level();
+  g_fade.reset(from);   // a wake ramp must not fight the change for the light
+  if (!g_change.request(now, dip, from, (int)g_setBrightness)) {
+    Serial.printf("[ui] change coalesced (luma %u -> %u): one transition, one push\n",
+                  (unsigned)g_changeOldLuma, (unsigned)newLuma);
+    return;
+  }
+  Serial.printf("[ui] change %s -> %s: luma %u -> %u (%s), %s\n",
+                om::ui::tabLabel((om::ui::Tab)fromTab), om::ui::tabLabel((om::ui::Tab)toTab),
+                (unsigned)g_changeOldLuma, (unsigned)newLuma, measured ? "measured" : "unknown",
+                dip ? "dip" : "instant");
+}
+
+// The transition, advanced once per loop pass. push = compose the target and push it once; done = the
+// light is back up. Between the passes the mesh, the radio and the GPS run as usual.
+static void screenChangeLoop() {
+  if (!g_change.active()) return;
+  const om::ScreenChange::Action action = g_change.tick(millis());
+  const int level = g_change.takeLevel();
+  if (level >= 0) om::boardSetBrightness((uint8_t)level);
+
+  if (action == om::ScreenChange::Action::Push) {
+    const uint16_t pushesBefore = om::omFramePushCount();
+    // Compose without pushing, so the composed frame can be measured before anything is shown.
+    // The compose happens with the light already out, so a slow screen (the map decodes tiles) is
+    // dark for its own duration too: say how long, so the pause can be judged on the glass.
+    const uint32_t composeStart = millis();
+    om::omFrameHoldPush(true);
+    redrawMainTab();
+    om::omFrameHoldPush(false);
+    const uint32_t composeMs = millis() - composeStart;
+    if (composeMs >= 5) {
+      Serial.printf("[ui] change: composed in %lu ms (inside the dark)\n",
+                    (unsigned long)composeMs);
+    }
+    uint8_t newLuma = 0;
+    bool dark = g_change.dipped();
+    if (om::omFramePending()) {
+      newLuma = om::omFrameMeanLuma(om::ui::kChangeLumaStep);
+      // The late check. The plan said "instant" from the target tab's LAST frame; if the frame just
+      // composed is much brighter than the one on the glass (a page seen for the first time), the
+      // light is still up and would show the tear. Cut it now: a hard cut instead of a 40 ms fade is
+      // the honest repair, and the log says out 0 ms because that is what was spent.
+      if (!dark && om::screenChangeNeedsDip(g_changeOldLuma, newLuma, false,
+                                            om::ui::kChangeLumaDelta)) {
+        om::boardSetBrightness(0);
+        dark = true;
+        Serial.printf("[ui] change: late dip (composed luma %u, glass %u)\n", (unsigned)newLuma,
+                      (unsigned)g_changeOldLuma);
+      }
+      om::omFrameFlush();
+    }
+    const int pushes = (int)(uint16_t)(om::omFramePushCount() - pushesBefore);
+    if (pushes != 1) {
+      Serial.printf("[ui] tab %s: %d frame pushes, not 1\n",
+                    om::ui::tabLabel((om::ui::Tab)g_tab), pushes);
+    }
+    // What this screen really looks like, for the next change's comparison.
+    g_tabLuma[g_tab] = newLuma;
+    g_tabLumaKnown[g_tab] = true;
+    if (g_change.pushed(millis(), om::omFrameLastPushUs(), dark)) logScreenChange();
+  } else if (action == om::ScreenChange::Action::Done) {
+    logScreenChange();
+  }
+
+  if (!g_change.active()) {
+    // The change is over: the light is back where the wake ramp keeps it, and a finger that is down
+    // right now must lift before it can tap anything on the new screen (the wake path's own rule,
+    // with the change's window). Reading the panel here is what tells that gate whether to latch.
+    g_fade.reset((int)g_setBrightness);
+    uint16_t tx = 0, ty = 0;
+    const bool downNow = om::omTouch(tx, ty);
+    g_touchGate.onWake(millis(), downNow, om::ui::kChangeGateMs);
+  }
 }
 
 // One tab switch for the new shell. The old screens keep their own tap paths for now; both end here
 // or in drawHome(), so returning to Nodes always redraws the new chrome.
+//
+// EST-355: the switch itself is NOT drawn here any more. It is handed to the screen-change machine
+// (screen_change.h) and performed by screenChangeLoop() from loop(): with the light taken down first
+// when the two frames differ strongly in brightness, so the panel never shows the diagonal of a
+// half-written frame (board.h). The caller keeps its state resets because g_tab is what the next
+// drawings use, and no tap can arrive while the change runs.
 static void showTab(int tab) {
   if (tab < 0 || tab >= 4) return;
   if (tab == g_tab) {
-    if (tab == 0) drawHome();
+    // A plain redraw of the screen that is already up. Not while a change owns the light and the
+    // frame (EST-355): it would push into a light that is on its way down or up.
+    if (tab == 0 && !g_change.active()) drawHome();
     return;
   }
+  const int fromTab = g_tab;
   g_tab = tab;
   g_bubMenuSeq = 0;
   g_replySeq = 0;
@@ -3028,21 +3154,7 @@ static void showTab(int tab) {
     g_rptrDetail = true;
   }
   Serial.printf("[tab] %s\n", om::ui::tabLabel((om::ui::Tab)g_tab));
-  // EST-353: a tab switch replaces the whole screen, so its one push is made with the display off
-  // (board.h says why) and timed. The count is the evidence for the ticket's question: a switch
-  // must be exactly ONE frame push, and a second one (a screen that draws twice) is named here
-  // instead of hiding in the log.
-  const uint16_t pushesBefore = om::omFramePushCount();
-  om::omFrameScreenChange();
-  if (tab == 0) drawHome();
-  else if (tab == 1) drawChat();
-  else if (tab == 2) drawMapTab();
-  else drawRptrTab();
-  const int pushes = (int)(uint16_t)(om::omFramePushCount() - pushesBefore);
-  if (pushes != 1) {
-    Serial.printf("[ui] tab %s: %d frame pushes, not 1\n",
-                  om::ui::tabLabel((om::ui::Tab)g_tab), pushes);
-  }
+  beginScreenChange(fromTab, tab);
 }
 
 // A short message on top of the current frame, with its own deadline. The toast never answers a
@@ -3338,6 +3450,10 @@ static void handleTap(int x, int y, bool longPress) {
 // The once-a-minute clock repaint uses it too, so a tab, a settings page, the picker, the keyboard
 // sheet and the chat selector all survive a wake with their own content.
 static void redrawCurrentScreen() {
+  // EST-355: a screen change owns the light and the frame until it finishes (screenChangeLoop draws
+  // the target itself). An in-page redraw in the middle of it would push a frame into a light that is
+  // on its way down or up, so it is dropped here and happens on the next event instead.
+  if (g_change.active()) return;
   if (g_settings) {
     drawSettings();
     return;
@@ -3391,7 +3507,10 @@ void loop() {
         g_drag = false;
         g_acted = false;
         sleepPending = true;
-        const int fromLevel = g_fade.level();
+        // EST-355: a screen change that is still running is abandoned; the fade-out below owns the
+        // light from here and starts at whatever level the change had really reached.
+        const int fromLevel = g_change.active() ? g_change.level() : g_fade.level();
+        g_change.cancel();
         g_fade.start(millis(), fromLevel, 0, om::kFadeOutMs);
         Serial.printf("[wake] screen off (fade out %lums from %d)\n",
                       (unsigned long)om::kFadeOutMs, fromLevel);
@@ -3454,13 +3573,20 @@ void loop() {
     Serial.println("[wake] panel asleep");
   }
 
+  // EST-355: the screen change, advanced here so the mesh, the radio and the GPS keep running between
+  // its steps. It writes the light itself (out, settle, in) and does the one push.
+  screenChangeLoop();
+  // Everything below draws an ordinary, in-page frame; while a change is running the light and the
+  // frame belong to it (redrawCurrentScreen has the same rule for the toast and the clock paths).
+  const bool uiDrawOk = screenOn && !g_change.active();
+
   static uint32_t lastBatt = 0;
   if (millis() - lastBatt > 10000) {
     lastBatt = millis();
     const uint16_t mv = om::batteryMilliVolts();
     if (mv != g_battMv) {
       g_battMv = mv;
-      if (g_tab == 0 && !g_settings && screenOn) drawHome();
+      if (g_tab == 0 && !g_settings && uiDrawOk) drawHome();
       Serial.printf("[batt] %u mV\n", g_battMv);
     }
   }
@@ -3505,7 +3631,7 @@ void loop() {
       lastSats = g_gps.sats;
       lastValid = g_gps.valid;
       lastHeard = g_gps.heardTotal;
-      if (g_tab == 0 && !g_settings && screenOn) drawHome();
+      if (g_tab == 0 && !g_settings && uiDrawOk) drawHome();
       Serial.printf("[gps] %s used=%u expected=%u heard=%u best=%u maxheard=%u\n",
                     g_gps.valid ? "fix" : "no-fix", g_gps.sats, g_gps.expectedTotal,
                     g_gps.heardTotal, g_gps.bestSnr, g_gps.maxHeard);
@@ -3516,7 +3642,7 @@ void loop() {
   // cheap (a frame push) and means the list is never stale, without redrawing on every loop.
   static uint32_t lastNodeCheck = 0;
   static int lastUnreadSeen = -1;
-  if (g_tab == 0 && !g_settings && screenOn && millis() - lastNodeCheck > 1000) {
+  if (g_tab == 0 && !g_settings && uiDrawOk && millis() - lastNodeCheck > 1000) {
     lastNodeCheck = millis();
     const uint32_t sig = om::meshContactSignature();
     const int unread = unreadTotal();
@@ -3677,7 +3803,7 @@ void loop() {
           snprintf(g_nodeTraceTitle, sizeof(g_nodeTraceTitle), "%s", trace.node);
           g_nodeTraceOpen = true;
           g_nodeMenu = -1;
-          if (g_tab == 0 && !g_settings && screenOn) drawHome();
+          if (g_tab == 0 && !g_settings && uiDrawOk) drawHome();
           else if (screenOn) showToast("Trace came back");
           Serial.printf("[nodes] trace: %d hop(s), %lu ms\n", tv.count, (unsigned long)tv.rttMs);
         } else if (screenOn) {
@@ -3714,26 +3840,29 @@ void loop() {
       buildChatView(v);
       const int grown = om::ui::chatContentHeight(v) - g_chatTotal;
       if (g_chatScroll > 0 && grown > 0) g_chatScroll += grown;
-      drawChat();
+      if (uiDrawOk) drawChat();   // EST-355: never into a light a change is taking down or up
     }
   }   // a host upload takes over the serial port and reboots when done
 
+  // EST-355: a screen change owns the touch too. Nothing is read while it runs (the frame it is
+  // pushing is not the one the finger is looking at), and a finger that is already down when it ends
+  // must lift first: the same TouchGate the wake path uses, with the change's own short window.
+  // The change is fed "no finger" for its whole duration so that latch is never lost to a stale edge.
   uint16_t x = 0, y = 0;
-  // Touch is read only while the screen is on, and the wake gate has the last word: for 300 ms after
-  // a wake, and for any finger that was already down then, accept() returns false, so no tap fires.
-  // A USB tap/drag replaces the raw sample for a few passes; the gate and every gesture rule below
-  // are the same code the glass drives, so a test cannot skip them.
   bool rawDown = false;
   uint16_t injectedX = 0, injectedY = 0;
   bool injectedDown = false;
-  if (om::usbTouchSample(millis(), &injectedX, &injectedY, &injectedDown)) {
+  const bool changing = g_change.active();
+  if (changing) {
+    g_touchGate.accept(millis(), false);   // fed "no finger": no edge is recorded for the gate
+  } else if (om::usbTouchSample(millis(), &injectedX, &injectedY, &injectedDown)) {
     x = injectedX;
     y = injectedY;
     rawDown = screenOn && injectedDown;
   } else {
     rawDown = screenOn && om::omTouch(x, y);
   }
-  const bool isDown = g_touchGate.accept(millis(), rawDown);
+  const bool isDown = changing ? false : g_touchGate.accept(millis(), rawDown);
   if (!isDown) {
     if (g_down) {
       g_down = false;
@@ -4108,8 +4237,9 @@ void loop() {
     }
   }
   // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels over the 300 ms
-  // fade-in (150 ms out); otherwise keep the old 20 ms loop (mesh, touch, draw).
-  delay(g_fade.active() ? 1 : 20);
+  // fade-in (150 ms out); otherwise keep the old 20 ms loop (mesh, touch, draw). EST-355: a screen
+  // change's 40 ms out and 60 ms in need the same ~1 ms cadence.
+  delay((g_fade.active() || g_change.active()) ? 1 : 20);
 }
 
 // --------------------------------------------------------------------------- USB test commands

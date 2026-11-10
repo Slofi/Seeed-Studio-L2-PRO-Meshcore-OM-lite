@@ -314,5 +314,96 @@ class Machine {
   uint32_t since_ = 0;
 };
 
+// ------------------------------------------------------------------------------ the scan's start
+// EST-355. On the device the FIRST scan right after the switch went on failed: the driver refuses
+// `esp_wifi_scan_start` while its station is still coming up, and the Arduino wrapper turns that into
+// WIFI_SCAN_FAILED, which the page showed as `Failed: scan failed`. The second scan a few seconds
+// later found 12 networks. So the request and the driver call are separated here:
+//  - a scan asked for less than kScanReadyMs after the driver came up waits until it is ready,
+//  - a start the driver refuses, and a scan that ends in WIFI_SCAN_FAILED, are retried after
+//    kScanRetryMs, up to kScanAttempts tries in total,
+//  - only when those are used up does the caller turn it into Failed.
+// The switch-on path itself never reports a failure from this: it only arms the wait. Plain C++, so
+// the ORDER (request -> not yet -> start -> refused -> start -> done) is host-tested.
+constexpr uint32_t kScanReadyMs = 250;     // the station's own bring-up, after WiFi.mode()
+constexpr uint32_t kScanRetryMs = 250;     // between a refusal and the next try
+constexpr int kScanAttempts = 3;           // the first try plus two retries
+
+class ScanGate {
+ public:
+  // No driver, no request.
+  void reset() {
+    up_ = false;
+    requested_ = false;
+    attempts_ = 0;
+    upAtMs_ = 0;
+    nextTryMs_ = 0;
+  }
+
+  // The driver is up (or came back): a request that was waiting may go as soon as it is ready.
+  void driverUp(uint32_t nowMs) {
+    up_ = true;
+    upAtMs_ = nowMs;
+    if (requested_) nextTryMs_ = nowMs + kScanReadyMs;
+  }
+
+  void driverDown() {
+    up_ = false;
+    requested_ = false;
+    attempts_ = 0;
+  }
+
+  // The user (or the page, or the USB command) asked for a scan. Starting the count over is right:
+  // this is a new request, not a retry.
+  void request(uint32_t nowMs) {
+    requested_ = true;
+    attempts_ = 0;
+    const uint32_t readyAt = upAtMs_ + kScanReadyMs;
+    nextTryMs_ = up_ && (int32_t)(readyAt - nowMs) > 0 ? readyAt : nowMs;
+  }
+
+  // Forget a pending request (a connect took over, the switch went off).
+  void clear() {
+    requested_ = false;
+    attempts_ = 0;
+  }
+
+  bool pending() const { return requested_; }
+  int attempts() const { return attempts_; }
+
+  // Call once per loop pass while the machine is Scanning. True when the driver should be asked now.
+  // Never true while the station is still coming up.
+  bool due(uint32_t nowMs) const {
+    if (!requested_ || !up_) return false;
+    return (int32_t)(nowMs - nextTryMs_) >= 0;
+  }
+
+  // The driver accepted the start: the request is satisfied.
+  void started() {
+    requested_ = false;
+    attempts_ = 0;
+  }
+
+  // The driver refused the start, or a started scan ended in WIFI_SCAN_FAILED. Returns true while
+  // another try is scheduled, false when the attempts are used up (the caller says Failed).
+  bool retry(uint32_t nowMs) {
+    ++attempts_;
+    if (attempts_ >= kScanAttempts) {
+      requested_ = false;
+      return false;
+    }
+    requested_ = true;
+    nextTryMs_ = nowMs + kScanRetryMs;
+    return true;
+  }
+
+ private:
+  bool up_ = false;
+  bool requested_ = false;
+  int attempts_ = 0;
+  uint32_t upAtMs_ = 0;      // when the driver came up (the readiness wait starts here)
+  uint32_t nextTryMs_ = 0;   // the earliest moment the driver may be asked
+};
+
 }  // namespace wifi
 }  // namespace om

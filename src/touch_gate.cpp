@@ -4,11 +4,12 @@
 
 namespace om {
 
-void TouchGate::onWake(uint32_t nowMs, bool downAtWake) {
+void TouchGate::onWake(uint32_t nowMs, bool downAtWake, uint32_t gateMs) {
   active_ = true;
   latch_ = downAtWake;      // the finger that was already there must lift first
   prevDown_ = downAtWake;
   wakeMs_ = nowMs;
+  gateMs_ = gateMs;
 }
 
 bool TouchGate::accept(uint32_t nowMs, bool down) {
@@ -23,8 +24,8 @@ bool TouchGate::accept(uint32_t nowMs, bool down) {
   if (latch_) return false; // held through the wake, or begun inside the window
 
   // A press that begins inside the window is ignored until it lifts, so it can never turn into a
-  // tap merely because the finger stayed down past the 300 ms mark.
-  if ((uint32_t)(nowMs - wakeMs_) < kGateMs) {
+  // tap merely because the finger stayed down past the window's end.
+  if ((uint32_t)(nowMs - wakeMs_) < gateMs_) {
     latch_ = true;
     return false;
   }
@@ -38,6 +39,7 @@ void TouchGate::reset() {
   latch_ = false;
   prevDown_ = false;
   wakeMs_ = 0;
+  gateMs_ = kGateMs;
 }
 
 }  // namespace om

@@ -2344,3 +2344,139 @@ line; then EST-355 (Bluetooth) can reuse the same switch/NVS/status pattern.
 ## 2026-11-10 17:00 (Claude): EST-354 on the device
 - Built in the sandbox (exit 0, RAM 197,456 B = 60.3 %, flash 2,129,921 B, +421 KB for the Wi-Fi stack), tests exit 0, reviewed binary flashed (2,130,288 B). Checked: no log line prints a password (only `s_pendingPass` is set from it).
 - By USB: `wifi status` off by default; `wifi on`: heap 128,668 -> 90,872 B (Wi-Fi driver up). **The first scan right after switching on fails** (`state=failed reason="scan failed"`); a second scan: `scan done: 12 visible, 12 rows`. Mesh stayed up. Connecting needs Filip's home password, typed by him on the device.
+
+## 2026-11-10 17:00 (DS): EST-355, the backlight dip on a screen change, and the first Wi-Fi scan
+
+Built with the REBUILD.md command, **exit 0**: RAM 197,576 B of 327,680 (60.3%), flash 2,132,309 B of
+6,553,600 (32.5%), `firmware.bin` 2,132,672 B. `test/host/run.sh` **exit 0** (all suites, including
+the new `test_est355.cpp` and the new scan-order test in `test_wifi.cpp`). Baseline (EST-354):
+RAM 197,456 B, flash 2,129,921 B, so this ticket costs **+120 B RAM and +2,388 B flash**.
+
+**1. Why the dip, and not a cleverer push.** EST-353's DISPOFF/DISPON around the push did not hide the
+tear on this panel (Filip, ~16:30), and the mechanism says it cannot: the panel scans the RAM while the
+push writes it, so what is scanned before the write arrives is the OLD frame, and a blanked display
+still shows the result when it comes back (the panel re-scans its RAM; DISPON does not re-push it).
+What cannot depend on the panel's timing is the LIGHT: with the backlight at 0 nothing that is scanned
+can be seen, and 17 ms after the push the RAM holds the complete frame. So a screen change now takes
+the light down, pushes, waits one panel frame, and brings the light back. The display itself stays ON:
+**DISPOFF/DISPON are gone** (`omFrameScreenChange()` is deleted). On the frame timings: Claude measured
+11,376..11,470 us per armed push; the blank did not shorten the transfer (it is five DMA slices, whose
+time cannot depend on the panel's display state) and did not hide the tear, so it bought nothing. This
+build prints the push time without the blank in the change line, which is the A/B that was missing.
+
+**2. Only when it can be seen.** The tear is written on every push; it is SEEN only when the old and
+new frames differ strongly in brightness (Filip, 16:35). One rule in `src/frame_metrics.h` (plain C++,
+host-tested): `mapInvolved || |lumaOld - lumaNew| > kChangeLumaDelta`. Luma is one number 0..255 per
+frame (BT.601 on the 5/6/5 channels, gold = 181, the app background = 18); it is measured from the
+frame's own pixels on a 15 px grid (21 x 16 = 336 samples, a few hundred PSRAM reads). Both sides are
+measured: the frame on the glass is sampled when the change is asked for, the target tab's last frame
+was sampled when it was pushed (`g_tabLuma[]`, four bytes). The map is always dipped, whatever the
+numbers say. Everything else (Nodes/Chat/RPTR, all dark) switches instantly, with no blink at all.
+- **A bright page seen for the first time** would slip through the prediction, so the composed frame is
+  measured before it is pushed: if it is much brighter than what is on the glass, the light is cut then
+  (a hard cut, logged as `late dip`, `out 0 ms`), which is honest about what was spent.
+- **A second change asked for while the light is still going down coalesces** into the running one: the
+  frame that is pushed is the LATEST target, with one push and one dip.
+- A change asked for with the light already up again on a new frame (Settle/FadeIn) is a new transition,
+  because the first frame is on the glass by then.
+
+**3. The state machine, non-blocking.** `src/screen_change.cpp/.h` (plain C++, no Arduino): FadeOut ->
+Push -> Settle -> FadeIn, one `tick()` per loop pass, wall-clock based, no waiting anywhere. It reuses
+the wake path's `FadeRamp` (gamma 2.2, EST-339) and the wake path's `TouchGate`. The three durations are
+in `theme.h` so they can be tuned after Filip looks: `kChangeOutMs 40`, `kChangeSettleMs 17`,
+`kChangeInMs 60`. **17 ms is the ~60 Hz assumption, not a measurement**: the L2 wires no TE line
+(board.h), so one full refresh at ~60 Hz is the best that can be said.
+- `loop()` ticks it once per pass and runs the push itself: `omFrameHoldPush(true)` composes the target
+  into the frame WITHOUT pushing, `omFrameMeanLuma()` measures it, the light is set, `omFrameFlush()`
+  pushes once. The loop keeps servicing the mesh, the radio, Wi-Fi and the GPS between the phases, and
+  the 1 ms cadence the wake fade already uses is extended to the change.
+- **Touches**: nothing is read while the change runs (the sample is forced up and the wake gate is fed
+  "no finger"), and when it ends the wake gate is armed with `kChangeGateMs 40`, so a finger that is
+  already down must lift first. In-page redraws are dropped while it runs (`redrawCurrentScreen()` and
+  the loop's direct draws), so nothing pushes into a light that is on its way down or up.
+- In-page updates (a new message, a clock tick, a pan, a key, a toast) keep their plain one push: only
+  a screen change (a tab, Nodes > Direct message, Show on map) goes through the machine. Settings pages
+  keep their plain push (same dark background on both sides, EST-353's note still applies).
+
+**4. Log lines, one per change** (plus one context line and, when it is slow, the compose time):
+```
+[ui] change Nodes -> Map: luma 18 -> 0 (unknown), dip
+[ui] change: composed in 34 ms (inside the dark)      <- only when >= 5 ms
+[ui] change: out 40 ms, push 11376 us, settle 17 ms, in 60 ms
+```
+`out` is the fade-out that was really spent, `settle` the panel frame after the push, `in` the fade-in;
+the push is `omFrameLastPushUs()`. An instant change prints `out 0 ms, push ..., settle 0 ms, in 0 ms`.
+
+**5. Wi-Fi: the first scan after switching on (EST-354's bug).** The driver refuses a scan while its
+station is still coming up, and the wrapper turns that into WIFI_SCAN_FAILED, which the page showed as
+`Failed: scan failed`. `wifi_model.h` now has a `ScanGate` (plain C++, host-tested) that separates the
+REQUEST from the driver call: a scan asked for less than `kScanReadyMs` (250) after the driver came up
+waits until it is ready, a refused start (and a scan the driver aborts) is retried after `kScanRetryMs`
+(250), at most `kScanAttempts` (3) tries, and only then does the model say Failed. `wifiStartScan()`
+now records the request and `wifiLoop()` asks the driver, so **the switch-on path cannot produce
+`failed` for this**, and the USB `wifi scan` still answers `state=scanning` at once (it changes nothing
+for the caller). Serial: `[wifi] scan requested`, then either `[wifi] scan started` or
+`[wifi] scan start refused (try 1 of 3), retrying in 250 ms`.
+
+**Host tests prove** (`test_est355.cpp`, `screen_change.cpp` + `fade.cpp` + `touch_gate.cpp`): the order
+of a dipped change (light down only, one push asked exactly at 40 ms with the light at 0, 17 ms of settle
+in which no level is written, a fade in that ends at the screen brightness after 60 ms and reports Done);
+an instant change (push at once, no level written at all, out/settle/in 0); a second change during the
+dip coalescing (one push, the light never jumps back up); a dip asked for before an instant push
+escalating in place, and a change asked for after a push being a new transition; the touches (nothing
+accepted while it runs, a finger that is down when it ends must lift, the next new press counts); the
+luma arithmetic (black 0, white 250, gold 181), the sample mean, the sample count (~350) and the rule
+itself (map on either side, the threshold at exactly `kChangeLumaDelta` and one above it, both
+directions). `test_wifi.cpp` proves the SCAN ORDER: nothing due in the pass the switch goes on, due at
+exactly `kScanReadyMs`, a refusal retried (not failed), 3 refusals the only way to Failed, an accepted
+start clearing the request, a scan asked for later starting at once, the switch-off dropping a request,
+and the wait surviving the millis() wrap.
+
+**Exact `tools/cmd.py` steps for Claude** (one reader on the port; `OM_PORT=/dev/ttyACM0`;
+`tools/shot.py docs/shots/<name>.png` after each step):
+1. Flash `firmware.bin` (2,132,672 B). Boot must still print `[om] colour push probe ... OK` and the
+   `[map] tile pixel probe ... OK`. `tools/cmd.py status` -> note `loop_stack_size` and
+   `loop_stack_free`. **There is no `[ui] frame push` line any more**; every change prints
+   `[ui] change: out ... push ... settle ... in ...`.
+2. **The map (the page Filip saw the tear on):** `tap 200 227` (Map tab) -> the serial must print
+   `[tab] Map`, `[ui] change Nodes -> Map: luma N -> N (unknown), dip`, then (first visit only) the
+   compose time, then `[ui] change: out 40 ms, push N us, settle 17 ms, in 60 ms`. **Watch the glass**:
+   no diagonal, and the switch is a quick blink, not a black pause (note the `composed in N ms` line
+   if the first map entry shows one). Shot `2026-11-10-est355-map`.
+3. **Leaving the map:** `tap 120 227` (Chat) -> the same line with `dip` and `luma ~N -> 18`: the light
+   must go down and come back with **no diagonal**. Shot `...-est355-chat`.
+4. **A dark switch must NOT blink:** `tap 280 227` (RPTR) -> `[ui] change Chat -> RPTR: luma 18 -> 18
+   (measured), instant` and `[ui] change: out 0 ms, push N us, settle 0 ms, in 0 ms`. The screen must
+   change with no blink at all. Then `tap 40 227` (Nodes) -> the same. Shot `...-est355-nodes`.
+5. **Every change is ONE push:** no line `[ui] tab ...: N frame pushes, not 1` anywhere in the log.
+6. **The push time without the blank** is the `push N us` in those lines: compare it with EST-353's
+   11,376..11,470 us (the same push WITH DISPOFF/DISPON). That is the measurement the ticket asks for.
+7. **Touches during a change:** `tap 200 227` (Map) and then, immediately (within ~150 ms), a second
+   `tap 160 100`: nothing must be pressed by the second tap, and the screen must stay on the Map. (A
+   `tap` that lands while the change runs is dropped; the next one after it works.)
+8. **Wi-Fi, the first scan:** `wifi off` then `wifi on`, and **immediately** `wifi scan` -> the serial
+   must print `[wifi] scan requested` and then `[wifi] scan started` (or one
+   `[wifi] scan start refused (try 1 of 3), retrying in 250 ms` before it), and `wifi status` must
+   **never** say `state=failed reason="scan failed"` on that path. A second `wifi scan` a few seconds
+   later prints the list (12 networks on the device). Repeat 3 times: the first scan must find the
+   networks without a `failed` in between.
+9. **Loop stack:** `tools/cmd.py status` after the steps; `loop_stack_size=16384` unchanged and
+   `loop_stack_free` at the EST-350 level (the change machine is 40 B of statics and runs on the loop
+   task, no new allocation).
+
+**Could not check** (no device, no card, no serial): whether a 40 + 17 + 60 ms dip reads as a blink or
+as a flicker on the glass (that is Filip's call; the three numbers are in `theme.h`), the measured push
+without the blank, the actual luma values of the real map (the map rule dips it regardless), how long
+the map's first compose is on the device (the log says it), the touch feel during a change, and whether
+the first Wi-Fi scan now succeeds on the device (the host proves the order, not the driver). The "no TE
+line" assumption of ~60 Hz is unchanged and is why 17 ms is an assumption.
+
+**Next step (if the blink is too much or too little):** tune `kChangeOutMs` / `kChangeSettleMs` /
+`kChangeInMs` in `theme.h` only. If the map's first entry shows a long `composed in N ms` and Filip
+dislikes the black, the next change is to compose BEFORE the fade-out (the frame is already held by
+`omFrameHoldPush`, so only the order of two calls in `screenChangeLoop()` moves) and then the dark is
+always 40 + push + 17 ms.
+
+## 2026-11-10 17:35 (Claude): EST-355 on the device
+- Built in the sandbox (exit 0, RAM 197,576 B, flash 2,132,309 B), tests exit 0, reviewed binary flashed (2,132,672 B).
+- Tab switches by USB: `Nodes -> Map: ... dip` (composed in 101 ms inside the dark), `Map -> Nodes: luma 160 -> 14 (measured), dip`, `Nodes -> Chat: ... instant`. Wi-Fi came back on by itself after the reboot (`state=connected`). Whether the dip hides the diagonal and how it feels: Filip.

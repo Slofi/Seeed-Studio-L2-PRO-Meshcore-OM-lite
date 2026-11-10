@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sound_synth.h"   // EST-359: `play <event>` validates the same event table the device uses
+
 namespace om {
 namespace usb {
 
@@ -27,6 +29,7 @@ enum class Kind : uint8_t {
   Wifi,     // wifi status | scan | on | off   (EST-354; never a password)
   Ble,      // ble status | on | off   (EST-356; never the pairing PIN)
   Rptr,     // rptr scan | rptr status <name>   (EST-358; never a repeater password)
+  Play,     // play <event> [variant]   (EST-359: hear the device's own sound bank)
 };
 
 // A parsed command. `target` and `text` point into the line given to parseCommand(), which is

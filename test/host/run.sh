@@ -42,7 +42,8 @@ BIN21="$(mktemp /tmp/om-lite-wifi.XXXXXX)"
 BIN22="$(mktemp /tmp/om-lite-est355.XXXXXX)"
 BIN23="$(mktemp /tmp/om-lite-est356.XXXXXX)"
 BIN24="$(mktemp /tmp/om-lite-est358.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24"' EXIT
+BIN25="$(mktemp /tmp/om-lite-est359.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -96,7 +97,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_dm.cpp \
 # wrong length, header and body timeouts) and the command language (quoted names such as
 # "Don't Panic", arguments, and the refusal of everything not on the list).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_usb_cmd.cpp \
-  ../../src/usb_cmd_logic.cpp -o "$BIN14"
+  ../../src/usb_cmd_logic.cpp ../../src/sound_synth.cpp -o "$BIN14"
 # EST-344: the DM ring's one allocation path (send, reply, two more, wrap), the channel ring's shared
 # sequence rule, the toast overlay state and MeshCore's encoded out_path_len (1B/2B/3B/unknown).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est344.cpp -o "$BIN15"
@@ -132,7 +133,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est351.cpp \
 # EST-355 adds the scan's order: a scan asked for right after the switch goes on waits for the driver
 # and a refusal is retried, so the switch-on path cannot show "Failed: scan failed".
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_wifi.cpp \
-  ../../src/usb_cmd_logic.cpp ../../src/ui/chat_layout.cpp -o "$BIN21"
+  ../../src/usb_cmd_logic.cpp ../../src/sound_synth.cpp ../../src/ui/chat_layout.cpp -o "$BIN21"
 # EST-355: the screen-change backlight transition (fade out -> one push -> settle -> fade in), the
 # coalescing of a second change during the dip, the touches consumed by it, and the dip rule itself
 # (the map on either side, or a brightness difference above the threshold).
@@ -141,7 +142,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est355.cpp \
 # EST-356: the Bluetooth switch and its three states, the PIN generator (six digits, never 123456),
 # the change watch that separates the phone's writes from ours, and the `ble` USB command.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est356.cpp \
-  ../../src/usb_cmd_logic.cpp -o "$BIN23"
+  ../../src/usb_cmd_logic.cpp ../../src/sound_synth.cpp -o "$BIN23"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -169,5 +170,14 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est356.cpp \
 # neighbour/region parsers, the two-step confirm, the admin row table, the admin layout's hit test
 # and the `rptr` USB command.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est358.cpp \
-  ../../src/rptr_model.cpp ../../src/ui/rptr_layout.cpp ../../src/usb_cmd_logic.cpp -o "$BIN24"
+  ../../src/rptr_model.cpp ../../src/ui/rptr_layout.cpp ../../src/usb_cmd_logic.cpp \
+  ../../src/sound_synth.cpp -o "$BIN24"
 "$BIN24"
+
+# EST-359: the sound bank. The synth is the same sound_synth.cpp the firmware and tools/mksounds.cpp
+# build: every event's 2-3 variants, lengths 0.1..0.4 s (Sent/Touch shorter on purpose), the soft
+# attack and exponential decay (measured in windows), the boot D7-gap-F7 phrase, no clipping at full
+# scale, and the `play <event> [variant]` USB command.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est359.cpp \
+  ../../src/sound_synth.cpp ../../src/usb_cmd_logic.cpp -o "$BIN25"
+"$BIN25"

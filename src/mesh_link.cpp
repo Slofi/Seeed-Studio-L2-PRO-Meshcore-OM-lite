@@ -35,7 +35,6 @@
 #include <helpers/BaseChatMesh.h>
 
 #include "DataStore.h"
-#include "audio.h"
 #include "rptr_link.h"   // EST-358: the repeater session's hooks (see rptr_link.h)
 #include "channels.h"
 #include "crash_report.h"
@@ -643,6 +642,41 @@ int s_newNodeHead = 0;
 int s_newNodeCount = 0;
 uint32_t s_newNodeSerial = 0;
 
+// EST-359: the receive-side sound serials. They change only for a channel message the user should
+// hear: not our own send (those go through s_storeSerial only) and not a muted channel. A mention has
+// its own serial, so the shell can pick the brighter mention sound and never plays two sounds for one
+// message. The synth and the choices live in the shell (main.cpp); this file only says what arrived.
+uint32_t s_msgSoundSerial = 0;
+uint32_t s_mentionSerial = 0;
+
+// The node name as typed in an @mention, case-insensitive, followed by the end of the text or one of
+// the separators a human uses. This is the same "@Name" form the reply path writes, so a reply to a
+// channel message is a mention here too.
+bool textMentionsUs(const char* body) {
+  if (body == nullptr || the_mesh.getNodeName() == nullptr) return false;
+  const char* self = the_mesh.getNodeName();
+  const size_t n = strlen(self);
+  if (n == 0) return false;
+  for (const char* at = strchr(body, '@'); at != nullptr; at = strchr(at + 1, '@')) {
+    const char* p = at + 1;
+    size_t i = 0;
+    for (; i < n; ++i) {
+      char a = p[i];
+      char b = self[i];
+      if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+      if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+      if (a == 0 || a != b) break;
+    }
+    if (i != n) continue;
+    const char end = p[n];
+    if (end == 0 || end == ' ' || end == ',' || end == '.' || end == '!' || end == '?' ||
+        end == ':' || end == ';') {
+      return true;
+    }
+  }
+  return false;
+}
+
 void queueNewNode(const ContactInfo& c) {
   NewNodeEvent& e = s_newNodeEvents[(s_newNodeHead + s_newNodeCount) % kNewNodeEvents];
   snprintf(e.name, sizeof(e.name), "%s", c.name);
@@ -849,10 +883,12 @@ class OmListener : public MyMesh::Listener {
     const bool muted = mcChannelMuted(channelIdx);
     Serial.printf("[mc] channel %d: %s (hops %d snr %.2f)%s\n", channelIdx, s_lastText,
                   (int)m.hops, (double)m.snr4 / 4.0, muted ? " [muted]" : "");
-    // A muted channel still stores and counts unread; mute is about the chime only.
+    // A muted channel still stores and counts unread; mute is about the sound only. EST-359: the
+    // shell watches these two serials and plays the message or the brighter mention sound; the
+    // audio itself lives in audio.cpp, never on this receive path.
     if (!muted) {
-      audioTone(1318, 70);
-      audioTone(1760, 90);
+      if (textMentionsUs(body)) ++s_mentionSerial;
+      else ++s_msgSoundSerial;
     }
   }
 
@@ -1513,6 +1549,9 @@ bool meshLinkReloadChannels() {
 // --- message accessors ---------------------------------------------------------------------------
 int meshMsgCount() { return s_msgRing.count(); }
 uint32_t meshMsgSerial() { return s_storeSerial; }
+// EST-359: receive-only serials, for the message and mention sounds. Our own sends never bump them.
+uint32_t meshMsgSoundSerial() { return s_msgSoundSerial; }
+uint32_t meshMentionSerial() { return s_mentionSerial; }
 
 const char* meshMsgText(int idx) {
   if (idx < 0 || idx >= s_msgRing.count()) return "";

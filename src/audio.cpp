@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: MIT
-// OM Lite audio — ES8311 codec + class-D amp on the Wio Tracker L2 Pro.
+// OM Lite audio: ES8311 codec + class-D amp on the Wio Tracker L2 Pro, and the EST-359 player.
 //
 // Register values are the ES8311 datasheet/vendor bring-up for MCLK = 256 x fs, codec in SLAVE
 // mode (the ESP32-S3 drives BCLK/WS/MCLK), 16-bit standard I2S. They are hardware facts checked
 // against the board's reference firmware; the structure and code here are ours.
+//
+// Playback is one small task (core 0) draining a three-slot request queue. For each request it
+// renders the phrase with sound_synth.cpp into one PSRAM buffer, then streams that buffer through
+// I2S. The loop task only calls audioPlay(), which is a queue send with a zero timeout: it never
+// waits for a note, a sine or the DMA.
 #include "audio.h"
 
 #include <Wire.h>
 #include <driver/i2s.h>
-#include <math.h>
+#include <esp32-hal-psram.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 #include "board.h"
 
@@ -19,12 +27,24 @@ constexpr i2s_port_t kPort = I2S_NUM_0;
 constexpr int kRate = 16000;          // in the ES8311 rate table; MCLK = 256 * fs
 constexpr uint8_t kAddr = 0x18;
 constexpr uint32_t kAmpSettleMs = 250;
+constexpr int kQueueLen = 3;          // one playing + a couple waiting; older ones are dropped, never stacked
 
 bool s_open = false;
 bool s_i2s = false;
 
 int s_writes = 0;
 int s_writeFails = 0;
+
+struct PlayRequest {
+  uint8_t event;
+  uint8_t variant;
+};
+
+QueueHandle_t s_queue = nullptr;
+int16_t* s_buf = nullptr;   // PSRAM, one phrase at a time (the task renders it before streaming)
+bool s_bufPsram = false;
+uint32_t s_played = 0;
+uint32_t s_dropped = 0;
 
 bool w(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(kAddr);
@@ -122,27 +142,67 @@ bool i2sInstall() {
   return true;
 }
 
-// 16-bit sine with a short fade in/out so it does not click. Loudness is the codec register.
-void playTone(int freq, int ms) {
-  const int total = (kRate * ms) / 1000;
-  const int fade = total / 8 > 0 ? total / 8 : 1;
-  const float step = 2.0f * (float)M_PI * (float)freq / (float)kRate;
-  int16_t buf[128];
-  float phase = 0.0f;
-  int done = 0;
-  while (done < total) {
-    int n = 0;
-    for (; n < 128 && done < total; ++n, ++done) {
-      float amp = 22000.0f;
-      if (done < fade) amp *= (float)done / fade;
-      else if (done > total - fade) amp *= (float)(total - done) / fade;
-      buf[n] = (int16_t)(sinf(phase) * amp);
-      phase += step;
-      if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+// The audio task: render the phrase into the PSRAM buffer first (the loop is already gone), then
+// stream it. A request that arrives while this runs waits in the three-slot queue.
+void audioTask(void*) {
+  PlayRequest req{};
+  for (;;) {
+    if (xQueueReceive(s_queue, &req, portMAX_DELAY) != pdTRUE) continue;
+    const sound::Event ev = (sound::Event)req.event;
+    if (!sound::validVariant(ev, req.variant)) continue;
+    sound::RenderInfo info{};
+    const uint32_t renderStart = micros();
+    const int n = sound::render(ev, req.variant, s_buf, sound::kMaxSamples, &info);
+    const uint32_t renderUs = micros() - renderStart;
+    if (n <= 0) {
+      Serial.printf("[sound] render failed event=%s v%u\n", sound::eventKey(ev),
+                    (unsigned)req.variant);
+      continue;
     }
-    size_t written = 0;
-    i2s_write(kPort, buf, (size_t)n * sizeof(int16_t), &written, pdMS_TO_TICKS(200));
+    size_t done = 0;
+    const size_t bytes = (size_t)n * sizeof(int16_t);
+    while (done < bytes) {
+      size_t wrote = 0;
+      const esp_err_t err = i2s_write(kPort, (const char*)s_buf + done, bytes - done, &wrote,
+                                      pdMS_TO_TICKS(1000));
+      if (err != ESP_OK || wrote == 0) {
+        Serial.printf("[sound] i2s write stopped after %u of %u B (err=%d)\n", (unsigned)done,
+                      (unsigned)bytes, (int)err);
+        break;
+      }
+      done += wrote;
+    }
+    ++s_played;
+    Serial.printf("[sound] play event=%s v%u name=\"%s\" ms=%d samples=%d peak=%d render_us=%lu\n",
+                  sound::eventKey(ev), (unsigned)req.variant,
+                  sound::variantName(ev, req.variant) ? sound::variantName(ev, req.variant) : "?",
+                  sound::eventMs(ev, req.variant), info.samples, info.peak,
+                  (unsigned long)renderUs);
   }
+}
+
+bool soundTaskBegin() {
+  s_buf = (int16_t*)ps_malloc((size_t)sound::kMaxSamples * sizeof(int16_t));
+  s_bufPsram = s_buf != nullptr;
+  if (s_buf == nullptr) {
+    // Internal RAM fallback keeps a board whose PSRAM did not come up audible; the log says which
+    // one answered. 12.8 KB is small enough that the EST-357 internal-heap work still holds.
+    s_buf = (int16_t*)malloc((size_t)sound::kMaxSamples * sizeof(int16_t));
+  }
+  s_queue = xQueueCreate(kQueueLen, sizeof(PlayRequest));
+  if (s_buf == nullptr || s_queue == nullptr) {
+    Serial.printf("[sound] player not started (buffer=%s queue=%s)\n", s_buf ? "ok" : "NULL",
+                  s_queue ? "ok" : "NULL");
+    return false;
+  }
+  if (xTaskCreatePinnedToCore(audioTask, "om_audio", 4096, nullptr, 3, nullptr, 0) != pdPASS) {
+    Serial.println("[sound] player not started (task)");
+    return false;
+  }
+  Serial.printf("[sound] player up: %d samples (%u B) in %s, queue %d\n", sound::kMaxSamples,
+                (unsigned)((size_t)sound::kMaxSamples * sizeof(int16_t)),
+                s_bufPsram ? "PSRAM" : "INTERNAL (PSRAM refused)", kQueueLen);
+  return true;
 }
 
 void codecMute(bool mute) {
@@ -178,6 +238,7 @@ bool audioBegin() {
   codecMute(false);
   setAudioPa(true);
   delay(kAmpSettleMs);
+  soundTaskBegin();
   return true;
 }
 
@@ -189,10 +250,21 @@ void audioVolume(uint8_t pct) {
   w(0x32, (uint8_t)(kFloor + ((uint32_t)(0xFF - kFloor) * pct) / 100));
 }
 
-void audioTone(uint16_t freq, uint16_t ms) {
-  if (!s_open || !s_i2s) return;
-  playTone(freq, ms);
+bool audioPlay(sound::Event ev, uint8_t variant) {
+  if (!s_open || !s_i2s || s_queue == nullptr) return false;
+  if (!sound::validVariant(ev, variant)) return false;
+  const PlayRequest req{(uint8_t)ev, variant};
+  if (xQueueSend(s_queue, &req, 0) != pdTRUE) {
+    ++s_dropped;
+    Serial.printf("[sound] queue full, dropped event=%s v%u (%lu dropped since boot)\n",
+                  sound::eventKey(ev), (unsigned)variant, (unsigned long)s_dropped);
+    return false;
+  }
+  return true;
 }
+
+uint32_t audioPlayedCount() { return s_played; }
+uint32_t audioDroppedCount() { return s_dropped; }
 
 void audioStandby(bool standby) {
   if (!s_open) return;

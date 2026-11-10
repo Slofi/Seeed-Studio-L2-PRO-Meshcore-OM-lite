@@ -2766,3 +2766,148 @@ Neighbours > Read, and one control per view, each answered in the strip and in `
 ## 2026-11-10 18:30 (Claude): EST-358 on the device
 - Built in the sandbox (exit 0, RAM 143,912 B, flash 2,733,297 B), tests exit 0, reviewed binary flashed (2,733,664 B). Internal free 168,656 B (BLE off by Filip).
 - `rptr scan`: discover request, two answers within seconds: `86a8eedb744b` (no name) SNR in 11.0 / out 11.75 dB and `Argus mobile RPTR` SNR 13.25 / 8.25 dB, both direct. The RPTR tab lists them, "saved" on the one in contacts (`docs/shots/2026-11-10-1829-rptr-scan.png`). Login, status and the admin set need Filip's repeater password: Filip.
+
+## 2026-11-10 18:45 (DS): EST-359 better sounds: a small synth, one sound per event
+
+Built with the REBUILD.md command, **exit 0**: RAM **143,952 B of 327,680 (43.9 %)**, flash
+**2,738,545 B of 6,553,600 (41.8 %)**, `firmware.bin` **2,738,912 B**. `sh test/host/run.sh`
+**exit 0** (every suite, including the new `test_est359.cpp`). Baseline EST-358: RAM 143,912 B,
+flash 2,733,297 B, bin 2,733,664 B, so this ticket costs **+40 B RAM**, **+5,248 B flash** and
+**+5,248 B bin**. At runtime the player also takes a **12,800 B PSRAM** phrase buffer, a 3-slot
+queue and a **4,096 B task stack** (internal heap, not .bss): `[sound] player up ... in PSRAM`.
+
+**1. Synth or samples: I chose the synth, and this is the comparison.** The 9 events x 3 variants
+at 16-bit / 16 kHz are **6,035 ms = 193,120 B (189 KB)** of PCM if stored in flash. The whole synth
+plus player costs **5,248 B of flash**. The synth also gives the picker its 27 variants, follows the
+volume setting, needs no recorded/licensed assets, and the same table is what the host test and
+`tools/mksounds.cpp` exercise, so a WAV listened to on the laptop is the waveform the device streams.
+A small L2 Pro speaker would not reveal the realism 189 KB of samples would buy. If a future voice
+really needs a recording, the `play` path and the per-event picker stay; only `sound_synth.cpp` is
+replaced.
+
+**2. One voice, one table (`src/sound_synth.h/.cpp`, plain C++).** 16-bit mono at the codec's
+16 kHz. Every note is 3 sine partials through an ADSR envelope: soft smoothstep attack **3-8 ms**,
+exponential decay to a low sustain, a **16-30 ms** release that reaches exactly zero. Voices:
+Bell (inharmonic 1 / 2 / 2.76), Marimba (the bar's 3.93 fourth partial), Pluck (near-harmonic),
+Chime (octaves) and Soft (quiet octaves). One gentle one-pole low-pass at **6.5 kHz** over the
+phrase, a 3 ms final ramp to zero, and partials above 7.2 kHz are skipped so nothing aliases on this
+16 kHz path. Headroom is guaranteed twice: a per-recipe worst-case bound sets the render scale, and
+the measured peak is scaled down only if it exceeds **28,000** (14.5 % below full scale, never up),
+so no event can clip at maximum volume. The phrase is rendered into PSRAM before the I2S write.
+
+The event table (all lengths include the release and tail):
+
+| event | variants | default | lengths |
+|---|---|---|---|
+| boot | Bell TK-TK / Chime TK-TK / Soft TK-TK | Bell TK-TK | 195-205 ms |
+| message | Chime / Bell / Marimba | Chime | 210-260 ms |
+| dm | Warm / Soft / Basso | Warm | 300-340 ms |
+| mention | Bright / Bell / Glass | Bright | 200-240 ms |
+| sent | Tick / Blip / Tock | Tick | 80-95 ms (deliberately very short) |
+| error | Low / Warn / Bell | Low | 300-320 ms |
+| newnode | Soft / Marimba / Bell | Soft | 220-250 ms |
+| battery | Low / Alert / Bell | Low | 360-380 ms |
+| touch | Tick / Tock / Click | Tick | 30-40 ms (very short, off by default) |
+
+Every event also has an **Off** row; its stored value is `variantCount(ev)`. Boot keeps Filip's
+"TK-TK" character exactly: **D7 2349 Hz, a 55 ms silent gap, F7 2794 Hz**; the three variants change
+only the voice, not the phrase (host-tested by correlation, not by eye).
+
+**3. One sound per event, and where each trigger lives.** `boot` in `setup()` when `Welcome sound`
+is on; `message` from the new receive-only `meshMsgSoundSerial()` (not our own send, not a muted
+channel); `mention` from `meshMentionSerial()` when the received text names us as `@Name`
+(case-insensitive, so the reply path's own `@Name` counts); `dm` from `meshDmRecvSerial()`; `sent`
+from a successful UI channel/DM send; `error` from a new radio fault (radio/mesh/TX) and a failed UI
+send; `newnode` from `meshNewNodeSerial()`; `low battery` once when the estimate first reaches
+**<= 15 %**, re-armed above **20 %**; `touch` from `playClick()` only when `Touch clicks` is on.
+When a mention and a normal message change in the same loop pass, mention wins and the message serial
+is consumed too, so one message never plays two sounds.
+
+**DND choice:** `Do not disturb` silences every sound **except error and low battery**, which the
+ticket names (the table flag `dndExempt` is host-tested). `Master sound` off silences all nine,
+including those two. The picker preview bypasses DND (an explicit user action) but not Master sound.
+The USB `play` command bypasses both because it is the reviewer's diagnostic. Volume is the existing
+`g_volume`, written to the codec before every play.
+
+**4. Settings picker.** Sound has one row per event (Boot, Message, Direct message, Mention, Sent,
+Error, New node, Low battery), then Touch clicks, Click tone, Do not disturb, Welcome sound. Each row
+opens that event's own list: its 3 variants + Off. Tapping a variant plays that event's sound with
+the current volume; `Use this sound` saves it back to the Sound page or the Chat page it came from.
+Per-event NVS keys are `boot`, `msg`, `dm`, `men`, `sent`, `err`, `newn`, `batt`, `tone`. Migration
+from the old 17-chime table: old **17 (Off)** becomes Off here, any other old value that is out of
+range for the new event falls back to that event's default (0). Touch clicks now default **off** for
+a fresh device; an explicitly saved `tsnd=true` is kept.
+
+**5. WAVs for the listening check.** `tools/mksounds.cpp` compiles `src/sound_synth.cpp` on the host
+and writes **27 WAV files** (16-bit mono 16 kHz) to `docs/sounds/`, named
+`<event>-<variant>-<name>.wav`. Build/run:
+
+```
+g++ -std=c++17 -O2 -I src tools/mksounds.cpp src/sound_synth.cpp -o /tmp/mksounds
+/tmp/mksounds docs/sounds
+```
+
+It exits non-zero on a clipped, empty or wrong-length render. Measured peaks (of 32,767 full scale)
+and lengths, all well under the 28,000 target:
+
+| file | ms | peak | | file | ms | peak |
+|---|---|---|---|---|---|---|
+| boot-0-bell-tk-tk | 205 | 11,127 | | error-0-low | 300 | 12,332 |
+| boot-1-chime-tk-tk | 195 | 11,401 | | error-1-warn | 310 | 12,268 |
+| boot-2-soft-tk-tk | 205 | 12,295 | | error-2-bell | 320 | 12,173 |
+| message-0-chime | 240 | 13,483 | | newnode-0-soft | 250 | 12,238 |
+| message-1-bell | 260 | 17,062 | | newnode-1-marimba | 230 | 13,706 |
+| message-2-marimba | 210 | 15,184 | | newnode-2-bell | 220 | 13,202 |
+| dm-0-warm | 300 | 13,125 | | battery-0-low | 380 | 13,190 |
+| dm-1-soft | 300 | 16,711 | | battery-1-alert | 380 | 8,428 |
+| dm-2-basso | 340 | 13,490 | | battery-2-bell | 360 | 12,477 |
+| mention-0-bright | 220 | 11,490 | | sent-0-tick | 80 | 8,736 |
+| mention-1-bell | 240 | 12,751 | | sent-1-blip | 90 | 7,713 |
+| mention-2-glass | 200 | 11,312 | | sent-2-tock | 95 | 7,831 |
+| touch-0-tick | 35 | 2,552 | | touch-1-tock | 40 | 4,266 |
+| touch-2-click | 30 | 1,733 | | | | |
+
+**6. The player (`audio.cpp`).** One task pinned to core 0, priority 3, 4 KB stack, drains a
+3-slot queue. For each request it renders the phrase into the one PSRAM buffer, then streams it with
+`i2s_write`. The loop only does `xQueueSend(..., 0)`: it never renders a sine, never waits for a
+phrase and cannot be blocked by the DMA. A full queue drops the newest request and counts it; old
+chimes never stack up. Each play logs `[sound] play event=... vN name="..." ms=... samples=... peak=...
+render_us=...`, so the real on-device render cost is visible. The old blocking `audioTone()` is gone;
+`mesh_link` no longer plays audio on the receive path.
+
+**Host tests prove** (`test_est359.cpp`): the 9 events, their exact keys, 2-3 variants each, unique
+names, valid defaults, Off not a playable variant and the `dndExempt` flags (only error and low
+battery); every one of the 27 renders has the table's exact length (30-380 ms, 100-400 ms except the
+deliberately short Sent/Touch), starts at 0 or +/-1 LSB and ends at exactly 0, has 1,000 < peak
+<= 28,000, never touches full scale, and `RenderInfo.peak` equals the measured peak; the boot
+envelope (RMS 1,525 in 0-2 ms, 6,665 in 4-6 ms, 5,382 in 20-40 ms, 2,476 in 40-60 ms, **exactly 0**
+in the 75-105 ms gap, the second note audible by 118 ms), and the D7/F7 correlation (D7 > 3x F7 in
+the first note, F7 > 3x D7 in the second, for all three boot variants); bad event/variant/small/null
+render arguments refuse cleanly; and the USB command (`play message`, `play dm 2` accepted, every
+table key accepted, `play boot 3` / `play message 9` / bare `play` / `play nope` / non-numeric
+variant / extra word all refused with the right error, and `status` still parses).
+
+**7. USB for Claude:** `play <event> [variant]`. Events: `boot`, `message`, `dm`, `mention`,
+`sent`, `error`, `newnode`, `battery`, `touch`. Without a variant it plays that event's default.
+Examples: `tools/cmd.py play boot`, `tools/cmd.py play boot 2`, `tools/cmd.py play dm 1`. The reply
+is `[cmd] ok play event=... variant=N name="..." ms=... queued=1 played=... dropped=...`; the
+device serial then shows the `[sound] play ... render_us=...` line. It does not change any setting.
+
+**Could not check** (no device, no flash, no serial): that the ES8311 path actually plays these
+waveforms and how they sound on the small speaker; the real `render_us` on the ESP32-S3 (host
+rendering is ~2 ms for the longest phrase, the device number is the useful one); that the PSRAM
+buffer allocation and the core-0 task behave under Wi-Fi/BLE load; the queue under a burst of
+messages; the touch default-off and the per-event pickers on the glass; mention detection on live
+traffic (the `@Name` rule is host-side only); the low-battery threshold on a real cell; and every
+WAV by ear.
+
+**Next step:** flash `firmware.bin` (2,738,912 B), confirm `[audio] ok` and `[sound] player up ...
+in PSRAM`, then `play boot`, `play message`, `play dm`, `play mention`, `play sent`, `play error`,
+`play newnode`, `play battery`, `play touch` (and each variant) over USB, and record `render_us` and
+what the speaker does. Open Settings > Sound and tap every variant. Listen to `docs/sounds/` first;
+if a voice is thin or a phrase is too long, the one place to change is `src/sound_synth.cpp`'s
+`kVoices` / `k*Variants`, then re-run the host test and `mksounds`.
+
+## 2026-11-10 19:35 (Claude): EST-359 on the device
+- WAVs checked first (27 files, docs/sounds): 30..380 ms, peaks 1,733..17,062 of 32,767, 0 clipped samples, every file starts and ends at 0 (no clicks), DC offset within 10 LSB.
+- Built in the sandbox (exit 0, RAM 143,952 B, flash 2,738,545 B), tests exit 0, reviewed binary flashed (2,738,912 B). `play message`: played (Chime, 240 ms). How they sound on the L2's speaker: Filip.

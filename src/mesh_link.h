@@ -35,6 +35,11 @@ int meshHistoryDump(const char* chat, int n);
 int meshMsgCount();
 uint32_t meshMsgSerial();   // monotonic: changes on every stored CHANNEL message, even when the ring is full
                             // (DMs have their own serial: meshDmSerial/meshDmRecvSerial)
+// EST-359: receive-only sound triggers. meshMsgSoundSerial changes for a received channel message on
+// a channel that is not muted; meshMentionSerial changes instead when that text names us (@Name).
+// Our own sends and muted channels bump neither.
+uint32_t meshMsgSoundSerial();
+uint32_t meshMentionSerial();
 const char* meshMsgText(int idx);
 int meshMsgChannel(int idx);
 const char* meshMsgName(int idx);

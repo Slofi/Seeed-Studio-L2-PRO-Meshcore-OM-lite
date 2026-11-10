@@ -2,16 +2,18 @@
 // The status bar's GPS cell, the node count cell, and the arithmetic that proves the row fits.
 //
 // Why the GPS cell changed: GGA's satellite count only counts the satellites USED in the fix, and
-// GSV's "in view" number is what the module's ALMANAC expects, not what it hears. So while
-// searching the cell reads "GPS 0/4" (used/heard) and indoors it reads "GPS 0/0"; with a fix the
-// count that matters is the used one: "GPS 7".
+// GSV's "in view" number is what the module's ALMANAC expects, not what it hears. Filip asked for
+// ONE number, so the cell shows the satellites heard right now (GSV with a C/N0 value). Searching:
+// "GPS 3" in dim. With a fix: the same heard number in the fix colour (kGreen), so a fix is visible
+// without a second number. The module silent: "GPS --". The used count and the expected count stay
+// in the heartbeat, not on the glass (EST-336).
 //
 // The row is 320 px and the mono face advances 6 px per glyph, so the text is short on purpose and
 // every width below is measured, not guessed: widgets.cpp measures with the real font and asks
 // chooseStatusRow() before it commits, and test/host repeats the measurement.
 //
 // Fitting order (the ticket's rule): the full row first; if it does not fit, drop the node count's
-// word ("12 nodes" -> "12"); only then shorten the GPS cell ("GPS 0/13" -> "0/13"); as the last
+// word ("12 nodes" -> "12"); only then shorten the GPS cell ("GPS 13" -> "13"); as the last
 // resort drop the node cell. Adjacent cells are always at least kStatusGap apart, including the gap
 // between the left group and the right one, so the two groups can never run into each other.
 //
@@ -30,33 +32,31 @@ namespace ui {
 // xAdvance for all 96 glyphs). Used by the host test to repeat the status-row measurement.
 constexpr int kMonoStatusAdvancePx = 6;
 
-constexpr int kGpsCellMax = 12;    // "GPS 0/99" is 8 chars plus room
+constexpr int kGpsCellMax = 12;    // "GPS 99" is 6 chars plus room
 constexpr int kNodeCellMax = 16;   // "255 nodes" is 9 chars plus room
 
 struct GpsCell {
-  bool valid = false;    // a fix: show the satellites used
+  bool valid = false;    // a fix: the heard number changes colour, nothing else
   bool talked = false;   // at least one complete NMEA sentence from the module
-  int used = 0;          // GGA satellite count (used in the fix)
   int heard = 0;         // GSV satellites with a C/N0 value above zero, all constellations
 };
 
 // Clamped to two digits: the cell may never outgrow the row.
 inline int gpsCountClamp(int v) { return v < 0 ? 0 : (v > 99 ? 99 : v); }
 
-// "GPS 7" with a fix, "GPS 0/4" while searching (used/heard), "GPS --" when the module never talked.
+// "GPS 4" (the satellites heard right now) while searching and with a fix alike; "GPS --" when the
+// module has never talked. The fix is the colour, not a second number (EST-336).
 inline void gpsCellText(char* out, size_t cap, const GpsCell& g) {
   if (!out || cap == 0) return;
-  if (g.valid) snprintf(out, cap, "GPS %d", gpsCountClamp(g.used));
-  else if (!g.talked) snprintf(out, cap, "GPS --");
-  else snprintf(out, cap, "GPS %d/%d", gpsCountClamp(g.used), gpsCountClamp(g.heard));
+  if (!g.talked) snprintf(out, cap, "GPS --");
+  else snprintf(out, cap, "GPS %d", gpsCountClamp(g.heard));
 }
 
 // The same cell without the label, for a row that would otherwise collide with the left group.
 inline void gpsCellTextShort(char* out, size_t cap, const GpsCell& g) {
   if (!out || cap == 0) return;
-  if (g.valid) snprintf(out, cap, "%d", gpsCountClamp(g.used));
-  else if (!g.talked) snprintf(out, cap, "--");
-  else snprintf(out, cap, "%d/%d", gpsCountClamp(g.used), gpsCountClamp(g.heard));
+  if (!g.talked) snprintf(out, cap, "--");
+  else snprintf(out, cap, "%d", gpsCountClamp(g.heard));
 }
 
 // The node count cell: "2 nodes" normally, just "2" when the row is tight (the ticket's first thing

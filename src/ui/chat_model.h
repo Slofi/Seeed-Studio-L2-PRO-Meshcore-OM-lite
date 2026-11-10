@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Plain model shared by the Chat screen and the host test. No LovyanGFX and no Arduino, so the
-// sequence-number rule that keeps REPLY / INFO / the message menu on the same message can be proven
-// with the system g++.
+// sequence-number rule that keeps REPLY / the message sheet on the same message can be proven with
+// the system g++.
 #pragma once
 
 #include <stdint.h>
@@ -27,6 +27,12 @@ struct ChatMsgView {
   int8_t hops = -1;         // packet hops, -1 = local echo / unknown
   int8_t snrq = 0;          // SNR x 4 (MeshCore's unit), 0 = unknown
   bool mine = false;
+  // The packet's path, as it arrived: `path` points into mesh_link's ring (valid while this view
+  // exists). pathHashCount repeaters of pathHashSize bytes each; 0 count = heard directly.
+  const uint8_t* path = nullptr;
+  uint8_t pathHashSize = 1;
+  uint8_t pathHashCount = 0;
+  int repeats = 0;          // own message: times we heard our packet repeated by others
 };
 
 // One row of the chat selector: a channel or a direct message, exactly as the facade hands it over

@@ -280,7 +280,13 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   char left[40];
   // The mock separates with U+00B7 MIDDLE DOT, not an ASCII period on the baseline. The mono blob
   // carries that glyph (tools/mkvlw.py --extra 0xb7), so the UTF-8 bytes below draw at x-height.
-  snprintf(left, sizeof(left), "%s \xC2\xB7 %s \xC2\xB7 %s", m.protocol, m.region, m.hash);
+  // The "2B" comes from the node's own path hash setting, not from a literal (EST-336).
+  uint8_t hashBytes = m.pathHashBytes;
+  if (hashBytes < 1) hashBytes = 1;
+  if (hashBytes > 3) hashBytes = 3;
+  char hashText[4];
+  snprintf(hashText, sizeof(hashText), "%uB", (unsigned)hashBytes);
+  snprintf(left, sizeof(left), "%s \xC2\xB7 %s \xC2\xB7 %s", m.protocol, m.region, hashText);
   const int leftX = r.x + kStatusPadX + kStatusDot + kStatusGap;
   drawTextLeft(d, FontRole::MonoStatus, kDim, kBar, leftX, cy, left);
 
@@ -299,14 +305,14 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   drawBattery(d, rx - kBattW, cy, m.batteryPct);
   rx -= kBattW + kStatusGap;
 
-  // "GPS 7" with a fix, "GPS 0/4" while searching (used/heard), "GPS --" when the module has never
-  // talked. The row is measured before anything on the right is drawn: the fitting order is the
-  // ticket's (drop the node count's "nodes" word first, then shorten the GPS cell, then drop the
-  // node cell), so the left group and the right group are always at least kStatusGap apart.
+  // ONE GPS number: "GPS 4", the satellites heard right now, in dim while searching and in kGreen
+  // with a fix (the fix is the colour, not a second number), "GPS --" when the module never talked.
+  // The row is measured before anything on the right is drawn: the fitting order is the ticket's
+  // (drop the node count's "nodes" word first, then shorten the GPS cell, then drop the node cell),
+  // so the left group and the right group are always at least kStatusGap apart.
   GpsCell cell;
   cell.valid = m.gpsValid;
   cell.talked = m.gpsTalked;
-  cell.used = m.gpsSats;
   cell.heard = m.gpsHeard;
 
   char nodesFull[kNodeCellMax];
@@ -338,7 +344,8 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
     case StatusRowForm::NodesDropped: nodes = nullptr; gps = gpsShort; break;
   }
 
-  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, gps) + kStatusGap;
+  const uint16_t gpsColour = cell.valid ? kGreen : kDim;
+  rx -= drawTextRight(d, FontRole::MonoStatus, gpsColour, kBar, rx, cy, gps) + kStatusGap;
   if (nodes != nullptr) drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, nodes);
 }
 
@@ -457,10 +464,14 @@ void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RowModel& row) {
 void drawEmptyState(lgfx::LovyanGFX* d, const Rect& area, const char* title, const char* sub) {
   const int cx = area.x + area.w / 2;
   const int cy = area.y + area.h / 2;
+  // An empty state may be one line only (the chat's "No messages yet", EST-336): no orphan second
+  // line, and the title sits on the band's centre instead of 9 px above it.
+  const bool hasSub = sub != nullptr && sub[0] != 0;
   setRole(d, FontRole::SansBody);
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(kInk, kScreen);
-  d->drawString(title, cx, cy - 9);
+  d->drawString(title, cx, hasSub ? cy - 9 : cy);
+  if (!hasSub) return;
   d->setTextColor(kDim, kScreen);
   d->drawString(sub, cx, cy + 9);
 }

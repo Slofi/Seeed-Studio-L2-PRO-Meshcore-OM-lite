@@ -41,6 +41,13 @@ char s_lastText[kMeshTextCap];
 int s_lastChannel = -1;
 bool s_ready = false;
 
+// Path hash size for every packet this node SENDS (MeshCore's sendFlood parameter): 1..3 bytes, 2 by
+// default because SLO runs 2-byte hashes and enforces them. NVS-backed ("phs" in "mcnet"); the
+// received side needs nothing, MeshCore reads the size from each packet.
+uint8_t s_pathHashBytes = 2;
+char s_pathHashLabel[4] = "2B";
+bool s_prefsBegun = false;
+
 // Contact persistence (see contact_store.h). The scheduler lives here so the callbacks below only
 // mark it dirty; the actual SPIFFS write happens at most once per interval, from meshLinkLoop().
 // static_assert ties the file format's record capacity to MeshCore's contact table.
@@ -61,16 +68,81 @@ struct Msg {
   uint8_t mine;
   int8_t hops;     // packet path hops, -1 = local echo / unknown
   int8_t snr4;     // SNR x 4 (MeshCore's unit), 0 = unknown
+  uint8_t pathHashSize;   // bytes per path hash of the received packet
+  uint8_t pathCount;      // repeaters the packet came over
+  uint8_t repeats;        // own message: times we heard our packet repeated by others
   uint32_t ts;     // uptime seconds when it was stored (monotonic: a GPS sync cannot disturb ages)
   uint32_t seq;    // stable message id across ring shifts, see meshMsgSeq()
   char name[kMeshNameCap];
   char text[kMeshTextCap];
+  uint8_t path[MAX_PATH_SIZE];   // the packet's path as it arrived, pathCount * pathHashSize
 };
 constexpr int kMsgRing = 32;
 Msg s_msgs[kMsgRing];
 uint32_t s_msgSeq = 0;   // messages ever stored; the next slot is s_msgSeq % kMsgRing
 int s_msgCount = 0;      // readable messages, capped at kMsgRing
 uint8_t s_unread[8] = {0};
+
+// MeshTables with one extra job: counting the times our OWN packet is heard again, repeated by
+// someone else. This uses only MeshCore's public virtual interface (markSeen/wasSeen), no library
+// edit: MeshCore calls markSeen() on the packet it is about to send, so while our send is in flight
+// that hash is remembered as ours; when a copy of it comes back from a repeater, wasSeen() is the
+// first thing MeshCore calls, and it lands here before the duplicate is dropped. The repeat is then
+// counted on the local echo that carries the same message id.
+class OmMeshTables : public SimpleMeshTables {
+ public:
+  // seq = the message id the local echo will get (s_msgSeq + 1 when the send succeeds).
+  void beginOwnSend(uint32_t seq) {
+    s_pendingSeq = seq;
+    s_pendingSlot = -1;
+  }
+  void endOwnSend(bool stored) {
+    if (!stored && s_pendingSlot >= 0) {
+      s_own[s_pendingSlot].seq = 0;   // the send failed, so the echo was not stored
+    }
+    s_pendingSeq = 0;
+    s_pendingSlot = -1;
+  }
+
+  void markSeen(const mesh::Packet* pkt) override {
+    if (s_pendingSeq != 0 && pkt != nullptr) {
+      uint8_t h[MAX_HASH_SIZE];
+      pkt->calculatePacketHash(h);
+      memcpy(s_own[s_ownNext].hash, h, MAX_HASH_SIZE);
+      s_own[s_ownNext].seq = s_pendingSeq;
+      s_pendingSlot = s_ownNext;
+      s_ownNext = (s_ownNext + 1) % kOwnSlots;
+    }
+    SimpleMeshTables::markSeen(pkt);
+  }
+
+  bool wasSeen(const mesh::Packet* pkt) override {
+    if (pkt != nullptr) {
+      uint8_t h[MAX_HASH_SIZE];
+      pkt->calculatePacketHash(h);
+      for (int i = 0; i < kOwnSlots; ++i) {
+        if (s_own[i].seq == 0 || memcmp(s_own[i].hash, h, MAX_HASH_SIZE) != 0) continue;
+        const int slot = (int)(s_own[i].seq % (uint32_t)kMsgRing);
+        if (s_msgs[slot].seq == s_own[i].seq && s_msgs[slot].repeats < 255) {
+          ++s_msgs[slot].repeats;
+        }
+        break;
+      }
+    }
+    return SimpleMeshTables::wasSeen(pkt);
+  }
+
+ private:
+  static constexpr int kOwnSlots = 8;
+  struct Own {
+    uint8_t hash[MAX_HASH_SIZE];
+    uint32_t seq;
+  };
+  Own s_own[kOwnSlots] = {};
+  int s_ownNext = 0;
+  uint32_t s_pendingSeq = 0;
+  int s_pendingSlot = -1;
+};
 
 // idx 0 is the oldest readable message. Deriving the slot from s_msgSeq (not from the count)
 // keeps the order right after the ring wraps; the old version silently reordered at 32.
@@ -225,7 +297,21 @@ public:
 
   void sendAdvert() {
     mesh::Packet* pkt = createAdvert(self_id);
-    if (pkt) sendPacket(pkt, 0, 800);
+    // A flood with OUR configured path hash size, like upstream's companion does for
+    // CMD_SEND_SELF_ADVERT: sendPacket() would leave the route type and the hash size at whatever
+    // createAdvert() left them (1-byte hashes, transport-flood route).
+    if (pkt) sendFlood(pkt, 0, s_pathHashBytes);
+  }
+
+  // MeshCore's own sendFloodScoped() calls sendFlood(pkt, delay) and so always sends 1-byte path
+  // hashes, whatever the node is configured for. Both variants are virtual for exactly this: pass
+  // the configured size, the way upstream's companion does (_prefs.path_hash_mode + 1). Every
+  // channel message, ACK, path reply and direct-message flood goes through these.
+  void sendFloodScoped(const ContactInfo&, mesh::Packet* pkt, uint32_t delay_millis) override {
+    sendFlood(pkt, delay_millis, s_pathHashBytes);
+  }
+  void sendFloodScoped(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t delay_millis) override {
+    sendFlood(pkt, delay_millis, s_pathHashBytes);
   }
 
   // Any advert that lands in the table, and every learned return path, marks it for a (rate
@@ -291,6 +377,22 @@ public:
     // What the air gave us: hops travelled and SNR at the last hop (Dispatcher sets _snr on RX).
     s_msgs[slot].hops = pkt ? (int8_t)pkt->getPathHashCount() : -1;
     s_msgs[slot].snr4 = pkt ? (int8_t)lroundf(pkt->getSNR() * 4.0f) : 0;
+    // The repeaters the packet came over: the hash bytes exactly as they arrived. MeshCore's own
+    // size travels in the packet, so the UI names each entry by matching that prefix against a known
+    // repeater's public key (the path hash IS the pub_key prefix, Identity.h).
+    s_msgs[slot].repeats = 0;
+    {
+      uint8_t hs = pkt ? pkt->getPathHashSize() : 0;
+      uint8_t hc = pkt ? pkt->getPathHashCount() : 0;
+      if (pkt == nullptr || hs < 1 || hs > 3 || (int)hc * (int)hs > MAX_PATH_SIZE) {
+        hs = 0;
+        hc = 0;
+      }
+      s_msgs[slot].pathHashSize = hs;
+      s_msgs[slot].pathCount = hc;
+      memset(s_msgs[slot].path, 0, sizeof(s_msgs[slot].path));
+      if (hc > 0) memcpy(s_msgs[slot].path, pkt->path, (size_t)hc * hs);
+    }
     const char* body = text ? text : "";
     const char* sep = strstr(body, ": ");
     // "<name>: <text>" is one MAX_TEXT_LEN string on the air, so the name can be as long as
@@ -341,7 +443,7 @@ struct Ctx {
   ArduinoMillis ms;
   OmRTCClock rtc;
   StaticPoolPacketManager mgr{16};
-  SimpleMeshTables tables;
+  OmMeshTables tables;
   CustomSX1262Wrapper* wrapper = nullptr;
   OmChat* mesh = nullptr;
 };
@@ -349,16 +451,37 @@ struct Ctx {
 Ctx* s_ctx = nullptr;
 Preferences s_netPrefs;
 
+// One place that sets the setting and the label together, so the status bar can never disagree
+// with what goes on the air.
+void applyPathHashBytes(uint8_t bytes) {
+  if (bytes < 1) bytes = 1;
+  if (bytes > 3) bytes = 3;
+  s_pathHashBytes = bytes;
+  snprintf(s_pathHashLabel, sizeof(s_pathHashLabel), "%uB", (unsigned)bytes);
+}
+
 }  // namespace
 
 bool meshLinkReady() { return s_ready; }
 const char* meshLinkLastMessage() { return s_lastText; }
 int meshLinkLastChannel() { return s_lastChannel; }
 
+uint8_t meshPathHashBytes() { return s_pathHashBytes; }
+const char* meshPathHashLabel() { return s_pathHashLabel; }
+
+bool meshPathHashSet(uint8_t bytes) {
+  if (bytes < 1 || bytes > 3) return false;
+  applyPathHashBytes(bytes);
+  if (s_prefsBegun) s_netPrefs.putUChar("phs", bytes);
+  Serial.printf("[mc] path hash set to %s (saved)\n", s_pathHashLabel);
+  return true;
+}
+
 bool meshLinkBegin() {
   if (s_ready) return true;
 
   s_netPrefs.begin("mcnet", false);
+  s_prefsBegun = true;
   if (s_netPrefs.getBool("crashed", false)) {
     const uint8_t fails = (uint8_t)(s_netPrefs.getUChar("fails", 0) + 1);
     s_netPrefs.putUChar("fails", fails);
@@ -373,6 +496,11 @@ bool meshLinkBegin() {
     return false;
   }
   s_netPrefs.putBool("crashed", true);   // cleared only after a full successful init
+
+  // The path hash size goes on the air with every packet, so it is read before the first advert.
+  applyPathHashBytes(s_netPrefs.getUChar("phs", 2));
+  Serial.printf("[mc] path hash %s (NVS phs=%u)\n", s_pathHashLabel,
+                (unsigned)s_netPrefs.getUChar("phs", 2));
 
   Serial.println("[mc] 1 spiffs");
   if (!SPIFFS.begin(true)) {
@@ -505,6 +633,22 @@ int meshMsgSnrQ(int idx) {
   return s_msgs[slotFor(idx)].snr4;
 }
 
+const uint8_t* meshMsgPath(int idx, uint8_t* hashSize, uint8_t* count) {
+  if (hashSize) *hashSize = 1;
+  if (count) *count = 0;
+  if (idx < 0 || idx >= s_msgCount) return nullptr;
+  const Msg& m = s_msgs[slotFor(idx)];
+  if (m.pathCount == 0) return nullptr;
+  if (hashSize) *hashSize = m.pathHashSize;
+  if (count) *count = m.pathCount;
+  return m.path;
+}
+
+int meshMsgHeardRepeats(int idx) {
+  if (idx < 0 || idx >= s_msgCount) return 0;
+  return s_msgs[slotFor(idx)].repeats;
+}
+
 int meshUnread(int channelIdx) {
   if (channelIdx < 0 || channelIdx >= 8) return 0;
   return s_unread[channelIdx];
@@ -525,12 +669,27 @@ const char* meshDmName(int idx) {
   return "";
 }
 
+// A DM row in the message sheet needs a real DM store behind it; false today, and the row is left
+// out of the sheet rather than shown greyed (EST-336).
+bool meshDmAvailable() { return meshDmCount() > 0; }
+
 // --- node DB ---------------------------------------------------------------------------------------
 // The UI gets a copy, never a pointer into contacts[]: the mesh may overwrite a slot on the next
 // advert while the screen is being built.
 namespace {
 bool validContact(const ContactInfo& c) {
   return c.type != ADV_TYPE_NONE && c.name[0] != 0;
+}
+
+void fillContact(const ContactInfo& ci, MeshContact& mc) {
+  mc = MeshContact{};
+  snprintf(mc.name, sizeof(mc.name), "%s", ci.name);
+  mc.type = ci.type;
+  mc.path_len = ci.out_path_len;
+  mc.lastmod = ci.lastmod;
+  mc.has_pos = (ci.gps_lat != 0 || ci.gps_lon != 0);
+  mc.lat_e6 = ci.gps_lat;
+  mc.lon_e6 = ci.gps_lon;
 }
 }  // namespace
 
@@ -541,14 +700,8 @@ int meshContactList(MeshContact* out, int max) {
   for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
     ContactInfo ci;
     if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
-    MeshContact mc{};
-    snprintf(mc.name, sizeof(mc.name), "%s", ci.name);
-    mc.type = ci.type;
-    mc.path_len = ci.out_path_len;
-    mc.lastmod = ci.lastmod;
-    mc.has_pos = (ci.gps_lat != 0 || ci.gps_lon != 0);
-    mc.lat_e6 = ci.gps_lat;
-    mc.lon_e6 = ci.gps_lon;
+    MeshContact mc;
+    fillContact(ci, mc);
     // Insert newest first; the newest max contacts win when the table is larger than the view.
     int pos = n;
     while (pos > 0 && out[pos - 1].lastmod < mc.lastmod) --pos;
@@ -558,6 +711,38 @@ int meshContactList(MeshContact* out, int max) {
     out[pos] = mc;
   }
   return n;
+}
+
+bool meshContactByName(const char* name, MeshContact* out) {
+  if (name == nullptr || name[0] == 0 || out == nullptr || !s_ctx || !s_ctx->mesh) return false;
+  const int total = s_ctx->mesh->getTotalContactSlots();
+  for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
+    ContactInfo ci;
+    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    if (strcmp(ci.name, name) != 0) continue;
+    fillContact(ci, *out);
+    return true;
+  }
+  return false;
+}
+
+// MeshCore's path hash is the first 1..3 bytes of the node's public key (Identity.h copyHashTo), so a
+// path entry names a repeater when its prefix equals that repeater's pub_key prefix. Repeaters only:
+// a room server or a client in the path stays hex rather than being named as something it is not.
+const char* meshPathHopName(const uint8_t* hash, uint8_t len, char* buf, size_t cap) {
+  if (buf == nullptr || cap == 0) return "";
+  buf[0] = 0;
+  if (hash == nullptr || len < 1 || len > MAX_HASH_SIZE || !s_ctx || !s_ctx->mesh) return buf;
+  const int total = s_ctx->mesh->getTotalContactSlots();
+  for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
+    ContactInfo ci;
+    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    if (ci.type != ADV_TYPE_REPEATER) continue;
+    if (memcmp(ci.id.pub_key, hash, len) != 0) continue;
+    snprintf(buf, cap, "%s", ci.name);
+    return buf;
+  }
+  return buf;
 }
 
 uint32_t meshContactSignature() {
@@ -594,8 +779,12 @@ bool meshLinkSend(int channelIdx, const char* text) {
   }
   Serial.printf("[mc] send: hash %02x secret %02x textlen %d\n", cd.channel.hash[0],
                 cd.channel.secret[0], (int)strlen(text));
+  // Let the tables remember this packet's hash as OURS, so a copy repeated back by someone else can
+  // be counted on the local echo below (MeshCore calls markSeen() on the outgoing packet).
+  s_ctx->tables.beginOwnSend(s_msgSeq + 1);
   const bool ok = s_ctx->mesh->sendGroupMessage(meshNow(), cd.channel, kMeshOwnName, text,
                                                 (int)strlen(text));
+  s_ctx->tables.endOwnSend(ok);
   Serial.printf("[mc] sendGroupMessage -> %d\n", (int)ok);
   if (ok) {
     // Locally echo what we sent, so the channel view shows the outgoing message too.
@@ -606,6 +795,10 @@ bool meshLinkSend(int channelIdx, const char* text) {
     s_msgs[slot].ts = millis() / 1000;
     s_msgs[slot].hops = -1;   // we know it is local; the air has not told us anything yet
     s_msgs[slot].snr4 = 0;
+    s_msgs[slot].pathHashSize = 0;
+    s_msgs[slot].pathCount = 0;
+    s_msgs[slot].repeats = 0;
+    memset(s_msgs[slot].path, 0, sizeof(s_msgs[slot].path));
     snprintf(s_msgs[slot].name, sizeof(s_msgs[slot].name), "%s", kMeshOwnName);
     snprintf(s_msgs[slot].text, sizeof(s_msgs[slot].text), "%s", text);
     if (s_msgCount < kMsgRing) ++s_msgCount;

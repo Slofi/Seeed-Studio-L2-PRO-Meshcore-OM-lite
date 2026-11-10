@@ -151,27 +151,8 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
     }
   }
 
-  const int menuH = chatMenuHeight();
-  const int menuBottom = (osk ? g.sheet.y : g.compose.y) - kPanelPad;
-  g.menuPanel = Rect{(int16_t)((L.width - kMenuW) / 2), (int16_t)(menuBottom - menuH), kMenuW,
-                     (int16_t)menuH};
-  g.menuHead = Rect{g.menuPanel.x, (int16_t)(g.menuPanel.y + kPanelPad), kMenuW, kMenuHeadH};
-  for (int r = 0; r < 3; ++r) {
-    g.menuRow[r] = Rect{(int16_t)(g.menuPanel.x + kPanelPad),
-                        (int16_t)(g.menuHead.y + g.menuHead.h + r * kActionRowH),
-                        (int16_t)(kMenuW - 2 * kPanelPad), kActionRowH};
-  }
-
-  const int infoH = chatInfoHeight();
-  const int16_t infoW = (int16_t)(L.width - 20);
-  g.infoPanel = Rect{10, (int16_t)(L.content.y + (L.content.h - infoH) / 2), infoW,
-                     (int16_t)infoH};
   return g;
 }
-
-int chatMenuHeight() { return 2 * kPanelPad + kMenuHeadH + 3 * kActionRowH; }
-
-int chatInfoHeight() { return 2 * kPanelPad + kMenuHeadH + 5 * kActionRowH; }
 
 int selContentHeight(int channelCount, int dmCount) {
   if (channelCount < 0) channelCount = 0;

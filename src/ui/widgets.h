@@ -20,11 +20,13 @@ struct StatusModel {
   bool meshReady = false;
   const char* protocol = "MC";
   const char* region = "EU868";
-  const char* hash = "2B";
+  // The path hash size every packet we send carries, in bytes (1..3): the node's own setting, never a
+  // literal. The bar draws it as "2B" (EST-336).
+  uint8_t pathHashBytes = 2;
   int nodes = 0;
   bool gpsValid = false;
-  int gpsSats = 0;          // satellites USED in the fix (GGA)
-  int gpsHeard = 0;         // satellites HEARD (GSV with a C/N0 value, all constellations)
+  int gpsSats = 0;          // satellites USED in the fix (GGA); only the heartbeat shows it now
+  int gpsHeard = 0;         // satellites HEARD right now (GSV with a C/N0 value, all constellations)
   bool gpsTalked = false;   // the module has sent at least one NMEA sentence
   int batteryPct = -1;      // -1 = unknown
   const char* clock = "--:--";
@@ -51,7 +53,8 @@ void drawCountBadge(lgfx::LovyanGFX* d, const Rect& box, int count, uint16_t rin
 // One list row (type dot, name in sans, optional note, signal bars, age in mono, bottom line).
 void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RowModel& row);
 
-// Centred two-line empty state (sans title, dim text).
+// Centred two-line empty state (sans title, dim text). A null or empty `sub` draws the title alone,
+// on the band's centre, which is the chat's "No messages yet" (EST-336).
 void drawEmptyState(lgfx::LovyanGFX* d, const Rect& area, const char* title, const char* sub);
 
 // Blend an 8-bit alpha icon (tools/mkicons.py) in fg over bg, pixel by pixel. The caller knows the

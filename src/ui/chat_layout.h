@@ -44,10 +44,6 @@ struct ChatLayout {
   Rect selPanel;           // the dropdown: the message band, header bottom to compose top
   Rect selList;            // the scrolling part (section labels and chat rows)
   Rect selManage;          // the pinned last row: "Manage channels"
-  Rect infoPanel;
-  Rect menuPanel;
-  Rect menuHead;
-  Rect menuRow[3];
 };
 
 ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector);
@@ -82,11 +78,6 @@ int msgAt(const Rect& band, const int16_t* heights, int n, int scroll, int py);
 // Split one row into keys by weight so they tile it exactly: the last key takes the rounding
 // remainder, so the row's right edge is exact whatever the division leaves over.
 int rowKeyRects(const Rect& row, const uint8_t* units, int n, int gap, Rect* out);
-
-// --- the two overlays ---------------------------------------------------------------------------
-// Height of the action menu for a given message count (3 rows) and of the INFO panel.
-int chatMenuHeight();
-int chatInfoHeight();
 
 }  // namespace ui
 }  // namespace om

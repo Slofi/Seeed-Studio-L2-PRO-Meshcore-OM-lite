@@ -1,7 +1,7 @@
-// Host test for the chat layer: src/ui/chat_layout.cpp and src/ui/text_wrap.cpp, plus the chat
-// rectangles. Plain g++, no Arduino and no LovyanGFX, so the same arithmetic the device uses is
-// proven here with a fake 6 px per ASCII character measure (a missing glyph is a space plus 2 px,
-// exactly what the device draws).
+// Host test for the chat layer: src/ui/chat_layout.cpp, src/ui/text_wrap.cpp and
+// src/ui/message_sheet.cpp, plus the chat rectangles. Plain g++, no Arduino and no LovyanGFX, so
+// the same arithmetic the device uses is proven here with a fake 6 px per ASCII character measure
+// (a missing glyph is a space plus 2 px, exactly what the device draws).
 #include <stdio.h>
 #include <string.h>
 
@@ -9,6 +9,7 @@
 #include "ui/chat_layout.h"
 #include "ui/chat_model.h"
 #include "ui/compose_text.h"
+#include "ui/message_sheet.h"
 #include "ui/text_wrap.h"
 
 using namespace om;
@@ -700,6 +701,181 @@ static void testBadge() {
   CHECK(badgeGlyphRows('0') == nullptr);   // zero is never drawn: an empty badge disappears
 }
 
+// The message sheet: the rows each message kind gets (and the ones that are left out because they
+// cannot work), the rectangles the drawing and the taps share, and the packet-path naming. This
+// drives the same src/ui/message_sheet.cpp the device draws with.
+static const char* fakeResolve(void* ctx, const uint8_t* hash, uint8_t len) {
+  (void)ctx;
+  if (len >= 1 && hash != nullptr && hash[0] == 0xAA) return "OM-RPTR";
+  return "";
+}
+
+static void testMessageSheet() {
+  const Layout& L = l2();
+
+  // --- someone else's message, with every fact available ----------------------
+  SheetContext c;
+  c.mine = false;
+  c.dmAvailable = true;
+  c.senderKnown = true;
+  c.senderHasPosition = true;
+  c.pathKnown = true;
+  c.pathText = "OM-RPTR > 7f";
+  SheetRow rows[kMaxSheetRows];
+  int n = messageSheetRows(c, rows, kMaxSheetRows);
+  CHECK(n == 7);
+  CHECK(rows[0].action == SheetAction::Reply);
+  CHECK(rows[1].action == SheetAction::DirectMessage);
+  CHECK(rows[2].action == SheetAction::CopyText);
+  CHECK(rows[3].action == SheetAction::Mention);
+  CHECK(rows[4].action == SheetAction::NodeDetails);
+  CHECK(rows[5].action == SheetAction::ShowOnMap);
+  CHECK(rows[6].action == SheetAction::Path);
+  CHECK(strcmp(rows[0].label, "Reply") == 0);
+  CHECK(strcmp(rows[6].value, "OM-RPTR > 7f") == 0);
+
+  // --- rows that cannot work are LEFT OUT, never greyed -----------------------
+  c = SheetContext();
+  n = messageSheetRows(c, rows, kMaxSheetRows);
+  CHECK(n == 3);   // Reply, Copy text, Mention: no DM store, unknown sender, no path
+  CHECK(rows[0].action == SheetAction::Reply);
+  CHECK(rows[1].action == SheetAction::CopyText);
+  CHECK(rows[2].action == SheetAction::Mention);
+
+  // ... the DM row exists only once the DM store does
+  c = SheetContext();
+  c.dmAvailable = true;
+  n = messageSheetRows(c, rows, kMaxSheetRows);
+  CHECK(n == 4);
+  CHECK(rows[1].action == SheetAction::DirectMessage);
+
+  // ... Node details only for a known contact, Show on map only with a position
+  c = SheetContext();
+  c.senderKnown = true;
+  n = messageSheetRows(c, rows, kMaxSheetRows);
+  CHECK(n == 4);
+  CHECK(rows[3].action == SheetAction::NodeDetails);
+  c.senderHasPosition = true;
+  n = messageSheetRows(c, rows, kMaxSheetRows);
+  CHECK(n == 5);
+  CHECK(rows[4].action == SheetAction::ShowOnMap);
+
+  // ... Path only for a packet that carried a repeater, and it carries the text
+  c = SheetContext();
+  c.pathKnown = true;
+  c.pathText = "1122 > OM-RPTR";
+  n = messageSheetRows(c, rows, kMaxSheetRows);
+  CHECK(n == 4);
+  CHECK(rows[3].action == SheetAction::Path);
+  CHECK(strcmp(rows[3].value, "1122 > OM-RPTR") == 0);
+
+  // --- our own message: Copy text, Resend, Heard repeats ----------------------
+  c = SheetContext();
+  c.mine = true;
+  c.dmAvailable = true;
+  c.senderKnown = true;
+  c.senderHasPosition = true;
+  c.pathKnown = true;
+  n = messageSheetRows(c, rows, kMaxSheetRows);
+  CHECK(n == 3);
+  CHECK(rows[0].action == SheetAction::CopyText);
+  CHECK(rows[1].action == SheetAction::Resend);
+  CHECK(rows[2].action == SheetAction::HeardRepeats);
+  CHECK(strcmp(rows[2].label, "Heard repeats") == 0);
+  for (int i = 0; i < n; ++i) {
+    CHECK(rows[i].action != SheetAction::Reply);
+    CHECK(rows[i].action != SheetAction::Mention);
+  }
+
+  // --- the cap: never more than the array holds -------------------------------
+  c = SheetContext();
+  c.dmAvailable = true;
+  n = messageSheetRows(c, rows, 2);
+  CHECK(n == 2);
+  CHECK(messageSheetRows(c, nullptr, 4) == 0);
+  CHECK(messageSheetRows(c, rows, 0) == 0);
+
+  // --- the geometry: a bottom sheet, seven rows, never over the status bar ----
+  const MessageSheetLayout g = messageSheetLayout(L, 7);
+  CHECK(g.rowCount == 7);
+  CHECK(g.panel.x == 0 && g.panel.w == L.width);
+  CHECK(g.panel.bottom() == L.height);
+  CHECK(g.panel.h == 2 * kSheetPadY + kSheetHeadH + 7 * kSheetRowH);
+  CHECK(g.panel.y == L.height - g.panel.h);
+  CHECK(g.panel.y >= kStatusH);   // the tallest sheet still leaves the status bar clear
+  CHECK(!g.panel.overlaps(L.status));
+  CHECK(g.head.x == kSheetPadX && g.head.w == L.width - 2 * kSheetPadX);
+  CHECK(g.head.y == g.panel.y + kSheetPadY && g.head.h == kSheetHeadH);
+  CHECK(g.head.bottom() == g.rows[0].y);
+  for (int i = 0; i < 7; ++i) {
+    CHECK(g.rows[i].x == kSheetPadX && g.rows[i].w == L.width - 2 * kSheetPadX);
+    CHECK(g.rows[i].h == kSheetRowH);
+    if (i > 0) CHECK(g.rows[i].y == g.rows[i - 1].bottom());
+    CHECK(!g.rows[i].overlaps(g.head));
+  }
+  CHECK(g.rows[6].bottom() == g.panel.bottom() - kSheetPadY);
+
+  // --- the hit rects are the drawn rows --------------------------------------
+  CHECK(messageSheetRowAt(g, g.rows[0].x, g.rows[0].y) == 0);
+  CHECK(messageSheetRowAt(g, g.rows[0].x, g.rows[0].y + kSheetRowH - 1) == 0);
+  CHECK(messageSheetRowAt(g, g.rows[1].x, g.rows[1].y) == 1);
+  CHECK(messageSheetRowAt(g, g.rows[6].x, g.rows[6].y + kSheetRowH - 1) == 6);
+  CHECK(messageSheetRowAt(g, g.rows[0].x, g.head.y) == -1);          // the header
+  CHECK(messageSheetRowAt(g, g.rows[0].x, g.rows[6].bottom()) == -1); // under the last row
+  CHECK(messageSheetRowAt(g, g.rows[0].x - 1, g.rows[0].y) == -1);    // left pad
+  CHECK(messageSheetRowAt(g, 5, g.rows[0].y) == -1);
+
+  // three rows (our own message) are shorter, so the message band above stays visible
+  const MessageSheetLayout own = messageSheetLayout(L, 3);
+  CHECK(own.panel.bottom() == L.height);
+  CHECK(own.panel.h == 2 * kSheetPadY + kSheetHeadH + 3 * kSheetRowH);
+  CHECK(own.panel.y > g.panel.y);
+  CHECK(messageSheetRowAt(own, own.rows[0].x, g.rows[0].y) == -1);
+  CHECK(messageSheetRowAt(own, own.rows[0].x, own.rows[0].y) == 0);
+  CHECK(messageSheetLayout(L, 0).panel.h == 2 * kSheetPadY + kSheetHeadH);
+  CHECK(messageSheetLayout(L, 99).rowCount == kMaxSheetRows);
+
+  // --- the path naming: a known repeater by name, the rest as hex -------------
+  char out[64];
+  const uint8_t path2[] = {0xAA, 0xBB, 0x3F, 0xA2};   // two 2-byte hashes
+  CHECK(formatMessagePath(out, sizeof(out), path2, 2, 2, fakeResolve, nullptr) ==
+        (int)strlen("OM-RPTR > 3fa2"));
+  CHECK(strcmp(out, "OM-RPTR > 3fa2") == 0);
+
+  // the hex width follows the packet's own hash size: 1 byte = 2 digits, 3 = 6
+  const uint8_t path1[] = {0xAA, 0x07};
+  formatMessagePath(out, sizeof(out), path1, 1, 2, fakeResolve, nullptr);
+  CHECK(strcmp(out, "OM-RPTR > 07") == 0);
+  const uint8_t path3[] = {0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03};
+  formatMessagePath(out, sizeof(out), path3, 3, 2, fakeResolve, nullptr);
+  CHECK(strcmp(out, "OM-RPTR > 010203") == 0);
+
+  // an unknown hash is lower-case hex, no resolver is fine, an empty path is ""
+  const uint8_t unknown[] = {0x11, 0x22};
+  formatMessagePath(out, sizeof(out), unknown, 2, 1, fakeResolve, nullptr);
+  CHECK(strcmp(out, "1122") == 0);
+  formatMessagePath(out, sizeof(out), unknown, 2, 1, nullptr, nullptr);
+  CHECK(strcmp(out, "1122") == 0);
+  CHECK(formatMessagePath(out, sizeof(out), nullptr, 2, 0, fakeResolve, nullptr) == 0);
+  CHECK(formatMessagePath(out, sizeof(out), path2, 2, 0, fakeResolve, nullptr) == 0);
+  CHECK(out[0] == 0);
+  CHECK(formatMessagePath(out, sizeof(out), path2, 0, 2, fakeResolve, nullptr) == 0);
+  CHECK(formatMessagePath(out, sizeof(out), path2, 4, 2, fakeResolve, nullptr) == 0);
+
+  // the cap is never overrun: a name wider than the buffer writes nothing and says so
+  const uint8_t wide[] = {0xAA, 0xBB};
+  CHECK(formatMessagePath(out, 4, wide, 2, 1, fakeResolve, nullptr) == 0);
+  CHECK(out[0] == 0);
+  CHECK(formatMessagePath(out, sizeof(out), wide, 2, 1, fakeResolve, nullptr) == 7);
+
+  // 63 bytes of path (21 hashes of 3) is the most a packet can carry; more is refused
+  uint8_t longPath[66];
+  memset(longPath, 0x55, sizeof(longPath));
+  CHECK(formatMessagePath(out, sizeof(out), longPath, 3, 21, fakeResolve, nullptr) > 0);
+  CHECK(strlen(out) < sizeof(out));
+  CHECK(formatMessagePath(out, sizeof(out), longPath, 3, 22, fakeResolve, nullptr) == 0);
+}
+
 int main() {
   testWrap();
   testUtf8();
@@ -711,6 +887,7 @@ int main() {
   testSelectorDrag();
   testComposeBudget();
   testBadge();
+  testMessageSheet();
 
   if (g_fail) {
     printf("%d chat check(s) FAILED\n", g_fail);

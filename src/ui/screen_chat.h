@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Chat tab on the new UI layer: the header with the chat selector (the L2 arrangement), the flat
-// message list, the compose line, the keyboard sheet that covers the tab bar, the message menu and
-// the INFO panel. Draws only into the off-screen frame (chatScreenDraw opens and closes it), and
+// message list, the compose line, the keyboard sheet that covers the tab bar, and the message sheet
+// a tap on a message opens (its header carries sender, channel, age, hops and SNR, so the old INFO
+// step is gone). Draws only into the off-screen frame (chatScreenDraw opens and closes it), and
 // hands out the same rectangles for the taps (chatScreenHit) so a screen never repeats a coordinate.
 //
 // The selector replaces the old chip strip and the three-line button (Filip, 2026-11-10). The
@@ -13,6 +14,7 @@
 
 #include "ui/chat_layout.h"
 #include "ui/chat_model.h"
+#include "ui/message_sheet.h"
 #include "ui/widgets.h"
 
 namespace om {
@@ -41,22 +43,29 @@ struct ChatView {
   const char* replyName = "";   // copied at the moment REPLY was tapped
   int menuMsg = -1;         // resolved index into msgs, -1 = closed / fell out of the ring
   uint32_t menuSeq = 0;     // held message id, what the tap returns
-  int infoMsg = -1;
-  uint32_t infoSeq = 0;
+  // What the open message's sheet needs, resolved by the shell from the mesh facade. A row exists
+  // only when its fact is true (message_sheet.h builds the list from these).
+  const uint8_t* menuPath = nullptr;   // the packet's path, as it arrived
+  uint8_t menuPathSize = 1;
+  uint8_t menuPathCount = 0;
+  int menuHeard = 0;        // own message: times we heard our packet repeated by others
+  bool menuSenderKnown = false;
+  bool menuSenderHasPos = false;
+  bool dmAvailable = false;
   int unread = 0;           // chat badge on the tab bar
 };
 
 void chatScreenDraw(const ChatView& v);
 
 enum class ChatHit : uint8_t {
-  None, Head, SelRow, SelManage, SelClose, Msg, MenuReply, MenuInfo, MenuCopy, MenuClose, InfoClose,
-  Field, Key, Outside,
+  None, Head, SelRow, SelManage, SelClose, Msg, SheetRow, SheetClose, Field, Key, Outside,
 };
 
 struct ChatHitResult {
   ChatHit hit = ChatHit::None;
   int index = -1;       // chat entry or message index (a snapshot, never held)
-  uint32_t seq = 0;     // message id to hold for REPLY / INFO / the menu
+  uint32_t seq = 0;     // message id to hold for REPLY / the message sheet
+  SheetAction sheet = SheetAction::None;   // which row of the message sheet was tapped
   int keyRow = -1;
   int keyCol = -1;
   KeyKind keyKind = KeyKind::Char;

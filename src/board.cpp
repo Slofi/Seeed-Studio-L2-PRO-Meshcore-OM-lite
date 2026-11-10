@@ -366,16 +366,29 @@ bool wakePressed(bool& pressed) {
 }
 
 void panelPower(bool on) {
-  if (on) s_display.wakeup();   // SLPOUT only: the panel needs kPanelWakeOutMs before it takes pixels
+  // sleep() = SLPIN only; wakeup() = SWRESET + 120 ms + the full init table (ending in SLPOUT) +
+  // DISPON. See board.h for the whole sequence and why the caller sends DISPOFF right after it.
+  if (on) s_display.wakeup();
   else s_display.sleep();
+}
+
+void panelDisplay(bool on) {
+  // NV3031B DISPOFF (0x28) / DISPON (0x29 + the dummy byte LovyanGFX adds). The display switches
+  // without touching the panel's RAM, so the frame pushed while it is off appears complete.
+  if (on) s_display.powerSaveOff();
+  else s_display.powerSaveOn();
 }
 
 void screenPower(bool on) {
   if (on) {
     panelPower(true);
+    panelDisplay(true);
+    delay(kPanelFramePeriodMs);
     boardSetBrightness(kScreenBrightness);
   } else {
+    // Light off first, then the display, then the panel: nothing is ever seen half-lit or scanning.
     boardSetBrightness(0);
+    panelDisplay(false);
     panelPower(false);
   }
 }

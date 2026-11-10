@@ -99,8 +99,7 @@ static bool g_compose = false;    // the keyboard sheet is open
 static bool g_kbNums = false;     // numbers/symbols page
 static bool g_kbShift = false;    // capitals
 static char g_kbText[om::kMeshTextCap];   // the draft, sized like MeshCore's longest channel text
-static uint32_t g_bubMenuSeq = 0; // message menu target: monotonic message id, 0 = closed
-static uint32_t g_bubInfoSeq = 0; // INFO panel target: monotonic message id, 0 = closed
+static uint32_t g_bubMenuSeq = 0; // the message sheet's target: monotonic message id, 0 = closed
 static uint32_t g_replySeq = 0;   // the message the next send answers (id), 0 = none
 static char g_replyName[om::kMeshNameCap] = "";   // the sender, copied when REPLY was tapped
 static om::ui::ChatEntry g_chats[om::ui::kMaxChats];
@@ -556,10 +555,13 @@ static void refreshNodes() {
 static void buildStatus(om::ui::StatusModel& s) {
   s = om::ui::StatusModel();
   s.meshReady = om::meshLinkReady();
+  // The path hash size is the node's own setting (NVS, 2 by default), never a literal: what the
+  // status bar says is exactly what sendFlood() puts on every packet we transmit (EST-336).
+  s.pathHashBytes = om::meshPathHashBytes();
   s.nodes = g_nodeCount;
   s.gpsValid = g_gps.valid;
-  s.gpsSats = g_gps.sats;
-  s.gpsHeard = g_gps.heardTotal;
+  s.gpsSats = g_gps.sats;         // not drawn any more; the heartbeat still reports it
+  s.gpsHeard = g_gps.heardTotal;  // the one GPS number on the glass
   s.gpsTalked = g_gps.sentences > 0;
   s.batteryPct = batteryPercent(g_battMv);
   // Data honesty: show HH:MM only after a real source (GPS today) has set the clock since boot.
@@ -653,6 +655,11 @@ static void refreshChatMessages() {
     m.hops = (int8_t)om::meshMsgHops(i);
     m.snrq = (int8_t)om::meshMsgSnrQ(i);
     m.mine = om::meshMsgMine(i);
+    uint8_t hs = 1, hc = 0;
+    m.path = om::meshMsgPath(i, &hs, &hc);
+    m.pathHashSize = hs;
+    m.pathHashCount = hc;
+    m.repeats = om::meshMsgHeardRepeats(i);
   }
 }
 
@@ -677,17 +684,27 @@ static void buildChatView(om::ui::ChatView& v) {
   v.nums = g_kbNums;
   v.draft = g_kbText;
   // The UI holds message ids, never indexes: when the 32-message ring shifts, the reply target and
-  // the open menu resolve to the same message. A name copied at REPLY time survives even if the
+  // the open sheet resolve to the same message. A name copied at REPLY time survives even if the
   // message itself falls out of the ring.
   v.replySeq = g_replySeq;
   v.replyName = g_replyName;
   v.menuSeq = g_bubMenuSeq;
   v.menuMsg = om::ui::chatMsgIndexBySeq(g_chatMsgs, g_chatMsgCount, g_bubMenuSeq);
-  v.infoSeq = g_bubInfoSeq;
-  v.infoMsg = om::ui::chatMsgIndexBySeq(g_chatMsgs, g_chatMsgCount, g_bubInfoSeq);
-  // The target fell out of the ring: the overlay has nothing left to show, so close it.
+  // The target fell out of the ring: the sheet has nothing left to show, so close it.
   if (g_bubMenuSeq != 0 && v.menuMsg < 0) g_bubMenuSeq = 0;
-  if (g_bubInfoSeq != 0 && v.infoMsg < 0) g_bubInfoSeq = 0;
+  if (v.menuMsg >= 0) {
+    // What the sheet may offer. Resolved here, once per build, from the same facade the screens use:
+    // a row exists only when its action can work (shown/left out, never greyed).
+    const om::ui::ChatMsgView& m = g_chatMsgs[v.menuMsg];
+    v.menuPath = m.path;
+    v.menuPathSize = m.pathHashSize;
+    v.menuPathCount = m.pathHashCount;
+    v.menuHeard = m.repeats;
+    v.dmAvailable = om::meshDmAvailable();
+    om::MeshContact contact{};
+    v.menuSenderKnown = !m.mine && om::meshContactByName(m.name, &contact);
+    v.menuSenderHasPos = v.menuSenderKnown && contact.has_pos;
+  }
   v.unread = unreadTotal();
 }
 
@@ -725,7 +742,6 @@ static void chatSelectChat(int chat) {
   g_selScroll = 0;
   g_selector = false;
   g_bubMenuSeq = 0;
-  g_bubInfoSeq = 0;
   g_replySeq = 0;
   g_replyName[0] = 0;
 }
@@ -795,6 +811,102 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
 static void showTab(int tab);
 static void drawSettings();   // the Chat header's gear opens it (defined below)
 
+// One row of the message sheet. The rows were built from what can work (message_sheet.h), so a row
+// that is here does something; the informational ones (Path, Heard repeats) just close the sheet.
+static void handleSheetAction(const om::ui::ChatHitResult& hit) {
+  if (hit.index < 0 || hit.index >= g_chatMsgCount) {
+    g_bubMenuSeq = 0;
+    return;
+  }
+  const om::ui::ChatMsgView& m = g_chatMsgs[hit.index];
+  switch (hit.sheet) {
+    case om::ui::SheetAction::Reply:
+      g_replySeq = hit.seq;
+      // Copy the name now: the ring may shift before Send, and the reply must still address the
+      // sender the user tapped, even if this message is the one that gets dropped.
+      snprintf(g_replyName, sizeof(g_replyName), "%s", m.name);
+      g_bubMenuSeq = 0;
+      g_kbText[0] = 0;
+      g_kbNums = false;
+      g_kbShift = false;
+      g_compose = true;
+      Serial.printf("[chat] reply to %s\n", g_replyName);
+      break;
+    case om::ui::SheetAction::CopyText:
+      // COPY takes the whole text, cut only by the composer's own byte budget: on a code point
+      // boundary and with an ellipsis when it has to shorten (composeCopy).
+      om::ui::composeCopy(g_kbText, (int)sizeof(g_kbText), m.text,
+                          om::ui::composeAllowance(false, nullptr));
+      g_replySeq = 0;
+      g_replyName[0] = 0;
+      g_bubMenuSeq = 0;
+      g_compose = true;
+      Serial.println("[chat] copied a message into the draft");
+      break;
+    case om::ui::SheetAction::Mention: {
+      // "@Name " in the draft without the reply bar: a plain message that starts with a mention.
+      char tag[om::kMeshNameCap + 3];
+      snprintf(tag, sizeof(tag), "@%s ", m.name);
+      om::ui::composeAppend(g_kbText, (int)sizeof(g_kbText), tag,
+                            om::ui::composeAllowance(false, nullptr));
+      g_replySeq = 0;
+      g_replyName[0] = 0;
+      g_bubMenuSeq = 0;
+      g_compose = true;
+      Serial.printf("[chat] mention %s\n", tag);
+      break;
+    }
+    case om::ui::SheetAction::NodeDetails: {
+      refreshNodes();
+      int at = -1;
+      for (int i = 0; i < g_nodeCount; ++i) {
+        if (strcmp(g_nodes[i].name, m.name) == 0) {
+          at = i;
+          break;
+        }
+      }
+      g_bubMenuSeq = 0;
+      g_selector = false;
+      if (at >= 0) g_nodeSel = at;
+      showTab(0);
+      return;
+    }
+    case om::ui::SheetAction::ShowOnMap: {
+      om::MeshContact c{};
+      if (om::meshContactByName(m.name, &c) && c.has_pos) {
+        const double lat = (double)c.lat_e6 / 1e6;
+        const double lon = (double)c.lon_e6 / 1e6;
+        g_bubMenuSeq = 0;
+        g_mapInfo = false;
+        om::mapSetView(lat, lon, om::mapZoom());
+        om::mapSetMarker(lat, lon);
+        Serial.printf("[chat] map %s %.6f,%.6f\n", m.name, lat, lon);
+        showTab(2);
+        return;
+      }
+      g_bubMenuSeq = 0;
+      break;
+    }
+    case om::ui::SheetAction::Resend: {
+      // The same text on the same channel as a NEW packet: a fresh timestamp makes a new payload.
+      const int chan = chatChannel(g_chatSel);
+      if (chan >= 0) {
+        const bool sent = om::meshLinkSend(chan, m.text);
+        Serial.printf("[chat] resend %s '%s'\n", sent ? "ok" : "failed", m.text);
+      }
+      g_bubMenuSeq = 0;
+      break;
+    }
+    case om::ui::SheetAction::DirectMessage:   // not offered while the DM store is empty
+    case om::ui::SheetAction::Path:            // informational, shown in the row's value
+    case om::ui::SheetAction::HeardRepeats:    // informational, shown in the row's value
+    case om::ui::SheetAction::None:
+    default:
+      g_bubMenuSeq = 0;
+      break;
+  }
+}
+
 // One tap on the Chat tab. The screen says what was hit with the same rectangles it drew.
 static void handleChatTap(int x, int y) {
   const om::ui::Layout& L = om::ui::l2();
@@ -807,7 +919,6 @@ static void handleChatTap(int x, int y) {
       g_selector = !g_selector;
       g_compose = false;
       g_bubMenuSeq = 0;
-      g_bubInfoSeq = 0;
       if (g_selector) g_selScroll = 0;
       break;
     case om::ui::ChatHit::SelRow:
@@ -822,41 +933,13 @@ static void handleChatTap(int x, int y) {
       break;
     case om::ui::ChatHit::Msg:
       g_bubMenuSeq = hit.seq;   // hold the message id, not its position in the ring
-      g_bubInfoSeq = 0;
-      g_compose = false;   // the menu needs the room, and the sheet would cover it
+      g_compose = false;        // the sheet needs the room and covers the keyboard anyway
       break;
-    case om::ui::ChatHit::MenuReply:
-      g_replySeq = hit.seq;
-      // Copy the name now: the ring may shift before Send, and the reply must still address the sender
-      // the user tapped, even if this message is the one that gets dropped.
-      snprintf(g_replyName, sizeof(g_replyName), "%s", g_chatMsgs[hit.index].name);
+    case om::ui::ChatHit::SheetRow:
+      handleSheetAction(hit);
+      break;
+    case om::ui::ChatHit::SheetClose:
       g_bubMenuSeq = 0;
-      g_kbText[0] = 0;
-      g_kbNums = false;
-      g_kbShift = false;
-      g_compose = true;
-      Serial.printf("[chat] reply to %s\n", g_replyName);
-      break;
-    case om::ui::ChatHit::MenuInfo:
-      g_bubInfoSeq = hit.seq;
-      g_bubMenuSeq = 0;
-      break;
-    case om::ui::ChatHit::MenuCopy:
-      // COPY takes the whole received text, cut only by the composer's own byte budget: on a code
-      // point boundary and with an ellipsis when it has to shorten (composeCopy).
-      om::ui::composeCopy(g_kbText, (int)sizeof(g_kbText), g_chatMsgs[hit.index].text,
-                          om::ui::composeAllowance(false, nullptr));
-      g_replySeq = 0;
-      g_replyName[0] = 0;
-      g_bubMenuSeq = 0;
-      g_compose = true;
-      Serial.printf("[chat] copied a message into the draft\n");
-      break;
-    case om::ui::ChatHit::MenuClose:
-      g_bubMenuSeq = 0;
-      break;
-    case om::ui::ChatHit::InfoClose:
-      g_bubInfoSeq = 0;
       break;
     case om::ui::ChatHit::Field:
       g_compose = true;   // the draft line rides on top of the keys
@@ -1140,7 +1223,6 @@ static void showTab(int tab) {
   }
   g_tab = tab;
   g_bubMenuSeq = 0;
-  g_bubInfoSeq = 0;
   g_replySeq = 0;
   g_replyName[0] = 0;
   g_selector = false;   // the dropdown belongs to the chat we are leaving
@@ -1261,7 +1343,6 @@ static void handleTap(int x, int y, bool longPress) {
         g_tab = tab;
         // Leaving the chat drops any overlay or reply target; they belong to the view we close.
         g_bubMenuSeq = 0;
-        g_bubInfoSeq = 0;
         g_replySeq = 0;
         g_replyName[0] = 0;
         Serial.printf("[tab] %s\n", kTabs[g_tab]);
@@ -1694,9 +1775,11 @@ void loop() {
         om::screenPower(false);
         Serial.printf("[wake] screen off\n");
       } else {
-        // Wake. The order matters: panel out of sleep, wait its sleep-out time, draw the current
-        // screen, and only then light the backlight, so no stale frame is ever shown. A finger
-        // already down (or one that lands during the gate) is swallowed by g_touchGate.
+        // Wake, in the order that leaves no diagonal on the glass (Filip, EST-336): the panel out of
+        // sleep, DISPOFF at once (LovyanGFX's wakeup() ends with DISPON, see board.h), its sleep-out
+        // time, the whole current frame pushed into the panel's RAM while the display is still off,
+        // then DISPON, one full frame period, and only then the backlight. A finger already down (or
+        // one that lands during the gate) is swallowed by g_touchGate.
         screenOn = true;
         uint16_t tx = 0, ty = 0;
         const bool downAtWake = om::omTouch(tx, ty);
@@ -1705,8 +1788,11 @@ void loop() {
         g_acted = false;
         const uint32_t wakeMs = millis();
         om::panelPower(true);
+        om::panelDisplay(false);
         delay(om::kPanelWakeOutMs);
         redrawCurrentScreen();
+        om::panelDisplay(true);
+        delay(om::kPanelFramePeriodMs);
         om::boardSetBrightness(om::kScreenBrightness);
         g_touchGate.onWake(wakeMs, downAtWake);
         Serial.printf("[wake] screen on (%s at wake), %lums masked\n",
@@ -1846,8 +1932,8 @@ void loop() {
       lastSeen = serial;
       const int chan = chatChannel(g_chatSel);
       if (chan >= 0) om::meshClearUnread(chan);
-      // Deliberately do NOT close the menu or INFO here: both hold the message id, so buildChatView
-      // resolves them to the same message after the ring shifts. It closes one only when its message
+      // Deliberately do NOT close the message sheet here: it holds the message id, so buildChatView
+      // resolves it to the same message after the ring shifts. It closes only when that message
       // has actually fallen out of the 32-message ring.
       om::ui::ChatView v;
       buildChatView(v);

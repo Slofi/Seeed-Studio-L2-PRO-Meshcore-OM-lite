@@ -188,12 +188,22 @@ constexpr uint8_t kKeyUnit     = 10;   // a normal key; wide keys are 22 units (
 constexpr uint8_t kKeyUnitWide = 22;
 constexpr uint8_t kKeyUnitSpace = 40;  // the bottom row's space, wider than the comma and the dot
 
-// Message menu and INFO panel: old behaviour (tap a message), new layer.
-constexpr int16_t kActionRowH = 24;
-constexpr int16_t kMenuHeadH  = 16;
-constexpr int16_t kMenuW      = 180;
-constexpr int16_t kPanelPad   = 6;
-constexpr int16_t kInfoColX   = 86;   // INFO panel: the value column, measured from the panel's left
+// The message sheet (a tap on a message, EST-336): a bottom sheet in the mock's style, like the
+// keyboard sheet, over the tab bar. Its two-line header carries sender, channel, age, hops and SNR;
+// the rows below it are kSheetRowH tall and end on a 1 px row line. Seven rows (a channel message
+// once DMs exist) still leave the status bar clear: 2 * 6 + 34 + 7 * 22 = 200 px from the bottom.
+constexpr int16_t kSheetPadX    = 10;
+constexpr int16_t kSheetPadY    = 6;
+constexpr int16_t kSheetHeadH   = 34;
+constexpr int16_t kSheetRowH    = 22;
+constexpr int16_t kSheetLine1Cy = 11;   // from the header's top: the sender
+constexpr int16_t kSheetLine2Cy = 25;   // from the header's top: channel, hops, SNR
+constexpr int16_t kSheetGap     = 6;    // a row's label -> its value
+constexpr int16_t kActionRowH   = 24;   // the old action menu used this; other screens still do
+constexpr int16_t kMenuHeadH    = 16;
+constexpr int16_t kMenuW        = 180;
+constexpr int16_t kPanelPad     = 6;
+constexpr int16_t kInfoColX     = 86;   // the value column of a label/value panel
 
 // Components the chat needs beyond the shared surfaces. Values are the mock's: the sheet is .osk
 // (#191816, the same value as the map canvas), a key is #232220 with a #31302e edge, and the compose

@@ -8,6 +8,7 @@
 
 #include "../fonts.h"   // om::useAppFont: leave the 12 px default for the old screens
 #include "board.h"
+#include "mesh_link.h"   // meshPathHopName: naming the repeaters a packet came over
 #include "ui/badge_font.h"
 #include "ui/compose_text.h"
 #include "ui/fonts.h"
@@ -274,7 +275,7 @@ void drawMessages(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
     if (v.chatCount <= 0) {
       drawEmptyState(d, g.msgs, "No channels", "Add one from Manage channels.");
     } else {
-      drawEmptyState(d, g.msgs, "No messages yet", "Say something.");
+      drawEmptyState(d, g.msgs, "No messages yet", "");
     }
     return;
   }
@@ -386,70 +387,102 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   }
 }
 
-void drawMenu(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
-  const int i = v.menuMsg;
-  if (i < 0 || i >= v.msgCount) return;
-  d->fillRoundRect(g.menuPanel.x, g.menuPanel.y, g.menuPanel.w, g.menuPanel.h, kRadiusLg, kPanel);
-  d->drawRoundRect(g.menuPanel.x, g.menuPanel.y, g.menuPanel.w, g.menuPanel.h, kRadiusLg, kLine);
-  drawTextEllipsis(d, FontRole::MonoMeta, kDim, kPanel, g.menuHead.x + kPanelPad,
-                   g.menuHead.y + g.menuHead.h / 2, g.menuHead.w - 2 * kPanelPad, v.msgs[i].name);
-  static const char* kLabels[3] = {"REPLY", "INFO", "COPY"};
-  for (int r = 0; r < 3; ++r) {
-    const Rect& row = g.menuRow[r];
-    d->fillRoundRect(row.x, row.y, row.w, row.h, kRadiusSm, kPanel2);
-    d->drawRoundRect(row.x, row.y, row.w, row.h, kRadiusSm, kLine);
-    setRole(d, FontRole::SansTab);
-    d->setTextDatum(lgfx::textdatum_t::middle_center);
-    d->setTextColor(kAcc, kPanel2);
-    d->drawString(kLabels[r], row.x + row.w / 2, row.y + row.h / 2);
-  }
+// One path hash, named when it matches a known repeater's public-key prefix (mesh_link scans the
+// contact table), "" otherwise, which leaves the hex in formatMessagePath().
+const char* resolvePathHop(void*, const uint8_t* hash, uint8_t len) {
+#if defined(OM_ENABLE_MESH)
+  static char name[kMeshNameMax];
+  return om::meshPathHopName(hash, len, name, sizeof(name));
+#else
+  (void)hash;
+  (void)len;
+  return "";
+#endif
 }
 
-void drawInfo(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
-  const int i = v.infoMsg;
-  if (i < 0 || i >= v.msgCount) return;
-  const ChatMsgView& m = v.msgs[i];
-  d->fillRoundRect(g.infoPanel.x, g.infoPanel.y, g.infoPanel.w, g.infoPanel.h, kRadiusLg, kPanel);
-  d->drawRoundRect(g.infoPanel.x, g.infoPanel.y, g.infoPanel.w, g.infoPanel.h, kRadiusLg, kLine);
+void formatSheetPath(const ChatView& v, char* out, size_t cap) {
+  out[0] = 0;
+  if (v.menuPath == nullptr || v.menuPathCount == 0) return;
+  formatMessagePath(out, cap, v.menuPath, v.menuPathSize, v.menuPathCount, resolvePathHop, nullptr);
+}
 
-  const int labelX = g.infoPanel.x + kPanelPad;
-  const int valueX = g.infoPanel.x + kInfoColX;
-  int y = g.infoPanel.y + kPanelPad + kMenuHeadH / 2;
-  drawTextLeft(d, FontRole::MonoMeta, kDimmer, kPanel, labelX, y, "FROM");
-  drawTextEllipsis(d, FontRole::MonoMeta, kAcc, kPanel, valueX, y,
-                   g.infoPanel.right() - kPanelPad - valueX, m.name);
+// The open message's rows. `pathText` must outlive the rows; every caller keeps both as locals.
+int buildSheetRows(const ChatView& v, const char* pathText, SheetRow* out) {
+  SheetContext c;
+  const ChatMsgView& m = v.msgs[v.menuMsg];
+  c.mine = m.mine;
+  c.dmAvailable = v.dmAvailable;
+  c.senderKnown = v.menuSenderKnown;
+  c.senderHasPosition = v.menuSenderHasPos;
+  c.pathKnown = v.menuPathCount > 0 && v.menuPathSize >= 1 && v.menuPathSize <= 3;
+  c.pathText = pathText;
+  return messageSheetRows(c, out, kMaxSheetRows);
+}
 
-  char line[64];
+// The sheet's header: what INFO used to show, on two lines. Sender on the first (age at the right),
+// channel, hops and SNR on the second, then the 1 px line the rows start under.
+void drawSheetHead(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m,
+                   const MessageSheetLayout& g) {
+  const int cy1 = g.head.y + kSheetLine1Cy;
   char age[8];
   ageText(age, sizeof(age), v.nowSec, m.ts);
-  const struct {
-    const char* label;
-    const char* value;
-  } rows[4] = {
-      {"CHANNEL", m.chanName ? m.chanName : ""},
-      {"AGE", line},
-      {"HOPS", ""},
-      {"SNR", ""},
-  };
-  snprintf(line, sizeof(line), "%s ago", age);
-  const int hops = m.hops;
-  const int snrq = m.snrq;
-  char hopsText[24];
-  char snrText[28];
-  if (hops < 0) snprintf(hopsText, sizeof(hopsText), "local echo");
-  else snprintf(hopsText, sizeof(hopsText), "%d", hops);
-  if (hops < 0 || snrq == 0) snprintf(snrText, sizeof(snrText), "--");
-  else snprintf(snrText, sizeof(snrText), "%.2f dB (last hop)", (double)snrq / 4.0);
-  const char* values[4] = {rows[0].value, rows[1].value, hopsText, snrText};
+  const int ageW = textWidth(d, FontRole::MonoMeta, age);
+  drawTextEllipsis(d, FontRole::SansBody, kInk, kSheet, g.head.x, cy1,
+                   g.head.w - ageW - kSheetGap, m.name);
+  drawTextRight(d, FontRole::MonoMeta, kDim, kSheet, g.head.right(), cy1, age);
 
-  for (int r = 0; r < 4; ++r) {
-    y += kActionRowH;
-    drawTextLeft(d, FontRole::MonoMeta, kDimmer, kPanel, labelX, y, rows[r].label);
-    drawTextEllipsis(d, FontRole::MonoMeta, kInk, kPanel, valueX, y,
-                     g.infoPanel.right() - kPanelPad - valueX, values[r]);
+  char hops[24];
+  char snr[28];
+  if (m.hops < 0) snprintf(hops, sizeof(hops), "local echo");
+  else snprintf(hops, sizeof(hops), "%d hop%s", (int)m.hops, m.hops == 1 ? "" : "s");
+  if (m.hops < 0 || m.snrq == 0) snprintf(snr, sizeof(snr), "SNR --");
+  else snprintf(snr, sizeof(snr), "SNR %.1f dB", (double)m.snrq / 4.0);
+  char meta[96];
+  snprintf(meta, sizeof(meta), "%s \xC2\xB7 %s \xC2\xB7 %s", m.chanName ? m.chanName : "", hops,
+           snr);
+  drawTextEllipsis(d, FontRole::MonoMeta, kDim, kSheet, g.head.x, g.head.y + kSheetLine2Cy,
+                   g.head.w, meta);
+  d->drawFastHLine(g.head.x, g.head.bottom() - 1, g.head.w, kLine);
+}
+
+// One action row: the label on the left, an optional mono value on the right (the path, the repeat
+// count), and the 1 px row line the mock uses between rows.
+void drawSheetRow(lgfx::LovyanGFX* d, const Rect& r, const SheetRow& row, int heard) {
+  char heardText[8];
+  const char* value = row.value;
+  if (row.action == SheetAction::HeardRepeats) {
+    snprintf(heardText, sizeof(heardText), "%d", heard < 0 ? 0 : heard);
+    value = heardText;
   }
-  drawTextLeft(d, FontRole::MonoMeta, kDimmer, kPanel, labelX, y + kActionRowH,
-               "tap anywhere to close");
+  const int cy = r.y + r.h / 2;
+  const int labelW = textWidth(d, FontRole::SansBody, row.label);
+  drawTextLeft(d, FontRole::SansBody, kInk, kSheet, r.x, cy, row.label);
+  if (value != nullptr && value[0] != 0) {
+    const int room = r.w - labelW - kSheetGap;
+    if (room > 0) {
+      const int w = textWidth(d, FontRole::MonoMeta, value);
+      const int x = r.right() - (w <= room ? w : room);
+      drawTextEllipsis(d, FontRole::MonoMeta, kDim, kSheet, x, cy, room, value);
+    }
+  }
+  d->drawFastHLine(r.x, r.bottom() - 1, r.w, kRowLine);
+}
+
+void drawMessageSheet(lgfx::LovyanGFX* d, const ChatView& v) {
+  if (v.msgs == nullptr || v.menuMsg < 0 || v.menuMsg >= v.msgCount) return;
+  char path[96];
+  formatSheetPath(v, path, sizeof(path));
+  SheetRow rows[kMaxSheetRows];
+  const int n = buildSheetRows(v, path, rows);
+  const MessageSheetLayout g = messageSheetLayout(l2(), n);
+
+  // Rounded at the top only, like the keyboard sheet: the body is drawn past the bottom edge so the
+  // lower corners fall off the screen, and it covers the tab bar because it is drawn after it.
+  d->fillRoundRect(g.panel.x, g.panel.y, g.panel.w, (int16_t)(g.panel.h + kOskRadius), kOskRadius,
+                   kSheet);
+  d->drawFastHLine(g.panel.x, g.panel.y, g.panel.w, kLine);
+  drawSheetHead(d, v, v.msgs[v.menuMsg], g);
+  for (int i = 0; i < n; ++i) drawSheetRow(d, g.rows[i], rows[i], v.menuHeard);
 }
 
 }  // namespace
@@ -476,8 +509,8 @@ void chatScreenDraw(const ChatView& v) {
   else drawCompose(d, v, g);
   // The sheet covers the bottom edge, so the tab bar is not drawn while it is open (mock .kb-open).
   if (!v.osk) drawTabBar(d, L, Tab::Chat, v.unread);
-  if (v.menuMsg >= 0) drawMenu(d, v, g);
-  if (v.infoMsg >= 0) drawInfo(d, v, g);
+  // The message sheet is last: the mock's bottom sheet sits over the tab bar.
+  if (v.menuMsg >= 0) drawMessageSheet(d, v);
 
   // The channel list and its pages are still the old screens and share this frame; leave them the
   // 12 px default font the old drawing code expects.
@@ -489,22 +522,23 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   ChatHitResult r;
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
 
-  // Overlays first: a tap anywhere closes INFO (old behaviour), and a tap outside the message menu
-  // closes the menu.
-  if (v.infoMsg >= 0) {
-    r.hit = ChatHit::InfoClose;
-    return r;
-  }
-  if (v.menuMsg >= 0) {
-    for (int i = 0; i < 3; ++i) {
-      if (g.menuRow[i].contains(x, y)) {
-        r.hit = (i == 0) ? ChatHit::MenuReply : (i == 1 ? ChatHit::MenuInfo : ChatHit::MenuCopy);
-        r.index = v.menuMsg;
-        r.seq = v.menuSeq;
-        return r;
-      }
+  // The message sheet swallows the screen: a row is its action, a tap on the header or anywhere
+  // outside the panel closes it (the same rule the keyboard sheet has).
+  if (v.menuMsg >= 0 && v.msgs != nullptr) {
+    char path[96];
+    formatSheetPath(v, path, sizeof(path));
+    SheetRow rows[kMaxSheetRows];
+    const int n = buildSheetRows(v, path, rows);
+    const MessageSheetLayout m = messageSheetLayout(l2(), n);
+    const int row = messageSheetRowAt(m, x, y);
+    if (row >= 0) {
+      r.hit = ChatHit::SheetRow;
+      r.sheet = rows[row].action;
+      r.index = v.menuMsg;
+      r.seq = v.menuSeq;
+      return r;
     }
-    r.hit = ChatHit::MenuClose;
+    r.hit = ChatHit::SheetClose;
     return r;
   }
 

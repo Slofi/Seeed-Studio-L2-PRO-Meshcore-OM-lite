@@ -73,10 +73,27 @@ constexpr uint8_t kScreenBrightness = 160;
 // CMD_SLPOUT_DELAY = 120 ms; wakeup() sends SLPOUT but does not wait). A caller that wants a fresh
 // frame must wake the panel, wait this long, draw, and only then light the backlight, otherwise the
 // first thing the user sees is the stale frame or nothing.
+//
+// What LovyanGFX 1.2.27 actually sends for this panel (checked in Panel_NV3031B.cpp):
+//   sleep()  = SLPIN only.
+//   wakeup() = SWRESET, 120 ms, the WHOLE init table (which ends with SLPOUT + 100 ms), then DISPON
+//              with the dummy byte NV303x needs. So the panel cannot be held DISPOFF through the
+//              sleep-out: it turns DISPLAY ON inside wakeup(). The caller therefore sends DISPOFF
+//              immediately after wakeup() returns, keeps it through the frame push, and sends DISPON
+//              only once the whole frame is in the panel's RAM. The backlight stays 0 until then, so
+//              nothing of the init or the scan-out is ever visible (EST-336).
+// boardSetBrightness() does NOT ramp: it writes the level to the four channels and latches, so the
+// light steps in one go.
 constexpr uint32_t kPanelWakeOutMs = 120;
+constexpr uint32_t kPanelFramePeriodMs = 20;   // one full panel frame at ~60 Hz, after DISPON
 
 // Panel sleep/wake only: the backlight is left alone, so a caller can wake, redraw, then light it.
 void panelPower(bool on);
+
+// DISPOFF / DISPON (NV3031B 0x28 / 0x29 + the dummy byte). Keeping the display off across a wake's
+// sleep-out and the frame push is what removes the diagonal artefact: the panel is never seen
+// scanning a half-written frame.
+void panelDisplay(bool on);
 
 // Screen off: backlight 0 + panel sleep. Screen on: panel wake + backlight, with no redraw; use it
 // only where the panel's content is still valid. The wake button uses panelPower() and redraws.

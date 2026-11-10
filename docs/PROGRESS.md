@@ -694,3 +694,129 @@
 
 ## 2026-11-10 09:08 (Claude): EST-335 on the device
 - Built in the sandbox (exit 0, RAM 83,124 B, flash 857,297 B), tests exit 0, OTA ok (857,664 B). Indoors: `expected=13(g10 l0 b3 a0) heard=0 used=0 best=0 maxheard=0`, as it should be. Note: GLONASS expected stays 0 after `$PCAS04,7`; whether the mode was taken is still open (no `$PCAS` reply, no GL talker yet). Outdoor test next (Filip, balcony, upright).
+
+## 2026-11-10 09:25 (DeepSeek): EST-336 path hash really 2B, one GPS number, clean wake, no "Say something", new message sheet
+
+- **What this ticket is**: the five things Filip found at ~09:05 on the EST-333/334 build. Where he quoted
+  the mock, his words win.
+
+- **1. The path hash is 2B on the air, not just in the status bar.** Two separate bugs, as Claude said:
+  `ui/widgets.h` carried `hash = "2B"` as a literal that nothing ever wrote to (so the bar always said 2B),
+  and every flood went out with MeshCore's `sendFlood(pkt, delay)` default of `path_hash_size = 1` because
+  `BaseChatMesh::sendFloodScoped()` calls it without a size (both variants, BaseChatMesh.cpp lines 14-18).
+  - `OmChat` now overrides BOTH virtual `sendFloodScoped` variants (`ContactInfo` and `GroupChannel`) and
+    passes the configured size, exactly the way upstream's companion does (`_prefs.path_hash_mode + 1`,
+    reference MyMesh.cpp ~490-517). That covers channel messages, ACKs, path replies and DM floods.
+  - The self advert no longer calls `sendPacket(pkt, 0, 800)` (which left the route type and size as
+    `createAdvert()` made them, i.e. 1-byte hashes): it is a real `sendFlood(pkt, 0, configured)`, like
+    upstream's `CMD_SEND_SELF_ADVERT`.
+  - One setting: `s_pathHashBytes`, 2 by default, allowed 1..3, saved in NVS as `phs` in the `mcnet`
+    namespace, read in `meshLinkBegin()` before the first advert (`[mc] path hash 2B (NVS phs=2)` on the
+    boot log). Facade: `meshPathHashBytes()` / `meshPathHashSet()` / `meshPathHashLabel()`; the Settings
+    ticket wires the page, this ticket only stores it. `meshPathHashSet()` refuses a value outside
+    1..3 (returns false) rather than clamping it silently.
+  - The status bar no longer has a string literal: `StatusModel.pathHashBytes` (number) is filled from
+    `meshPathHashBytes()` by `buildStatus()` and drawn as `N` + "B", so the bar and the air cannot disagree.
+  - **The received side needs nothing**, checked: `Packet::getPathHashSize()` is `(path_len >> 6) + 1`,
+    carried per packet, and MeshCore reads it on RX, forwarding and dispatch (`Mesh.cpp` uses it for the
+    path checks and the append). Our receive path does not assume 1.
+  - **How to verify on the air** (Claude, on gandalf): send a channel message from the L2 with one repeater
+    between, then look at that message on OM: its path must be **2 bytes for that one hop** (4 for two
+    repeaters), where the old build showed 1 byte per hop. The L2's own advert is a flood too now, so OM's
+    recently-heard/advert path for our node must also show 2-byte entries. On the device, the boot log's
+    `[mc] path hash 2B` and the status bar's `... · 2B` come from the same variable.
+
+- **2. One GPS number.** The cell now shows only the satellites HEARD right now (`C/N0 > 0`, EST-335's
+  counting): `GPS 4` while searching in `kDim`, the same `GPS 4` in **`kGreen`** (theme.h, the
+  "repeater/good" green `#39d98a`) once there is a fix, so the fix is the colour and not a second number;
+  `GPS --` while the module is silent. `GpsCell.used` is gone from the cell (the struct no longer has it);
+  the used count and the expected count stay in the heartbeat (`[hb] gps ... expected=... used=...`). The
+  fitting row is unchanged in order, only the cell text is shorter, so the "drop the word, then the GPS
+  label, then the node cell" rules still hold.
+
+- **3. Clean wake, no diagonal.** What LovyanGFX 1.2.27 actually sends for the NV3031B (read from the panel
+  driver in the libdeps tree): `sleep()` = **SLPIN only**; `wakeup()` = **SWRESET, 120 ms, the whole init
+  table (which ends with SLPOUT + 100 ms), then DISPON with NV303x's dummy byte**. So the panel turns
+  DISPLAY ON inside `wakeup()`; DISPOFF cannot be held through the sleep-out with the public API alone.
+  `boardSetBrightness()` does **not** ramp: it writes 0x18..0x1B then latches 0x0F, so the light steps.
+  - New `board.cpp panelDisplay(bool)`: DISPOFF / DISPON through LovyanGFX's `powerSaveOn()/Off()`
+    (0x28 / 0x29 + the dummy byte). `screenPower(false)` is now light 0 -> DISPOFF -> SLPIN;
+    `screenPower(true)` is wake -> DISPON -> 20 ms -> light.
+  - The wake path in `loop()` is now: `panelPower(true)` (SWRESET + init, ends with DISPON), **DISPOFF at
+    once**, the 120 ms sleep-out, `redrawCurrentScreen()` (the whole frame, pushed into the panel's RAM
+    while the display is off), **DISPON**, one frame period `kPanelFramePeriodMs` = 20 ms, then the
+    backlight. So the diagonal (the panel scanning a half-written frame, or scanning garbage after the
+    reset) can no longer be seen: the display is dark through both, and the light comes up on a complete
+    frame.
+  - The ticket's fallback ("at least light the backlight after one full frame period past the push") is
+    therefore also in place; the DISPOFF part additionally hides the post-reset RAM.
+
+- **4. Empty chat**: "Say something." is gone; only "No messages yet". `drawEmptyState()` now takes a null
+  or empty sub as one line, centred on the band instead of 9 px high.
+
+- **5. A message sheet, not the three-button bubble menu.** `src/ui/message_sheet.h/.cpp` (new, plain C++,
+  host-tested) builds the rows and the geometry; `screen_chat.cpp` draws it and answers the taps with the
+  same rectangles. It is a bottom sheet in the mock's style (rounded top corners, full width, over the tab
+  bar, tap outside closes), as tall as its contents (7 rows max: 2*6 + 34 + 7*22 = 200 px, so it never
+  reaches the status bar). Header (what INFO used to show, so INFO is no longer a step): sender in sans
+  with the age at the right, then one mono line "channel · N hops · SNR x.x dB" ("local echo" / "SNR --"
+  where unknown).
+  - On someone else's message: **Reply** (the "@Name text" draft, as before), **Direct message** (only
+    when a DM can actually be opened: `meshDmAvailable()` is false while the DM store is empty, so the row
+    is left OUT, not greyed), **Copy text**, **Mention** ("@Name " into the draft without the reply bar),
+    **Node details** (jumps to the sender in Nodes, only when the name matches a known contact),
+    **Show on map** (only when that contact has an advertised position: recentres the map and drops the
+    marker), **Path** (only when the packet carried a repeater; the value is the named path, below).
+  - On our own message: **Copy text**, **Resend** (same text, same channel, a new packet: a fresh
+    timestamp makes a new payload, MeshCore's own `sendGroupMessage` does the rest), **Heard repeats**
+    with the count at the right.
+  - **Heard repeats works, with no lib/meshcore edit.** MeshCore's `MeshTables` is a public virtual
+    interface, and `SimpleMeshTables` was ours to subclass: `OmMeshTables` remembers the packet hash that
+    MeshCore `markSeen()`s on the outgoing packet (while our send is in flight), and when a copy of that
+    hash comes back from a repeater, `wasSeen()` sees it before MeshCore drops the duplicate and counts it
+    on the local echo with the same message id. So the row is shown; the count is "times we heard our own
+    packet repeated", not a hop count.
+  - **Path naming**: the hash bytes are stored per message as they arrived (up to 64 B in the ring, about
+    +2.1 KB RAM for 32 messages). MeshCore's path hash is the first 1..3 bytes of the repeater's public key
+    (`Identity.h copyHashTo`), so `meshPathHopName()` matches each entry against a **known repeater's**
+    pub_key prefix and returns its name; an unmatched entry stays lower-case hex at the packet's own hash
+    width (1 byte = 2 digits, 3 = 6). Entries are joined " > " ("OM-RPTR > 3fa2").
+  - The old bubble menu and the INFO panel are removed where nothing calls them (draw functions, hit
+    cases, `ChatHit::Menu*/InfoClose`, `ChatLayout`'s menu/info rects, `chatMenuHeight/chatInfoHeight`).
+  - New facade bits: `meshMsgPath()`, `meshMsgHeardRepeats()`, `meshContactByName()`, `meshPathHopName()`,
+    `meshDmAvailable()`.
+
+- **Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS, 21.4 s. RAM 85,724 B of
+  327,680 (26.2 %), flash 860,777 B of 6,553,600 (13.1 %), `firmware.bin` 861,136 B. Previous run 83,124 B /
+  857,297 B, so this ticket added **+2,600 B RAM and +3,480 B flash** (the 32 x 64-byte message paths and
+  the repeat counters, the path-hash plumbing, the sheet and its rows, the empty-state change).
+
+- **Tests**: `test/host/run.sh` exit 0 (7 g++ binaries + the 9 python checks). New `testMessageSheet()` in
+  `test_chat.cpp`, compiled against the same `message_sheet.cpp` the device draws with: the 7 rows of a
+  channel message with every fact available and their order; the rows that are left out (no DM store, no
+  known sender, no position, no path) and that each appears exactly when its fact does; the 3 rows of our
+  own message and that no Reply/Mention is offered there; the cap and the null/0 cases; the geometry (full
+  width, bottom edge, 200 px for 7 rows, above the status bar, header then rows with no gap, each row 22 px,
+  the last row ends kSheetPadY above the floor) and the hit rects (each row's own band, the header and the
+  edges answer -1); the path naming (named + hex, 1/2/3-byte widths, unknown, no resolver, empty, a cap
+  smaller than the first name, 63 bytes accepted and 66 refused). `test_age.cpp` was rewritten for the one
+  number (`GPS 4` searching and with a fix, `GPS 0` indoors, `GPS --` silent, two digits, the 99 clamp) and
+  its status-row widths recomputed (a full row is 193 px now); the tight case uses `999 nodes` + `GPS 24`
+  because the shorter cell made the old `12 nodes` row fit.
+
+- **Could not check** (no device): the on-air path size (Claude + OM on gandalf, above is the test); the
+  sheet on the panel at 1:1 (row height 22 px, the header's two lines, a 7-row sheet over the tab bar, the
+  Path row's long value); the wake with a real eye on the glass (the artefact is timing, we only reason
+  about it); whether OM shows our advert's path as 2-byte entries; whether a repeater actually repeats us
+  within the test window (the Heard repeats count may stay 0 on a quiet band, which is honest); the "2B"
+  with a value saved to NVS (no page writes it yet, so only the default 2 path is exercised).
+
+- **Next step**: Claude flashes and checks, in this order: boot log `[mc] path hash 2B (NVS phs=2)`; the
+  status bar `MC · EU868 · 2B`; indoors `GPS 0` (dim) with the heartbeat `expected=13 heard=0`; the chat's
+  empty state with only "No messages yet"; a tap on someone else's message (sheet header + Reply, Copy
+  text, Mention; Node details / Show on map / Path only where they apply); a tap on our own message (Copy
+  text, Resend, Heard repeats); tap outside to close. Then on gandalf, the one real proof: OM must show
+  our next message/advert with **2 bytes per path hop**.
+
+## 2026-11-10 09:28 (Claude): EST-336 on the device
+- Built in the sandbox (exit 0, RAM 85,724 B, flash 860,777 B), tests exit 0, OTA ok (861,136 B). Boot: `[mc] path hash 2B (NVS phs=2)`, advert sent as a 2B flood. Status bar: `GPS 0` indoors (heard only), 2B from the setting. On-air check through OM on gandalf still to do (needs a message or advert from the L2 heard there). Wake, message sheet: Filip to check.

@@ -79,36 +79,32 @@ static int width(const char* s) { return glyphs(s) * kMonoStatusAdvancePx; }
 
 static void testStatusCells() {
   GpsCell c;
-
-  // --- with a fix: the satellites USED ---------------------------------------
-  c = GpsCell();
-  c.valid = true;
-  c.talked = true;
-  c.used = 7;
-  c.heard = 20;
   char out[16];
-  gpsCellText(out, sizeof(out), c);
-  CHECK(strcmp(out, "GPS 7") == 0);
-  gpsCellTextShort(out, sizeof(out), c);
-  CHECK(strcmp(out, "7") == 0);
 
-  // --- searching: used / HEARD, the ticket's own example ---------------------
+  // --- ONE number, the satellites HEARD right now, while searching -----------
   c = GpsCell();
   c.talked = true;
-  c.used = 0;
   c.heard = 4;
   gpsCellText(out, sizeof(out), c);
-  CHECK(strcmp(out, "GPS 0/4") == 0);
-  CHECK(width(out) == 42);
+  CHECK(strcmp(out, "GPS 4") == 0);
+  CHECK(width(out) == 30);
   gpsCellTextShort(out, sizeof(out), c);
-  CHECK(strcmp(out, "0/4") == 0);
+  CHECK(strcmp(out, "4") == 0);
 
-  // Indoors, with the almanac listing 13 satellites and nothing heard: "GPS 0/0", never "0/13".
+  // With a fix the number stays the heard count: the fix is the colour (kGreen in widgets.cpp), not
+  // a second number. The old "GPS 7" (used) and "GPS 0/4" (used/heard) are gone (EST-336).
+  c.valid = true;
+  gpsCellText(out, sizeof(out), c);
+  CHECK(strcmp(out, "GPS 4") == 0);
+  CHECK(width(out) == 30);
+
+  // Indoors, with the almanac listing 13 satellites and nothing heard: "GPS 0", never "0/13". The
+  // expected count stays in the heartbeat.
   c.heard = 0;
   gpsCellText(out, sizeof(out), c);
-  CHECK(strcmp(out, "GPS 0/0") == 0);
+  CHECK(strcmp(out, "GPS 0") == 0);
   gpsCellTextShort(out, sizeof(out), c);
-  CHECK(strcmp(out, "0/0") == 0);
+  CHECK(strcmp(out, "0") == 0);
 
   // --- the module has never said anything ------------------------------------
   c = GpsCell();
@@ -120,20 +116,14 @@ static void testStatusCells() {
   // --- two digits stay inside the cap; three clamp to 99 ---------------------
   c = GpsCell();
   c.talked = true;
-  c.used = 0;
   c.heard = 24;
   gpsCellText(out, sizeof(out), c);
-  CHECK(strcmp(out, "GPS 0/24") == 0);
-  c.heard = 300;
-  gpsCellText(out, sizeof(out), c);
-  CHECK(strcmp(out, "GPS 0/99") == 0);
-  c.valid = true;
-  c.used = 250;
+  CHECK(strcmp(out, "GPS 24") == 0);
   c.heard = 300;
   gpsCellText(out, sizeof(out), c);
   CHECK(strcmp(out, "GPS 99") == 0);
   CHECK(width(out) <= kGpsCellMax * kMonoStatusAdvancePx);
-  CHECK((int)strlen("GPS 0/99") <= kGpsCellMax);
+  CHECK((int)strlen("GPS 99") <= kGpsCellMax);
 
   // --- the node count cell ---------------------------------------------------
   nodeCellText(out, sizeof(out), 2, true);
@@ -153,32 +143,35 @@ static void testStatusCells() {
   const int leftEnd = kStatusPadX + kStatusDot + kStatusGap + width("MC \xC2\xB7 EU868 \xC2\xB7 2B");
   CHECK(leftEnd == 107);
 
-  // Claude's screenshot: two nodes, 97 %, 08:53, "GPS 0/13". It fits with the full cells, and the
-  // gap at the group boundary is at least kStatusGap (measured: 8 px).
+  // Claude's screenshot: two nodes, 97 %, 08:53, "GPS 13" heard. It fits with the full cells, and
+  // the gap at the group boundary is at least kStatusGap (measured: 8 px).
   StatusRightWidths w;
-  const auto set = [&w](int nodes, int gpsCount, int pct, const char* clock) {
+  const auto set = [&w](int nodes, int heard, int pct, const char* clock) {
     char buf[16];
     nodeCellText(buf, sizeof(buf), nodes, true);
     w.nodes = width(buf);
     nodeCellText(buf, sizeof(buf), nodes, false);
     w.nodesNumber = width(buf);
-    snprintf(buf, sizeof(buf), "GPS 0/%d", gpsCount);
+    GpsCell cell;
+    cell.talked = true;
+    cell.heard = heard;
+    gpsCellText(buf, sizeof(buf), cell);   // the same one number widgets.cpp draws
     w.gps = width(buf);
-    snprintf(buf, sizeof(buf), "0/%d", gpsCount);
+    gpsCellTextShort(buf, sizeof(buf), cell);
     w.gpsShort = width(buf);
     snprintf(buf, sizeof(buf), "%d%%", pct);
     w.pct = width(buf);
     w.clock = width(clock);
   };
   set(2, 13, 97, "08:53");
-  CHECK(statusRightWidth(w, StatusRowForm::Full) == 205);
+  CHECK(statusRightWidth(w, StatusRowForm::Full) == 193);
   CHECK(statusRowFits(kScreenW, leftEnd, w, StatusRowForm::Full));
   CHECK(chooseStatusRow(kScreenW, leftEnd, w) == StatusRowForm::Full);
   CHECK(kScreenW - statusRightWidth(w, StatusRowForm::Full) >= leftEnd + kStatusGap);
 
-  // The tight row: "12 nodes", a full battery, "GPS 0/24". The full row runs into the left group,
-  // so the node count's word goes FIRST (the ticket's order): "12" with the GPS cell still whole.
-  set(12, 24, 100, "08:20");
+  // The tight row: "999 nodes", a full battery, "GPS 24". The full row runs into the left group, so
+  // the node count's word goes FIRST (the ticket's order): "999" with the GPS cell still whole.
+  set(999, 24, 100, "08:20");
   CHECK(!statusRowFits(kScreenW, leftEnd, w, StatusRowForm::Full));
   CHECK(statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodeNumber));
   CHECK(chooseStatusRow(kScreenW, leftEnd, w) == StatusRowForm::NodeNumber);
@@ -186,8 +179,8 @@ static void testStatusCells() {
         statusRightWidth(w, StatusRowForm::Full));
 
   // Only when dropping the word is not enough does the GPS cell lose its label.
-  set(12, 24, 100, "08:20");
-  w.pct = width("100%") + 30;   // a wider right group than any real text, same order of fit
+  set(999, 24, 100, "08:20");
+  w.pct = width("100%") + 40;   // a wider right group than any real text, same order of fit
   CHECK(!statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodeNumber));
   CHECK(statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodeNumberGpsShort));
   CHECK(chooseStatusRow(kScreenW, leftEnd, w) == StatusRowForm::NodeNumberGpsShort);

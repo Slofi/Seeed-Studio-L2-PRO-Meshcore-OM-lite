@@ -1,17 +1,14 @@
 # OM Lite for the Seeed Wio Tracker L2 Pro
 
-A pocket MeshCore handheld that works on its own. No phone, no laptop, no cloud.
+OM Lite is a MeshCore app for the Seeed Studio Wio Tracker L2 Pro. It runs on the device itself, so you can chat,
+check nodes, use an offline map and manage repeaters without a phone.
 
-OM Lite turns the [Seeed Studio Wio Tracker L2 Pro](https://www.seeedstudio.com/) (ESP32-S3, SX1262 LoRa radio,
-GPS, 3.2" touch screen, speaker, SD card, 3000 mAh battery) into a little mesh terminal you can carry around: read
-and send messages, see who is around, look at an offline map, and look after your own repeaters, all from the
-device in your hand.
+The L2 Pro has an ESP32-S3, an SX1262 LoRa radio, GPS, a 3.2" touch screen, a speaker, an SD card slot and a
+3000 mAh battery. This firmware uses all of it.
 
-It is the small sibling of [OverMesh](https://github.com/Slofi/overmesh), the dashboard we run at home, and it
-speaks [MeshCore](https://github.com/meshcore-dev/MeshCore).
+OM Lite is a handheld version of [OverMesh](https://github.com/Slofi/overmesh), our MeshCore dashboard.
 
-> **Status:** work in progress, but very usable. It runs every day on a real L2 Pro on the Slovenian MeshCore mesh.
-> Expect things to keep changing.
+Status: work in progress. I use it every day on the Slovenian MeshCore mesh.
 
 <p align="center">
   <img src="docs/shots/2026-11-10-1014-nodes-times.png" width="320" alt="Nodes list">
@@ -22,50 +19,53 @@ speaks [MeshCore](https://github.com/meshcore-dev/MeshCore).
   <img src="docs/shots/2026-11-10-1401-settings-general.png" width="320" alt="Settings">
 </p>
 
-## What it can do
+## Features
 
-**Chat**
-- Channels and direct messages, with a dropdown to jump between them and unread counts on each.
-- A proper on-screen keyboard: hold `s`, `c` or `z` for `š`, `č`, `ž`, a numbers page, and an emoji page.
-- Colour emoji in messages (the full Noto set).
-- Tap a message for Reply, Mention, Copy, Direct message, the sender's node, the path it took, and more.
-- Delivery receipts on direct messages ("delivered 14:02").
-- Chat history saved on the SD card, so it survives restarts.
-- A short pop-up when something arrives; a tap dismisses it without pressing anything underneath.
+### Chat
+- Channels and direct messages
+- Unread counts per chat, channel/DM dropdown
+- On-screen keyboard with a numbers page and an emoji page
+- Long press `s`, `c`, `z` for `š`, `č`, `ž`
+- Colour emoji (Noto)
+- Message menu: reply, mention, copy, DM the sender, node info, path
+- Delivery status on DMs
+- Chat history on the SD card
+- Pop-up for new messages, tap to close
 
-**Nodes**
-- Everyone you have heard, with real times ("heard 14:02") instead of "5 min ago".
-- Long-press a node for Info, Ping, Trace, Show on map, Favourite and Remove.
-- A notice and a sound when a new node shows up.
+### Nodes
+- List of heard nodes with the time they were last heard
+- Long press a node: DM, info, ping, trace, show on map, favourite, remove
+- Pop-up and sound for new nodes
 
-**Map**
-- Offline map tiles from the SD card, with your position from the built-in GPS.
+### Map
+- Offline tiles from the SD card
+- Own position from GPS
+- Message traces through repeaters (toggle)
 
-**Repeaters (RPTR)**
-- Opens with a scan of the repeaters around you.
-- Log in, then see battery, noise floor, uptime and the repeater's clock at a glance.
-- Change name, position (with a map picker), radio, regions and more. Every change is one Apply.
-- Fix a repeater's clock from the L2's own GPS time with one tap.
+### Repeaters
+- Scan for nearby repeaters
+- Login with remembered passwords
+- Status: battery, noise floor, uptime, clock
+- Settings: name, position (with a map picker), radio, TX power, regions, neighbours
+- Set the repeater's clock from the L2's GPS time
 
-**The rest**
-- Real time from GPS (it even works indoors once a single satellite is heard).
-- Wi-Fi (off by default) for internet time.
-- Bluetooth (off by default): the MeshCore phone app can use the L2 as its radio.
-- A small sound synthesizer with a library of notification sounds, one for every kind of event.
-- Settings with a tab for each screen.
-- Looks after its own memory, stack and crashes: if something ever goes wrong, it says where on the next boot.
+### Other
+- Time from GPS, Wi-Fi or the phone
+- Wi-Fi (off by default)
+- Bluetooth for the MeshCore phone app (off by default)
+- Sound library with about 40 notification sounds
+- Settings with a tab per screen
+- Crash reports on the next boot
 
 ## How it is built
 
-- **MeshCore stays MeshCore.** The mesh runs on MeshCore's own companion code, copied in unchanged
-  (`lib/meshcore`, `lib/meshcore_companion`, MIT). Our code only talks to it through its public interface, so a
-  new MeshCore release is a matter of running `tools/update_meshcore.py <tag>` and checking the board glue.
-- **Everything on screen is ours** (`src/ui/`): one theme file, one layout, one rectangle for drawing and tapping,
-  and every frame drawn off-screen first so nothing flickers.
-- **Lots of small host tests** (`test/host/`), so most logic is checked on a normal computer before it ever
-  reaches the device.
+MeshCore runs from its own companion code, unchanged, in `lib/meshcore` and `lib/meshcore_companion` (MIT).
+OM Lite talks to it through its public API. To move to a new MeshCore release, run
+`tools/update_meshcore.py <tag>` and check the board code in `src/target.*`.
 
-## Building and flashing
+The UI is in `src/ui/`. Logic is covered by host tests in `test/host/`.
+
+## Build and flash
 
 You need [PlatformIO](https://platformio.org/).
 
@@ -73,31 +73,30 @@ You need [PlatformIO](https://platformio.org/).
 pio run -e om_lite_l2
 ```
 
-**The very first time**, put the L2 into download mode (hold BOOT, tap RESET) and flash with
-`pio run -e om_lite_l2 -t upload`, then tap RESET once.
+First flash: hold BOOT, tap RESET, run `pio run -e om_lite_l2 -t upload`, tap RESET again.
 
-**After that**, no buttons are needed. The firmware updates itself over the USB cable:
+After that the firmware updates over USB:
 
 ```sh
 python3 tools/ota_send.py <path to firmware.bin> /dev/ttyACM0
 ```
 
-A few more helpers live in `tools/`: `shot.py` takes a screenshot of the device over USB, and `cmd.py` sends test
-commands (send a message, list nodes, tap the screen) so the firmware can be tested without a finger on the glass.
+Other tools in `tools/`:
+- `shot.py` saves a screenshot from the device
+- `cmd.py` sends test commands (send a message, list nodes, tap the screen)
 
-The offline map pack is not part of this repo. The map reads a tile pack from the SD card.
+The map tile pack is not included. Put your own on the SD card.
 
 ## Credits
 
-- [MeshCore](https://github.com/meshcore-dev/MeshCore) (MIT), the mesh itself.
-- [LovyanGFX](https://github.com/lovyan03/LovyanGFX), [RadioLib](https://github.com/jgromes/RadioLib) and
-  [JPEGDEC](https://github.com/bitbank2/JPEGDEC).
-- [Noto Color Emoji](https://github.com/googlefonts/noto-emoji) (SIL Open Font License) and the DejaVu fonts.
-- Ideas for features came from WadaMesh and from our own OverMesh. No code from WadaMesh is used here.
+- [MeshCore](https://github.com/meshcore-dev/MeshCore) (MIT)
+- [LovyanGFX](https://github.com/lovyan03/LovyanGFX), [RadioLib](https://github.com/jgromes/RadioLib),
+  [JPEGDEC](https://github.com/bitbank2/JPEGDEC)
+- [Noto Color Emoji](https://github.com/googlefonts/noto-emoji) (SIL OFL), DejaVu fonts
+- Feature ideas from WadaMesh and OverMesh. No WadaMesh code is used.
 
-Made in Slovenia by Filip, with a lot of help from two AIs: Claude (design, review and testing) and DeepSeek
-(building). The full story of each step is in [`docs/PROGRESS.md`](docs/PROGRESS.md).
+Built with Claude and DeepSeek. Development notes are in [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 ## Licence
 
-Not chosen yet. The bundled third-party parts keep their own licences (see their folders).
+Not chosen yet. Third-party parts keep their own licences.

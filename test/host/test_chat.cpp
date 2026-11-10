@@ -1,6 +1,7 @@
 // Host test for the chat layer: src/ui/chat_layout.cpp and src/ui/text_wrap.cpp, plus the chat
 // rectangles. Plain g++, no Arduino and no LovyanGFX, so the same arithmetic the device uses is
-// proven here with a fake 6 px-per-character measure.
+// proven here with a fake 6 px per ASCII character measure (a missing glyph is a space plus 2 px,
+// exactly what the device draws).
 #include <stdio.h>
 #include <string.h>
 
@@ -27,12 +28,32 @@ static int fakeMeasure(void* ctx, const char* text, int len) {
   return len * 6;
 }
 
+// --- a fake face with ASCII plus the mono middle dot: 6 px, a missing glyph is space + 2 ---------
+static int fakeGlyph(void* ctx, uint32_t cp) {
+  (void)ctx;
+  if ((cp >= 0x20 && cp <= 0x7E) || cp == 0xB7) return 6;
+  return 0;
+}
+
+static int fakeUtf8Measure(void* ctx, const char* text, int len) {
+  return measureUtf8(text, len, fakeGlyph, ctx, 6);
+}
+
 static const char* lineText(const char* src, char* buf, size_t cap, const WrapLine& l) {
   size_t n = (size_t)l.len;
   if (n >= cap) n = cap - 1;
   memcpy(buf, src + l.start, n);
   buf[n] = 0;
   return buf;
+}
+
+// Is byte offset `at` the start of a code point in s?
+static bool onBoundary(const char* s, int at) {
+  for (int i = 0; s[i] != 0;) {
+    if (i == at) return true;
+    utf8Decode(s, &i);
+  }
+  return s[at] == 0;
 }
 
 static void testWrap() {
@@ -116,82 +137,185 @@ static void testWrap() {
   CHECK(wrapText("abc", fakeMeasure, nullptr, 10, 10, lines, 0) == 0);
 }
 
-static void testChips() {
-  const int16_t widths[3] = {40, 50, 60};
+// UTF-8: a 4-byte emoji is one placeholder a space plus 2 px wide, it never splits a sequence, and
+// the wrap measures it the same way the screen draws it.
+static void testUtf8() {
+  // The bytes the bot replies carry: "[OM Bot Ljubljana] \xF0\x9F\x98\x80PONG" (U+1F600 grinning).
+  const char* msg = "[OM Bot] \xF0\x9F\x98\x80PONG";
+  const int len = (int)strlen(msg);
+  CHECK(len == 17);   // 2 + 3 + 4 + 8: the 4-byte emoji, never 1 byte per glyph
 
-  CHECK(chipWidth(30, 0) == 30 + 2 * (kChipPadX + 1));
-  CHECK(chipWidth(30, 6) == 30 + 6 + kChipGap + 2 * (kChipPadX + 1));
+  // decode: ASCII, a 2-byte, a 3-byte and the 4-byte sequence, and a broken byte
+  int i = 0;
+  CHECK(utf8Decode("A", &i) == 'A' && i == 1);
+  i = 0;
+  CHECK(utf8Decode("\xC3\xA9", &i) == 0xE9 && i == 2);
+  i = 0;
+  CHECK(utf8Decode("\xE2\x82\xAC", &i) == 0x20AC && i == 3);
+  i = 0;
+  CHECK(utf8Decode("\xF0\x9F\x98\x80", &i) == 0x1F600 && i == 4);
+  i = 0;
+  CHECK(utf8Decode("\x80", &i) == kUtf8Invalid && i == 1);          // stray continuation
+  i = 0;
+  CHECK(utf8Decode("\xF0\x9F", &i) == kUtf8Invalid && i == 1);      // truncated at the NUL
+  CHECK(utf8SeqLen(0xF0) == 4 && utf8SeqLen(0xE2) == 3 && utf8SeqLen('a') == 1);
+  CHECK(utf8SeqLen(0x80) == 1 && utf8SeqLen(0xC0) == 1);
 
-  CHECK(chipStripWidth(widths, 3) == 2 * kChipRowPadX + 40 + 50 + 60 + 2 * kChipGap);
-  CHECK(chipStripWidth(nullptr, 0) == 2 * kChipRowPadX);
+  // encode round trip
+  char enc[8];
+  const uint32_t cps[4] = {(uint32_t)'A', 0xE9u, 0x20ACu, 0x1F600u};
+  for (int c = 0; c < 4; ++c) {
+    const uint32_t cp = cps[c];
+    const int n = utf8Encode(cp, enc);
+    int j = 0;
+    CHECK(n >= 1 && utf8Decode(enc, &j) == cp && j == n);
+  }
 
-  // overflow: three chips of 150 px do not fit a 100 px strip
-  CHECK(chipMaxScroll(widths, 3, 1000) == 0);
-  const int maxS = chipMaxScroll(widths, 3, 100);
-  CHECK(maxS == chipStripWidth(widths, 3) - 100);
-  CHECK(maxS > 0);
+  // measure: a,b,c + emoji + d,e,f -> 18 + 8 (space 6 + 2) + 18
+  CHECK(measureUtf8("abc", 3, fakeGlyph, nullptr, 6) == 18);
+  CHECK(measureUtf8("\xF0\x9F\x98\x80", 4, fakeGlyph, nullptr, 6) == 8);
+  CHECK(measureUtf8("abc\xF0\x9F\x98\x80", 7, fakeGlyph, nullptr, 6) == 26);
+  // a range that ends inside a sequence counts one placeholder, it never reads past `len`
+  CHECK(measureUtf8("\xF0\x9F\x98\x80", 2, fakeGlyph, nullptr, 6) == 8);
+  // the real string: 13 ASCII characters at 6 px + one 8 px placeholder
+  CHECK(measureUtf8(msg, len, fakeGlyph, nullptr, 6) == 13 * 6 + 8);
 
-  // chip hit rectangles: the left edge is inside, the right edge is the next chip's or the gap
-  CHECK(chipLeft(widths, 0, 0) == kChipRowPadX);
-  CHECK(chipLeft(widths, 1, 0) == kChipRowPadX + 40 + kChipGap);
-  CHECK(chipLeft(widths, 2, 0) == kChipRowPadX + 40 + kChipGap + 50 + kChipGap);
+  // wrapping with the real metrics: the word is wider than the line, so it splits between code
+  // points; no line ever starts or ends inside a sequence and every line fits.
+  WrapLine lines[kMaxWrapLines];
+  char b[32];
+  const int n = wrapText(msg, fakeUtf8Measure, nullptr, 60, 60, lines, kMaxWrapLines);
+  CHECK(n == 2);
+  // "[OM Bot]" (48 px), then the emoji plus PONG (32 px): the break is before the emoji, never in it
+  CHECK(strcmp(lineText(msg, b, sizeof(b), lines[0]), "[OM Bot]") == 0);
+  CHECK(lines[1].start == 9 && lines[1].len == 8);
+  CHECK(memcmp(msg + lines[1].start, "\xF0\x9F\x98\x80", 4) == 0);
+  for (int k = 0; k < n; ++k) {
+    CHECK(onBoundary(msg, lines[k].start));
+    CHECK(onBoundary(msg, lines[k].start + lines[k].len));
+    CHECK(measureUtf8(msg + lines[k].start, lines[k].len, fakeGlyph, nullptr, 6) <= 60);
+  }
+  CHECK(wrapConsumed(msg, lines, n) == len);
 
-  CHECK(chipAt(widths, 3, 0, kChipRowPadX) == 0);
-  CHECK(chipAt(widths, 3, 0, kChipRowPadX + 39) == 0);
-  CHECK(chipAt(widths, 3, 0, kChipRowPadX + 40) == -1);         // the gap
-  CHECK(chipAt(widths, 3, 0, kChipRowPadX + 40 + kChipGap) == 1);
-  CHECK(chipAt(widths, 3, 0, 2) == -1);                          // the leading pad
-  CHECK(chipAt(widths, 3, 0, 9999) == -1);
+  // exactly the emoji on a short line: it is one glyph, never split into two lines
+  const char* justEmoji = "\xF0\x9F\x98\x80";
+  CHECK(wrapText(justEmoji, fakeUtf8Measure, nullptr, 8, 8, lines, kMaxWrapLines) == 1);
+  CHECK(lines[0].start == 0 && lines[0].len == 4);
+  // one pixel too narrow: it still gets a line of its own (never a zero-byte line, never a loop)
+  CHECK(wrapText(justEmoji, fakeUtf8Measure, nullptr, 7, 7, lines, kMaxWrapLines) == 1);
+  CHECK(lines[0].len == 4);
 
-  // scrolling moves the same rectangles: what is drawn is what is tapped
-  const int scrolled = chipScrollTo(0, widths, 3, 2, 100);
-  CHECK(scrolled == 64);
-  CHECK(chipLeft(widths, 2, scrolled) >= 0);
-  CHECK(chipLeft(widths, 2, scrolled) + widths[2] <= 100);
-  CHECK(chipAt(widths, 3, scrolled, chipLeft(widths, 2, scrolled)) == 2);
-  CHECK(chipAt(widths, 3, scrolled, chipLeft(widths, 2, scrolled) + 59) == 2);
+  // the middle dot the mono face carries measures as a glyph, not as a placeholder
+  CHECK(measureUtf8("a\xC2\xB7" "b", 4, fakeGlyph, nullptr, 6) == 18);
+}
 
-  // scrolling back to the first chip brings it fully into view, and never past the ends
-  CHECK(chipScrollTo(64, widths, 3, 0, 100) == kChipRowPadX);
-  CHECK(chipLeft(widths, 0, chipScrollTo(64, widths, 3, 0, 100)) == 0);
-  CHECK(chipScrollTo(-5, widths, 3, 0, 100) == 0);
-  CHECK(chipScrollTo(999, widths, 3, 1, 100) <= maxS);
-  CHECK(chipScrollTo(0, widths, 3, 7, 100) == 0);   // no such chip: unchanged
+// The header and the selector: one rectangle set for the drawing and the taps.
+static void testHeadAndSelector() {
+  const Layout& L = l2();
+  const ChatLayout c = chatLayoutFor(L, false, false, false, false);
+  const ChatLayout s = chatLayoutFor(L, false, false, false, true);
+
+  // --- the header replaces the chip strip in the same row --------------------
+  CHECK(c.head.x == L.content.x && c.head.y == L.content.y && c.head.w == L.content.w);
+  CHECK(c.head.h == kHeadH);
+  CHECK(c.msgs.y == c.head.bottom());
+  CHECK(c.msgs.bottom() == c.compose.y);
+  CHECK(!c.msgs.overlaps(c.head));
+
+  // the gold dot sits at the right edge, inside the row, and the name stops before it
+  CHECK(c.headDot.x + c.headDot.w == c.head.right() - kHeadPadX);
+  CHECK(c.headDot.y >= c.head.y && c.headDot.bottom() <= c.head.bottom() - 1);
+  CHECK(c.headDot.w == kElsewhereDot && c.headDot.h == kElsewhereDot);
+  CHECK(c.headTitle.x == c.head.x + kHeadPadX);
+  CHECK(c.headTitle.y == c.head.y && c.headTitle.h == c.head.h - 1);
+  CHECK(c.headTitle.right() <= c.headDot.x - kElsewhereGap - kElsewhereW);
+  CHECK(!c.headTitle.overlaps(c.headDot));
+
+  // --- the compose line: field + keyboard button, no Send button --------------
+  CHECK(c.field.x == c.compose.x + kComposePadX);
+  CHECK(c.kbdBtn.right() == c.compose.right() - kComposePadX);
+  CHECK(c.field.right() + kComposeGap == c.kbdBtn.x);
+  CHECK(!c.field.overlaps(c.kbdBtn));
+  CHECK(c.field.h == kFieldH && c.kbdBtn.h == kFieldH);
+  // the freed width: the field is the whole row left of the button
+  CHECK(c.field.w == c.compose.w - 2 * kComposePadX - kKbdBtnW - kComposeGap);
+
+  // --- the dropdown covers exactly the message band, closed = empty -----------
+  CHECK(c.selPanel.empty() && c.selList.empty() && c.selManage.empty());
+  CHECK(!c.selector);
+  CHECK(s.selector);
+  CHECK(s.selPanel.x == s.msgs.x && s.selPanel.y == s.msgs.y);
+  CHECK(s.selPanel.w == s.msgs.w && s.selPanel.h == s.msgs.h);
+  CHECK(s.selManage.bottom() == s.selPanel.bottom());
+  CHECK(s.selManage.h == kSelManageH);
+  CHECK(s.selList.y == s.selPanel.y);
+  CHECK(s.selList.bottom() == s.selManage.y);
+  CHECK(!s.selList.overlaps(s.selManage));
+  // the message band itself is unchanged by the dropdown: same rect, it is drawn under it
+  CHECK(s.msgs.x == c.msgs.x && s.msgs.y == c.msgs.y && s.msgs.h == c.msgs.h);
+
+  // --- the list arithmetic: labels, rows, the empty DM line, scroll -----------
+  CHECK(selContentHeight(0, 0) == kSelSectionH * 2 + kSelEmptyH);
+  CHECK(selContentHeight(4, 0) == kSelSectionH * 2 + 4 * kSelRowH + kSelEmptyH);
+  CHECK(selContentHeight(4, 2) == kSelSectionH * 2 + 6 * kSelRowH);
+
+  const Rect list = s.selList;
+  CHECK(selMaxScroll(list, 1, 0) == 0);   // one channel fits the list, even with the DM label
+  CHECK(selMaxScroll(list, 4, 0) == selContentHeight(4, 0) - list.h);
+
+  // scroll 0: the first row sits one section label down, rows are 30 px apart
+  CHECK(selRowTop(list, 4, 0, 0, 0) == list.y + kSelSectionH);
+  CHECK(selRowTop(list, 4, 0, 1, 0) == list.y + kSelSectionH + kSelRowH);
+  CHECK(selRowTop(list, 4, 0, 3, 0) == list.y + kSelSectionH + 3 * kSelRowH);
+  // the first DM row follows the DM label after the channel rows
+  CHECK(selRowTop(list, 4, 2, 4, 0) == list.y + kSelSectionH + 4 * kSelRowH + kSelSectionH);
+  CHECK(selRowTop(list, 4, 2, 5, 0) == list.y + kSelSectionH + 4 * kSelRowH + kSelSectionH +
+                                     kSelRowH);
+  CHECK(selRowTop(list, 4, 2, 6, 0) == -1);   // no such entry
+
+  // scrolling moves the rows by the same amount, and the list clamps to its content
+  CHECK(selRowTop(list, 4, 0, 0, 10) == list.y + kSelSectionH - 10);
+  CHECK(selRowTop(list, 4, 0, 0, 2 * kSelRowH) == list.y + kSelSectionH - 2 * kSelRowH);
+  const int maxS = selMaxScroll(list, 4, 0);
+  CHECK(selRowTop(list, 4, 0, 3, maxS) >= list.y - kSelRowH);
+
+  // the tap bands: the top edge is inside, the bottom edge belongs to the next row
+  const int top0 = selRowTop(list, 4, 0, 0, 0);
+  CHECK(selRowAt(list, 4, 0, 0, top0) == 0);
+  CHECK(selRowAt(list, 4, 0, 0, top0 + kSelRowH - 1) == 0);
+  CHECK(selRowAt(list, 4, 0, 0, top0 + kSelRowH) == 1);
+  CHECK(selRowAt(list, 4, 0, 0, list.y) == -1);            // the "Channels" label
+  CHECK(selRowAt(list, 4, 0, 0, list.bottom() - 1) == 3);  // the last visible row
+  CHECK(selRowAt(list, 4, 0, 0, list.bottom()) == -1);     // under the Manage row
+  CHECK(selRowAt(list, 4, 0, 0, list.y - 1) == -1);
+  // scrolled to the end: the rows moved up, the same row still answers at its own top
+  CHECK(selRowAt(list, 4, 0, maxS, selRowTop(list, 4, 0, 2, maxS)) == 2);
+  CHECK(selRowAt(list, 4, 0, maxS, selRowTop(list, 4, 0, 2, maxS) + kSelRowH) == 3);
+  CHECK(selRowAt(list, 4, 0, maxS, list.bottom() - 1) == -1);   // the empty DM line, not a row
+
+  // a tap on a row while it is scrolled half out of the list still needs a visible y
+  CHECK(selRowAt(list, 4, 0, maxS, list.y - 5) == -1);
+
+  // --- the sheet's rectangles are unchanged by the header --------------------
+  const ChatLayout o = chatLayoutFor(L, true, false, false, false);
+  CHECK(o.head.y == L.content.y && o.head.h == kHeadH);
+  CHECK(o.msgs.y == o.head.bottom());
+  CHECK(o.msgs.bottom() == o.sheet.y);
+  CHECK(o.sheet.bottom() == L.height);
+  CHECK(o.compose.empty() && o.field.empty() && o.kbdBtn.empty());
+  CHECK(o.selPanel.empty());
+
+  // a tap on the header with the sheet open is still the header: the shell closes the sheet
+  CHECK(chatLayoutFor(L, true, false, false, false).head.contains(10, L.content.y));
 }
 
 static void testComposeAndSheet() {
   const Layout& L = l2();
-  const ChatLayout c = chatLayoutFor(L, false, false, false);
+  const ChatLayout o = chatLayoutFor(L, true, false, false, false);
 
-  // the closed screen: chips, messages and the compose line tile the content, no overlap
-  CHECK(c.chips.x == L.content.x && c.chips.y == L.content.y && c.chips.h == kChipRowH);
-  CHECK(c.msgs.y == c.chips.bottom());
-  CHECK(c.msgs.bottom() == c.compose.y);
-  CHECK(c.compose.bottom() == L.content.bottom());
-  CHECK(!c.msgs.overlaps(c.compose));
-  CHECK(c.sheet.empty());
-  CHECK(c.replyBar.empty());
-  CHECK(c.keyCount[0] == 0);
-
-  // the compose line's three pieces sit in order with exactly the gap between them
-  CHECK(c.field.x == c.compose.x + kComposePadX);
-  CHECK(c.sendBtn.right() == c.compose.right() - kComposePadX);
-  CHECK(c.field.right() + kComposeGap == c.kbdBtn.x);
-  CHECK(c.kbdBtn.right() + kComposeGap == c.sendBtn.x);
-  CHECK(!c.field.overlaps(c.kbdBtn) && !c.kbdBtn.overlaps(c.sendBtn));
-  CHECK(c.field.h == kFieldH && c.kbdBtn.h == kFieldH && c.sendBtn.h == kFieldH);
-
-  // the sheet covers the tab bar completely, and the compose line is gone while it is open
-  const ChatLayout o = chatLayoutFor(L, true, false, false);
+  // the sheet covers the tab bar completely and its contents are the four 22 px key rows
   CHECK(o.osk);
-  CHECK(o.sheet.bottom() == L.height);
   CHECK(o.sheet.y < L.tabbar.y);
-  CHECK(o.sheet.y + o.sheet.h >= L.tabbar.bottom());
-  CHECK(o.compose.empty() && o.field.empty() && o.sendBtn.empty());
-  CHECK(o.msgs.bottom() == o.sheet.y);
-  CHECK(!o.msgs.overlaps(o.sheet));
-
-  // its contents: pad, draft, gap, four 22 px rows with 2 px gaps, and the bottom pad
   CHECK(o.sheet.h == kOskPad * 2 + kOskDraftH + kOskDraftGap + 4 * kOskKeyH + 3 * kOskKeyGap);
   CHECK(o.draft.y == o.sheet.y + kOskPad);
   CHECK(o.draft.x == kOskPad);
@@ -200,7 +324,7 @@ static void testComposeAndSheet() {
   CHECK(o.keys[3][0].bottom() + kOskPad == o.sheet.bottom());
   CHECK(o.replyBar.empty());
 
-  // the keys tile every row exactly: no overlap, the inner gap, both edges flush
+  // every row tiles exactly: no overlap, a 2 px gap, both edges flush, all keys 22 px tall
   for (int r = 0; r < 4; ++r) {
     const int n = o.keyCount[r];
     CHECK(n >= 2);
@@ -216,16 +340,28 @@ static void testComposeAndSheet() {
       }
     }
   }
-  CHECK(o.keyCount[0] == 10 && o.keyCount[1] == 9 && o.keyCount[2] == 9 && o.keyCount[3] == 3);
+  CHECK(kOskKeyH == 22);
+  CHECK(o.keyCount[0] == 10 && o.keyCount[1] == 9 && o.keyCount[2] == 9 && o.keyCount[3] == 5);
+
+  // the bottom row of the letters page: 123, comma, space, dot, Send (Filip, 2026-11-10)
+  const Rect* row3 = o.keys[3];
+  // 123 and Send are the two wide keys (the last one takes the rounding remainder)
+  CHECK(row3[0].w >= 60 && row3[4].w >= 60);
+  CHECK(row3[0].w - row3[4].w <= 1 && row3[4].w - row3[0].w <= 1);
+  CHECK(row3[2].w > row3[1].w && row3[2].w > row3[3].w);   // the space is the widest of the three
+  CHECK(row3[1].w == row3[3].w);                       // comma and dot are one unit each
 
   // the numbers page has the same footprint and its own keys
-  const ChatLayout num = chatLayoutFor(L, true, false, true);
+  const ChatLayout num = chatLayoutFor(L, true, false, true, false);
   CHECK(num.sheet.y == o.sheet.y && num.sheet.h == o.sheet.h);
   CHECK(num.keyCount[0] == 10 && num.keyCount[1] == 10 && num.keyCount[2] == 10 &&
-        num.keyCount[3] == 2);
+        num.keyCount[3] == 4);
+  for (int r = 0; r < 4; ++r) {
+    for (int i = 0; i < num.keyCount[r]; ++i) CHECK(num.keys[r][i].h == kOskKeyH);
+  }
 
   // a reply bar rides above the draft and makes the sheet taller by exactly its own row
-  const ChatLayout rep = chatLayoutFor(L, true, true, false);
+  const ChatLayout rep = chatLayoutFor(L, true, true, false, false);
   CHECK(rep.sheet.h == o.sheet.h + kOskReplyH + kOskDraftGap);
   CHECK(rep.replyBar.y == rep.sheet.y + kOskPad);
   CHECK(rep.replyBar.bottom() + kOskDraftGap == rep.draft.y);
@@ -241,21 +377,31 @@ static void testComposeAndSheet() {
   CHECK(defs[0].kind == KeyKind::Shift);
   CHECK(defs[1].label[0] == 'y' && defs[7].label[0] == 'm');
   CHECK(defs[8].kind == KeyKind::Del);
-  CHECK(keyRow(false, 3, defs) == 3);
-  CHECK(defs[0].kind == KeyKind::Mode && defs[1].kind == KeyKind::Space &&
-        defs[2].kind == KeyKind::Send);
+  // the new bottom row: 123, comma, space, dot, Send
+  CHECK(keyRow(false, 3, defs) == 5);
+  CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "123") == 0);
+  CHECK(defs[1].kind == KeyKind::Char && defs[1].label[0] == ',');
+  CHECK(defs[2].kind == KeyKind::Space);
+  CHECK(defs[3].kind == KeyKind::Char && defs[3].label[0] == '.');
+  CHECK(defs[4].kind == KeyKind::Send);
+  CHECK(defs[2].units > defs[1].units);   // the space takes more of the row
   CHECK(keyRow(true, 0, defs) == 10 && defs[0].label[0] == '1');
   CHECK(keyRow(true, 1, defs) == 10 && defs[0].label[0] == '@');
   CHECK(keyRow(true, 2, defs) == 10);
   CHECK(defs[0].kind == KeyKind::Mode && defs[9].kind == KeyKind::Del);
-  CHECK(keyRow(true, 3, defs) == 2 && defs[0].kind == KeyKind::Space);
+  // the dot and the comma are on the 123 page too
+  CHECK(keyRow(true, 3, defs) == 4);
+  CHECK(defs[0].kind == KeyKind::Space);
+  CHECK(defs[1].kind == KeyKind::Char && defs[1].label[0] == ',');
+  CHECK(defs[2].kind == KeyKind::Char && defs[2].label[0] == '.');
+  CHECK(defs[3].kind == KeyKind::Send);
   CHECK(keyRow(false, 9, defs) == 0);
   CHECK(keyRow(false, 0, nullptr) == 0);
 }
 
 static void testMessages() {
   const Layout& L = l2();
-  const ChatLayout c = chatLayoutFor(L, false, false, false);
+  const ChatLayout c = chatLayoutFor(L, false, false, false, false);
 
   // content height: pads, the blocks and the gaps between them
   const int16_t heights[3] = {14, 28, 14};
@@ -300,11 +446,32 @@ static void testMessages() {
   CHECK(msgAt(c.msgs, many, 20, 0, c.msgs.y) != 0);
 
   // the band shrinks while the sheet is open, so the same history scrolls further
-  const ChatLayout o = chatLayoutFor(L, true, false, false);
+  const ChatLayout o = chatLayoutFor(L, true, false, false, false);
   CHECK(o.msgs.h < c.msgs.h);
   CHECK(msgMaxScroll(o.msgs, many, 20) > maxS);
 }
 
+// The header's gold dot counts unread in the chats the user is NOT reading.
+static void testUnreadElsewhere() {
+  ChatEntry chats[3];
+  snprintf(chats[0].name, sizeof(chats[0].name), "#a");
+  snprintf(chats[1].name, sizeof(chats[1].name), "#b");
+  snprintf(chats[2].name, sizeof(chats[2].name), "DM: C");
+  chats[2].dm = true;
+  chats[0].unread = 3;
+  chats[1].unread = 2;
+  chats[2].unread = 5;
+
+  CHECK(chatUnreadElsewhere(chats, 3, 0) == 7);
+  CHECK(chatUnreadElsewhere(chats, 3, 2) == 5);
+  CHECK(chatUnreadElsewhere(chats, 0, 0) == 0);
+  CHECK(chatUnreadElsewhere(nullptr, 3, 0) == 0);
+
+  chats[0].unread = 0;
+  chats[1].unread = 0;
+  chats[2].unread = 0;
+  CHECK(chatUnreadElsewhere(chats, 3, 1) == 0);   // nothing waiting: no dot is drawn
+}
 
 // The reply target and the open menu hold a message sequence number, not an index into the view.
 // A full ring plus one new message drops its oldest entry and shifts every index by one; the held ids
@@ -360,9 +527,11 @@ static void testRingShift() {
 
 int main() {
   testWrap();
-  testChips();
+  testUtf8();
+  testHeadAndSelector();
   testComposeAndSheet();
   testMessages();
+  testUnreadElsewhere();
   testRingShift();
 
   if (g_fail) {

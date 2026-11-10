@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Chat tab on the new UI layer: channel chips, the flat message list, the compose line, the keyboard
-// sheet that covers the tab bar, the message menu and the INFO panel. Draws only into the off-screen
-// frame (chatScreenDraw opens and closes it), and hands out the same rectangles for the taps
-// (chatScreenHit) so a screen never repeats a coordinate.
+// Chat tab on the new UI layer: the header with the chat selector (the L2 arrangement), the flat
+// message list, the compose line, the keyboard sheet that covers the tab bar, the message menu and
+// the INFO panel. Draws only into the off-screen frame (chatScreenDraw opens and closes it), and
+// hands out the same rectangles for the taps (chatScreenHit) so a screen never repeats a coordinate.
+//
+// The selector replaces the old chip strip and the three-line button (Filip, 2026-11-10). The
+// Tanmatsu keeps its list pane later; the layout is a parameter, so only this L2 arrangement is
+// implemented here.
 #pragma once
 
 #include <stdint.h>
@@ -14,21 +18,17 @@
 namespace om {
 namespace ui {
 
-constexpr int kMaxChips = 12;   // eight channels plus DMs, matching om::kMaxChannels
-
-struct ChatChip {
-  char label[28] = "";
-  uint16_t unread = 0;
-  bool dm = false;
-  bool muted = false;
-};
+constexpr int kMaxChats = 12;   // eight channels plus DMs, matching om::kMaxChannels
 
 struct ChatView {
   StatusModel status;
-  const ChatChip* chips = nullptr;
-  int chipCount = 0;
-  int selChip = 0;
-  int chipScroll = 0;
+  const ChatEntry* chats = nullptr;   // channels first, then DMs
+  int chatCount = 0;
+  int channelCount = 0;
+  int dmCount = 0;
+  int selChat = 0;                    // the open chat (an index into chats)
+  int selScroll = 0;                  // the selector list's scroll, px
+  bool selector = false;              // the dropdown is open
   const ChatMsgView* msgs = nullptr;
   int msgCount = 0;
   int scroll = 0;           // px scrolled up from the newest message (0 = at the bottom)
@@ -49,13 +49,13 @@ struct ChatView {
 void chatScreenDraw(const ChatView& v);
 
 enum class ChatHit : uint8_t {
-  None, Chip, ChipMenu, Msg, MenuReply, MenuInfo, MenuCopy, MenuClose, InfoClose,
-  Field, KbdBtn, Send, Key, Outside,
+  None, Head, SelRow, SelManage, SelClose, Msg, MenuReply, MenuInfo, MenuCopy, MenuClose, InfoClose,
+  Field, KbdBtn, Key, Outside,
 };
 
 struct ChatHitResult {
   ChatHit hit = ChatHit::None;
-  int index = -1;       // chip or message index (a snapshot, never held)
+  int index = -1;       // chat entry or message index (a snapshot, never held)
   uint32_t seq = 0;     // message id to hold for REPLY / INFO / the menu
   int keyRow = -1;
   int keyCol = -1;
@@ -71,8 +71,8 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y);
 int chatContentHeight(const ChatView& v);
 int chatMaxScroll(const ChatView& v);
 
-// The chip strip scroll that brings chip i completely into view (clamped).
-int chatChipScrollInto(const ChatView& v, int chip);
+// The selector list's scroll clamp and the row under a y. The shell drags the list with the finger.
+int chatSelectorMaxScroll(const ChatView& v);
 
 }  // namespace ui
 }  // namespace om

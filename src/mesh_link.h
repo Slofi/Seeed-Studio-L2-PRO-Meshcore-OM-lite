@@ -32,6 +32,12 @@ uint32_t meshMsgSeq(int idx);
 int meshUnread(int channelIdx);
 void meshClearUnread(int channelIdx);
 
+// Direct messages, fed from the same store the core will fill once upstream's companion code is in
+// (work order item 5). Empty today: the chat selector shows "No direct messages yet" rather than a
+// made-up list. meshDmName() is "" for an index that does not exist.
+int meshDmCount();
+const char* meshDmName(int idx);
+
 // --- node DB for the Nodes screen -----------------------------------------------------------------
 // The MeshCore contact table, read-only. type is MeshCore's ADV_TYPE_* (1 chat/client, 2 repeater,
 // 3 room, 4 sensor). path_len is ContactInfo::out_path_len in bytes (0 = direct, 0xFF = unknown);

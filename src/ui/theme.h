@@ -104,19 +104,33 @@ constexpr int16_t kRadiusLg   = 6;
 
 constexpr int16_t kBadgeH     = 9;
 constexpr int16_t kBadgePadX  = 2;
-constexpr int16_t kGearSize   = 9;   // mock: the status ⚙ glyph at the status font size (8.5 px)
+constexpr int16_t kGearSize   = 13;  // the vector gear mask (tools/mkicons.py), 8 teeth at 13x13
 
 // Chat (work order item 3). Every number comes from the mock's L2 rules (.chans, .msgs, .compose,
 // .osk) rounded to whole pixels for the panel.
-// Chip strip: .chans padding 4px 6px, chips 4px apart, 1 px bottom line. A chip is mono 8 px text with
-// 2px 5px padding, a 1 px border and a 9 px pill radius at 14 px high -> 16 px high here.
-constexpr int16_t kChipRowH    = 23;
-constexpr int16_t kChipH       = 16;
-constexpr int16_t kChipPadX    = 5;
-constexpr int16_t kChipGap     = 4;
-constexpr int16_t kChipRowPadX = 6;
-constexpr int16_t kChipRadius  = 8;    // pill; the mock's 9 px at 14 px high is half the height
-constexpr int16_t kChipMenuW   = 30;   // the list button at the right end of the strip
+// Header row (replaces the chip strip, Filip 2026-11-10): the open chat's name and a down chevron on
+// the left, the gold dot counting unread in the OTHER chats on the right, 1 px bottom line.
+constexpr int16_t kHeadH        = 23;
+constexpr int16_t kHeadPadX     = 8;
+constexpr int16_t kHeadChevronW = 7;   // the down chevron drawn after the name (two 4 px lines)
+constexpr int16_t kHeadChevronGap = 5;
+constexpr int16_t kElsewhereDot = 5;   // the gold dot: something is waiting in another chat
+constexpr int16_t kElsewhereGap = 4;
+constexpr int16_t kElsewhereW   = 14;  // room kept for its count ("9+"), so the name never jumps
+
+// The chat selector (the dropdown over the message area). Section labels, two-line chat rows and the
+// pinned "Manage channels" row at the panel's floor.
+constexpr int16_t kSelPadX      = 7;
+constexpr int16_t kSelRowH      = 30;  // mock list rows: min 30 px
+constexpr int16_t kSelSectionH  = 15;  // "Channels" / "Direct messages"
+constexpr int16_t kSelEmptyH    = 22;  // "No direct messages yet"
+constexpr int16_t kSelManageH   = 30;  // the last row: Manage channels >
+constexpr int16_t kSelDot       = 5;   // the open chat's gold dot in the list
+constexpr int16_t kSelDotGap    = 6;   // dot -> name
+constexpr int16_t kSelGap       = 6;   // name -> age, preview -> unread count
+constexpr int16_t kSelLine1Cy   = 9;   // from the row's top: name / age
+constexpr int16_t kSelLine2Cy   = 21;  // from the row's top: sender and the start of the text
+constexpr int16_t kSelChevronW  = 5;   // the right chevron of the Manage row
 
 // Message band: .msgs padding 5px 7px, 4px between messages, line-height 1.35 at 9 px -> 14 px pitch.
 constexpr int16_t kMsgPadX     = 7;
@@ -125,17 +139,22 @@ constexpr int16_t kMsgGap      = 4;
 constexpr int16_t kMsgLineH    = 14;
 constexpr int16_t kMsgHdrGap   = 4;    // time -> name -> text gaps on the first line
 
-// Compose line: .compose padding 4px 6px, a .field of mono 8.5 px with 3px 5px padding and 1 px border,
-// buttons at the sans 9 px size. 27 px keeps the field at 20 px and the line 3 px inside the edges.
+// Compose line: .compose padding 4px 6px, a .field of mono 8.5 px with 3px 5px padding and 1 px border.
+// 27 px keeps the field at 20 px and the line 3 px inside the edges. No Send button (Filip,
+// 2026-11-10): the field and the keyboard button, and the keyboard carries the Send key.
 constexpr int16_t kComposeH     = 27;   // 1 px top line + 3 px + 20 px field + 3 px
 constexpr int16_t kComposePadX  = 6;
 constexpr int16_t kComposeGap   = 4;
 constexpr int16_t kFieldH       = 20;
 constexpr int16_t kFieldPadX    = 5;
 constexpr int16_t kKbdBtnW      = 26;
-constexpr int16_t kSendW        = 44;
 constexpr int16_t kCaretH       = 9;
 constexpr int16_t kCaretW       = 1;
+
+// A code point the face cannot draw: one small dim box, a space plus 2 px wide (Filip, 2026-11-10:
+// the old path drew LovyanGFX's full-height missing-glyph rectangle, which read as the caret).
+constexpr int16_t kMissingExtra = 2;
+constexpr int16_t kMissingBoxH  = 6;
 
 // Keyboard sheet: .osk padding 4px, a 15 px .draft line, key rows 2 px apart; keys "about 22 px"
 // (the ticket). 4 + 18 + 3 + 4*22 + 3*2 + 4 = 123 px, so the sheet covers the tab bar completely.
@@ -149,6 +168,7 @@ constexpr int16_t kOskReplyH   = 18;
 constexpr int16_t kKeyRadius   = 3;
 constexpr uint8_t kKeyUnit     = 10;   // a normal key; wide keys are 22 units (the mock's flex 2.2)
 constexpr uint8_t kKeyUnitWide = 22;
+constexpr uint8_t kKeyUnitSpace = 40;  // the bottom row's space, wider than the comma and the dot
 
 // Message menu and INFO panel: old behaviour (tap a message), new layer.
 constexpr int16_t kActionRowH = 24;
@@ -178,8 +198,10 @@ constexpr int16_t kTabY       = kScreenH - kTabH;
 // the status line: 11 px (the brief) made "MC · EU868 · 2B" collide with the node count at 320 px,
 // so the status uses the same 10 px mono as the row metadata.
 // One glyph outside ASCII: mono carries U+00B7 MIDDLE DOT, the mock's status separator, added by
-// tools/mkvlw.py --extra 0xb7. The settings cog is the mask rendered from U+2699 by tools/mkicons.py
-// (drawGear blends it), so the sans9 metrics and the tab labels do not move.
+// tools/mkvlw.py --extra 0xb7. The settings gear is a vector mask (13x13, 8 teeth) drawn by
+// tools/mkicons.py and blended by drawGear, so the sans9 metrics and the tab labels do not move.
+// Everything else the faces cannot draw is the screen's dim placeholder box, never the font's
+// full-height missing-glyph rectangle (see widgets drawTextLeft / the text wrap).
 enum class FontRole : uint8_t {
   SansBody = 0,    // list names, empty state              (11 px, mock 10 px)
   SansTitle,       // detail heading                       (14 px, mock 13 px)

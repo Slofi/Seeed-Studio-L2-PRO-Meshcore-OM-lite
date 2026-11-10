@@ -35,24 +35,21 @@ void ageText(char* out, size_t cap, uint32_t nowSec, uint32_t ts) {
   else snprintf(out, cap, "%uh", (unsigned)(age / 3600));
 }
 
-void chipBadge(char* out, size_t cap, int n) {
+// An unread count as the screens show it: two digits at most.
+void countText(char* out, size_t cap, int n) {
   if (n > 9) snprintf(out, cap, "9+");
   else snprintf(out, cap, "%d", n);
-}
-
-void textCentre(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int cx, int cy,
-                const char* s) {
-  setRole(d, role);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(fg, bg);
-  d->drawString(s, cx, cy);
 }
 
 // The last `maxW` pixels of s: a long draft keeps its tail visible instead of running off the line.
 const char* tailFits(lgfx::LovyanGFX* d, FontRole role, int maxW, const char* s) {
   if (maxW <= 0) return s + strlen(s);
   const char* p = s;
-  while (*p != 0 && measureText(d, role, p, (int)strlen(p)) > maxW) ++p;
+  while (*p != 0 && measureText(d, role, p, (int)strlen(p)) > maxW) {
+    ++p;
+    // Keep the tail on a code point boundary: a dropped first byte would draw as a placeholder.
+    while ((*p & 0xC0) == 0x80) ++p;
+  }
   return p;
 }
 
@@ -82,20 +79,20 @@ void drawKbIcon(lgfx::LovyanGFX* d, const Rect& r, uint16_t col) {
   d->fillRect(x + 3, y + 7, 10, 1, col);
 }
 
-int chipWidths(const ChatView& v, int16_t* out, int max) {
-  lgfx::LovyanGFX* d = om_display();
-  int n = 0;
-  for (int i = 0; i < v.chipCount && i < max; ++i) {
-    const int labelW = d ? textWidth(d, FontRole::MonoMeta, v.chips[i].label) : 0;
-    int countW = 0;
-    if (v.chips[i].unread > 0) {
-      char b[4];
-      chipBadge(b, sizeof(b), v.chips[i].unread);
-      countW = d ? textWidth(d, FontRole::MonoMeta, b) : 0;
-    }
-    out[n++] = (int16_t)chipWidth(labelW, countW);
+// The header's and the Manage row's chevrons: vectors, because the faces carry no arrows.
+void drawChevron(lgfx::LovyanGFX* d, int x, int cy, uint16_t col, bool up, bool right) {
+  if (right) {
+    d->drawLine(x, cy - 3, x + 3, cy, col);
+    d->drawLine(x + 3, cy, x, cy + 3, col);
+    return;
   }
-  return n;
+  if (up) {
+    d->drawLine(x, cy + 2, x + 3, cy - 2, col);
+    d->drawLine(x + 3, cy - 2, x + 6, cy + 2, col);
+  } else {
+    d->drawLine(x, cy - 2, x + 3, cy + 2, col);
+    d->drawLine(x + 3, cy + 2, x + 6, cy - 2, col);
+  }
 }
 
 // Wraps one message and reports the width the first line loses to the time and the name.
@@ -118,7 +115,7 @@ int wrapMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, con
 // on the block the eye sees.
 int chatMsgHeights(const ChatView& v, int16_t* out, int max) {
   lgfx::LovyanGFX* d = om_display();
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
   int n = 0;
   if (d == nullptr) return 0;
   for (int i = 0; i < v.msgCount && i < max; ++i) {
@@ -129,42 +126,125 @@ int chatMsgHeights(const ChatView& v, int16_t* out, int max) {
   return n;
 }
 
-void drawChips(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
-  d->fillRect(g.chips.x, g.chips.y, g.chips.w, g.chips.h, kScreen);
-  d->drawFastHLine(g.chips.x, g.chips.bottom() - 1, g.chips.w, kLine);
+const ChatEntry* openChat(const ChatView& v) {
+  if (v.chats == nullptr || v.selChat < 0 || v.selChat >= v.chatCount) return nullptr;
+  return &v.chats[v.selChat];
+}
 
-  // The list button: three short lines, the same rect the tap test uses.
-  {
-    const int cx = g.chipMenu.x + g.chipMenu.w / 2;
-    const int cy = g.chipMenu.y + g.chipMenu.h / 2;
-    for (int i = -1; i <= 1; ++i) d->drawFastHLine(cx - 6, cy + i * 4, 12, kDim);
-    d->drawFastVLine(g.chipMenu.x, g.chipMenu.y + 3, g.chipMenu.h - 6, kLine);
+// One row of the dropdown: the chat's name and the last message's age on the first line, its sender
+// and the start of its text on the second, the unread count at the right. The open chat carries the
+// gold dot.
+void drawSelRow(lgfx::LovyanGFX* d, const ChatView& v, const ChatEntry& e, int entry,
+                const Rect& list) {
+  const int top = selRowTop(list, v.channelCount, v.dmCount, entry, v.selScroll);
+  const Rect row{list.x, (int16_t)top, list.w, kSelRowH};
+  if (!row.overlaps(list)) return;
+  const bool on = (entry == v.selChat);
+  if (on) d->fillRect(row.x, row.y, row.w, row.h, kSelBg);
+
+  const int cy1 = row.y + kSelLine1Cy;
+  const int cy2 = row.y + kSelLine2Cy;
+  const int dotX = row.x + kSelPadX;
+  if (on) d->fillCircle(dotX + kSelDot / 2, cy1, kSelDot / 2, kAcc);
+  const int nameX = dotX + kSelDot + kSelDotGap;
+
+  int right = row.right() - kSelPadX;
+  char age[8];
+  if (e.hasLast) {
+    ageText(age, sizeof(age), v.nowSec, e.lastTs);
+    drawTextRight(d, FontRole::MonoMeta, kDimmer, on ? kSelBg : kPanel, right, cy1, age);
+    right -= textWidth(d, FontRole::MonoMeta, age) + kSelGap;
+  }
+  drawTextEllipsis(d, FontRole::SansBody, on ? kAccInk : kInk, on ? kSelBg : kPanel, nameX, cy1,
+                   right - nameX, e.name);
+
+  int textRight = row.right() - kSelPadX;
+  if (e.unread > 0) {
+    char b[4];
+    countText(b, sizeof(b), e.unread);
+    drawTextRight(d, FontRole::MonoMeta, kAcc, on ? kSelBg : kPanel, textRight, cy2, b);
+    textRight -= textWidth(d, FontRole::MonoMeta, b) + kSelGap;
+  }
+  char line[96];
+  if (e.hasLast) {
+    snprintf(line, sizeof(line), "%s: %s", e.lastFrom, e.lastText);
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, on ? kSelBg : kPanel, nameX, cy2,
+                     textRight - nameX, line);
+  } else {
+    snprintf(line, sizeof(line), "no messages yet");
+    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, on ? kSelBg : kPanel, nameX, cy2,
+                     textRight - nameX, line);
   }
 
-  int16_t widths[kMaxChips];
-  const int n = chipWidths(v, widths, kMaxChips);
-  const int16_t chipY = (int16_t)(g.chips.y + (g.chips.h - 1 - kChipH) / 2);
-  d->setClipRect(g.chipScroll.x, g.chipScroll.y, g.chipScroll.w, g.chipScroll.h);
-  for (int i = 0; i < n; ++i) {
-    const int x = g.chipScroll.x + chipLeft(widths, i, v.chipScroll);
-    if (x + widths[i] <= g.chipScroll.x || x >= g.chipScroll.right()) continue;
-    const bool on = (i == v.selChip);
-    if (on) {
-      d->fillRoundRect(x, chipY, widths[i], kChipH, kChipRadius, kSelBg);
-      d->drawRoundRect(x, chipY, widths[i], kChipH, kChipRadius, kAcc);
-    }
-    const int cy = chipY + kChipH / 2;
-    const uint16_t col = on ? kAccInk : (v.chips[i].muted ? kDimmer : kDim);
-    drawTextLeft(d, FontRole::MonoMeta, col, on ? kSelBg : kScreen, x + kChipPadX + 1, cy,
-                 v.chips[i].label);
-    if (v.chips[i].unread > 0) {
-      char b[4];
-      chipBadge(b, sizeof(b), v.chips[i].unread);
-      drawTextRight(d, FontRole::MonoMeta, kBad, on ? kSelBg : kScreen,
-                    x + widths[i] - kChipPadX - 1, cy, b);
+  const int lineY = row.bottom() - 1;
+  if (lineY >= list.y && lineY < list.bottom()) {
+    d->drawFastHLine(row.x, lineY, row.w, kRowLine);
+  }
+}
+
+// The selector: a vertical list over the message area, sections "Channels" and "Direct messages",
+// and the pinned "Manage channels" row at its floor.
+void drawSelector(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
+  d->fillRect(g.selPanel.x, g.selPanel.y, g.selPanel.w, g.selPanel.h, kPanel);
+  d->drawRect(g.selPanel.x, g.selPanel.y, g.selPanel.w, g.selPanel.h, kLine);
+
+  d->setClipRect(g.selList.x, g.selList.y, g.selList.w, g.selList.h);
+  int y = g.selList.y - v.selScroll;
+  drawTextLeft(d, FontRole::MonoMeta, kDim, kPanel, g.selList.x + kSelPadX,
+               y + kSelSectionH / 2, "Channels");
+  y += kSelSectionH;
+  for (int i = 0; i < v.channelCount && i < v.chatCount; ++i) {
+    drawSelRow(d, v, v.chats[i], i, g.selList);
+  }
+  y += v.channelCount * kSelRowH;
+  drawTextLeft(d, FontRole::MonoMeta, kDim, kPanel, g.selList.x + kSelPadX,
+               y + kSelSectionH / 2, "Direct messages");
+  y += kSelSectionH;
+  if (v.dmCount <= 0) {
+    drawTextLeft(d, FontRole::MonoMeta, kDimmer, kPanel, g.selList.x + kSelPadX,
+                 y + kSelEmptyH / 2, "No direct messages yet");
+  } else {
+    for (int i = 0; i < v.dmCount; ++i) {
+      const int entry = v.channelCount + i;
+      if (entry < v.chatCount) drawSelRow(d, v, v.chats[entry], entry, g.selList);
     }
   }
   d->clearClipRect();
+
+  const int cy = g.selManage.y + g.selManage.h / 2;
+  d->drawFastHLine(g.selManage.x, g.selManage.y, g.selManage.w, kLine);
+  drawTextLeft(d, FontRole::SansBody, kAcc, kPanel, g.selManage.x + kSelPadX, cy,
+               "Manage channels");
+  drawChevron(d, g.selManage.right() - kSelPadX - kSelChevronW, cy, kAcc, false, true);
+}
+
+// The header row: the open chat's name with a down chevron, and the gold dot counting unread in the
+// other chats on the right.
+void drawHead(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
+  const uint16_t bg = v.selector ? kSelBg : kScreen;
+  d->fillRect(g.head.x, g.head.y, g.head.w, g.head.h, bg);
+  d->drawFastHLine(g.head.x, g.head.bottom() - 1, g.head.w, kLine);
+
+  const ChatEntry* cur = openChat(v);
+  const char* name = cur ? cur->name : "No channels";
+  const int cy = g.head.y + g.head.h / 2;
+  const int room = g.headTitle.w - kHeadChevronW - kHeadChevronGap;
+  const int nameW = textWidth(d, FontRole::SansBody, name);
+  if (nameW > room) {
+    drawTextEllipsis(d, FontRole::SansBody, kInk, bg, g.headTitle.x, cy, room, name);
+  } else {
+    drawTextLeft(d, FontRole::SansBody, kInk, bg, g.headTitle.x, cy, name);
+  }
+  const int shown = nameW > room ? room : nameW;
+  drawChevron(d, g.headTitle.x + shown + kHeadChevronGap, cy, kDim, v.selector, false);
+
+  const int elsewhere = chatUnreadElsewhere(v.chats, v.chatCount, v.selChat);
+  if (elsewhere > 0) {
+    char b[4];
+    countText(b, sizeof(b), elsewhere);
+    drawTextRight(d, FontRole::MonoMeta, kAcc, bg, g.headDot.x - kElsewhereGap, cy, b);
+    d->fillCircle(g.headDot.x + kElsewhereDot / 2, cy, kElsewhereDot / 2, kAcc);
+  }
 }
 
 void drawMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, const Rect& band,
@@ -198,8 +278,8 @@ void drawMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, co
 void drawMessages(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->fillRect(g.msgs.x, g.msgs.y, g.msgs.w, g.msgs.h, kScreen);
   if (v.msgCount <= 0) {
-    if (v.chipCount <= 0) {
-      drawEmptyState(d, g.msgs, "No channels", "Add one from the channel list.");
+    if (v.chatCount <= 0) {
+      drawEmptyState(d, g.msgs, "No channels", "Add one from Manage channels.");
     } else {
       drawEmptyState(d, g.msgs, "No messages yet", "Say something.");
     }
@@ -234,6 +314,8 @@ void drawDraft(lgfx::LovyanGFX* d, const Rect& field, uint16_t bg, const char* d
   if (focus) d->fillRect(x + textW, cy - kCaretH / 2, kCaretW, kCaretH, kAcc);
 }
 
+// The compose line: the draft field and the keyboard button only. The Send button is gone (Filip,
+// 2026-11-10); the keyboard's own Send key sends.
 void drawCompose(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->fillRect(g.compose.x, g.compose.y, g.compose.w, g.compose.h, kScreen);
   d->drawFastHLine(g.compose.x, g.compose.y, g.compose.w, kLine);
@@ -245,11 +327,6 @@ void drawCompose(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->fillRoundRect(g.kbdBtn.x, g.kbdBtn.y, g.kbdBtn.w, g.kbdBtn.h, kRadius, kPanel2);
   d->drawRoundRect(g.kbdBtn.x, g.kbdBtn.y, g.kbdBtn.w, g.kbdBtn.h, kRadius, kLine);
   drawKbIcon(d, g.kbdBtn, kDim);
-
-  d->fillRoundRect(g.sendBtn.x, g.sendBtn.y, g.sendBtn.w, g.sendBtn.h, kRadius, kPanel2);
-  d->drawRoundRect(g.sendBtn.x, g.sendBtn.y, g.sendBtn.w, g.sendBtn.h, kRadius, kAcc);
-  textCentre(d, FontRole::SansTab, kAccInk, kPanel2, g.sendBtn.x + g.sendBtn.w / 2,
-             g.sendBtn.y + g.sendBtn.h / 2, "Send");
 }
 
 void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
@@ -268,7 +345,10 @@ void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
   snprintf(label, sizeof(label), "%s", k.kind == KeyKind::Shift ? (shift ? "CAPS" : "shift")
                                                                : k.label);
   if (shift && label[0] >= 'a' && label[0] <= 'z') label[0] = (char)(label[0] - 32);
-  textCentre(d, FontRole::MonoMeta, fg, bg, cx, cy, label);
+  setRole(d, FontRole::MonoMeta);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(fg, bg);
+  d->drawString(label, cx, cy);
 }
 
 void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
@@ -311,8 +391,10 @@ void drawMenu(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
     const Rect& row = g.menuRow[r];
     d->fillRoundRect(row.x, row.y, row.w, row.h, kRadiusSm, kPanel2);
     d->drawRoundRect(row.x, row.y, row.w, row.h, kRadiusSm, kLine);
-    textCentre(d, FontRole::SansTab, kAcc, kPanel2, row.x + row.w / 2, row.y + row.h / 2,
-               kLabels[r]);
+    setRole(d, FontRole::SansTab);
+    d->setTextDatum(lgfx::textdatum_t::middle_center);
+    d->setTextColor(kAcc, kPanel2);
+    d->drawString(kLabels[r], row.x + row.w / 2, row.y + row.h / 2);
   }
 }
 
@@ -376,12 +458,13 @@ void chatScreenDraw(const ChatView& v) {
     return;
   }
   const Layout& L = l2();
-  const ChatLayout g = chatLayoutFor(L, v.osk, v.replySeq != 0, v.nums);
+  const ChatLayout g = chatLayoutFor(L, v.osk, v.replySeq != 0, v.nums, v.selector);
 
   d->fillScreen(kScreen);
   drawStatusBar(d, L, v.status);
-  drawChips(d, v, g);
+  drawHead(d, v, g);
   drawMessages(d, v, g);
+  if (v.selector) drawSelector(d, v, g);
   if (v.osk) drawSheet(d, v, g);
   else drawCompose(d, v, g);
   // The sheet covers the bottom edge, so the tab bar is not drawn while it is open (mock .kb-open).
@@ -397,7 +480,7 @@ void chatScreenDraw(const ChatView& v) {
 
 ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   ChatHitResult r;
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
 
   // Overlays first: a tap anywhere closes INFO (old behaviour), and a tap outside the message menu
   // closes the menu.
@@ -415,6 +498,25 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
       }
     }
     r.hit = ChatHit::MenuClose;
+    return r;
+  }
+
+  // The dropdown swallows the screen: a row opens that chat, the last row opens the channel
+  // settings, a tap on the header or anywhere else closes it.
+  if (v.selector) {
+    if (g.selManage.contains(x, y)) {
+      r.hit = ChatHit::SelManage;
+      return r;
+    }
+    if (g.selList.contains(x, y)) {
+      const int i = selRowAt(g.selList, v.channelCount, v.dmCount, v.selScroll, y);
+      if (i >= 0 && i < v.chatCount) {
+        r.hit = ChatHit::SelRow;
+        r.index = i;
+        return r;
+      }
+    }
+    r.hit = ChatHit::SelClose;
     return r;
   }
 
@@ -454,18 +556,8 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
     return r;
   }
 
-  if (g.chipMenu.contains(x, y)) {
-    r.hit = ChatHit::ChipMenu;
-    return r;
-  }
-  if (g.chipScroll.contains(x, y)) {
-    int16_t widths[kMaxChips];
-    const int n = chipWidths(v, widths, kMaxChips);
-    const int i = chipAt(widths, n, v.chipScroll, x - g.chipScroll.x);
-    if (i >= 0) {
-      r.hit = ChatHit::Chip;
-      r.index = i;
-    }
+  if (g.head.contains(x, y)) {
+    r.hit = ChatHit::Head;
     return r;
   }
   if (g.field.contains(x, y)) {
@@ -474,10 +566,6 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   }
   if (g.kbdBtn.contains(x, y)) {
     r.hit = ChatHit::KbdBtn;
-    return r;
-  }
-  if (g.sendBtn.contains(x, y)) {
-    r.hit = ChatHit::Send;
     return r;
   }
   if (g.msgs.contains(x, y)) {
@@ -500,17 +588,16 @@ int chatContentHeight(const ChatView& v) {
 }
 
 int chatMaxScroll(const ChatView& v) {
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
   int16_t heights[kMaxChatMsgs];
   const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
   return msgMaxScroll(g.msgs, heights, n);
 }
 
-int chatChipScrollInto(const ChatView& v, int chip) {
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
-  int16_t widths[kMaxChips];
-  const int n = chipWidths(v, widths, kMaxChips);
-  return chipScrollTo(v.chipScroll, widths, n, chip, g.chipScroll.w);
+int chatSelectorMaxScroll(const ChatView& v) {
+  if (!v.selector) return 0;   // the dropdown is closed: nothing to scroll
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
+  return selMaxScroll(g.selList, v.channelCount, v.dmCount);
 }
 
 }  // namespace ui

@@ -102,8 +102,11 @@ int main() {
   // A count smaller than the index asked for never returns a phantom row.
   CHECK(L.rowAt(0, 116, 0, 2) == -1);
 
-  // --- gear: inside the status bar, right aligned, and the same rect hit-tests
+  // --- gear: inside the status bar, right aligned, and the same rect hit-tests ---------------
+  // 13 px since EST-332 (the vector gear mask); the slot is the mask's size, not a literal.
   const Rect g = L.gear();
+  CHECK(kGearSize == 13);
+  CHECK(g.w == kGearSize && g.h == kGearSize);
   CHECK(g.x + g.w == 320 - 6);
   CHECK(g.y >= 0 && g.bottom() <= 26);
   CHECK(g.contains(g.x, g.y));

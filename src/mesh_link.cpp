@@ -504,6 +504,17 @@ void meshClearUnread(int channelIdx) {
   if (channelIdx >= 0 && channelIdx < 8) s_unread[channelIdx] = 0;
 }
 
+// --- direct messages -------------------------------------------------------------------------------
+// The DM store arrives with upstream's companion code (work order item 5: onMessageRecv is still an
+// empty override). Until then there is no DM, and the chat selector says "No direct messages yet"
+// instead of inventing a list. The UI asks this facade, never a placeholder list.
+int meshDmCount() { return 0; }
+
+const char* meshDmName(int idx) {
+  (void)idx;
+  return "";
+}
+
 // --- node DB ---------------------------------------------------------------------------------------
 // The UI gets a copy, never a pointer into contacts[]: the mesh may overwrite a slot on the next
 // advert while the screen is being built.

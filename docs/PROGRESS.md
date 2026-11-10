@@ -346,3 +346,102 @@
 ## 2026-11-10 08:40 (Claude): EST-331 checked
 - Built in the sandbox (exit 0, RAM 77,572 B, flash 849,885 B), host tests exit 0. Not flashed yet: it goes to the device together with the chat polish (one interruption for Filip).
 - Review: clock design as asked (ranking, floor, honest `--:--`); the reply/menu fix holds sequence numbers. **Icons not accepted:** the 9x9 U+2699 reads as a ring with a dot and the Bluetooth mask as a diamond (`docs/shots/icons-preview.png`). Claude drew candidates (`docs/shots/2026-11-10-icons-claude-try-8x.png`, left to right: DS 9 px glyph, glyph 13 px, vector gear 11, **vector gear 13 px 8 teeth (chosen)**, 6 teeth, Bluetooth rune 13 and 15 px). The chosen shapes and their exact code go in the next ticket.
+
+
+## 2026-11-10 (DS, EST-332, chat polish + icons)
+
+- **What this ticket is**: Filip's first look at the Chat screen on the device
+  (`docs/shots/2026-11-10-0800-chat.png`). His word overrides the mock: the channel bar goes and a
+  channel/DM selector takes its place, the compose line loses the Send button, the keyboard gains the
+  comma and the dot, text the font cannot draw gets an honest fallback instead of a bar that looked
+  like the caret, and the rejected icons are redrawn from Claude's chosen shapes.
+- **Header + selector (the L2 arrangement)**:
+  - The 23 px chip row is now one header: the open chat's name (`#test`, or `DM: Name`), a vector down
+    chevron right after it (it points up while the dropdown is open), and at the right edge a 5 px OM
+    gold dot with the count of unread messages in the OTHER chats (`9+` above nine). The count room
+    (14 px) is always reserved, so a count appearing never moves the name. Nothing waiting elsewhere =
+    no dot. `chatUnreadElsewhere()` in `chat_model.h`.
+  - Tap the header: the selector drops down over the message band (header bottom to the compose line,
+    139 px). A vertical list: "Channels" label, one 30 px two-line row per channel (name + the last
+    message's age on line 1, `sender: start of the text` on line 2), then "Direct messages" and either
+    its rows or one dim line "No direct messages yet". The open chat is marked with the gold dot and
+    the `kSelBg` row. The unread count of each row sits at the right of line 2 in gold. Rows scroll
+    with the finger (10 px give past the ends, snapped back on release) inside a clipped list; the
+    last row, "Manage channels", is pinned to the panel's floor above a 1 px line and opens the
+    existing channel settings (add, join, delete, key, mute). Tap a row = open that chat and close;
+    tap the header again or anywhere else = close.
+  - The three-line button is gone. The gear now opens Settings (it opened the channel list before);
+    the channel list is reached only through "Manage channels".
+  - `chatLayoutFor()` grew a `selector` flag and the rects `head`, `headTitle`, `headDot`, `selPanel`,
+    `selList`, `selManage`; `selContentHeight()`/`selMaxScroll()`/`selRowTop()`/`selRowAt()` are the
+    list arithmetic (labels, rows, the empty-DM line, the pads and the gaps answer "no row").
+- **Direct messages**: prepared only, as asked. `mesh_link` gained `meshDmCount()`/`meshDmName()`
+  (0 / ""), with the comment that the store arrives with upstream's companion code (work order item 5,
+  `onMessageRecv` is still an empty override). The selector asks the facade; nothing is invented.
+  The view model `ChatEntry` (channels first, then DMs) copies the last message's sender, preview and
+  age into fixed arrays, so a new packet cannot move the list under the finger.
+- **Chip code removed**: `ChatChip`, `chipWidth`, `chipStripWidth`, `chipMaxScroll`, `chipLeft`,
+  `chipAt`, `chipScrollTo`, `chatChipScrollInto`, the `kChip*` constants and their host tests.
+  `kMaxChips` became `kMaxChats`.
+- **Compose line**: the Send button is gone ("the keyboard already contains the send button"). The
+  field is now 278 px (was 234) and the keyboard button sits at the right edge; tapping the field or
+  the button opens the keyboard, as before.
+- **Keyboard**: the letters page's bottom row is 123, comma, space, dot, Send (5 keys, 22/10/40/10/22
+  units: the space is the widest of the middle three); the 123 page's bottom row is space, comma, dot,
+  Send (4 keys). New constant `kKeyUnitSpace = 40`. The 22 px key height is unchanged and re-checked:
+  the sheet is still 123 px tall, covers the tab bar, and every row tiles with 2 px gaps and flush
+  edges.
+- **Text the font cannot draw** (the fallback until the emoji ticket): the bright bar was LovyanGFX's
+  missing-glyph rectangle, space wide and a whole line tall, which read as the caret. Now:
+  - `text_wrap` gained plain-C++ UTF-8: `utf8SeqLen()`, `utf8Decode()` (one malformed or truncated
+    byte = one replacement, always advancing by one byte), `utf8Encode()` and `measureUtf8()`, which
+    sums code points and charges a missing one a space plus `kMissingExtra` (2 px).
+  - `wrapText()` splits long words on code point boundaries, never inside a sequence.
+  - `measureText()`, `drawTextLeft()`, `drawTextRight()` and `drawTextEllipsis()` walk UTF-8; a code
+    point the face lacks is never handed to LovyanGFX. It measures as a space plus 2 px and draws as
+    one small dim 1 px box (`kMissingBoxH` = 6) of that width, so the wrap and the drawing agree. The
+    tail of a long draft also starts on a code point boundary now.
+  - Faces still carry ASCII 0x20-0x7E (and U+00B7 in mono), so the rule is `fontHasGlyph()`.
+- **Icons**: `tools/mkicons.py` now draws Claude's chosen shapes with his exact geometry, 16x
+  supersampled and LANCZOS down: the VECTOR gear 13x13 with 8 teeth (polygon of four points per tooth,
+  disc, hub hole) and the Bluetooth rune as one polyline, 13 px tall and 9 px wide. Wi-Fi stays 11x11.
+  `src/ui/icons.cpp/.h` and `docs/shots/icons-preview.png` regenerated; the mask sizes now come from
+  the images, not from a square assumption. `kGearSize` 9 -> 13, so `Layout::gear()` hands the status
+  bar a 13x13 slot (layout value, no literal in the screen).
+- **Build** (`pio run -e om_lite_l2`, the command from REBUILD.md): exit 0, SUCCESS, 9.90 s.
+  RAM 78,644 B of 327,680 (24.0%), flash 852,737 B of 6,553,600 (13.0%). Previous run 77,572 B /
+  849,885 B, so this ticket added **+1,072 B RAM and +2,852 B flash** (the ChatEntry copies, the UTF-8
+  walkers and the two bigger icon masks; no new font bytes).
+- **Tests**: `test/host/run.sh` exit 0. The 9 Python screenshot tests, layout, contact-store and
+  timekeeper tests still pass, and `test_chat.cpp` (g++, `-Wall -Wextra -Werror`) now proves, besides
+  the existing wrap/message/ring checks: UTF-8 decode of 1/2/3/4-byte sequences, stray continuation
+  and truncated bytes, the encode round trip, a missing code point measuring space+2, the 4-byte emoji
+  measured and wrapped correctly (every line start and end on a boundary, every line within its
+  width, no empty line after a split that ends the message), one emoji narrower than the line still
+  getting exactly one line; the header rect, its gold dot, the reserved title room and the title/dot
+  never overlapping; the compose field taking the freed width with exactly one gap to the keyboard
+  button; the dropdown covering exactly the message band, its list and pinned Manage row not
+  overlapping; `selContentHeight`/`selMaxScroll` with and without DMs; row tops at scroll 0 and
+  scrolled, and the hit test at every edge (labels, pads, the 1 px between rows, the Manage row, the
+  empty DM line); the 5-key and 4-key bottom rows, their order, their widths, 22 px height and exact
+  tiling; and the chat tab's unread-elsewhere sum. `test_layout.cpp` asserts the 13 px gear slot.
+- **Could not check** (no device in the sandbox): how the dropdown looks and how it scrolls under a
+  real finger; whether 3 visible rows are enough before scrolling (the DM section sits below the fold
+  with three or more channels: the panel is the 139 px message band); the gold dot and its count at
+  11 px; the placeholder box on the panel (dim 6 px box) against a bot's emoji reply; the 5-key bottom
+  row at 22 px on the real panel; the 13 px gear in the 26 px status bar. The 1:1/8x gear and
+  Bluetooth previews are in `docs/shots/icons-preview.png`.
+- **Next step**: Claude flashes and screenshots, in this order: the Chat tab with the new header
+  (name + chevron, gold dot with a count from a second chat), the dropdown open at the top and
+  scrolled to "Direct messages"/"Manage channels", a bot reply that contains an emoji (expect one
+  small dim box, no bright bar), the compose line without Send, and the keyboard's bottom row with
+  the comma and the dot (letters and 123). If the dropdown feels too short, letting the panel cover
+  the compose line too is a one-line change in `chatLayoutFor()`.
+
+## 2026-11-10 08:20 (Claude): EST-331 + EST-332 on the device
+- Built in the sandbox (exit 0, RAM 78,644 B, flash 852,737 B), host tests exit 0, OTA ok, boot log read over USB (opened like shot.py, no reset).
+- **Clock works:** `[time] GPS -> 1794295133` = 2026-11-10 07:18:53 UTC, matching TestBox; the status bar shows 08:20 (CET). Only two `[time]` lines at boot and none in the next 20 s, so the floor is not written to NVS every second.
+- **Contacts survive a reboot (EST-329 proven):** `[mc] contacts: loaded 2 of 2 from flash`, both on the Nodes list after the flash.
+- **GPS:** the UART works and the module has real time, but GGA says 0 satellites used and no fix (indoors now; 15 min on a balcony with half the sky also gave no fix, old firmware). The time came from ZDA (RMC was void), i.e. from the module's own clock.
+- Gear 13 px reads as a gear (`docs/shots/2026-11-10-0820-nodes-clock.png`).
+- Found: both stored contacts show `30d+`: their `lastmod` was written by the old 2024 clock. Filip found: the wake button turns the screen on black until a touch, and that touch can press something.

@@ -83,8 +83,11 @@ static char g_keyText[32];           // base64 key being typed
 // --- chat (new UI layer) -----------------------------------------------------------------------
 // The chat screen keeps no geometry of its own: om::ui::screen_chat.cpp owns the rectangles and the
 // hit test, and these are only the state it draws.
-static int g_chatSel = 0;         // selected chip (channels first, then DMs)
-static int g_chipScroll = 0;      // chips row scroll, px
+static int g_chatSel = 0;         // the open chat: an index into g_chats (channels first, then DMs)
+static bool g_selector = false;   // the chat/DM selector is dropped down
+static int g_selScroll = 0;       // the selector list's scroll, px
+static int g_selScroll0 = 0;      // its value when the finger went down
+static int g_selMaxScroll = 0;    // the last draw's clamp
 static int g_chatScroll = 0;      // px scrolled up from the newest message (0 = at the bottom)
 static int g_chatScroll0 = 0;     // chat scroll when the finger went down (its own base, not the picker's)
 static int g_chatMaxScroll = 0;   // the last draw's clamp
@@ -97,8 +100,10 @@ static uint32_t g_bubMenuSeq = 0; // message menu target: monotonic message id, 
 static uint32_t g_bubInfoSeq = 0; // INFO panel target: monotonic message id, 0 = closed
 static uint32_t g_replySeq = 0;   // the message the next send answers (id), 0 = none
 static char g_replyName[20] = ""; // the sender, copied when REPLY was tapped
-static om::ui::ChatChip g_chips[om::ui::kMaxChips];
-static int g_chipCount = 0;
+static om::ui::ChatEntry g_chats[om::ui::kMaxChats];
+static int g_chatCount = 0;
+static int g_channelCount = 0;
+static int g_dmCount = 0;
 static om::ui::ChatMsgView g_chatMsgs[om::ui::kMaxChatMsgs];
 static int g_chatMsgCount = 0;
 
@@ -591,31 +596,56 @@ static void drawHome() {
 // The Chat tab is the new screen (src/ui/screen_chat.cpp). This file only feeds it and reacts to what
 // was tapped; every rectangle and every pixel lives in the UI layer.
 
-// The chips are the MeshCore channels. A DM is a chip too ("DM: name"): the view model carries the
-// flag, but nothing produces DM traffic yet (direct messages arrive with work order item 5), so no DM
-// chip exists today and none is invented.
-static void refreshChips() {
-  g_chipCount = 0;
-  for (int i = 0; i < om::mcChannelCount() && g_chipCount < om::ui::kMaxChips; ++i) {
-    om::ui::ChatChip& c = g_chips[g_chipCount++];
-    snprintf(c.label, sizeof(c.label), "%s", om::mcChannelName(i));
+// The chats are the MeshCore channels (channels first), then the direct messages the facade knows.
+// A DM row is exactly what mesh_link hands over: while its DM store is empty (the onMessageRecv
+// hook is still an empty override) the selector shows "No direct messages yet" and nothing is
+// invented (EST-332).
+static void refreshChats() {
+  g_chatCount = 0;
+  for (int i = 0; i < om::mcChannelCount() && g_chatCount < om::ui::kMaxChats; ++i) {
+    om::ui::ChatEntry& c = g_chats[g_chatCount++];
+    c = om::ui::ChatEntry();
+    snprintf(c.name, sizeof(c.name), "%s", om::mcChannelName(i));
     const int unread = om::meshUnread(i);
     c.unread = unread > 0 ? (uint16_t)unread : 0;
     c.dm = false;
     c.muted = om::mcChannelMuted(i);
   }
-  if (g_chatSel >= g_chipCount) g_chatSel = g_chipCount - 1;
+  g_channelCount = g_chatCount;
+
+  // The last message of each channel, for the selector's preview line (sender, start of text, age).
+  // The ring is oldest first, so the latest write wins.
+  for (int i = 0; i < om::meshMsgCount(); ++i) {
+    const int chan = om::meshMsgChannel(i);
+    if (chan < 0 || chan >= g_channelCount) continue;
+    om::ui::ChatEntry& c = g_chats[chan];
+    c.hasLast = true;
+    c.lastTs = om::meshMsgTs(i);
+    snprintf(c.lastFrom, sizeof(c.lastFrom), "%s", om::meshMsgName(i));
+    snprintf(c.lastText, sizeof(c.lastText), "%s", om::meshMsgText(i));
+  }
+
+  // Direct messages come from the facade, never from a placeholder list.
+  for (int i = 0; i < om::meshDmCount() && g_chatCount < om::ui::kMaxChats; ++i) {
+    om::ui::ChatEntry& c = g_chats[g_chatCount++];
+    c = om::ui::ChatEntry();
+    snprintf(c.name, sizeof(c.name), "DM: %s", om::meshDmName(i));
+    c.dm = true;
+  }
+  g_dmCount = g_chatCount - g_channelCount;
+
+  if (g_chatSel >= g_chatCount) g_chatSel = g_chatCount - 1;
   if (g_chatSel < 0) g_chatSel = 0;
 }
 
-// The MeshCore channel a chip sends to, or -1 for a chip that is not a channel (a DM).
-static int chipChannel(int chip) {
-  return (chip >= 0 && chip < om::mcChannelCount()) ? chip : -1;
+// The MeshCore channel a chat entry sends to, or -1 for an entry that is not a channel (a DM).
+static int chatChannel(int chat) {
+  return (chat >= 0 && chat < g_channelCount) ? chat : -1;
 }
 
 static void refreshChatMessages() {
   g_chatMsgCount = 0;
-  const int chan = chipChannel(g_chatSel);
+  const int chan = chatChannel(g_chatSel);
   if (chan < 0) return;
   for (int i = 0; i < om::meshMsgCount() && g_chatMsgCount < om::ui::kMaxChatMsgs; ++i) {
     if (om::meshMsgChannel(i) != chan) continue;
@@ -632,14 +662,17 @@ static void refreshChatMessages() {
 }
 
 static void buildChatView(om::ui::ChatView& v) {
-  refreshChips();
+  refreshChats();
   refreshChatMessages();
   v = om::ui::ChatView();
   buildStatus(v.status);
-  v.chips = g_chips;
-  v.chipCount = g_chipCount;
-  v.selChip = g_chatSel;
-  v.chipScroll = g_chipScroll;
+  v.chats = g_chats;
+  v.chatCount = g_chatCount;
+  v.channelCount = g_channelCount;
+  v.dmCount = g_dmCount;
+  v.selChat = g_chatSel;
+  v.selScroll = g_selScroll;
+  v.selector = g_selector;
   v.msgs = g_chatMsgs;
   v.msgCount = g_chatMsgCount;
   v.scroll = g_chatScroll;
@@ -671,6 +704,10 @@ static void drawChat() {
   if (g_chatScroll > g_chatMaxScroll) g_chatScroll = g_chatMaxScroll;
   if (g_chatScroll < 0) g_chatScroll = 0;
   v.scroll = g_chatScroll;
+  g_selMaxScroll = om::ui::chatSelectorMaxScroll(v);
+  if (g_selScroll > g_selMaxScroll) g_selScroll = g_selMaxScroll;
+  if (g_selScroll < 0) g_selScroll = 0;
+  v.selScroll = g_selScroll;
   g_chatTotal = om::ui::chatContentHeight(v);
   om::ui::chatScreenDraw(v);
 }
@@ -684,25 +721,24 @@ static void openChannelList() {
   drawChannelSettings();
 }
 
-static void chatSelectChip(int chip) {
-  if (chip < 0 || chip >= g_chipCount) return;
-  g_chatSel = chip;
-  const int chan = chipChannel(chip);
+static void chatSelectChat(int chat) {
+  if (chat < 0 || chat >= g_chatCount) return;
+  g_chatSel = chat;
+  const int chan = chatChannel(chat);
   if (chan >= 0) om::meshClearUnread(chan);
-  om::ui::ChatView v;
-  buildChatView(v);
-  g_chipScroll = om::ui::chatChipScrollInto(v, chip);
   g_chatScroll = 0;
+  g_selScroll = 0;
+  g_selector = false;
   g_bubMenuSeq = 0;
   g_bubInfoSeq = 0;
   g_replySeq = 0;
   g_replyName[0] = 0;
 }
 
-// Send on the selected channel. A reply travels as "@Name text": MeshCore's message format has no
+// Send on the open channel. A reply travels as "@Name text": MeshCore's message format has no
 // reply field (checked in Packet/BaseChatMesh), and the mention is what the bots already understand.
 static bool chatSend() {
-  const int chan = chipChannel(g_chatSel);
+  const int chan = chatChannel(g_chatSel);
   if (chan < 0 || g_kbText[0] == 0) return false;
   char wire[sizeof(g_kbText) + 32];
   if (g_replySeq != 0 && g_replyName[0] != 0) {
@@ -754,6 +790,7 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
 }
 
 static void showTab(int tab);
+static void drawSettings();   // the Chat header's gear opens it (defined below)
 
 // One tap on the Chat tab. The screen says what was hit with the same rectangles it drew.
 static void handleChatTap(int x, int y) {
@@ -762,12 +799,24 @@ static void handleChatTap(int x, int y) {
   buildChatView(v);
   const om::ui::ChatHitResult hit = om::ui::chatScreenHit(v, x, y);
   switch (hit.hit) {
-    case om::ui::ChatHit::Chip:
-      chatSelectChip(hit.index);
+    case om::ui::ChatHit::Head:
+      // The header is the selector's own door: it opens the dropdown and closes it again.
+      g_selector = !g_selector;
+      g_compose = false;
+      g_bubMenuSeq = 0;
+      g_bubInfoSeq = 0;
+      if (g_selector) g_selScroll = 0;
       break;
-    case om::ui::ChatHit::ChipMenu:
+    case om::ui::ChatHit::SelRow:
+      chatSelectChat(hit.index);
+      break;
+    case om::ui::ChatHit::SelManage:
+      g_selector = false;
       openChannelList();
       return;
+    case om::ui::ChatHit::SelClose:
+      g_selector = false;
+      break;
     case om::ui::ChatHit::Msg:
       g_bubMenuSeq = hit.seq;   // hold the message id, not its position in the ring
       g_bubInfoSeq = 0;
@@ -807,13 +856,6 @@ static void handleChatTap(int x, int y) {
     case om::ui::ChatHit::KbdBtn:
       g_compose = true;   // the draft line rides on top of the keys
       break;
-    case om::ui::ChatHit::Send:
-      if (chatSend()) {
-        g_kbText[0] = 0;
-        g_replySeq = 0;
-        g_replyName[0] = 0;
-      }
-      break;
     case om::ui::ChatHit::Key:
       chatKey(hit);
       break;
@@ -826,7 +868,18 @@ static void handleChatTap(int x, int y) {
         const int tab = L.tabAt(x, y);
         if (tab >= 0) { showTab(tab); return; }
       }
-      if (L.gear().contains(x, y)) { openChannelList(); return; }
+      // The gear is the only door to Settings (Filip, 2026-11-10); the channel list is reached from
+      // the selector's "Manage channels" row.
+      if (L.gear().contains(x, y)) {
+        g_settings = true;
+        g_settingsScreen = 0;
+        g_setScroll = 0;
+        g_selRow = -1;
+        g_pickerSel = -1;
+        g_chanSel = -1;
+        drawSettings();
+        return;
+      }
       return;
   }
   drawChat();
@@ -1084,6 +1137,7 @@ static void showTab(int tab) {
   g_bubInfoSeq = 0;
   g_replySeq = 0;
   g_replyName[0] = 0;
+  g_selector = false;   // the dropdown belongs to the chat we are leaving
   g_mapInfo = false;
   Serial.printf("[tab] %s\n", kTabs[g_tab]);
   if (tab == 0) drawHome();
@@ -1709,7 +1763,7 @@ void loop() {
     const uint32_t serial = om::meshMsgSerial();
     if (serial != lastSeen) {
       lastSeen = serial;
-      const int chan = chipChannel(g_chatSel);
+      const int chan = chatChannel(g_chatSel);
       if (chan >= 0) om::meshClearUnread(chan);
       // Deliberately do NOT close the menu or INFO here: both hold the message id, so buildChatView
       // resolves them to the same message after the ring shifts. It closes one only when its message
@@ -1738,14 +1792,26 @@ void loop() {
       g_upY = g_sy;
       g_upMs = millis();
       if (!g_drag && !g_acted) handleTap(g_sx, g_sy, false);
-      // A rubber band needs a spring: clamp the chat back into range when the finger lifts.
+      // A rubber band needs a spring: clamp the chat back into range when the finger lifts. The
+      // selector list has its own scroll and only moves while it is open.
       if (g_tab == 1 && !g_compose && !g_settings) {
-        const int clamped = g_chatScroll < 0 ? 0
-                          : (g_chatScroll > g_chatMaxScroll ? g_chatMaxScroll : g_chatScroll);
-        if (clamped != g_chatScroll) {
-          g_chatScroll = clamped;
-          drawChat();
+        bool redraw = false;
+        if (g_selector) {
+          const int clamped = g_selScroll < 0 ? 0
+                            : (g_selScroll > g_selMaxScroll ? g_selMaxScroll : g_selScroll);
+          if (clamped != g_selScroll) {
+            g_selScroll = clamped;
+            redraw = true;
+          }
+        } else {
+          const int clamped = g_chatScroll < 0 ? 0
+                            : (g_chatScroll > g_chatMaxScroll ? g_chatMaxScroll : g_chatScroll);
+          if (clamped != g_chatScroll) {
+            g_chatScroll = clamped;
+            redraw = true;
+          }
         }
+        if (redraw) drawChat();
       }
       // The Nodes scroll is clamped while dragging, but the last 60 ms may not have been drawn.
       if (g_drag && g_tab == 0 && !g_settings && screenOn) drawHome();
@@ -1757,6 +1823,7 @@ void loop() {
     g_sy = y;
     g_scroll0 = g_pickerScroll;
     g_chatScroll0 = g_chatScroll;
+    g_selScroll0 = g_selScroll;
     g_setScroll0 = g_setScroll;
     g_nodeScroll0 = g_nodeScroll;
     g_drag = false;
@@ -1796,6 +1863,15 @@ void loop() {
         if (next < 0) next = 0;
         if (next > 30) next = 30;
         if (next != g_setScroll) { g_setScroll = next; drawSettings(); }
+      } else if (g_tab == 1 && g_selector) {
+        // The dropdown's list scrolls with the finger, clamped to its content and snapped back on
+        // release; the message band underneath is not touched.
+        constexpr int kGive = 10;
+        int next = g_selScroll0 - dy;
+        if (next < -kGive) next = -kGive;
+        if (next > g_selMaxScroll + kGive) next = g_selMaxScroll + kGive;
+        g_selScroll = next;
+        if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
       } else if (g_tab == 1 && !g_compose) {
         // A fingertip of give past either end, snapped back on release (see the release path). The
         // base is the chat's own scroll: using g_scroll0 here meant every drag started from the sound

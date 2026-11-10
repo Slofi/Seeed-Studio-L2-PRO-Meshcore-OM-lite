@@ -58,6 +58,10 @@ int textWidth(lgfx::LovyanGFX* d, FontRole role, const char* text);
 // --- text helpers -----------------------------------------------------------------------------
 // The chat screen needs the same three primitives the widgets use (a role font, a colour pair, and a
 // measure that works on a byte range for the wrapper). Public so no screen grows a second copy.
+//
+// All of them decode UTF-8. A code point the face cannot draw is never handed to LovyanGFX (its
+// missing-glyph rectangle is line-high and reads as a caret); it measures, and draws, as one small
+// dim box a space plus 2 px wide (theme.h kMissingExtra / kMissingBoxH).
 void setRole(lgfx::LovyanGFX* d, FontRole role);
 void drawTextLeft(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
                   const char* s);
@@ -65,8 +69,13 @@ int drawTextRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, i
                   const char* s);
 void drawTextEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
                       int maxW, const char* s);
-// Width of the first `len` bytes of s (copied into a small buffer: the VLW face measures a C string).
+// Width of the first `len` bytes of s, code point by code point (a range may start or end anywhere;
+// a byte that is not valid UTF-8 counts as one missing glyph).
 int measureText(lgfx::LovyanGFX* d, FontRole role, const char* s, int len);
+
+// Whether the face for a role carries a glyph. The four blobs hold ASCII 0x20-0x7E and the mono face
+// U+00B7 (theme.h), so anything else is the placeholder box.
+bool fontHasGlyph(FontRole role, uint32_t cp);
 
 }  // namespace ui
 }  // namespace om

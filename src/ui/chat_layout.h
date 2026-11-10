@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Chat geometry: the chip strip, the message band, the compose line and the keyboard sheet. Plain C++
+// Chat geometry: the header, the chat selector, the message band, the compose line, the keyboard
+// sheet and the two overlays. Plain C++
 // (no LovyanGFX) so test/host can prove the arithmetic with the system g++. One function hands out
 // the rectangles, and the same rectangles answer the taps: a screen never repeats a coordinate.
 #pragma once
@@ -27,40 +28,40 @@ struct KeyDef {
 int keyRow(bool nums, int row, KeyDef* out);
 
 struct ChatLayout {
-  Rect chips;       // the strip, including its 1 px bottom line
-  Rect chipScroll;  // the part the chips scroll in
-  Rect chipMenu;    // the fixed button that opens the channel list
+  Rect head;        // the header row: the whole row toggles the selector
+  Rect headTitle;   // the room the open chat's name has (chevron and unread dot sit outside it)
+  Rect headDot;     // the gold dot counting unread in the OTHER chats (empty while none wait)
   Rect msgs;        // the message band
   Rect compose;     // the compose line (empty while the sheet is open)
   Rect field;
   Rect kbdBtn;
-  Rect sendBtn;
   bool osk = false;
   Rect sheet;
   Rect replyBar;    // empty when the draft is not answering a message
   Rect draft;
   Rect keys[4][10];
   uint8_t keyCount[4] = {0, 0, 0, 0};
+  bool selector = false;   // the chat dropdown is open
+  Rect selPanel;           // the dropdown: the message band, header bottom to compose top
+  Rect selList;            // the scrolling part (section labels and chat rows)
+  Rect selManage;          // the pinned last row: "Manage channels"
   Rect infoPanel;
   Rect menuPanel;
   Rect menuHead;
   Rect menuRow[3];
 };
 
-ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums);
+ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector);
 
-// --- chip strip ---------------------------------------------------------------------------------
-// Width of one chip: its text, an optional unread count, 5 px padding each side and the 1 px border.
-int chipWidth(int labelW, int countW);
-// Width of n chips including the leading pad and the gaps (no trailing pad).
-int chipStripWidth(const int16_t* widths, int n);
-int chipMaxScroll(const int16_t* widths, int n, int areaW);
-// Left edge of chip i inside the scrolling area at the given scroll. Negative = scrolled off.
-int chipLeft(const int16_t* widths, int i, int scroll);
-// The chip under px (in the scrolling area), or -1.
-int chipAt(const int16_t* widths, int n, int scroll, int px);
-// Where the strip must scroll to show chip i completely; clamped to [0, maxScroll].
-int chipScrollTo(int cur, const int16_t* widths, int n, int i, int areaW);
+// --- the chat selector arithmetic ---------------------------------------------------------------
+// The list holds a "Channels" label, one row per channel, a "Direct messages" label and either one
+// row per DM or the "No direct messages yet" line. `entry` counts channels first, then DMs.
+int selContentHeight(int channelCount, int dmCount);
+int selMaxScroll(const Rect& list, int channelCount, int dmCount);
+// Screen y of one entry's row at a scroll (negative or past the list when scrolled out of view).
+int selRowTop(const Rect& list, int channelCount, int dmCount, int entry, int scroll);
+// The entry under py, or -1 (labels, the empty-DM line, the pads and the gaps answer -1).
+int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py);
 
 // --- message band -------------------------------------------------------------------------------
 // heights[] is the drawn height of every message block (text lines, no gaps). Oldest first.
@@ -70,7 +71,7 @@ int msgMaxScroll(const Rect& band, const int16_t* heights, int n);
 // the pad) when scroll is 0, and scroll moves the whole stack up.
 void msgSpans(const Rect& band, const int16_t* heights, int n, int scroll, int16_t* top);
 // The message under py, or -1. Only the visible part of a block counts, so a tap under the chips row
-// or the sheet cannot hit a message hidden behind it.
+// or the header cannot hit a message hidden behind it.
 int msgAt(const Rect& band, const int16_t* heights, int n, int scroll, int py);
 
 // --- keys ---------------------------------------------------------------------------------------

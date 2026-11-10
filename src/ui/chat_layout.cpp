@@ -55,8 +55,12 @@ int keyRow(bool nums, int row, KeyDef* out) {
         put(out[n++], "", kKeyUnitWide, KeyKind::Del);
         return n;
       default:
+        // Filip, 2026-11-10: "where are the dot and comma?" The bottom row is
+        // 123, comma, space, dot, Send.
         put(out[n++], "123", kKeyUnitWide, KeyKind::Mode);
-        put(out[n++], "space", kKeyUnitWide, KeyKind::Space);
+        put(out[n++], ",", kKeyUnit, KeyKind::Char);
+        put(out[n++], "space", kKeyUnitSpace, KeyKind::Space);
+        put(out[n++], ".", kKeyUnit, KeyKind::Char);
         put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
         return n;
     }
@@ -72,21 +76,30 @@ int keyRow(bool nums, int row, KeyDef* out) {
       put(out[n++], "", kKeyUnitWide, KeyKind::Del);
       return n;
     default:
-      put(out[n++], "space", kKeyUnitWide, KeyKind::Space);
+      // The dot and the comma stay on the 123 page too.
+      put(out[n++], "space", kKeyUnitSpace, KeyKind::Space);
+      put(out[n++], ",", kKeyUnit, KeyKind::Char);
+      put(out[n++], ".", kKeyUnit, KeyKind::Char);
       put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
       return n;
   }
 }
 
-ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums) {
+ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector) {
   ChatLayout g;
   g.osk = osk;
+  g.selector = selector;
 
-  g.chips = Rect{L.content.x, L.content.y, L.content.w, kChipRowH};
-  g.chipMenu = Rect{(int16_t)(g.chips.right() - kChipMenuW), g.chips.y, kChipMenuW,
-                    (int16_t)(g.chips.h - 1)};
-  g.chipScroll = Rect{g.chips.x, g.chips.y, (int16_t)(g.chipMenu.x - g.chips.x),
-                      (int16_t)(g.chips.h - 1)};
+  // The header replaces the old chip strip in the same row, so the message band keeps its top edge.
+  g.head = Rect{L.content.x, L.content.y, L.content.w, kHeadH};
+  g.headDot = Rect{(int16_t)(g.head.right() - kHeadPadX - kElsewhereDot),
+                   (int16_t)(g.head.y + (g.head.h - 1 - kElsewhereDot) / 2), kElsewhereDot,
+                   kElsewhereDot};
+  // The title stops before the reserved unread-count room, so a count appearing beside the dot never
+  // moves the name. The chevron follows the measured name inside this rect.
+  g.headTitle = Rect{(int16_t)(g.head.x + kHeadPadX), g.head.y,
+                     (int16_t)(g.headDot.x - kElsewhereGap - kElsewhereW - (g.head.x + kHeadPadX)),
+                     (int16_t)(g.head.h - 1)};
 
   if (osk) {
     const int16_t sh = (int16_t)sheetHeight(replying);
@@ -94,22 +107,30 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums) {
   }
 
   if (osk) {
-    g.msgs = Rect{L.content.x, g.chips.bottom(), L.content.w,
-                  (int16_t)(g.sheet.y - g.chips.bottom())};
+    g.msgs = Rect{L.content.x, g.head.bottom(), L.content.w,
+                  (int16_t)(g.sheet.y - g.head.bottom())};
   } else {
     g.compose = Rect{L.content.x, (int16_t)(L.content.bottom() - kComposeH), L.content.w, kComposeH};
-    g.msgs = Rect{L.content.x, g.chips.bottom(), L.content.w,
-                  (int16_t)(g.compose.y - g.chips.bottom())};
+    g.msgs = Rect{L.content.x, g.head.bottom(), L.content.w,
+                  (int16_t)(g.compose.y - g.head.bottom())};
 
+    // Two pieces now: the draft field, and the keyboard button. The field takes the width the Send
+    // button used to occupy (Filip, 2026-11-10: "the keyboard already contains the send button").
     const int16_t rowY = (int16_t)(g.compose.y + 1 + (kComposeH - 1 - kFieldH) / 2);
     const int innerL = g.compose.x + kComposePadX;
     const int innerR = g.compose.right() - kComposePadX;
-    int x = innerR - kSendW;
-    g.sendBtn = Rect{(int16_t)x, rowY, kSendW, kFieldH};
-    x -= kComposeGap + kKbdBtnW;
-    g.kbdBtn = Rect{(int16_t)x, rowY, kKbdBtnW, kFieldH};
-    x -= kComposeGap;
-    g.field = Rect{(int16_t)innerL, rowY, (int16_t)(x - innerL), kFieldH};
+    g.kbdBtn = Rect{(int16_t)(innerR - kKbdBtnW), rowY, kKbdBtnW, kFieldH};
+    g.field = Rect{(int16_t)innerL, rowY, (int16_t)(g.kbdBtn.x - kComposeGap - innerL), kFieldH};
+  }
+
+  // The selector drops down over the message area: the header's bottom edge to the compose line (or
+  // the keyboard sheet), with its last row pinned to the panel's floor.
+  if (selector) {
+    g.selPanel = g.msgs;
+    g.selManage = Rect{g.selPanel.x, (int16_t)(g.selPanel.bottom() - kSelManageH), g.selPanel.w,
+                       kSelManageH};
+    g.selList = Rect{g.selPanel.x, g.selPanel.y, g.selPanel.w,
+                     (int16_t)(g.selManage.y - g.selPanel.y)};
   }
 
   if (osk) {
@@ -154,52 +175,45 @@ int chatMenuHeight() { return 2 * kPanelPad + kMenuHeadH + 3 * kActionRowH; }
 
 int chatInfoHeight() { return 2 * kPanelPad + kMenuHeadH + 5 * kActionRowH; }
 
-int chipWidth(int labelW, int countW) {
-  int w = labelW + 2 * (kChipPadX + 1);
-  if (countW > 0) w += kChipGap + countW;
-  return w;
+int selContentHeight(int channelCount, int dmCount) {
+  if (channelCount < 0) channelCount = 0;
+  if (dmCount < 0) dmCount = 0;
+  const int channels = kSelSectionH + channelCount * kSelRowH;
+  const int dms = kSelSectionH + (dmCount > 0 ? dmCount * kSelRowH : kSelEmptyH);
+  return channels + dms;
 }
 
-int chipStripWidth(const int16_t* widths, int n) {
-  if (widths == nullptr || n <= 0) return 2 * kChipRowPadX;
-  int w = 2 * kChipRowPadX;
-  for (int i = 0; i < n; ++i) w += widths[i] + (i > 0 ? kChipGap : 0);
-  return w;
+int selMaxScroll(const Rect& list, int channelCount, int dmCount) {
+  const int content = selContentHeight(channelCount, dmCount);
+  return content > list.h ? content - list.h : 0;
 }
 
-int chipMaxScroll(const int16_t* widths, int n, int areaW) {
-  const int strip = chipStripWidth(widths, n);
-  return strip > areaW ? strip - areaW : 0;
+namespace {
+
+// Top of one entry's row, in scrolling-list pixels (0 = the list's first pixel at scroll 0).
+int selRowOffset(int channelCount, int dmCount, int entry) {
+  if (entry < 0) return -1;
+  if (entry < channelCount) return kSelSectionH + entry * kSelRowH;
+  const int dm = entry - channelCount;
+  if (dm >= dmCount) return -1;
+  return kSelSectionH + channelCount * kSelRowH + kSelSectionH + dm * kSelRowH;
 }
 
-int chipLeft(const int16_t* widths, int i, int scroll) {
-  if (widths == nullptr || i < 0) return kChipRowPadX - scroll;
-  int x = kChipRowPadX - scroll;
-  for (int j = 0; j < i; ++j) x += widths[j] + kChipGap;
-  return x;
+}  // namespace
+
+int selRowTop(const Rect& list, int channelCount, int dmCount, int entry, int scroll) {
+  const int off = selRowOffset(channelCount, dmCount, entry);
+  if (off < 0) return -1;
+  return list.y + off - scroll;
 }
 
-int chipAt(const int16_t* widths, int n, int scroll, int px) {
-  if (widths == nullptr) return -1;
-  for (int i = 0; i < n; ++i) {
-    const int x0 = chipLeft(widths, i, scroll);
-    if (px >= x0 && px < x0 + widths[i]) return i;
+int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py) {
+  if (py < list.y || py >= list.bottom()) return -1;
+  for (int i = 0; i < channelCount + dmCount; ++i) {
+    const int top = selRowTop(list, channelCount, dmCount, i, scroll);
+    if (py >= top && py < top + kSelRowH) return i;
   }
   return -1;
-}
-
-int chipScrollTo(int cur, const int16_t* widths, int n, int i, int areaW) {
-  if (widths == nullptr || i < 0 || i >= n) return cur;
-  const int maxS = chipMaxScroll(widths, n, areaW);
-  if (cur < 0) cur = 0;
-  if (cur > maxS) cur = maxS;
-  const int left = chipLeft(widths, i, cur);
-  const int right = left + widths[i];
-  if (left < 0) cur += left;
-  else if (right > areaW) cur += right - areaW;
-  if (cur < 0) cur = 0;
-  if (cur > maxS) cur = maxS;
-  return cur;
 }
 
 int msgContentHeight(const int16_t* heights, int n) {

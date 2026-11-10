@@ -17,8 +17,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_contact_store.cpp -o "$BIN2"
 "$BIN2"
-# Chat: the word wrapper, the chip strip, the message band, the keyboard sheet and the held
-# message sequence numbers (a full ring plus one new message must not move a reply target).
+# Chat: the word wrapper and its UTF-8 fallback, the header and the chat selector arithmetic, the
+# message band, the keyboard sheet and the held message sequence numbers (a full ring plus one new
+# message must not move a reply target).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_chat.cpp \
   ../../src/ui/chat_layout.cpp ../../src/ui/text_wrap.cpp -o "$BIN3"
 # Time: NMEA RMC/ZDA, the source ranking, the floor and the Ljubljana DST clock.

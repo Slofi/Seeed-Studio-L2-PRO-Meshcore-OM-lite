@@ -8,6 +8,7 @@
 
 #include "ui/fonts.h"
 #include "ui/icons.h"
+#include "ui/text_wrap.h"
 
 namespace om {
 namespace ui {
@@ -116,59 +117,138 @@ void setRole(lgfx::LovyanGFX* d, FontRole role) {
   d->setFont(f ? f : &lgfx::fonts::Font0);
 }
 
+bool fontHasGlyph(FontRole role, uint32_t cp) {
+  if (cp >= 0x20 && cp <= 0x7E) return true;
+  // Only the mono blob was generated with the mock's U+00B7 MIDDLE DOT (tools/mkvlw.py --extra 0xb7).
+  return cp == 0xB7u && (role == FontRole::MonoMeta || role == FontRole::MonoStatus);
+}
+
+namespace {
+
+struct Utf8Ctx {
+  lgfx::LovyanGFX* d;
+  FontRole role;
+};
+
+// Width of one code point, or 0 when the face has no glyph for it (measureUtf8 then uses the
+// placeholder width, a space plus 2 px).
+int glyphWidthCb(void* ctx, uint32_t cp) {
+  Utf8Ctx* c = (Utf8Ctx*)ctx;
+  if (c->d == nullptr || !fontHasGlyph(c->role, cp)) return 0;
+  char b[5] = {0};
+  const int n = utf8Encode(cp, b);
+  if (n <= 0) return 0;
+  b[n] = 0;
+  setRole(c->d, c->role);
+  return c->d->textWidth(b);
+}
+
+int spaceWidth(lgfx::LovyanGFX* d, FontRole role) {
+  setRole(d, role);
+  return d->textWidth(" ");
+}
+
+// The fallback glyph: one small dim box, never LovyanGFX's full-height missing-glyph rectangle.
+void drawMissingGlyph(lgfx::LovyanGFX* d, int x, int cy, int w) {
+  d->drawRect(x, cy - kMissingBoxH / 2, w, kMissingBoxH, kDimmer);
+}
+
+// Draw the drawable run [a, b) at (x, cy), advancing x. Long runs are cut at a code point boundary
+// into chunks, because a VLW face measures a C string.
+int drawRun(lgfx::LovyanGFX* d, int x, int cy, const char* s, int a, int b) {
+  char chunk[112];
+  while (a < b) {
+    int end = a;
+    while (end < b) {
+      int at = end;
+      utf8Decode(s, &at);
+      if (at > b) at = b;
+      if (at - a > (int)sizeof(chunk) - 5) break;
+      end = at;
+    }
+    if (end == a) {   // a single sequence longer than the chunk: draw it alone
+      int at = a;
+      utf8Decode(s, &at);
+      end = at > b ? b : at;
+    }
+    const int n = end - a;
+    memcpy(chunk, s + a, (size_t)n);
+    chunk[n] = 0;
+    d->drawString(chunk, x, cy);
+    x += d->textWidth(chunk);
+    a = end;
+  }
+  return x;
+}
+
+}  // namespace
+
 void drawTextLeft(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
                   const char* s) {
+  if (d == nullptr || s == nullptr) return;
   setRole(d, role);
   d->setTextDatum(lgfx::textdatum_t::middle_left);
   d->setTextColor(fg, bg);
-  d->drawString(s, x, y);
+  if (*s == 0) return;
+  int runStart = -1;
+  int xCursor = x;
+  for (int i = 0; s[i] != 0;) {
+    const int at = i;
+    const uint32_t cp = utf8Decode(s, &i);
+    if (fontHasGlyph(role, cp)) {
+      if (runStart < 0) runStart = at;
+      continue;
+    }
+    if (runStart >= 0) xCursor = drawRun(d, xCursor, y, s, runStart, at);
+    runStart = -1;
+    const int w = spaceWidth(d, role) + kMissingExtra;
+    drawMissingGlyph(d, xCursor, y, w);
+    xCursor += w;
+  }
+  if (runStart >= 0) drawRun(d, xCursor, y, s, runStart, (int)strlen(s));
 }
 
 int drawTextRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int right, int y,
                   const char* s) {
-  setRole(d, role);
-  const int w = d->textWidth(s);
-  d->setTextDatum(lgfx::textdatum_t::middle_right);
-  d->setTextColor(fg, bg);
-  d->drawString(s, right, y);
+  if (d == nullptr || s == nullptr) return 0;
+  const int w = measureText(d, role, s, (int)strlen(s));
+  drawTextLeft(d, role, fg, bg, right - w, y, s);
   return w;
 }
 
-// ASCII only by design (the fonts cover 0x20-0x7E); never draws outside maxW.
+// Never draws outside maxW; the cut is on a code point boundary and ends with "...".
 void drawTextEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
                       int maxW, const char* s) {
-  setRole(d, role);
-  d->setTextDatum(lgfx::textdatum_t::middle_left);
-  d->setTextColor(fg, bg);
-  if (maxW <= 0) return;
-  if (d->textWidth(s) <= maxW) {
-    d->drawString(s, x, y);
+  if (d == nullptr || s == nullptr || maxW <= 0) return;
+  const int len = (int)strlen(s);
+  if (measureText(d, role, s, len) <= maxW) {
+    drawTextLeft(d, role, fg, bg, x, y, s);
     return;
   }
-  const int ellW = d->textWidth("...");
-  char buf[48];
-  int n = 0;
+  const int ellW = measureText(d, role, "...", 3);
+  char buf[80];
+  int cut = 0;
   int w = 0;
-  for (; s[n] && n < (int)sizeof(buf) - 4; ++n) {
-    buf[n] = s[n];
-    buf[n + 1] = 0;
-    w = d->textWidth(buf);
-    if (w + ellW > maxW) break;
+  for (int i = 0; s[i] != 0 && cut < (int)sizeof(buf) - 4;) {
+    int at = i;
+    utf8Decode(s, &at);
+    const int cw = measureText(d, role, s + i, at - i);
+    if (w + cw + ellW > maxW) break;
+    w += cw;
+    cut = at;
+    i = at;
   }
-  if (n == 0) return;
-  buf[n] = 0;
+  if (cut == 0) return;
+  memcpy(buf, s, (size_t)cut);
+  buf[cut] = 0;
   strncat(buf, "...", sizeof(buf) - strlen(buf) - 1);
-  d->drawString(buf, x, y);
+  drawTextLeft(d, role, fg, bg, x, y, buf);
 }
 
 int measureText(lgfx::LovyanGFX* d, FontRole role, const char* s, int len) {
   if (d == nullptr || s == nullptr || len <= 0) return 0;
-  char buf[128];
-  const int n = len < (int)sizeof(buf) - 1 ? len : (int)sizeof(buf) - 1;
-  memcpy(buf, s, (size_t)n);
-  buf[n] = 0;
-  setRole(d, role);
-  return d->textWidth(buf);
+  Utf8Ctx ctx{d, role};
+  return measureUtf8(s, len, glyphWidthCb, &ctx, spaceWidth(d, role));
 }
 
 uint16_t typeColour(NodeType t) {
@@ -182,8 +262,8 @@ uint16_t typeColour(NodeType t) {
 }
 
 int textWidth(lgfx::LovyanGFX* d, FontRole role, const char* text) {
-  setRole(d, role);
-  return d->textWidth(text);
+  if (d == nullptr || text == nullptr) return 0;
+  return measureText(d, role, text, (int)strlen(text));
 }
 
 void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {

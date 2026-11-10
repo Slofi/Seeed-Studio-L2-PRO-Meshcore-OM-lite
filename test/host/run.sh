@@ -277,11 +277,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est368.cpp \
   ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/timekeeper.cpp -o "$BIN33"
 "$BIN33"
 
-# EST-370: the Map's Names key, the centre dot and the two saved switches. The key is the top of the
-# right column (rect, tap, no overlap with the chip or the credit box, a marker still wins), the dot
-# is 3 px at (160,107), the same point map.cpp projects the view centre onto and the Position
-# picker's crosshair uses, and the names/traces store proves its defaults, one-key writes, reloads, a
-# failed write and a missing key.
+# EST-370 + EST-372: the Map's Names tab, the centre cross, the trace palette and the two saved
+# switches. The tab is the top of the right column (44x34, right edge 320, tap, no overlap with the
+# z13 line or the credit box, a marker still wins), the cross is 9x9 at (160,107), the same point
+# map.cpp projects the view centre onto and the Position picker's crosshair uses, the trace colour
+# and widths are fixed in theme.h with a measured contrast floor, and the names/traces store proves
+# its defaults, one-key writes, reloads, a failed write and a missing key.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est370.cpp \
   ../../src/ui/map_chrome.cpp -o "$BIN34"
 "$BIN34"

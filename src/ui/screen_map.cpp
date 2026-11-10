@@ -2,9 +2,12 @@
 // Map screen: the new layer's chrome over map.cpp's tiles. Everything is drawn into the off-screen
 // frame, once, then pushed by omFrameEnd(); the toast rides on top as always.
 //
-// EST-368: no distance scale; the Traces key toggles OM's animated routes, drawn over the tiles at
-// the map's own frame rate. EST-370 (Filip ~23:40): the attribution is plain dim text, the Names key
-// hides every label, and a small dot marks the map's centre.
+// EST-368: no distance scale; the Traces tab toggles OM's animated routes, drawn over the tiles at
+// the map's own frame rate. EST-370 (Filip ~23:40): the attribution is plain dim text, the Names tab
+// hides every label, and a small marker shows the map's centre.
+// EST-372 (Filip ~23:55 and ~00:00): the centre marker is a thin 9 px cross, the traces are a bolder
+// fuchsia-violet at 2 px with a 5 px dot and a dark outline, the right-hand keys are tabs flush with
+// the screen edge, and the "offline · z13" chip is a plain zN line above them.
 #include "ui/screen_map.h"
 
 #include <Arduino.h>
@@ -18,9 +21,12 @@ namespace om {
 namespace ui {
 namespace {
 
-void keyBox(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, fill);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, line);
+// EST-372: a tab coming out of the right edge. The rounded left corners are the visible ones; the
+// rectangle is extended past the screen by the radius, so the right corners are clipped away and
+// the visible right side is square with no border and no gap. One call for the fill and the edge.
+void edgeTabBox(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line) {
+  d->fillRoundRect(r.x, r.y, (int16_t)(r.w + kRadius), r.h, kRadius, fill);
+  d->drawRoundRect(r.x, r.y, (int16_t)(r.w + kRadius), r.h, kRadius, line);
 }
 
 void drawLockIcon(lgfx::LovyanGFX* d, const Rect& r, bool on) {
@@ -67,15 +73,20 @@ void drawPlainTextOnMap(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, const R
   d->drawString(s, box.x, box.y + box.h / 2);
 }
 
-// EST-370: the centre dot, above the tiles (and the route) but below the markers and the keys. A
-// 3 px kInk core with a 1 px dark ring, so it reads on a bright topo tile as well as a dark one. It
-// is not a crosshair: the Position picker keeps its own crosshair and never calls this screen.
-void drawCentreDot(lgfx::LovyanGFX* d, const MapChrome& c) {
-  const Rect r = mapCentreDotRect(c);
+// EST-372: the centre cross, above the tiles (and the route) but below the markers and the tabs.
+// Two 1 px kInk lines, 9 px long; a 1 px kMapBg outline under them keeps the white line visible on
+// a bright topo tile as well as on a dark one. It is not a crosshair: the Position picker keeps its
+// own crosshair and never calls this screen.
+void drawCentreCross(lgfx::LovyanGFX* d, const MapChrome& c) {
+  const Rect r = mapCentreCrossRect(c);
   const int cx = r.x + r.w / 2;
   const int cy = r.y + r.h / 2;
-  d->fillCircle(cx, cy, kMapCentreDotR + 1, kMapBg);   // the 1 px ring
-  d->fillCircle(cx, cy, kMapCentreDotR, kInk);         // the 3 px core
+  const int arm = kMapCentreCrossArm;
+  const int span = 2 * arm + 1;
+  d->fillRect((int16_t)(cx - arm), (int16_t)(cy - 1), (int16_t)span, 3, kMapBg);  // dark outline
+  d->fillRect((int16_t)(cx - 1), (int16_t)(cy - arm), 3, (int16_t)span, kMapBg);
+  d->fillRect((int16_t)(cx - arm), (int16_t)cy, (int16_t)span, 1, kInk);           // the cross
+  d->fillRect((int16_t)cx, (int16_t)(cy - arm), 1, (int16_t)span, kInk);
 }
 
 // A colour laid over whatever the frame already holds (the tiles) by a 0..255 alpha. omFramePixel
@@ -93,24 +104,36 @@ uint16_t mixOverFrame(int x, int y, uint16_t fg, uint8_t a) {
   return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-// One blended line from a to b, pixel by pixel. The colour is mixed with the tile under each pixel,
-// so the line reads on a bright map as well as on a dark one.
-void blendLine(lgfx::LovyanGFX* d, int x0, int y0, int x1, int y1, uint16_t col, uint8_t alpha) {
+// One blended line from a to b, pixel by pixel. `w` makes it a band of w px (EST-372: the tail is
+// 2 px). The colour is mixed with the tile under each pixel, so the line reads on a bright map as
+// well as on a dark one.
+void blendLine(lgfx::LovyanGFX* d, int x0, int y0, int x1, int y1, uint16_t col, uint8_t alpha,
+               int w) {
   const int dx = x1 - x0;
   const int dy = y1 - y0;
   const int n = (abs(dx) > abs(dy) ? abs(dx) : abs(dy));
   if (n <= 0) {
-    d->drawPixel((int16_t)x0, (int16_t)y0, mixOverFrame(x0, y0, col, alpha));
+    for (int o = 0; o < w; ++o) {
+      const int x = x0 + (w > 1 ? o : 0);
+      const int y = y0;
+      d->drawPixel((int16_t)x, (int16_t)y, mixOverFrame(x, y, col, alpha));
+    }
     return;
   }
+  const bool horizontal = abs(dx) >= abs(dy);
   for (int i = 0; i <= n; ++i) {
     const int x = x0 + (dx * i) / n;
     const int y = y0 + (dy * i) / n;
-    d->drawPixel((int16_t)x, (int16_t)y, mixOverFrame(x, y, col, alpha));
+    for (int o = 0; o < w; ++o) {
+      const int xx = horizontal ? x + o : x;
+      const int yy = horizontal ? y : y + o;
+      d->drawPixel((int16_t)xx, (int16_t)yy, mixOverFrame(xx, yy, col, alpha));
+    }
   }
 }
 
-// The whole route, faint and dashed: 2 px on, 4 px off, as the mock's .tr stroke-dasharray.
+// The whole route: 2 px wide, the mock's 2 on / 4 off dash kept for the unknown hops. EST-372 draws
+// it at full opacity; the old 1 px line at 34 % vanished into the light topo tiles.
 void drawTraceRoute(lgfx::LovyanGFX* d, const TraceFrame& f) {
   for (int i = 0; i + 1 < f.routeCount; ++i) {
     const int x0 = f.route[i].x, y0 = f.route[i].y;
@@ -118,24 +141,32 @@ void drawTraceRoute(lgfx::LovyanGFX* d, const TraceFrame& f) {
     const int dx = x1 - x0, dy = y1 - y0;
     const int n = (abs(dx) > abs(dy) ? abs(dx) : abs(dy));
     if (n <= 0) continue;
+    const bool horizontal = abs(dx) >= abs(dy);
     for (int k = 0; k <= n; ++k) {
       if ((k % 6) >= 2) continue;   // 2 on, 4 off
       const int x = x0 + (dx * k) / n;
       const int y = y0 + (dy * k) / n;
-      d->drawPixel((int16_t)x, (int16_t)y, mixOverFrame(x, y, kTraceLine, 86));   // about 34 %
+      for (int o = 0; o < kTraceRouteW; ++o) {
+        const int xx = horizontal ? x + o : x;
+        const int yy = horizontal ? y : y + o;
+        d->drawPixel((int16_t)xx, (int16_t)yy, kTraceLine);
+      }
     }
   }
 }
 
-// The dot and its tail, above the markers: the dot has a violet ring so it reads on any tile.
+// The dot and its tail, above the markers: a 5 px dot with a 1 px dark outline (a 2 px dark ring
+// would swallow it, one dark pixel is enough to read on a bright tile) and a 2 px fading tail.
 void drawTraceMoving(lgfx::LovyanGFX* d, const TraceFrame& f) {
   for (int i = 0; i + 1 < f.tailCount; ++i) {
     blendLine(d, f.tail[i].x, f.tail[i].y, f.tail[i + 1].x, f.tail[i + 1].y, kTraceTail,
-              f.tailAlpha);
+              f.tailAlpha, kTraceTailW);
   }
   if (f.hasDot) {
-    d->fillCircle(f.dot.x, f.dot.y, 3, mixOverFrame(f.dot.x, f.dot.y, kTraceDot, f.dotAlpha));
-    d->drawCircle(f.dot.x, f.dot.y, 4, mixOverFrame(f.dot.x, f.dot.y, kTraceLine, 200));
+    const uint16_t ring = mixOverFrame(f.dot.x, f.dot.y, kTraceDotOutline, f.dotAlpha);
+    d->fillCircle(f.dot.x, f.dot.y, (int16_t)(kTraceDotR + kTraceDotOutlineW), ring);
+    d->fillCircle(f.dot.x, f.dot.y, kTraceDotR,
+                  mixOverFrame(f.dot.x, f.dot.y, kTraceDot, f.dotAlpha));
   }
 }
 
@@ -145,8 +176,11 @@ void drawTrace(lgfx::LovyanGFX* d, const TraceFrame& f, bool movingOnly) {
   if (f.direct) {
     if (f.ringAlpha > 0 && f.ringR > 0) {
       const uint16_t col = mixOverFrame(f.ringX + f.ringR, f.ringY, kTraceRing, f.ringAlpha);
-      d->drawCircle(f.ringX, f.ringY, f.ringR, col);
-      if (f.ringR > 5) d->drawCircle(f.ringX, f.ringY, f.ringR - 1, col);
+      // EST-372: the same colour, 2 px instead of 1.
+      for (int w = 0; w < kTraceRingW; ++w) {
+        const int r = f.ringR - w;
+        if (r > 0) d->drawCircle(f.ringX, f.ringY, (int16_t)r, col);
+      }
     }
   } else {
     drawTraceMoving(d, f);
@@ -189,7 +223,7 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
         drawPlainTextOnMap(d, FontRole::MonoMeta, kMapCredit, cr, kMapCreditText);
       } else {
         // A box too narrow for the whole line (no real screen is): shorten it so it never runs
-        // under the key column.
+        // under the tab column.
         drawTextEllipsis(d, FontRole::MonoMeta, kMapCredit, kMapBg, cr.x, cr.y + cr.h / 2, cr.w,
                          kMapCreditText);
       }
@@ -199,8 +233,8 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   // The route belongs under the markers; the moving dot goes on top of them (below).
   if (!v.trace.direct) drawTrace(d, v.trace, false);
 
-  // EST-370: the centre dot, above the tiles and the route, below the markers and the keys.
-  drawCentreDot(d, c);
+  // EST-372: the centre cross, above the tiles and the route, below the markers and the tabs.
+  drawCentreCross(d, c);
 
   // Node markers over the tiles, our own position last so it is never hidden by a contact.
   for (int i = 0; i < v.markerCount; ++i) {
@@ -211,7 +245,7 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
     if (v.markers[i].self) drawMarker(d, v.markers[i]);
   }
 
-  // EST-370: the Names key. Off hides every marker label; the markers themselves stay. When on,
+  // EST-370: the Names tab. Off hides every marker label; the markers themselves stay. When on,
   // every contact is named (clients included), our own marker never (the tab's "Your position").
   if (v.namesOn) {
     for (int i = 0; i < v.markerCount; ++i) {
@@ -230,20 +264,22 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   if (v.trace.direct) drawTrace(d, v.trace, false);
   else drawTrace(d, v.trace, true);
 
-  // The info chip (mock .mapinfo): what this map is and at which zoom.
-  char chip[24];
-  snprintf(chip, sizeof(chip), "offline \xC2\xB7 z%d", v.zoom);
-  d->fillRoundRect(c.chip.x, c.chip.y, c.chip.w, c.chip.h, kRadiusSm, kPanel);
-  d->drawRoundRect(c.chip.x, c.chip.y, c.chip.w, c.chip.h, kRadiusSm, kLine);
-  drawTextLeft(d, FontRole::MonoMeta, kDim, kPanel, c.chip.x + kMapChipPadX,
-               c.chip.y + c.chip.h / 2, chip);
+  // EST-372: the zoom is plain small text, right-aligned with the tabs' right edge, just above the
+  // top tab. No plate, no border, no "offline": the map is always offline.
+  char zoom[8];
+  snprintf(zoom, sizeof(zoom), "z%d", v.zoom);
+  setRole(d, FontRole::MonoMeta);
+  d->setTextDatum(lgfx::textdatum_t::middle_right);
+  d->setTextColor(kDim);
+  d->drawString(zoom, c.zoomLabel.right(), c.zoomLabel.y + c.zoomLabel.h / 2);
 
-  // Zoom, follow, Traces (EST-368) and Names (EST-370), bottom right, as in the mock.
-  keyBox(d, c.zoomIn, kPanel, kLine);
-  keyBox(d, c.zoomOut, kPanel, kLine);
-  keyBox(d, c.lock, v.locked ? kSelBg2 : kPanel, v.locked ? kAcc : kLine);
-  keyBox(d, c.traces, v.tracesOn ? kSelBg2 : kPanel, v.tracesOn ? kAcc : kLine);
-  keyBox(d, c.names, v.namesOn ? kSelBg2 : kPanel, v.namesOn ? kAcc : kLine);
+  // EST-372: the right-hand tabs, flush with the screen edge, rounded on the left only. Zoom,
+  // follow, Traces (EST-368) and Names (EST-370), bottom up.
+  edgeTabBox(d, c.zoomIn, kPanel, kLine);
+  edgeTabBox(d, c.zoomOut, kPanel, kLine);
+  edgeTabBox(d, c.lock, v.locked ? kSelBg2 : kPanel, v.locked ? kAcc : kLine);
+  edgeTabBox(d, c.traces, v.tracesOn ? kSelBg2 : kPanel, v.tracesOn ? kAcc : kLine);
+  edgeTabBox(d, c.names, v.namesOn ? kSelBg2 : kPanel, v.namesOn ? kAcc : kLine);
   setRole(d, FontRole::SansTitle);
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(kInk, kPanel);

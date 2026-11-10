@@ -33,24 +33,32 @@ static void testMapChrome() {
   const MapChrome c = mapChromeFor(L, false);
   CHECK(c.view.x == 0 && c.view.y == 0 && c.view.w == 320 && c.view.h == L.tabbar.y);
   CHECK(c.view.bottom() == L.tabbar.y);
-  CHECK(c.chip.y >= L.status.bottom());          // the chip never hides under the status bar
-  CHECK(c.chip.right() <= c.view.right());
-  CHECK(c.zoomIn.right() == c.view.right() - kMapMargin);
+  // EST-372: the zoom is plain text in the same right column, above the top tab.
+  CHECK(c.zoomLabel.y >= L.status.bottom());
+  CHECK(c.zoomLabel.right() == c.view.right());
+  CHECK(c.zoomLabel.bottom() < c.names.y);
+  CHECK(c.zoomLabel.h == kMapZoomLabelH);
+  // EST-372: every tab's right edge IS the screen edge; no margin, no gap.
+  CHECK(c.zoomIn.right() == c.view.right());
   CHECK(c.zoomOut.right() == c.zoomIn.right());
   CHECK(c.lock.right() == c.zoomIn.right());
   CHECK(c.traces.right() == c.zoomIn.right());
   CHECK(c.names.right() == c.zoomIn.right());
-  CHECK(c.zoomOut.bottom() == c.view.bottom() - kMapMargin);
-  CHECK(c.zoomOut.y == c.zoomIn.bottom() + kMapKeyGap);
-  CHECK(c.zoomIn.y == c.lock.bottom() + kMapKeyGap);
-  CHECK(c.lock.y == c.traces.bottom() + kMapKeyGap);
-  CHECK(c.traces.y == c.names.bottom() + kMapKeyGap);   // EST-370: Names is the top key
+  CHECK(c.zoomOut.bottom() == c.view.bottom());
+  CHECK(c.zoomOut.y == c.zoomIn.bottom() + kMapTabGap);
+  CHECK(c.zoomIn.y == c.lock.bottom() + kMapTabGap);
+  CHECK(c.lock.y == c.traces.bottom() + kMapTabGap);
+  CHECK(c.traces.y == c.names.bottom() + kMapTabGap);   // EST-370: Names is the top tab
   CHECK(!c.zoomIn.overlaps(c.zoomOut));
   CHECK(!c.lock.overlaps(c.zoomIn));
   CHECK(!c.traces.overlaps(c.lock));
   CHECK(!c.names.overlaps(c.traces));
-  CHECK(c.names.y >= c.chip.bottom());                  // the column stays below the chip
-  CHECK(c.callout.empty());                            // nothing selected: no panel
+  CHECK(c.names.y >= c.zoomLabel.bottom());
+  // The tabs are 44 wide and, with the z13 line, 34 tall (40 x 5 = 200 does not fit the 189 px band).
+  CHECK(c.names.w == kMapTabW && c.names.w == 44);
+  CHECK(c.names.h == 34);
+  CHECK(c.names.h > 24 && c.names.w > 24);   // still bigger than the old 24x24 key
+  CHECK(c.callout.empty());                   // nothing selected: no panel
 
   const MapChrome s = mapChromeFor(L, true);
   CHECK(!s.callout.empty());
@@ -71,6 +79,11 @@ static void testMapHit() {
                  c.traces.y + c.traces.h / 2).kind == MapHitKind::Traces);
   CHECK(mapHitAt(c, nullptr, 0, c.names.x + c.names.w / 2,
                  c.names.y + c.names.h / 2).kind == MapHitKind::Names);
+  // EST-372: the last pixel column is the tab; one pixel left of it is map.
+  CHECK(mapHitAt(c, nullptr, 0, c.view.right() - 1, c.names.y + 1).kind == MapHitKind::Names);
+  CHECK(mapHitAt(c, nullptr, 0, c.names.x - 1, c.names.y + 1).kind == MapHitKind::Map);
+  // The z13 label is not a key: a tap on it is a map tap.
+  CHECK(mapHitAt(c, nullptr, 0, c.zoomLabel.x + 2, c.zoomLabel.y + 2).kind == MapHitKind::Map);
   CHECK(mapHitAt(c, nullptr, 0, c.callout.x + 4, c.callout.y + 4).kind == MapHitKind::Callout);
   CHECK(mapHitAt(c, nullptr, 0, 160, 90).kind == MapHitKind::Map);
   CHECK(mapHitAt(c, nullptr, 0, 0, 0).kind == MapHitKind::None);   // the status bar's pixels
@@ -173,7 +186,7 @@ static void testRgb565RoundTrip() {
 static void testMapCredit() {
   // EST-370: the attribution is plain dim text straight on the tiles, no outline and no plate. It
   // sits on the bottom LEFT (where the removed scale was), clamped inside the map area and clear of
-  // the key column. The mono advance the map draws with is 6 px.
+  // the tab column. The mono advance the map draws with is 6 px.
   const int creditW = 6 * (int)strlen(kMapCreditText);
   CHECK(creditW == 138);   // "Esri, HERE, Garmin, OSM", 23 glyphs
 
@@ -185,12 +198,12 @@ static void testMapCredit() {
     CHECK(cr.x == c.view.x + kMapMargin);
     CHECK(cr.bottom() == c.view.bottom() - kMapMargin);
     CHECK(cr.w == creditW);
-    // Inside the map area and off every key and the chip.
+    // Inside the map area and off every tab and the z13 line.
     CHECK(cr.right() <= c.view.right());
     CHECK(cr.y >= c.status.bottom());
     CHECK(!cr.overlaps(c.zoomIn) && !cr.overlaps(c.zoomOut) && !cr.overlaps(c.lock) &&
           !cr.overlaps(c.traces) && !cr.overlaps(c.names));
-    CHECK(!cr.overlaps(c.chip));
+    CHECK(!cr.overlaps(c.zoomLabel));
   }
 
   // The numbers quoted in PROGRESS.md at 320 px: the box starts at 6 and is 138 wide.

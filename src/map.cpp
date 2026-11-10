@@ -495,10 +495,10 @@ void mapRender() {
   }
 
   // The tile attribution is NOT drawn here: it is the map's licence line and ui/screen_map.cpp
-  // draws it straight on the map (EST-368), outlined, on the bottom left.
+  // draws it straight on the map (EST-368/EST-370), plain, on the bottom left.
 
-  // The on-screen state line is gone (EST-351): the chip in ui/screen_map.cpp says the zoom, and
-  // the serial still says whether any tile was drawn.
+  // The on-screen state line is gone (EST-351): the plain zN line in ui/screen_map.cpp says the
+  // zoom, and the serial still says whether any tile was drawn.
   if (drawn == 0) {
     Serial.printf("[map] BLANK z%d (render z%d) tx %d..%d ty %d..%d\n", s_z, rz, tx0, tx1,
                   ty0, ty1);

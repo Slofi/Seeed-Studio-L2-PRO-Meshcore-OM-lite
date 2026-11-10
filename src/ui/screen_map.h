@@ -3,10 +3,11 @@
 // pan stay exactly where they were; this file owns the pixels and the rectangles of everything
 // around them, and draws the whole view into the off-screen frame.
 //
-// EST-368: the distance scale is gone and the Map carries OM's Traces: a faint dashed route, a dot
-// with a short tail moving hop by hop, and a ring for a direct arrival (ui/map_trace.h owns the
-// model). EST-370: the attribution is plain dim text (no outline, no plate), a Names key hides every
-// label, and a small dot marks the map's centre, where a zoom focuses.
+// EST-368: the distance scale is gone and the Map carries OM's Traces: a dashed route, a dot with a
+// short tail moving hop by hop, and a ring for a direct arrival (ui/map_trace.h owns the model).
+// EST-370: the attribution is plain dim text (no outline, no plate), a Names tab hides every label.
+// EST-372: the traces are bolder fuchsia-violet at 2 px, the centre mark is a thin 9 px cross, the
+// right-hand keys are edge tabs, and the old "offline · zN" chip is plain zN text.
 #pragma once
 
 #include <LovyanGFX.hpp>

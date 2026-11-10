@@ -1,7 +1,9 @@
-// EST-370 host test: the Map's Names key (its rectangle, tap and the marker-wins rule), the centre
-// dot's position (the same point the tile renderer projects the view centre onto, and the picker's
+// EST-370 host test: the Map's Names tab (its rectangle, tap and the marker-wins rule), the centre
+// cross's position (the same point the tile renderer projects the view centre onto, and the picker's
 // crosshair uses), and the saved names/traces switches (defaults, toggle, persistence, a failed
-// write and a missing key). Plain g++, no Arduino.
+// write and a missing key). EST-372 adds the edge-tab geometry, the plain z13 line, the centre
+// cross's 9x9 box and the trace colour's measured contrast. Plain g++, no Arduino.
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,28 +21,30 @@ static int g_fail = 0;
     }                                                                      \
   } while (0)
 
-// --- the Names key -------------------------------------------------------------------------------
+// --- the Names tab -------------------------------------------------------------------------------
 static void testNamesKey() {
   const Layout& L = l2();
   const MapChrome c = mapChromeFor(L, false);
   CHECK(c.names.right() == c.zoomIn.right());
   CHECK(c.names.x == c.zoomOut.x);
-  CHECK(c.names.w == kMapKey && c.names.h == kMapKey);
-  CHECK(c.names.y == c.traces.y - kMapKey - kMapKeyGap);   // the top key of the column
-  CHECK(c.names.y >= c.chip.bottom());                    // never under the info chip
+  // EST-372: 44 px wide, 34 px tall, up to the screen edge.
+  CHECK(c.names.w == kMapTabW && c.names.w == 44);
+  CHECK(c.names.h == 34);
+  CHECK(c.names.y == c.traces.y - c.traces.h - kMapTabGap);   // the top tab of the column
+  CHECK(c.names.y >= c.zoomLabel.bottom());                   // never under the z13 line
   CHECK(!c.names.overlaps(c.traces));
   CHECK(!c.names.overlaps(c.lock));
   CHECK(!c.names.overlaps(c.zoomIn));
   CHECK(!c.names.overlaps(c.zoomOut));
-  CHECK(!c.names.overlaps(c.chip));
+  CHECK(!c.names.overlaps(c.zoomLabel));
 
-  // The 320x240 geometry quoted in PROGRESS.md: right edge 314, x 290, y 73..97.
-  CHECK(c.names.x == 290);
-  CHECK(c.names.right() == 314);
-  CHECK(c.names.y == 73);
-  CHECK(c.names.bottom() == 97);
+  // The 320x240 geometry quoted in PROGRESS.md: right edge 320, x 276, y 41..75.
+  CHECK(c.names.x == 276);
+  CHECK(c.names.right() == 320);
+  CHECK(c.names.y == 41);
+  CHECK(c.names.bottom() == 75);
 
-  // The one hit test: the centre of the key is the Names key, every pixel of it is.
+  // The one hit test: the centre of the tab is the Names tab, every pixel of it is.
   const int cx = c.names.x + c.names.w / 2;
   const int cy = c.names.y + c.names.h / 2;
   CHECK(mapHitAt(c, nullptr, 0, cx, cy).kind == MapHitKind::Names);
@@ -50,7 +54,7 @@ static void testNamesKey() {
   CHECK(mapHitAt(c, nullptr, 0, c.names.x - 1, cy).kind != MapHitKind::Names);
   CHECK(mapHitAt(c, nullptr, 0, c.names.right(), cy).kind != MapHitKind::Names);
 
-  // A marker still wins over the key it sits on (the map's one rule).
+  // A marker still wins over the tab it sits on (the map's one rule).
   MapMarker m;
   m.x = (int16_t)cx;
   m.y = (int16_t)cy;
@@ -60,12 +64,12 @@ static void testNamesKey() {
   CHECK(hit.kind == MapHitKind::Marker);
   CHECK(hit.marker == 0);
 
-  // The credit box never runs under the top key either (its clamp uses the bottom key's column).
+  // The credit box never runs under the tab column.
   const Rect cr = mapCreditRect(c, 138);
   CHECK(!cr.overlaps(c.names));
 }
 
-// --- the centre dot ------------------------------------------------------------------------------
+// --- the centre cross ----------------------------------------------------------------------------
 static void testCentre() {
   const MapChrome c = mapChromeFor(l2(), false);
   const MapPoint p = mapCentreOf(c);
@@ -80,31 +84,70 @@ static void testCentre() {
   CHECK(p.x == c.view.x + c.view.w / 2);
   CHECK(p.y == c.view.y + c.view.h / 2);
 
-  // The dot is 2-3 px across: a 3x3 core (the screen's 1 px ring is decoration, not the dot).
-  const Rect d = mapCentreDotRect(c);
-  CHECK(d.w == 3 && d.h == 3);
+  // EST-372: two 1 px lines, 9 px long, so the box is 9x9 and centred on the same point.
+  const Rect d = mapCentreCrossRect(c);
+  CHECK(d.w == 9 && d.h == 9);
+  CHECK(d.w == 2 * kMapCentreCrossArm + 1);
   CHECK(d.x + d.w / 2 == p.x);
   CHECK(d.y + d.h / 2 == p.y);
-  CHECK(d.w >= 2 && d.w <= 3);
   CHECK(c.view.contains(d.x, d.y));
   CHECK(c.view.contains(d.right() - 1, d.bottom() - 1));
   CHECK(!d.overlaps(c.status));
-  CHECK(!d.overlaps(c.chip));
+  CHECK(!d.overlaps(c.zoomLabel));
   CHECK(!d.overlaps(c.zoomIn) && !d.overlaps(c.zoomOut) && !d.overlaps(c.lock));
   CHECK(!d.overlaps(c.traces) && !d.overlaps(c.names));
-  // It is not a crosshair: its box is small and does not reach the key column or the bars.
+  // It stays a small mark, far from the tab column and the bars.
   CHECK(d.right() < c.zoomIn.x);
 
   // The point does not move when the callout opens (it is the view's, not the selection's).
   const MapChrome sel = mapChromeFor(l2(), true);
   const MapPoint ps = mapCentreOf(sel);
   CHECK(ps.x == p.x && ps.y == p.y);
-  CHECK(mapCentreDotRect(sel).x == d.x && mapCentreDotRect(sel).y == d.y);
+  CHECK(mapCentreCrossRect(sel).x == d.x && mapCentreCrossRect(sel).y == d.y);
 
   // The Position picker's crosshair (rptr_layout.cpp: 154,101 12x12) is centred on the same pixel,
-  // which is why the picker does not draw this dot: it already has a crosshair there.
+  // which is why the picker does not draw this cross: it already has a crosshair there.
   CHECK(154 + 12 / 2 == p.x);
   CHECK(101 + 12 / 2 == p.y);
+}
+
+// --- the trace colours and widths ----------------------------------------------------------------
+// The ticket asks for a bolder colour, measured against the tile colours, and for the widths to
+// live in theme.h. These are the same numbers the python measurement in PROGRESS.md reports,
+// repeated here so a later palette change cannot silently undo EST-372.
+static double chan5(uint16_t v) { return ((v >> 11) & 0x1F) * 255.0 / 31.0; }
+static double chan6(uint16_t v) { return ((v >> 5) & 0x3F) * 255.0 / 63.0; }
+static double chan5b(uint16_t v) { return (v & 0x1F) * 255.0 / 31.0; }
+
+static double relativeLuminance(uint16_t c) {
+  const double ch[3] = {chan5(c) / 255.0, chan6(c) / 255.0, chan5b(c) / 255.0};
+  double lin[3];
+  for (int i = 0; i < 3; ++i) {
+    lin[i] = ch[i] <= 0.04045 ? ch[i] / 12.92 : pow((ch[i] + 0.055) / 1.055, 2.4);
+  }
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+
+static double contrast(uint16_t a, uint16_t b) {
+  const double la = relativeLuminance(a);
+  const double lb = relativeLuminance(b);
+  return la > lb ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05);
+}
+
+static void testTraceColour() {
+  CHECK(kTraceLine == rgb565(0xc026d3));
+  CHECK(kTraceTail == kTraceLine);
+  CHECK(kTraceDot == kTraceLine);
+  CHECK(kTraceRing == kTraceLine);
+  CHECK(kTraceRouteW == 2);
+  CHECK(kTraceTailW == 2);
+  CHECK(kTraceDotR == 2);              // 5 px fill
+  CHECK(kTraceDotOutlineW == 1);
+  CHECK(kTraceRingW == 2);
+  // The measured tile colours from the real z13 image: the light ground and a dark tile.
+  CHECK(contrast(kTraceLine, rgb565(0xf0f0e0)) > 3.5);
+  CHECK(contrast(kTraceLine, rgb565(0xe0e0e0)) > 3.0);
+  CHECK(contrast(kTraceLine, rgb565(0x181818)) > 3.5);
 }
 
 // --- the saved switches --------------------------------------------------------------------------
@@ -240,11 +283,12 @@ static void testSavedSwitches() {
 int main() {
   testNamesKey();
   testCentre();
+  testTraceColour();
   testSavedSwitches();
   if (g_fail) {
     printf("est370: %d failure(s)\n", g_fail);
     return 1;
   }
-  printf("est370: names key + centre dot + saved switches ok\n");
+  printf("est370: edge tabs + centre cross + trace colour + saved switches ok\n");
   return 0;
 }

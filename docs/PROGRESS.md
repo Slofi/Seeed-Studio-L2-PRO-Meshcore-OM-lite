@@ -4346,3 +4346,119 @@ decode and the SD reads from that path; what remains is the canvas repush plus t
 ## 2026-11-11 00:30 (Claude): EST-371 on the device
 - Built in the sandbox (exit 0, RAM 156,800 B, flash 2,803,305 B), tests exit 0, reviewed binary flashed (2,803,664 B); `chats` 0 mismatches. main.cpp 7,526 -> 6,172 lines (partial split: map tab, toasts, sound events, USB commands moved out).
 - Map open: first entry composed in 105 ms; the second entry `[map] open: cached canvas 19790 us, view unchanged`, composed in 23 ms. The dip sequence (out ~42 ms, push ~11.5 ms, settle ~18 ms, in ~61 ms) unchanged.
+
+## 2026-11-11 00:26 (DeepSeek): EST-372 map cross, bolder traces, edge tabs, plain zN, charge probe
+
+Two map tweaks from Filip plus the edge tabs and the charging question. The charge icon is NOT in
+this build: no verified charge status source was found from the sandbox. A read-only probe was added
+so the next boot log can name 0x34 (item 4 below).
+
+### 1. The centre mark is a thin cross
+- `ui/map_chrome.h`: `kMapCentreCrossArm = 4`, `mapCentreCrossRect()` returns the 9x9 box around
+  `mapCentreOf()`. For the L2 that is (155..163, 102..110), still centred on (160,107).
+- `ui/screen_map.cpp` draws two 1 px kInk lines, 9 px long, over a 1 px kMapBg outline under each
+  line, so the white cross reads on a bright topo tile as well as on a dark one. It is not a
+  crosshair: the Position picker still calls only `mapRender()` and draws its own crosshair at the
+  same pixel; no picker code changed.
+- The cross is drawn after the route and before the markers, exactly where the dot was, so it can
+  never cover a node or a tab.
+
+### 2. The traces are bolder (theme.h holds the colours and widths)
+- Colour: one fuchsia-violet `#c026d3` for route, tail, dot and the direct-arrival ring. The old
+  `#8b5cf6` route was 1 px at alpha 86 (about 34 %); the new one is 2 px at full opacity.
+- Sizes in `ui/theme.h`: `kTraceRouteW = 2`, `kTraceTailW = 2`, `kTraceDotR = 2` (5 px fill),
+  `kTraceDotOutlineW = 1` (a 1 px dark ring, `#14101a`), `kTraceRingW = 2`. The dashed route keeps
+  its 2 on / 4 off pattern; that is the "dashed kept for unknown hops" style.
+- Measured contrast (sRGB WCAG ratio) against the real z13 tile image `map-preview-ljubljana-z13-2026-11-09.png`
+  and a dark-tile sample. The old figure is the effective 34 % blend, not the raw colour:
+
+  | sample | new `#c026d3` | old `#8b5cf6` at 34 % |
+  |---|---|---|
+  | `#f0f0e0` tile ground (34.6 % of the image) | 4.09:1 | 1.50:1 |
+  | `#e0e0e0` tile ground (11.7 %) | 3.57:1 | 1.46:1 |
+  | `#d0d0d0` road grey (6.9 %) | 3.05:1 | 1.39:1 |
+  | `#181818` dark-tile sample (no dark tiles in this pack) | 3.77:1 | 1.52:1 |
+  | `#909090` darker road ink | 1.48:1 | 1.14:1 |
+  | `#6c6c6a` darkest 1 % of the real tile | 1.12:1 | 1.05:1 |
+
+  The last two are thin dark map features, not a tile ground; no single colour clears 3:1 against
+  both a white ground and a mid-grey line. The 2 px width and the dot's dark outline are what keep
+  those crossings readable.
+- Preview for Claude before flashing: `docs/shots/2026-11-11-0026-trace-preview.png` (320x240, the
+  real z13 tile crop as the background, the new dashed route, 2 px tail, 5 px dot with its outline,
+  the 2 px ring, the centre cross, and the measured ratios in the caption bar).
+- Host test `test_est370.cpp` now also checks the theme values and the contrast floors.
+
+### 3. Edge tabs and the plain z13 line
+- `ui/map_chrome.cpp`: the five tabs start at x = 276 and end at x = 320, so the right edge IS the
+  screen edge. `kMapTabW = 44`, `kMapTabGap = 1`. They stack bottom up: zoom out (181..214),
+  zoom in (146..180), locate (111..145), Traces (76..110), Names (41..74). 34 px tall each.
+- `ui/screen_map.cpp`: `edgeTabBox()` calls `fillRoundRect`/`drawRoundRect` with the rectangle
+  extended `kRadius` past the right edge, so the left corners are round and the right corners are
+  clipped away: no right border and no gap. The icons and the + / - glyphs are unchanged; the on
+  state is still the dark gold fill with a gold edge and gold icon.
+- The "offline · z13" chip is gone. `MapChrome::chip` became `zoomLabel` (x 296..319, y 28..38),
+  drawn as plain kDim mono text right-aligned at the same edge as the tabs, just above Names. It is
+  not a button and it is not a map tap (the hit test falls through to Map).
+- **The 40 px tall tap area does not fit.** The map band between the bars is 189 px (240 - 26 - 25);
+  five 40 px tabs alone need 200 px, and the z13 line takes another 13 px. The fit is 34 px per tab,
+  1 px apart (5*34 + 4 = 174, from y 41 to 215). That is still 10 px taller and 20 px wider than the
+  old 24x24 key, and every tab is a separate hit rectangle. If 40 px is a hard requirement, the
+  status bar, the tab bar or the one-column rule has to give; that is Filip's call.
+- The bottom tab is flush with the tab bar's top (215) and the right edge is flush with the screen;
+  the left edge of the tab column moved from 290 to 276, so the map gains 14 px there.
+
+### 4. Charging indicator: no icon, the source is not verified yet
+- Boot scan (the device's own log, same list as the ticket): `14 18 21 22 2C 34 48 5D` all ACK.
+  0x21 is the PCA9554 expander, 0x18 the ES8311 codec, 0x2C the backlight driver, 0x48 the ADS1115
+  battery ADC, 0x5D the GT911 touch. 0x14, 0x22 and 0x34 are unidentified.
+- Expander inputs: `board.h` uses all 16 bits (0..15); the boot log prints `cfg=07/00`, so the only
+  inputs are port 0 bits 0, 1 and 2 (wake button, I2C interrupt, SD detect), and port 1 is all
+  outputs. There is no spare expander input to repurpose, and `board.h` has no charger status pin.
+- 0x34 is the only plausible PMU/charger address. `board.cpp` now does a READ-ONLY probe after the
+  second I2C scan: `[pmu] 0x34 reg03=..` (an AXP2101 answers 0x4A), `[pmu] 0x34 reg00/reg01=.. (raw,
+  not interpreted)`, `[pmu] 0x22 in/cfg=..` and `[pmu] 0x14 reg00=..`. It writes nothing and nothing
+  in the app reads the result. The sandbox has no serial device (`/dev/ttyACM*` is absent), so the
+  register values are **not visible from here**; the next flash's boot log is the evidence.
+- Because no charge status source is verified, there is no bolt, no `[batt] charging yes/no` line,
+  and no `StatusModel::batteryCharging`. A battery-voltage trend was not used: it is not a charge
+  signal. If the probe reports 0x4A, the next ticket still has to prove which status bit means
+  charging before drawing anything.
+
+### Build and tests
+- `pio run -e om_lite_l2` exit 0: **RAM 156,800 B** (47.9% of 327,680; EST-371 was the same),
+  **flash 2,803,937 B** (42.8% of 6,553,600; +632 B), `firmware.bin` **2,804,304 B** (+640 B).
+  The growth is the edge-tab geometry, the thicker line loops, the cross and the read-only probe.
+- `sh test/host/run.sh` exit 0 (full suite). `test_est370.cpp` updated: Names is the 44x34 top tab
+  with its right edge at 320, the centre cross is 9x9 at (160,107), the trace colour and widths are
+  fixed with the contrast floors above, and the saved-switch checks are unchanged. `test_est351.cpp`
+  updated to the new tab geometry and the z13 line; its other checks pass.
+
+### Could not check (no device, no serial, no glass)
+- The glass: the 34 px tabs, the left-only rounding at the right edge, the plain z13 line on a
+  bright tile, the cross on a light tile, the new trace at 2 px and the dot's outline.
+- The `[pmu]` answers: the probe is in the build, but this sandbox sees no `/dev/ttyACM*`.
+- Whether 34 px tabs feel big enough for Filip; the ticket's 40 px does not fit the 189 px band.
+
+### Next step for Claude (one reader on the USB port)
+1. Flash `firmware.bin` (2,804,304 B). Boot log should show the two `[i2c] found:` lines and the
+   new `[pmu]` lines. Write what 0x34/0x22/0x14 answered in this file.
+2. Open Map, `tools/shot.py`: no "offline" chip, plain z13 at the top right, a thin cross at
+   (160,107), five tabs flush with the right edge and rounded on the left only. Names and Traces
+   are gold (both default on).
+3. Tap each tab centre: Names (298,58), Traces (298,93), locate (298,128), + (298,163), -
+   (298,198). Same logs as before (`[map] names ...`, `[map] traces ...`, `[map] follow ...`,
+   `[map] zoom N`). The hit area is x 276..319, the full 34 px height.
+4. Trigger a trace (a message with hops) and look at the glass; compare with
+   `docs/shots/2026-11-11-0026-trace-preview.png`. The route should be a solid fuchsia-violet
+   2 px dash, the dot a 5 px fill with a dark ring, the direct ring the same colour at 2 px.
+5. If the 34 px tabs are too small, decide with Filip: shrink a bar or accept two columns. The
+   current build is the largest one-column fit with the z13 line above it.
+6. Charging: if `[pmu] 0x34 reg03=0x4A`, the next ticket can read the AXP2101 status register and
+   add the bolt. If not, close the charging item with the probe's answers.
+
+## 2026-11-11 00:36 (Claude): EST-372 on the device
+- Built in the sandbox (exit 0, RAM 156,800 B, flash 2,803,937 B), tests exit 0, reviewed binary flashed over USB OTA (2,804,304 B); `mesh: up`, `chats` 6 chats, 0 mismatches.
+- Screenshot: the thin cross at the centre, five edge tabs flush with the right edge (rounded on the left only), Traces tab on in gold, plain credits, and `z13` above the top tab. The label is right-aligned at the screen edge and readable, but dim grey is faint on the light topo ground; a darker ink is a possible later tweak.
+- Bolder traces are seen only in the preview (`docs/shots/2026-11-11-0026-trace-preview.png`); no real trace arrived during the check, so they are unproven on live traffic.
+- Charge probe (read-only), boot log: `0x34 reg00=0x01 reg01=0x01`, `0x34 reg03=0x00` (an AXP2101 answers 0x4A there, so 0x34 is something else), `0x22 in=0x00 cfg=0x24`, `0x14 reg00=0x1E`. No register is identified as a charge status yet, so there is no bolt. Next step: read the same lines once on USB power and once on battery and compare.

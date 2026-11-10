@@ -62,14 +62,25 @@ constexpr uint16_t kMapSide   = rgb565(0x11100e);  // mock .map-side
 constexpr uint16_t kMapCredit = rgb565(0x9aa3b0);  // tile attribution, plain dim text on the tiles
 // EST-370 (Filip ~23:40): the attribution is PLAIN text now, no outline and no plate ("no outline on
 // the credits!"). Its box is still mapCreditRect(); the screen draws it transparently.
-// The Map's centre dot uses kInk for its 3 px core and kMapBg for the 1 px ring that keeps it
-// readable on both a bright topo tile and a dark one.
-// EST-368: OM's Traces (OverMesh .trace CSS): a faint dashed route, a moving dot with a short
-// fading tail, and an expanding ring for a direct arrival.
-constexpr uint16_t kTraceLine = rgb565(0x8b5cf6);   // the route, drawn at low opacity
-constexpr uint16_t kTraceTail = rgb565(0x9b72f8);   // the tail behind the dot
-constexpr uint16_t kTraceDot  = rgb565(0xd8ccff);   // the dot itself, near white violet
-constexpr uint16_t kTraceRing = rgb565(0x8b5cf6);   // the direct arrival's expanding ring
+// EST-372: the Map's centre mark uses kInk for its two 1 px lines and kMapBg for the 1 px outline
+// under them, so the cross reads on a bright topo tile and on a dark one.
+// EST-368: OM's Traces (OverMesh .trace CSS): a dashed route, a moving dot with a short fading
+// tail, and an expanding ring for a direct arrival.
+// EST-372 (Filip ~23:55: "make it a little bit more visible, also maybe change the trace colour to
+// a bolder one"): one bold fuchsia-violet, full opacity. Measured against the real z13 tile
+// (map-preview-ljubljana-z13-2026-11-09.png): 4.1:1 on the #f0f0e0 ground, 3.6:1 on #e0e0e0 and
+// 3.8:1 on a #181818 dark tile; the old #8b5cf6 at the old 34 % alpha was about 1.5:1 on the
+// light ground, which is why it disappeared. Widths and the dot's outline are here with it.
+constexpr uint16_t kTraceLine = rgb565(0xc026d3);   // the route, dashes and the direct-arrival ring
+constexpr uint16_t kTraceTail = rgb565(0xc026d3);   // the tail behind the dot
+constexpr uint16_t kTraceDot  = rgb565(0xc026d3);   // the dot itself
+constexpr uint16_t kTraceDotOutline = rgb565(0x14101a);  // the dot's 1 px dark ring
+constexpr uint16_t kTraceRing = rgb565(0xc026d3);   // the direct arrival's expanding ring
+constexpr int16_t kTraceRouteW = 2;       // the dashed route, 2 px
+constexpr int16_t kTraceTailW = 2;        // the fading tail, 2 px
+constexpr int16_t kTraceDotR = 2;         // 5 px fill
+constexpr int16_t kTraceDotOutlineW = 1;  // one dark pixel around it (7 px overall)
+constexpr int16_t kTraceRingW = 2;        // the expanding ring, 2 px
 constexpr uint16_t kWarnBg    = rgb565(0x2a1e10);
 constexpr uint16_t kWarnLine  = rgb565(0x5c4320);
 constexpr uint16_t kWarnInk   = rgb565(0xffd08a);

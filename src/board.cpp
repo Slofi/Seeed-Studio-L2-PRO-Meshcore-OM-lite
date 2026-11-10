@@ -460,6 +460,41 @@ void i2cScan() {
   Serial.printf(" (%u device%s)\n", n, n == 1 ? "" : "s");
 }
 
+// EST-372: a READ-ONLY identity probe for the addresses the scan cannot name. It reads bytes and
+// prints them; it never writes, and nothing in the app uses the result yet. 0x34 is a common PMU
+// address (an AXP2101 answers 0x4A in register 0x03), 0x22 is probed as a possible second
+// expander (P0 input, config register), 0x14 as the remaining unknown. The point is that the next
+// boot log can answer "what is 0x34" instead of guessing it. No charge decision is made here: a
+// battery voltage trend is not a charge signal.
+static bool readByteAt(uint8_t addr, uint8_t reg, uint8_t* out) {
+  if (out == nullptr) return false;
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)addr, 1) != 1) return false;
+  *out = (uint8_t)Wire.read();
+  return true;
+}
+
+static void pmuProbe() {
+  uint8_t id = 0;
+  if (readByteAt(0x34, 0x03, &id)) {
+    Serial.printf("[pmu] 0x34 reg03=0x%02X%s\n", id, id == 0x4A ? " (AXP2101 chip id)" : "");
+  } else {
+    Serial.printf("[pmu] 0x34 reg03: no answer\n");
+  }
+  uint8_t s0 = 0, s1 = 0;
+  if (readByteAt(0x34, 0x00, &s0) && readByteAt(0x34, 0x01, &s1)) {
+    Serial.printf("[pmu] 0x34 reg00=0x%02X reg01=0x%02X (raw, not interpreted)\n", s0, s1);
+  }
+  uint8_t in = 0, cfg = 0;
+  if (readByteAt(0x22, 0x00, &in) && readByteAt(0x22, 0x06, &cfg)) {
+    Serial.printf("[pmu] 0x22 in=0x%02X cfg=0x%02X\n", in, cfg);
+  }
+  uint8_t u14 = 0;
+  if (readByteAt(0x14, 0x00, &u14)) Serial.printf("[pmu] 0x14 reg00=0x%02X\n", u14);
+}
+
 bool boardBegin() {
   Wire.begin(kPinSda, kPinScl, 100000);
   delay(20);
@@ -477,6 +512,8 @@ bool boardBegin() {
 
   // A second sweep after the rails are up: 0x5D must appear once the GT911 is released from reset.
   i2cScan();
+  // EST-372: one read-only look at the devices the scan cannot name. Nothing uses the result yet.
+  pmuProbe();
 
   // Continue even without the expander: the scan output is the diagnosis, and a partially powered
   // panel may still answer. The return value stays false so the app can say so.

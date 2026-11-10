@@ -396,7 +396,7 @@ void draw() {
   ui::MapView v;
   build(v);
   // EST-371: a Map open draws the canvas that is already in PSRAM first. mapScreenAnimate repushes
-  // it and redraws all the chrome (status, markers, chip, keys, callout), so the frame is current
+  // it and redraws all the chrome (status, markers, zN, tabs, callout), so the frame is current
   // except for the tiles; only a changed view needs those decoded, one pass later. The same rule
   // covers a plain in-page redraw (a marker select, the once-a-minute clock): an unchanged view
   // never decodes a tile again.

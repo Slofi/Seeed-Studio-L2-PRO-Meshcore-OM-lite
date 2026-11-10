@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
-// Map chrome arithmetic: the key rectangles, the attribution's box, the centre point and the one
-// hit test. No LovyanGFX. EST-368 removed the distance scale and its 1-2-5 ladder; EST-370 added
-// the Names key and the centre dot's geometry.
+// Map chrome arithmetic: the edge-tab rectangles, the plain zoom label, the attribution's box, the
+// centre point and the one hit test. No LovyanGFX. EST-368 removed the distance scale and its 1-2-5
+// ladder; EST-370 added the Names toggle and the centre marker; EST-372 turned the right-hand keys
+// into tabs flush with the screen edge, replaced the centre dot with a thin cross and dropped the
+// "offline" chip for a plain zN label.
 #include "ui/map_chrome.h"
 
 #include <string.h>
@@ -16,18 +18,25 @@ MapChrome mapChromeFor(const Layout& L, bool selected) {
   c.status = L.status;
   c.view = Rect{0, 0, w, h};
 
-  const int16_t right = (int16_t)(w - kMapMargin);
-  c.chip = Rect{(int16_t)(right - 92), (int16_t)(L.status.bottom() + 6), 92, kMapChipH};
+  // EST-372: the zoom is plain text, right-aligned to the same edge as the tabs, just above the
+  // top one. It is not a chip: no plate, no border.
+  c.zoomLabel = Rect{(int16_t)(w - kMapZoomLabelW),
+                     (int16_t)(L.status.bottom() + kMapZoomLabelGap), kMapZoomLabelW,
+                     kMapZoomLabelH};
+  const int16_t top = (int16_t)(c.zoomLabel.bottom() + kMapZoomLabelGap);
 
-  // The mock's stack, now five keys from the bottom right corner up: zoom out, zoom in, follow,
-  // Traces (EST-368) and Names (EST-370) on top.
-  const int16_t bx = (int16_t)(right - kMapKey);
-  const int16_t by = (int16_t)(h - kMapMargin - kMapKey);
-  c.zoomOut = Rect{bx, by, kMapKey, kMapKey};
-  c.zoomIn = Rect{bx, (int16_t)(by - kMapKey - kMapKeyGap), kMapKey, kMapKey};
-  c.lock = Rect{bx, (int16_t)(c.zoomIn.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
-  c.traces = Rect{bx, (int16_t)(c.lock.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
-  c.names = Rect{bx, (int16_t)(c.traces.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
+  // Five tabs, bottom up: zoom out, zoom in, follow, Traces, Names. The right edge is the screen
+  // edge (drawing rounds the left corners only and leaves the right square). The height is what is
+  // left after the label and the four 1 px gaps; every tab is the same height.
+  const int16_t available = (int16_t)(h - top - 4 * kMapTabGap);
+  int16_t tabH = (int16_t)(available / 5);
+  if (tabH < 1) tabH = 1;
+  const int16_t bx = (int16_t)(w - kMapTabW);
+  c.zoomOut = Rect{bx, (int16_t)(h - tabH), kMapTabW, tabH};
+  c.zoomIn = Rect{bx, (int16_t)(c.zoomOut.y - tabH - kMapTabGap), kMapTabW, tabH};
+  c.lock = Rect{bx, (int16_t)(c.zoomIn.y - tabH - kMapTabGap), kMapTabW, tabH};
+  c.traces = Rect{bx, (int16_t)(c.lock.y - tabH - kMapTabGap), kMapTabW, tabH};
+  c.names = Rect{bx, (int16_t)(c.traces.y - tabH - kMapTabGap), kMapTabW, tabH};
 
   if (selected) {
     c.callout = Rect{8, (int16_t)(h - 8 - kMapCalloutH), (int16_t)(w - 16), kMapCalloutH};
@@ -39,12 +48,12 @@ Rect mapCreditRect(const MapChrome& c, int16_t width) {
   Rect r;
   if (width <= 0) return r;   // nothing to draw, nothing to place
   // EST-370: plain dim text, no plate and no outline. The box is clamped to the map area and to
-  // the key column's left edge, the same rule that keeps every other piece of chrome off the keys.
+  // the tab column's left edge, the same rule that keeps every other piece of chrome off the tabs.
   const int16_t cy = (int16_t)(c.view.h - kMapMargin - kMapCreditH / 2);
   int16_t x = (int16_t)(c.view.x + kMapMargin);
   r = Rect{x, (int16_t)(cy - kMapCreditH / 2), width, kMapCreditH};
-  // A very wide face (a narrower screen) must not run into the key column: the box ends at the
-  // keys' left edge, the same rule that keeps every other piece of chrome off them.
+  // A very wide face (a narrower screen) must not run into the tab column: the box ends at the
+  // tabs' left edge, the same rule that keeps every other piece of chrome off them.
   const int16_t limit = (int16_t)(c.zoomOut.x - kMapMargin);
   if (r.right() > limit) r.w = (int16_t)(limit - r.x);
   if (r.w < 0) r.w = 0;
@@ -54,7 +63,7 @@ Rect mapCreditRect(const MapChrome& c, int16_t width) {
 MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, int y) {
   MapHit hit;
   if (c.status.contains(x, y)) return hit;   // the bar's own keys are handled before this
-  // Markers first: a finger on a dot is a node, even if the dot is under a key.
+  // Markers first: a finger on a dot is a node, even if the dot is under a tab.
   int best = -1;
   int bestD2 = kMapMarkerHitR * kMapMarkerHitR;
   for (int i = 0; i < count; ++i) {

@@ -123,6 +123,29 @@ uint8_t meshPathHashBytes();
 bool meshPathHashSet(uint8_t bytes);   // 1..3; saved in NodePrefs, false for a bad value
 const char* meshPathHashLabel();       // "1B" / "2B" / "3B", for Settings > Radio
 
+// --- the radio prefs the Settings screen edits (EST-347) -----------------------------------------
+// NodePrefs is the ONLY store. These calls mirror upstream's CMD_SET_RADIO_PARAMS,
+// CMD_SET_RADIO_TX_POWER, CMD_SET_ADVERT_NAME and CMD_SET_OTHER_PARAMS handler bodies: write the
+// same fields, MyMesh::savePrefs(), then the same radio apply (radio_driver.setParams / setTxPower)
+// the command path performs. No second store exists, so the phone and the screen cannot disagree.
+struct MeshRadioPrefs {
+  uint32_t freq_khz;
+  uint32_t bw_hz;
+  uint8_t sf;
+  uint8_t cr;
+  int8_t tx;
+};
+bool meshRadioPrefsGet(MeshRadioPrefs* out);
+// Upstream's ranges: freq 150000..2500000 kHz, bw 7000..500000 Hz, sf 5..12, cr 5..8. A bad value is
+// refused whole (nothing is written, nothing goes on the air).
+bool meshRadioPrefsSet(const MeshRadioPrefs& p);
+bool meshTxPowerSet(int8_t dbm);          // -9..MAX_LORA_TX_POWER, saved and applied live
+bool meshNodeNameSet(const char* name);   // the CMD_SET_ADVERT_NAME path, saved in NodePrefs
+bool meshAdvertPosPolicyGet();            // NodePrefs::advert_loc_policy (CMD_SET_OTHER_PARAMS)
+bool meshAdvertPosPolicySet(bool share);
+// The first 8 hex characters of this node's public key, for Settings > Node.
+bool meshPubKeyShort(char* out, size_t cap);
+
 // --- node DB for the Nodes screen -----------------------------------------------------------------
 // The MeshCore contact table, read-only. type is MeshCore's ADV_TYPE_* (1 chat/client, 2 repeater,
 // 3 room, 4 sensor). path_hops is ContactInfo::out_path_len DECODED (mesh_path.h): the hop count

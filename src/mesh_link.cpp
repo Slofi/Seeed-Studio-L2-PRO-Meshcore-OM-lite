@@ -855,6 +855,79 @@ bool meshPathHashSet(uint8_t bytes) {
   return true;
 }
 
+// --- radio prefs used by Settings (EST-347) -------------------------------------------------------
+// Same fields, same save, same radio apply as MyMesh's CMD_SET_RADIO_PARAMS / _TX_POWER handlers.
+bool meshRadioPrefsGet(MeshRadioPrefs* out) {
+  if (out == nullptr) return false;
+  const NodePrefs* p = the_mesh.getNodePrefs();
+  out->freq_khz = (uint32_t)(p->freq * 1000.0f + 0.5f);
+  out->bw_hz = (uint32_t)(p->bw * 1000.0f + 0.5f);
+  out->sf = p->sf;
+  out->cr = p->cr;
+  out->tx = p->tx_power_dbm;
+  return true;
+}
+
+bool meshRadioPrefsSet(const MeshRadioPrefs& p) {
+  // Upstream's CMD_SET_RADIO_PARAMS test, verbatim in meaning (bw is Hz there, kHz here).
+  if (p.freq_khz < 150000 || p.freq_khz > 2500000 || p.sf < 5 || p.sf > 12 || p.cr < 5 ||
+      p.cr > 8 || p.bw_hz < 7000 || p.bw_hz > 500000) {
+    return false;
+  }
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  prefs->sf = p.sf;
+  prefs->cr = p.cr;
+  prefs->freq = (float)p.freq_khz / 1000.0f;
+  prefs->bw = (float)p.bw_hz / 1000.0f;
+  prefs->tx_power_dbm = (p.tx < -9) ? -9 : (p.tx > MAX_LORA_TX_POWER ? MAX_LORA_TX_POWER : p.tx);
+  the_mesh.savePrefs();
+  radio_driver.setParams(prefs->freq, prefs->bw, prefs->sf, prefs->cr);
+  radio_driver.setTxPower(prefs->tx_power_dbm);
+  Serial.printf("[mc] radio set: %.3f MHz bw %.1f sf %u cr %u tx %d dBm (saved in prefs.json)\n",
+                (double)prefs->freq, (double)prefs->bw, (unsigned)prefs->sf, (unsigned)prefs->cr,
+                (int)prefs->tx_power_dbm);
+  return true;
+}
+
+bool meshTxPowerSet(int8_t dbm) {
+  if (dbm < -9 || dbm > MAX_LORA_TX_POWER) return false;
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  prefs->tx_power_dbm = dbm;
+  the_mesh.savePrefs();
+  radio_driver.setTxPower(dbm);
+  Serial.printf("[mc] tx power %d dBm (saved in prefs.json)\n", (int)dbm);
+  return true;
+}
+
+bool meshNodeNameSet(const char* name) {
+  if (name == nullptr) return false;
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  snprintf(prefs->node_name, sizeof(prefs->node_name), "%s", name);
+  the_mesh.savePrefs();   // the CMD_SET_ADVERT_NAME path
+  Serial.printf("[mc] node name \"%s\" (saved in prefs.json)\n", prefs->node_name);
+  return true;
+}
+
+bool meshAdvertPosPolicyGet() {
+  return the_mesh.getNodePrefs()->advert_loc_policy != ADVERT_LOC_NONE;
+}
+
+bool meshAdvertPosPolicySet(bool share) {
+  // CMD_SET_OTHER_PARAMS writes exactly this field, then saves.
+  the_mesh.getNodePrefs()->advert_loc_policy = share ? ADVERT_LOC_SHARE : ADVERT_LOC_NONE;
+  the_mesh.savePrefs();
+  Serial.printf("[mc] advert position %s (saved in prefs.json)\n", share ? "shared" : "off");
+  return true;
+}
+
+bool meshPubKeyShort(char* out, size_t cap) {
+  if (out == nullptr || cap < 9) return false;
+  snprintf(out, cap, "%02X%02X%02X%02X", the_mesh.self_id.pub_key[0], the_mesh.self_id.pub_key[1],
+           the_mesh.self_id.pub_key[2], the_mesh.self_id.pub_key[3]);
+  return true;
+}
+
+
 bool meshLinkBegin() {
   if (s_ready) return true;
 
@@ -978,6 +1051,30 @@ bool meshLinkBegin() {
     } else {
       Serial.printf("[mc] migration: name \"%s\", path hash %uB (NVS phs=%u), prefs read back\n",
                     prefs->node_name, (unsigned)meshPathHashBytes(), (unsigned)phs);
+    }
+  }
+
+  // EST-347: the radio settings now live in NodePrefs too. A store that is missing or invalid is
+  // seeded from the build values (the same ones the radio is already running), so the first boot
+  // changes nothing on the air; then the same setParams/setTxPower the phone command path calls.
+  {
+    NodePrefs* prefs = the_mesh.getNodePrefs();
+    const bool ok = prefs->freq >= 150.0f && prefs->freq <= 2500.0f && prefs->bw >= 7.0f &&
+                    prefs->bw <= 500.0f && prefs->sf >= 5 && prefs->sf <= 12 && prefs->cr >= 5 &&
+                    prefs->cr <= 8 && prefs->tx_power_dbm >= -9 &&
+                    prefs->tx_power_dbm <= MAX_LORA_TX_POWER;
+    if (!ok) {
+      prefs->freq = LORA_FREQ;
+      prefs->bw = LORA_BW;
+      prefs->sf = LORA_SF;
+      prefs->cr = LORA_CR;
+      prefs->tx_power_dbm = LORA_TX_POWER;
+      the_mesh.savePrefs();
+      radio_driver.setParams(prefs->freq, prefs->bw, prefs->sf, prefs->cr);
+      radio_driver.setTxPower(prefs->tx_power_dbm);
+      Serial.printf("[mc] radio prefs seeded from build: %.3f MHz bw %.1f sf %u cr %u tx %d dBm\n",
+                    (double)prefs->freq, (double)prefs->bw, (unsigned)prefs->sf,
+                    (unsigned)prefs->cr, (int)prefs->tx_power_dbm);
     }
   }
 

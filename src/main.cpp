@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT
-// OM Lite — P2: home shell + Settings > Sound.
-//
-// Gold theme (#e8b04f, CD OM's colour). The home screen shows the board status; a SET button opens
-// the sound settings: master sound, volume, per-event chime choice, DND and a test. Every choice is
-// stored in NVS and applied to the ES8311 immediately. The mesh layer (P3) will feed the same
-// per-event hooks with real messages; for now the Test button and the boot chime prove the path.
+// OM Lite shell: setup + loop + dispatch. The screens live in src/ui/ (Nodes, Chat, the node sheet,
+// Info and, since EST-347, Settings); this file owns the app state, the actions and the USB commands.
+// Settings keeps only rows and ids here: every rectangle and pixel is ui/settings_layout.h and
+// ui/screen_settings.cpp, and the radio values are MeshCore's NodePrefs through mesh_link.h.
 #include <Arduino.h>
 #include <FS.h>
 #include <LovyanGFX.hpp>
@@ -43,6 +41,8 @@
 #include "ui/screen_chat.h"
 #include "ui/screen_node_info.h"
 #include "ui/screen_nodes.h"
+#include "ui/screen_settings.h"
+#include "ui/settings_prefs.h"
 #include "ui/text_wrap.h"
 #include "ui/toast.h"
 #include "ui/widgets.h"
@@ -94,21 +94,44 @@ static constexpr uint8_t kNewNodeDefault = (uint8_t)(kChimeCount - 1);   // "Sof
 
 static bool g_boardOk = false;
 static int g_tab = 0;
-static bool g_settings = false;   // false = home, true = Settings > Sound
-static int g_settingsScreen = 0;  // 0 = the sound list, 1 = the chime picker
-static uint8_t g_pickerEvent = 0; // 0 message, 1 direct, 2 mention
-static int g_pickerScroll = 0;
-static int g_pickerPending = 0;   // previewed but not yet applied
-static int g_clickPending = 0;    // previewed click tone
-static int g_selRow = -1;         // highlighted settings row
-static int g_pickerSel = -1;      // highlighted picker row
-static int g_chanSel = -1;        // highlighted channel row
-static int g_chanPage = 0;        // the channel whose own page (screen 6) is open
-static bool g_deleteArmed = false;   // the Delete row needs a second tap
+// Settings (EST-347) keeps only state; every rectangle comes from ui/settings_layout.h and every
+// pixel is drawn by ui/screen_settings.cpp. A page is a flat list of SettingRow, so one index drives
+// both the drawing and the tap.
+enum class SetPage : uint8_t {
+  GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
+  Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
+  Sound, SoundPicker, Wifi, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash,
+};
+static bool g_settings = false;
+static om::ui::SettingsTab g_setTab = om::ui::SettingsTab::General;
+static SetPage g_setPage = SetPage::GeneralRoot;
+static int g_setScroll = 0;          // px scrolled in the body
+static int g_setScroll0 = 0;         // its value when the finger went down
+static int g_setMaxScroll = 0;       // the last build's clamp
+static char g_setTitle[40] = "Settings";
+static bool g_setSubPage = false;
+static om::ui::SettingsEditor g_setEditor = om::ui::SettingsEditor::None;
+static char g_setEditText[64] = "";
+static const char* g_setOkLabel = "OK";
+static int g_chanPage = 0;           // the channel whose page is open
+static bool g_deleteArmed = false;   // Delete needs a second tap, as today
 static bool g_editNew = false;       // the name editor is naming a NEW channel
+static int g_editCh = 0;             // the channel the name editor renames
 static int g_addKind = 0;            // 1 create private, 2 join private, 3 join #tag
-static int g_addSel = -1;            // highlighted row on the add sheet
-static char g_keyText[32];           // base64 key being typed
+static char g_keyText[32];           // base64 key being typed (never printed)
+static int g_setPresetPending = -1;  // a preset waiting for its confirm
+static int g_setHashPending = 0;     // the path hash waiting for its confirm
+static int g_setSoundEvent = 0;      // 0 message, 1 direct, 2 mention, 3 new node, 4 click tone
+static int g_setSoundPending = 0;    // the picker's chosen row (kSoundOff = Off)
+static om::ui::CivilTime g_setTime;  // the manual-time steppers' civil time
+static uint8_t g_setBrightness = om::kScreenBrightness;
+static om::ui::SettingRow g_setRows[28];
+static int g_setRowCount = 0;
+static om::ui::RadioPrefsStore g_radio;
+static om::ui::RadioPrefs g_custom;
+
+static void drawSettings();
+static void openSettings(int mainTab, om::ui::SettingsTab tab);
 // --- chat (new UI layer) -----------------------------------------------------------------------
 // The chat screen keeps no geometry of its own: om::ui::screen_chat.cpp owns the rectangles and the
 // hit test, and these are only the state it draws.
@@ -155,11 +178,9 @@ static int g_chatMsgCount = 0;
 // copies cost ~9 KB of RAM each (EST-342).
 static om::MeshDm g_dmScratch[om::ui::kMaxChatMsgs];
 
-static int g_setScroll = 0;       // settings page scroll, pixels
 static bool g_touchSnd = true;    // a short click on every tap
 static bool g_welcome = true;     // the slower boot chime
 static uint8_t g_touchIdx = 0;    // index into kClicks
-static uint8_t g_pickerKind = 0;  // 0 = notification chimes, 1 = UI click tones
 
 static bool g_sdOk = false;
 static uint16_t g_packMb = 0;
@@ -421,202 +442,13 @@ static void drawInfoPanel() {
   d->setTextDatum(lgfx::textdatum_t::top_left);
 }
 
-static int g_editCh = 0;
 static char g_editBuf[20];
-
-static const char* kKeyChars = "QWERTZUIOPASDFGHJKL_YXCVBNM.,-1234567890";
-
-static void drawDirectToast();   // defined after the direct-draw screens that end with it
-
-static void drawChannelSettings() {
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString("CHANNELS", 12, 40);
-  for (int i = 0; i < om::mcChannelCount(); ++i) {
-    const int y = 60 + i * 20;      // 20 px pitch: eight rows end at 212, nine would not fit
-    if (g_chanSel == i) d->fillRect(6, (int16_t)(y - 3), 308, 18, kGold);
-    d->setTextColor(g_chanSel == i ? kBg : kGold, g_chanSel == i ? kGold : kBg);
-    d->drawString(String(i).c_str(), 10, y);
-    d->setTextColor(g_chanSel == i ? kBg : TFT_WHITE, g_chanSel == i ? kGold : kBg);
-    d->drawString(om::mcChannelName(i), 26, y);
-    d->setTextColor(g_chanSel == i ? kBg : (om::mcChannelEnabled(i) ? kGold : kDim),
-                    g_chanSel == i ? kGold : kBg);
-    if (om::mcChannelMuted(i)) {
-      d->setTextColor(g_chanSel == i ? kBg : kDim, g_chanSel == i ? kGold : kBg);
-      d->drawString("mute", 216, y);
-    }
-    char badge[8];
-    const int unread = om::meshUnread(i);
-    if (unread > 0) snprintf(badge, sizeof(badge), "%d", unread);
-    else badge[0] = 0;
-    d->setTextColor(kGold);
-    d->drawString(badge, 250, y);
-    d->drawString(om::mcChannelEnabled(i) ? "ON" : "OFF", 272, y);
-  }
-  d->setTextColor(kDim);
-  if (om::mcChannelCount() <= 5) d->drawString("tap a channel to manage it", 10, 200);
-  if (om::mcChannelCount() < om::kMaxChannels) {
-    d->setTextColor(kGold);
-    d->drawString("+ Add channel", 10, 214);
-  }
-  // No second link here: it sat on top of "+ Add channel" at 214 and read as doubled glyphs. The
-  // general Sound page is reached from a channel's own page (row 6), which is where it belongs.
-  drawDirectToast();
-}
 
 // Some of the old screens draw straight to the panel and never open a frame, so the overlay that
 // omFrameEnd() runs for every framed redraw never gets its turn. Those paths end with this: the
 // active toast is still drawn last, on top of everything (EST-344).
 static void drawDirectToast() {
   om::ui::drawToastOverlay(om::om_display(), millis());
-}
-
-// One channel's own page. Rows are 24 px apart from y=50, matching the tap bands in handleTap().
-// Per-channel, in the order a person actually needs them: what it is called, whether it is on, whether
-// it makes a sound, what is waiting to be read, and the (public) hash that identifies it on the air.
-static void drawChannelPage() {
-  om::omFrameBegin();
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold);
-  d->drawString("CHANNEL", 12, 38);
-
-  const int idx = g_chanPage;
-  char line[48];
-  const int rowY[7] = {50, 74, 98, 122, 146, 170, 194};
-  const char* labels[7] = {"Name", "Enabled", "Sound", "Unread", "Key", "Delete", "Global sound  >"};
-  for (int r = 0; r < 7; ++r) {
-    const bool sel = (g_chanSel == 100 + r);
-    if (sel) d->fillRect(8, rowY[r] - 3, 304, 20, kGold);
-    d->setTextColor(sel ? kBg : TFT_WHITE);
-    d->drawString(labels[r], 12, rowY[r]);
-    if (r == 6) continue;                       // the link has no value column
-    d->setTextColor(sel ? kBg : kGold);
-    switch (r) {
-      case 0: snprintf(line, sizeof(line), "%s  >", om::mcChannelName(idx)); break;
-      case 1: snprintf(line, sizeof(line), "%s", om::mcChannelEnabled(idx) ? "ON" : "OFF"); break;
-      case 2: snprintf(line, sizeof(line), "%s", om::mcChannelMuted(idx) ? "MUTED" : "ON"); break;
-      case 3: snprintf(line, sizeof(line), "%s", om::meshUnread(idx) ? "new - tap to clear" : "none"); break;
-      case 4: {   // the key, base64, exactly as another node needs it to join
-        om::mcChannelKeyB64(idx, line, sizeof(line));
-        d->setTextColor(sel ? kBg : kDim);
-        break;
-      }
-      case 5: snprintf(line, sizeof(line), "%s", g_deleteArmed ? "tap again to delete" : "remove  >"); break;
-      default: break;
-    }
-    if (line[0]) d->drawString(line, 150, rowY[r]);
-  }
-  d->setTextColor(kDim);
-  d->drawString("Tap a row to change it", 12, 218);
-  om::omFrameEnd();
-}
-
-// "Add channel": the four joins WadaMesh offers, in our own words. The key always comes from the
-// secret; for a #tag channel it is derived from the name, so both ends land on it without sharing one.
-static void drawAddSheet() {
-  om::omFrameBegin();
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold);
-  d->drawString("ADD CHANNEL", 12, 38);
-  const char* rows[4] = {"Create private", "Join private", "Join Public", "Join #tag"};
-  for (int r = 0; r < 4; ++r) {
-    const int y = 54 + r * 30;
-    const bool sel = (g_addSel == r);
-    if (sel) d->fillRect(8, y - 3, 304, 24, kGold);
-    d->drawRect(8, y - 3, 304, 24, sel ? kGold : kDim);
-    d->setTextColor(sel ? kBg : TFT_WHITE);
-    d->drawString(rows[r], 16, y);
-  }
-  d->setTextColor(kDim);
-  d->drawString("A private channel needs its key shared;", 12, 196);
-  d->drawString("#tag and Public derive it from the name", 12, 210);
-  om::omFrameEnd();
-}
-
-// Base64 key entry: 13 columns x 5 rows is exactly the base64 alphabet, so every character is one tap.
-static const char* kBase64Chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
-
-static void drawKeyEntry() {
-  om::omFrameBegin();
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold);
-  d->drawString("CHANNEL KEY (base64)", 10, 36);
-  d->setTextColor(g_keyText[0] ? TFT_WHITE : kDim);
-  d->drawString(g_keyText[0] ? g_keyText : "(tap the letters)", 10, 52);
-  for (int r = 0; r < 5; ++r) {
-    for (int c = 0; c < 13; ++c) {
-      const int idx = r * 13 + c;
-      const int x = 10 + c * 23;
-      const int y = 72 + r * 28;
-      if (idx >= (int)strlen(kBase64Chars)) continue;
-      d->drawRect(x, y, 23, 26, kDim);
-      d->setTextDatum(lgfx::textdatum_t::middle_center);
-      d->setTextColor(TFT_WHITE);
-      char ch[2] = {kBase64Chars[idx], 0};
-      d->drawString(ch, x + 11, y + 13);
-      d->setTextDatum(lgfx::textdatum_t::top_left);
-    }
-  }
-  d->drawRect(8, 216, 90, 22, kGold);
-  d->drawRect(214, 216, 98, 22, kGold);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kGold);
-  d->drawString("DEL", 53, 227);
-  d->drawString("JOIN", 263, 227);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  om::omFrameEnd();
-}
-
-static void drawNameEditor() {
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString(g_editNew ? "NEW CHANNEL" : (String("RENAME ") + g_editCh).c_str(), 12, 40);
-  d->setTextColor(TFT_WHITE, kBg);
-  d->drawString(g_editBuf, 12, 54);
-
-  for (int r = 0; r < 4; ++r) {
-    for (int c = 0; c < 10; ++c) {
-      const int idx = r * 10 + c;
-      if (idx >= (int)strlen(kKeyChars)) break;
-      const int x = 8 + c * 31;
-      const int y = 74 + r * 28;
-      d->drawRect(x, y, 28, 24, kDim);
-      d->setTextDatum(lgfx::textdatum_t::middle_center);
-      d->setTextColor(TFT_WHITE, kBg);
-      char ch[2] = {kKeyChars[idx], 0};
-      d->drawString(ch, x + 14, y + 12);
-      d->setTextDatum(lgfx::textdatum_t::top_left);
-    }
-  }
-  d->drawRect(8, 192, 90, 24, kGold);
-  d->drawRect(222, 192, 90, 24, kGold);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kGold, kBg);
-  d->drawString("< DEL", 53, 204);
-  d->drawString("OK", 267, 204);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  drawDirectToast();
 }
 
 static void drawMapTab() {
@@ -1074,13 +906,12 @@ static void drawChat() {
   om::ui::chatScreenDraw(v);
 }
 
-// The channel list and its pages are still the old screens; both paths into them live here.
+// "Manage channels" in the chat selector is a door into the same Settings page: General > Channels.
 static void openChannelList() {
-  g_settings = true;
-  g_settingsScreen = 2;
-  g_chanSel = -1;
-  g_deleteArmed = false;
-  drawChannelSettings();
+  openSettings(1, om::ui::SettingsTab::General);
+  g_setPage = SetPage::Channels;
+  g_setScroll = 0;
+  drawSettings();
 }
 
 static void chatSelectChat(int chat) {
@@ -1430,13 +1261,7 @@ static void handleChatTap(int x, int y) {
       // The gear is the only door to Settings (Filip, 2026-11-10); the channel list is reached from
       // the selector's "Manage channels" row.
       if (L.gear().contains(x, y)) {
-        g_settings = true;
-        g_settingsScreen = 0;
-        g_setScroll = 0;
-        g_selRow = -1;
-        g_pickerSel = -1;
-        g_chanSel = -1;
-        drawSettings();
+        openSettings(1, om::ui::SettingsTab::Chat);
         return;
       }
       return;
@@ -1509,159 +1334,1107 @@ static void drawRptrTab() {
   drawDirectToast();
 }
 
-static void drawMapSettings() {
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString("MAP", 12, 40);
-  d->setTextColor(TFT_WHITE, kBg);
-  d->drawString("Recentre (Ljubljana)", 12, 62);
-  d->drawString("Clear marker", 12, 86);
-  d->setTextColor(kGold, kBg);
-  d->drawString("Sound settings  >", 12, 110);
-  drawDirectToast();
+// --------------------------------------------------------------------------------- settings shell
+// EST-347: Settings rebuilt on the new layer. Every page is a list of SettingRow built here and
+// drawn by ui/screen_settings.cpp; the rectangles, the tab row, the scroll clamp and the manual-time
+// arithmetic live in ui/settings_layout.h and are host-tested. The only geometry this file knows is
+// the action id in a row.
+enum SetAct : uint16_t {
+  A_None = 0,
+  A_Preset, A_TxPower, A_Hash, A_Node, A_Channels, A_Wifi, A_Bt, A_Sound,
+  A_Brightness, A_Time, A_AdvertPos,
+  A_Apply, A_Cancel,
+  A_MapRecentre, A_MapClear, A_RptrForget,
+  A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
+  A_ChatMsgSound, A_ChatDmSound, A_ChatMenSound,
+  A_SoundMaster, A_SoundVolume, A_SoundMsg, A_SoundDm, A_SoundMen, A_SoundNew,
+  A_SoundTouch, A_SoundClick, A_SoundDnd, A_SoundWelcome, A_SoundPickUse,
+  A_ChanAdd, A_ChanRename, A_ChanEnabled, A_ChanSound, A_ChanClear, A_ChanDelete,
+  A_AddCreate, A_AddPrivate, A_AddPublic, A_AddHashtag,
+  A_TimeManual, A_TimeApply,
+  A_CustomOpen, A_CustomFreq, A_CustomBw, A_CustomSf, A_CustomCr, A_CustomApply,
+  A_PresetBase = 100,      // 100..103 the four presets
+  A_HashBase = 120,        // 120..122 = 1B / 2B / 3B
+  A_PickBase = 140,        // 140.. the chimes, then Off
+  A_ChanBase = 200,        // 200..207 one row per channel
+  A_TimeFieldBase = 220,   // 220..224 year / month / day / hour / minute
+};
+
+static bool s_setFromChat = false;   // the open Channel page came from the Chat tab
+static bool s_setNameNode = false;   // the name editor is renaming the node, not a channel
+static bool s_pickerFromChat = false;   // the sound picker was opened from the Chat tab
+
+static void drawSettings();   // the gear and every settings page reach this
+static void showToast(const char* text);
+
+static void setResetRows() { g_setRowCount = 0; }
+
+static void setAdd(om::ui::SetRowKind kind, uint16_t id, const char* label, const char* value = "",
+                   bool on = false, bool danger = false) {
+  if (g_setRowCount >= (int)(sizeof(g_setRows) / sizeof(g_setRows[0]))) return;
+  om::ui::SettingRow& r = g_setRows[g_setRowCount++];
+  r = om::ui::SettingRow();
+  r.kind = kind;
+  r.id = id;
+  r.on = on;
+  r.danger = danger;
+  snprintf(r.label, sizeof(r.label), "%s", label != nullptr ? label : "");
+  snprintf(r.value, sizeof(r.value), "%s", value != nullptr ? value : "");
 }
 
-static void drawRptrSettings() {
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString("RPTR", 12, 40);
-  d->setTextColor(TFT_WHITE, kBg);
-  d->drawString("No repeater configured.", 12, 62);
-  d->setTextColor(kGold, kBg);
-  d->drawString("Sound settings  >", 12, 96);
-  drawDirectToast();
+static void setSection(const char* label) {
+  setAdd(om::ui::SetRowKind::Section, A_None, label);
 }
 
-static void drawPageForTab() {
-  g_settings = false;
-  g_settingsScreen = 0;
-  g_deleteArmed = false;          // leaving the settings tree disarms a pending delete
-  g_editNew = false;
-  if (g_tab == 2) drawMapTab();
+static bool setRootPage(SetPage p) {
+  return p == SetPage::GeneralRoot || p == SetPage::NodesRoot || p == SetPage::ChatRoot ||
+         p == SetPage::MapRoot || p == SetPage::RptrRoot;
+}
+
+static SetPage setRootForTab(om::ui::SettingsTab t) {
+  switch (t) {
+    case om::ui::SettingsTab::Nodes: return SetPage::NodesRoot;
+    case om::ui::SettingsTab::Chat:  return SetPage::ChatRoot;
+    case om::ui::SettingsTab::Map:   return SetPage::MapRoot;
+    case om::ui::SettingsTab::Rptr:  return SetPage::RptrRoot;
+    default:                         return SetPage::GeneralRoot;
+  }
+}
+
+static int openChatChannel() {
+  if (g_chatSel < 0 || g_chatSel >= g_chatCount) return -1;
+  if (g_chats[g_chatSel].dm) return -1;
+  return g_chatSel < g_channelCount ? g_chatSel : -1;
+}
+
+static void clockLine(char* out, size_t cap) {
+  const uint32_t now = om::timeKeeper().now();
+  if (!om::timeKeeper().realSinceBoot() || !om::formatClock(now, out, cap)) {
+    snprintf(out, cap, "--:--");
+  }
+}
+
+// "GPS, 2 min ago" / "not set": the time's source and how long ago it set the clock.
+static void timeSourceLine(char* out, size_t cap) {
+  const om::TimeSource s = om::timeKeeper().source();
+  if (s == om::TimeSource::None) {
+    snprintf(out, cap, "not set");
+    return;
+  }
+  const uint32_t age = om::timeKeeper().sourceAgeSec(millis() / 1000);
+  char ag[24];
+  if (age < 60) snprintf(ag, sizeof(ag), "just now");
+  else if (age < 3600) snprintf(ag, sizeof(ag), "%lu min ago", (unsigned long)(age / 60));
+  else if (age < 86400) snprintf(ag, sizeof(ag), "%lu h ago", (unsigned long)(age / 3600));
+  else snprintf(ag, sizeof(ag), "%lu d ago", (unsigned long)(age / 86400));
+  snprintf(out, cap, "%s, %s", om::timeSourceName(s), ag);
+}
+
+static void timeInitFromClock() {
+  const uint32_t now = om::timeKeeper().now();
+  int y = 2026, mo = 1, d = 1, h = 0, mi = 0;
+  if (!om::localCivil(now, y, mo, d, h, mi)) {
+    y = 2026; mo = 1; d = 1; h = 0; mi = 0;
+  }
+  g_setTime = om::ui::CivilTime{y, mo, d, h, mi};
+}
+
+static void presetDesc(int i, char* out, size_t cap) {
+  if (i >= 0 && i < om::ui::kRadioPresetCount) {
+    snprintf(out, cap, "%s", om::ui::radioPresetAt(i).desc);
+  } else {
+    const om::ui::RadioPrefs& p = g_custom;
+    char f[16], b[16];
+    om::ui::radioFreqText(p, f, sizeof(f));
+    om::ui::radioBwText(p, b, sizeof(b));
+    snprintf(out, cap, "%s MHz / SF%u / BW%s / CR%u", f, (unsigned)p.sf, b, (unsigned)p.cr);
+  }
+}
+
+static void radioPresetValue(char* out, size_t cap) {
+  const int i = om::ui::radioPresetIndex(g_radio.prefs());
+  snprintf(out, cap, "%s", i < om::ui::kRadioPresetCount ? om::ui::radioPresetAt(i).name : "Custom");
+}
+
+// The manual-time page's values, as the steppers show them.
+static void timeFieldText(om::ui::TimeField f, char* out, size_t cap) {
+  switch (f) {
+    case om::ui::TimeField::Year:   snprintf(out, cap, "%d", g_setTime.year); break;
+    case om::ui::TimeField::Month:  snprintf(out, cap, "%02d", g_setTime.month); break;
+    case om::ui::TimeField::Day:    snprintf(out, cap, "%02d", g_setTime.day); break;
+    case om::ui::TimeField::Hour:   snprintf(out, cap, "%02d", g_setTime.hour); break;
+    default:                        snprintf(out, cap, "%02d", g_setTime.minute); break;
+  }
+}
+
+static void buildSettingsRows() {
+  setResetRows();
+  g_setEditor = om::ui::SettingsEditor::None;
+  g_setSubPage = !setRootPage(g_setPage);
+  g_setOkLabel = "OK";
+  snprintf(g_setTitle, sizeof(g_setTitle), "Settings");
+
+  switch (g_setPage) {
+    case SetPage::GeneralRoot: {
+      char v[40], name[40], key[16];
+      radioPresetValue(v, sizeof(v));
+      setSection("RADIO & MESH");
+      setAdd(om::ui::SetRowKind::Chevron, A_Preset, "Region / preset", v);
+      snprintf(v, sizeof(v), "%d dBm", (int)g_radio.prefs().tx);
+      setAdd(om::ui::SetRowKind::Stepper, A_TxPower, "TX power", v);
+      setAdd(om::ui::SetRowKind::Chevron, A_Hash, "Path hash", om::meshPathHashLabel());
+      snprintf(name, sizeof(name), "%s", om::meshNodeName());
+      setAdd(om::ui::SetRowKind::Chevron, A_Node, "Node", name);
+      snprintf(v, sizeof(v), "%d channels", om::mcChannelCount());
+      setAdd(om::ui::SetRowKind::Chevron, A_Channels, "Channels", v);
+
+      setSection("CONNECTIONS");
+      setAdd(om::ui::SetRowKind::Chevron, A_Wifi, "Wi-Fi", "");
+      setAdd(om::ui::SetRowKind::Chevron, A_Bt, "Bluetooth", "");
+
+      setSection("SOUND");
+      setAdd(om::ui::SetRowKind::Chevron, A_Sound, "Sound", g_soundOn ? "on" : "off");
+
+      setSection("DISPLAY");
+      snprintf(v, sizeof(v), "%u", (unsigned)g_setBrightness);
+      setAdd(om::ui::SetRowKind::Stepper, A_Brightness, "Brightness", v);
+
+      setSection("TIME");
+      clockLine(v, sizeof(v));
+      setAdd(om::ui::SetRowKind::Chevron, A_Time, "Time", v);
+
+      setSection("GPS");
+      snprintf(v, sizeof(v), "%u used, %u heard", (unsigned)g_gps.sats,
+               (unsigned)g_gps.heardTotal);
+      setAdd(om::ui::SetRowKind::Value, A_None, "Satellites", v);
+      setAdd(om::ui::SetRowKind::Value, A_None, "Fix", g_gps.valid ? "3D" : "no fix");
+      if (g_gps.valid) snprintf(v, sizeof(v), "%.4f, %.4f", g_gps.lat, g_gps.lon);
+      else snprintf(v, sizeof(v), "--");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Position", v);
+      setAdd(om::ui::SetRowKind::Toggle, A_AdvertPos, "Share position", "ON",
+             om::meshAdvertPosPolicyGet());
+
+      setSection("ABOUT");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Firmware", __DATE__);
+      key[0] = 0;
+      om::meshPubKeyShort(key, sizeof(key));
+      setAdd(om::ui::SetRowKind::Value, A_None, "Node id", key);
+      if (g_battMv) snprintf(v, sizeof(v), "%.2f V", g_battMv / 1000.0f);
+      else snprintf(v, sizeof(v), "--");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Battery", v);
+      snprintf(v, sizeof(v), "%u B", (unsigned)ESP.getFreeHeap());
+      setAdd(om::ui::SetRowKind::Value, A_None, "Free heap", v);
+      setAdd(om::ui::SetRowKind::Value, A_None, "SD card", g_sdOk ? "mounted" : "absent");
+      break;
+    }
+
+    case SetPage::NodesRoot: {
+      char v[32];
+      setSection("NODE LIST");
+      snprintf(v, sizeof(v), "%d", g_nodeCount);
+      setAdd(om::ui::SetRowKind::Value, A_None, "Nodes heard", v);
+      setAdd(om::ui::SetRowKind::Note, A_None, "No node list settings yet.");
+      setAdd(om::ui::SetRowKind::Note, A_None,
+             "Sorting, a hearing filter and type filters are not built yet.");
+      break;
+    }
+
+    case SetPage::ChatRoot: {
+      refreshChats();
+      const int ch = openChatChannel();
+      if (ch >= 0) {
+        char head[48], v[40], k[40];
+        snprintf(head, sizeof(head), "THIS CHAT: %s", om::mcChannelName(ch));
+        setSection(head);
+        setAdd(om::ui::SetRowKind::Chevron, A_ChatOpen, "Open channel", om::mcChannelName(ch));
+        setAdd(om::ui::SetRowKind::Toggle, A_ChatEnabled, "Enabled", "ON", om::mcChannelEnabled(ch));
+        setAdd(om::ui::SetRowKind::Toggle, A_ChatSound, "Sound", "ON", !om::mcChannelMuted(ch));
+        setAdd(om::ui::SetRowKind::Chevron, A_ChatRename, "Rename", om::mcChannelName(ch));
+        om::mcChannelKeyB64(ch, k, sizeof(k));
+        setAdd(om::ui::SetRowKind::Value, A_None, "Key", k);
+        if (g_deleteArmed) setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Tap again to delete",
+                                  "", false, true);
+        else setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Delete channel", "", false, true);
+      } else if (g_chatCount > 0 && g_chats[g_chatSel].dm) {
+        setSection("THIS CHAT");
+        setAdd(om::ui::SetRowKind::Note, A_None, "Direct message settings are not built yet.");
+      } else {
+        setSection("THIS CHAT");
+        setAdd(om::ui::SetRowKind::Note, A_None, "No chat is open.");
+      }
+      setSection("CHAT");
+      setAdd(om::ui::SetRowKind::Chevron, A_ChatMsgSound, "Message sound",
+             patternName(g_sndMsg));
+      setAdd(om::ui::SetRowKind::Chevron, A_ChatDmSound, "Direct message sound",
+             patternName(g_sndDm));
+      setAdd(om::ui::SetRowKind::Chevron, A_ChatMenSound, "Mention sound", patternName(g_sndMen));
+      break;
+    }
+
+    case SetPage::MapRoot: {
+      setSection("MAP");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Tile source", g_sdOk ? "SD card" : "no card");
+      setAdd(om::ui::SetRowKind::Button, A_MapRecentre, "Recentre on Ljubljana");
+      setAdd(om::ui::SetRowKind::Button, A_MapClear, "Clear marker");
+      setAdd(om::ui::SetRowKind::Note, A_None,
+             "Follow my position and node names are not built yet.");
+      break;
+    }
+
+    case SetPage::RptrRoot: {
+      setSection("REPEATER");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Logged-in repeater",
+             g_rptrNode[0] ? g_rptrNode : "none");
+      setAdd(om::ui::SetRowKind::Note, A_None, "Repeater login is not built yet.");
+      setAdd(om::ui::SetRowKind::Note, A_None, "Auto-login is not built yet.");
+      if (g_rptrNode[0]) setAdd(om::ui::SetRowKind::Button, A_RptrForget, "Forget repeater");
+      break;
+    }
+
+    case SetPage::Preset: {
+      char v[40];
+      snprintf(g_setTitle, sizeof(g_setTitle), "Region / preset");
+      setSection("PRESETS");
+      const int cur = om::ui::radioPresetIndex(g_radio.prefs());
+      for (int i = 0; i < om::ui::kRadioPresetCount; ++i) {
+        presetDesc(i, v, sizeof(v));
+        setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PresetBase + i),
+               om::ui::radioPresetAt(i).name, v, cur == i);
+      }
+      setAdd(om::ui::SetRowKind::Chevron, A_CustomOpen, "Custom",
+             "enter frequency and modulation");
+      setAdd(om::ui::SetRowKind::Warn, A_None,
+             "A node with the wrong preset is deaf: it hears nothing and reports no error. "
+             "Presets are suggestions from the mesh config, not firmware defaults.");
+      break;
+    }
+
+    case SetPage::PresetCustom: {
+      char v[24], f[16], b[16];
+      snprintf(g_setTitle, sizeof(g_setTitle), "Custom preset");
+      om::ui::radioFreqText(g_custom, f, sizeof(f));
+      snprintf(v, sizeof(v), "%s MHz", f);
+      setAdd(om::ui::SetRowKind::Stepper, A_CustomFreq, "Frequency", v);
+      om::ui::radioBwText(g_custom, b, sizeof(b));
+      snprintf(v, sizeof(v), "%s kHz", b);
+      setAdd(om::ui::SetRowKind::Stepper, A_CustomBw, "Bandwidth", v);
+      snprintf(v, sizeof(v), "SF%u", (unsigned)g_custom.sf);
+      setAdd(om::ui::SetRowKind::Stepper, A_CustomSf, "Spreading", v);
+      snprintf(v, sizeof(v), "CR%u", (unsigned)g_custom.cr);
+      setAdd(om::ui::SetRowKind::Stepper, A_CustomCr, "Coding", v);
+      setAdd(om::ui::SetRowKind::Warn, A_None,
+             "A node with the wrong preset is deaf: it hears nothing and reports no error.");
+      setAdd(om::ui::SetRowKind::Button, A_CustomApply, "Apply");
+      break;
+    }
+
+    case SetPage::Hash: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Path hash");
+      setSection("PATH HASH");
+      const uint8_t cur = om::meshPathHashBytes();
+      setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_HashBase + 0), "1B", "256 ids, 64 hops",
+             cur == 1);
+      setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_HashBase + 1), "2B", "65,536 ids, 32 hops",
+             cur == 2);
+      setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_HashBase + 2), "3B", "16,777,216 ids, 21 hops",
+             cur == 3);
+      setAdd(om::ui::SetRowKind::Warn, A_None,
+             "SLO runs 2B and it is enforced. Keep 2B unless the mesh changes: 1B still works but "
+             "diverges from everyone else, and 3B cuts the max path to 21 hops.");
+      break;
+    }
+
+    case SetPage::Node: {
+      char key[16];
+      snprintf(g_setTitle, sizeof(g_setTitle), "Node");
+      setSection("IDENTITY");
+      setAdd(om::ui::SetRowKind::Chevron, A_Node, "Name", om::meshNodeName());
+      key[0] = 0;
+      om::meshPubKeyShort(key, sizeof(key));
+      setAdd(om::ui::SetRowKind::Value, A_None, "Public key", key);
+      setAdd(om::ui::SetRowKind::Toggle, A_AdvertPos, "Share position", "ON",
+             om::meshAdvertPosPolicyGet());
+      break;
+    }
+
+    case SetPage::NameEdit: {
+      snprintf(g_setTitle, sizeof(g_setTitle), s_setNameNode ? "Node name" : "Channel name");
+      g_setEditor = om::ui::SettingsEditor::Letters;
+      snprintf(g_setEditText, sizeof(g_setEditText), "%s", g_editBuf);
+      break;
+    }
+
+    case SetPage::Channels: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Channels");
+      setSection("CHANNELS");
+      for (int i = 0; i < om::mcChannelCount(); ++i) {
+        char v[32];
+        if (!om::mcChannelEnabled(i)) snprintf(v, sizeof(v), "OFF");
+        else if (om::mcChannelMuted(i)) snprintf(v, sizeof(v), "muted");
+        else snprintf(v, sizeof(v), "ON");
+        if (om::meshUnread(i) > 0) {
+          char u[16];
+          snprintf(u, sizeof(u), " +%d", om::meshUnread(i));
+          strncat(v, u, sizeof(v) - strlen(v) - 1);
+        }
+        setAdd(om::ui::SetRowKind::Chevron, (uint16_t)(A_ChanBase + i), om::mcChannelName(i), v);
+      }
+      if (om::mcChannelCount() < om::kMaxChannels) {
+        setAdd(om::ui::SetRowKind::Button, A_ChanAdd, "+ Add channel");
+      }
+      setAdd(om::ui::SetRowKind::Note, A_None, "Tap a channel to manage it.");
+      break;
+    }
+
+    case SetPage::Channel: {
+      if (g_chanPage < 0 || g_chanPage >= om::mcChannelCount()) {
+        g_setPage = SetPage::Channels;
+        buildSettingsRows();
+        return;
+      }
+      char title[48];
+      snprintf(title, sizeof(title), "Channel: %s", om::mcChannelName(g_chanPage));
+      snprintf(g_setTitle, sizeof(g_setTitle), "%s", title);
+      char key[40];
+      om::mcChannelKeyB64(g_chanPage, key, sizeof(key));
+      setSection("CHANNEL");
+      setAdd(om::ui::SetRowKind::Chevron, A_ChanRename, "Name", om::mcChannelName(g_chanPage));
+      setAdd(om::ui::SetRowKind::Toggle, A_ChanEnabled, "Enabled", "ON",
+             om::mcChannelEnabled(g_chanPage));
+      setAdd(om::ui::SetRowKind::Toggle, A_ChanSound, "Sound", "ON",
+             !om::mcChannelMuted(g_chanPage));
+      setAdd(om::ui::SetRowKind::Value, A_None, "Unread",
+             om::meshUnread(g_chanPage) ? "new, clear below" : "none");
+      setAdd(om::ui::SetRowKind::Button, A_ChanClear, "Clear unread");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Key", key);
+      if (g_deleteArmed) setAdd(om::ui::SetRowKind::Button, A_ChanDelete, "Tap again to delete",
+                                "", false, true);
+      else setAdd(om::ui::SetRowKind::Button, A_ChanDelete, "Delete channel", "", false, true);
+      break;
+    }
+
+    case SetPage::ChanAdd: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Add channel");
+      setSection("ADD CHANNEL");
+      setAdd(om::ui::SetRowKind::Button, A_AddCreate, "Create private");
+      setAdd(om::ui::SetRowKind::Button, A_AddPrivate, "Join private");
+      setAdd(om::ui::SetRowKind::Button, A_AddPublic, "Join Public");
+      setAdd(om::ui::SetRowKind::Button, A_AddHashtag, "Join #tag");
+      setAdd(om::ui::SetRowKind::Note, A_None, "A #tag or Public key is derived from the name.");
+      break;
+    }
+
+    case SetPage::ChanKey: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Channel key");
+      g_setEditor = om::ui::SettingsEditor::Base64;
+      g_setOkLabel = "Join";
+      snprintf(g_setEditText, sizeof(g_setEditText), "%s", g_keyText);
+      break;
+    }
+
+    case SetPage::Sound: {
+      char v[24];
+      snprintf(g_setTitle, sizeof(g_setTitle), "Sound");
+      setSection("SOUND");
+      setAdd(om::ui::SetRowKind::Toggle, A_SoundMaster, "Master sound", "ON", g_soundOn);
+      snprintf(v, sizeof(v), "%u%%", (unsigned)g_volume);
+      setAdd(om::ui::SetRowKind::Stepper, A_SoundVolume, "Volume", v);
+      setAdd(om::ui::SetRowKind::Chevron, A_SoundMsg, "Message", patternName(g_sndMsg));
+      setAdd(om::ui::SetRowKind::Chevron, A_SoundDm, "Direct message", patternName(g_sndDm));
+      setAdd(om::ui::SetRowKind::Chevron, A_SoundMen, "Mention", patternName(g_sndMen));
+      setAdd(om::ui::SetRowKind::Chevron, A_SoundNew, "New node", patternName(g_sndNew));
+      setAdd(om::ui::SetRowKind::Toggle, A_SoundTouch, "Touch clicks", "ON", g_touchSnd);
+      setAdd(om::ui::SetRowKind::Chevron, A_SoundClick, "Click tone",
+             kClicks[g_touchIdx % kClickCount].name);
+      setAdd(om::ui::SetRowKind::Toggle, A_SoundDnd, "Do not disturb", "ON", g_dnd);
+      setAdd(om::ui::SetRowKind::Toggle, A_SoundWelcome, "Welcome sound", "ON", g_welcome);
+      break;
+    }
+
+    case SetPage::SoundPicker: {
+      const bool click = g_setSoundEvent == 4;
+      const int count = click ? kClickCount : kChimeCount + 1;
+      const char* title = click ? "Click tone"
+                                : (g_setSoundEvent == 0 ? "Message sound"
+                                   : g_setSoundEvent == 1 ? "Direct message sound"
+                                   : g_setSoundEvent == 2 ? "Mention sound" : "New node sound");
+      snprintf(g_setTitle, sizeof(g_setTitle), "%s", title);
+      setSection("CHOOSE");
+      // Use sits above the list: the picker can be 18 rows long (17 chimes + Off), and a key at the
+      // very bottom would be a long scroll away after previewing the first sound.
+      setAdd(om::ui::SetRowKind::Button, A_SoundPickUse, "Use this sound");
+      for (int i = 0; i < count; ++i) {
+        const char* name = click ? kClicks[i % kClickCount].name
+                                 : (i >= kChimeCount ? "Off" : kChimes[i % kChimeCount].name);
+        setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PickBase + i), name, "",
+               i == g_setSoundPending);
+      }
+      setAdd(om::ui::SetRowKind::Note, A_None, "Tap a sound to hear it, then Use.");
+      break;
+    }
+
+    case SetPage::Wifi: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Wi-Fi");
+      setAdd(om::ui::SetRowKind::Note, A_None, "Not built yet.");
+      break;
+    }
+    case SetPage::Bt: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Bluetooth");
+      setAdd(om::ui::SetRowKind::Note, A_None, "Not built yet.");
+      break;
+    }
+
+    case SetPage::Time: {
+      char now[8], src[40];
+      snprintf(g_setTitle, sizeof(g_setTitle), "Time");
+      clockLine(now, sizeof(now));
+      timeSourceLine(src, sizeof(src));
+      setSection("CLOCK");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Now", now);
+      setAdd(om::ui::SetRowKind::Value, A_None, "Source", src);
+      setAdd(om::ui::SetRowKind::Chevron, A_TimeManual, "Set manually");
+      setAdd(om::ui::SetRowKind::Note, A_None, "GPS first, then Wi-Fi, phone, then by hand.");
+      break;
+    }
+
+    case SetPage::TimeEdit: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Set time");
+      setSection("DATE AND TIME");
+      for (int i = 0; i < (int)om::ui::TimeField::Count; ++i) {
+        const char* labels[5] = {"Year", "Month", "Day", "Hour", "Minute"};
+        char v[12];
+        timeFieldText((om::ui::TimeField)i, v, sizeof(v));
+        setAdd(om::ui::SetRowKind::Stepper, (uint16_t)(A_TimeFieldBase + i), labels[i], v);
+      }
+      setAdd(om::ui::SetRowKind::Button, A_TimeApply, "Set the clock");
+      setAdd(om::ui::SetRowKind::Note, A_None, "The next GPS fix takes over.");
+      break;
+    }
+
+    case SetPage::ConfirmPreset: {
+      char desc[40];
+      snprintf(g_setTitle, sizeof(g_setTitle), "Apply preset?");
+      presetDesc(g_setPresetPending, desc, sizeof(desc));
+      setAdd(om::ui::SetRowKind::Value, A_None, "Preset", desc);
+      setAdd(om::ui::SetRowKind::Warn, A_None,
+             "A node with the wrong preset is deaf: it hears nothing and reports no error.");
+      setAdd(om::ui::SetRowKind::Button, A_Apply, "Apply and save");
+      setAdd(om::ui::SetRowKind::Button, A_Cancel, "Cancel");
+      break;
+    }
+
+    case SetPage::ConfirmHash: {
+      char v[8];
+      snprintf(v, sizeof(v), "%uB", (unsigned)g_setHashPending);
+      snprintf(g_setTitle, sizeof(g_setTitle), "Change path hash?");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Path hash", v);
+      setAdd(om::ui::SetRowKind::Warn, A_None,
+             "SLO runs 2B. 1B still works but diverges from everyone else, and 3B cuts the max "
+             "path to 21 hops.");
+      setAdd(om::ui::SetRowKind::Button, A_Apply, "Apply and save");
+      setAdd(om::ui::SetRowKind::Button, A_Cancel, "Cancel");
+      break;
+    }
+  }
+}
+
+static om::ui::SettingsView settingsView() {
+  om::ui::SettingsView v;
+  buildStatus(v.status);
+  v.tab = g_setTab;
+  v.title = g_setTitle;
+  v.subPage = g_setSubPage;
+  v.rows = g_setRows;
+  v.rowCount = g_setRowCount;
+  v.scroll = g_setScroll;
+  v.editor = g_setEditor;
+  v.editText = g_setEditText;
+  v.okLabel = g_setOkLabel;
+  return v;
+}
+
+static void redrawMainTab() {
+  if (g_tab == 0) drawHome();
   else if (g_tab == 1) drawChat();
-  else if (g_tab == 3) drawRptrTab();
-  else drawHome();
-}
-
-static void drawRow(int y, const char* label, const char* value) {
-  auto* d = om::om_display();
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(TFT_WHITE, kBg);
-  d->drawString(label, 12, y);
-  d->setTextColor(kGold, kBg);
-  d->drawString(value, 170, y);
-}
-
-// EST-342: row 9 is "New node". Ten rows at a 19 px pitch all fit above the tab bar (the last one
-// ends at 233), so the page needs no scroll to reach it.
-static constexpr int kSetRowY[10] = {50, 69, 88, 107, 126, 145, 164, 183, 202, 221};
-
-static void setRow(int i, const char* label, const char* value) {
-  auto* d = om::om_display();
-  const int y = kSetRowY[i] + g_setScroll;
-  if (y < 44 || y > 236) return;
-  const bool sel = (g_selRow == i);
-  if (sel) d->fillRect(8, (int16_t)(y - 3), 304, 20, kGold);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(sel ? kBg : TFT_WHITE, sel ? kGold : kBg);
-  d->drawString(label, 12, y);
-  d->setTextColor(sel ? kBg : kGold, sel ? kGold : kBg);
-  d->drawString(value, 176, y);
+  else if (g_tab == 2) drawMapTab();
+  else drawRptrTab();
 }
 
 static void drawSettings() {
-  om::omFrameBegin();
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString("SOUND", 12, 38);
-
-  setRow(0, "Master sound", g_soundOn ? "ON" : "OFF");
-  const int yv = kSetRowY[1] + g_setScroll;
-  if (yv >= 44 && yv <= 236) {
-    if (g_selRow == 1) d->fillRect(8, (int16_t)(yv - 3), 304, 20, kGold);
-    d->setTextColor(g_selRow == 1 ? kBg : TFT_WHITE, g_selRow == 1 ? kGold : kBg);
-    d->drawString("Volume", 12, yv);
-    d->setTextColor(g_selRow == 1 ? kBg : kGold, g_selRow == 1 ? kGold : kBg);
-    d->drawString((String(g_volume) + " %").c_str(), 176, yv);
-    d->drawRect(232, (int16_t)(yv - 2), 22, 16, kGold);
-    d->drawRect(262, (int16_t)(yv - 2), 22, 16, kGold);
-    // Signs as rects, centred in their boxes (the font glyphs sit off-centre).
-    d->fillRect(238, (int16_t)(yv + 5), 10, 2, kGold);
-    d->fillRect(267, (int16_t)(yv + 5), 12, 2, kGold);
-    d->fillRect(272, (int16_t)(yv), 2, 12, kGold);
-  }
-  setRow(2, "Message  >", patternName(g_sndMsg));
-  setRow(3, "Direct  >", patternName(g_sndDm));
-  setRow(4, "Mention  >", patternName(g_sndMen));
-  setRow(5, "Touch clicks", g_touchSnd ? "ON" : "OFF");
-  setRow(6, "Click tone  >", kClicks[g_touchIdx % kClickCount].name);
-  setRow(7, "Do not disturb", g_dnd ? "ON" : "OFF");
-  setRow(8, "Welcome sound", g_welcome ? "ON" : "OFF");
-  setRow(9, "New node  >", patternName(g_sndNew));
-  om::omFrameEnd();
+  buildSettingsRows();
+  const om::ui::SettingsLayout L =
+      om::ui::settingsLayoutFor(om::ui::kScreenW, om::ui::kScreenH, g_setSubPage);
+  g_setMaxScroll = om::ui::settingsMaxScroll(L, g_setRows, g_setRowCount);
+  const om::ui::SettingsView v = settingsView();
+  om::ui::settingsScreenDraw(v);
 }
 
-// A scrolling list of the chimes. A tap previews (pending, gold); USE applies it. The row that is
-// currently in use carries a dot, so preview and applied are never confused.
-// A scrolling list. A tap previews (gold); USE applies it; the row in use carries a '*'.
-// g_pickerKind selects the notification palette or the shorter UI-click palette.
-static void drawPicker() {
-  om::omFrameBegin();
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("BACK");
-  // EST-342: the notification palette ends with an Off row, so a per-event sound can be turned off
-  // in the same place every other event's sound is chosen.
-  const int count = g_pickerKind ? kClickCount : kChimeCount + 1;
-  const int pending = g_pickerKind ? g_clickPending : g_pickerPending;
-  const int applied = g_pickerKind ? (int)g_touchIdx : (int)patternFor(g_pickerEvent);
-  const char* title = g_pickerKind
-      ? "CLICK TONE"
-      : (g_pickerEvent == 0 ? "MESSAGE SOUND"
-         : (g_pickerEvent == 1 ? "DIRECT SOUND"
-            : (g_pickerEvent == 2 ? "MENTION SOUND" : "NEW NODE SOUND")));
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString(title, 12, 40);
-
-  constexpr int kRows = 6;
-  for (int r = 0; r < kRows; ++r) {
-    const int idx = g_pickerScroll + r;
-    if (idx >= count) break;
-    const int y = 56 + r * 22;
-    const bool isPending = (g_pickerSel >= 0) ? (idx == g_pickerSel) : (idx == pending);
-    if (isPending) d->fillRect(8, (int16_t)(y - 2), 304, 18, kGold);
-    d->setTextColor(isPending ? kBg : TFT_WHITE, isPending ? kGold : kBg);
-    const char* name = g_pickerKind
-        ? kClicks[idx].name
-        : (idx >= kChimeCount ? "Off" : kChimes[idx].name);
-    d->drawString(name, 20, y);
-    if (idx == applied) d->drawString("*", 10, y);
-  }
-  d->setTextColor(kGold, kBg);
-  d->drawRect(12, 190, 296, 22, kGold);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->drawString("USE THIS SOUND", 160, 201);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  om::omFrameEnd();
+static void openSettings(int mainTab, om::ui::SettingsTab tab) {
+  g_settings = true;
+  g_setTab = tab;
+  g_setPage = setRootForTab(tab);
+  g_setScroll = 0;
+  g_setEditor = om::ui::SettingsEditor::None;
+  g_deleteArmed = false;
+  s_setFromChat = false;
+  if (tab == om::ui::SettingsTab::Chat) refreshChats();
+  buildSettingsRows();
+  drawSettings();
 }
 
-// ----------------------------------------------------------------------------- setup / loop
+static void settingsBack() {
+  switch (g_setPage) {
+    case SetPage::GeneralRoot:
+    case SetPage::NodesRoot:
+    case SetPage::ChatRoot:
+    case SetPage::MapRoot:
+    case SetPage::RptrRoot:
+      g_settings = false;
+      g_setEditor = om::ui::SettingsEditor::None;
+      g_deleteArmed = false;
+      redrawMainTab();
+      return;
+    case SetPage::Preset:        g_setPage = SetPage::GeneralRoot; break;
+    case SetPage::PresetCustom:  g_setPage = SetPage::Preset; break;
+    case SetPage::Hash:          g_setPage = SetPage::GeneralRoot; break;
+    case SetPage::Node:          g_setPage = SetPage::GeneralRoot; break;
+    case SetPage::NameEdit:
+      if (s_setNameNode) g_setPage = SetPage::Node;
+      else if (g_editNew) g_setPage = SetPage::ChanAdd;
+      else g_setPage = SetPage::Channel;
+      break;
+    case SetPage::Channels:      g_setPage = SetPage::GeneralRoot; break;
+    case SetPage::Channel:
+      g_setPage = s_setFromChat ? SetPage::ChatRoot : SetPage::Channels;
+      break;
+    case SetPage::ChanAdd:       g_setPage = SetPage::Channels; break;
+    case SetPage::ChanKey:       g_setPage = SetPage::NameEdit; break;
+    case SetPage::Sound:         g_setPage = SetPage::GeneralRoot; break;
+    case SetPage::SoundPicker:
+      g_setPage = s_pickerFromChat ? SetPage::ChatRoot : SetPage::Sound;
+      break;
+    case SetPage::Wifi:
+    case SetPage::Bt:            g_setPage = SetPage::GeneralRoot; break;
+    case SetPage::Time:          g_setPage = SetPage::GeneralRoot; break;
+    case SetPage::TimeEdit:      g_setPage = SetPage::Time; break;
+    case SetPage::ConfirmPreset: g_setPage = SetPage::Preset; break;
+    case SetPage::ConfirmHash:   g_setPage = SetPage::Hash; break;
+  }
+  g_setEditor = om::ui::SettingsEditor::None;
+  g_deleteArmed = false;
+  g_setScroll = 0;
+  drawSettings();
+}
+
+static void openChannelPage(int idx, bool fromChat) {
+  if (idx < 0 || idx >= om::mcChannelCount()) return;
+  g_chanPage = idx;
+  g_deleteArmed = false;
+  s_setFromChat = fromChat;
+  g_setPage = SetPage::Channel;
+  g_setScroll = 0;
+  drawSettings();
+}
+
+static void settingsEditorOk();
+
+static void openSoundPicker(int ev, bool fromChat) {
+  g_setSoundEvent = ev;
+  s_pickerFromChat = fromChat;
+  g_setSoundPending = ev == 4 ? (int)g_touchIdx : (int)patternFor((uint8_t)ev);
+  g_setPage = SetPage::SoundPicker;
+  g_setScroll = 0;
+  drawSettings();
+}
+
+// One row's action. The id is the only thing the shell needs to know about a row.
+static void handleSettingsRow(uint16_t id) {
+  if (g_setTab == om::ui::SettingsTab::Chat) refreshChats();
+  const int ch = openChatChannel();
+  switch (id) {
+    case A_Preset:   g_setPage = SetPage::Preset; g_setScroll = 0; break;
+    case A_Hash:     g_setPage = SetPage::Hash; g_setScroll = 0; break;
+    case A_Node:
+      snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::meshNodeName());
+      s_setNameNode = true;
+      g_editNew = false;
+      g_setPage = SetPage::NameEdit;
+      g_setScroll = 0;
+      break;
+    case A_Channels: g_setPage = SetPage::Channels; g_setScroll = 0; break;
+    case A_Wifi:     g_setPage = SetPage::Wifi; g_setScroll = 0; break;
+    case A_Bt:       g_setPage = SetPage::Bt; g_setScroll = 0; break;
+    case A_Sound:    g_setPage = SetPage::Sound; g_setScroll = 0; break;
+    case A_Time:     g_setPage = SetPage::Time; g_setScroll = 0; break;
+    case A_TimeManual:
+      timeInitFromClock();
+      g_setPage = SetPage::TimeEdit;
+      g_setScroll = 0;
+      break;
+    case A_AdvertPos: {
+      const bool on = !om::meshAdvertPosPolicyGet();
+      om::meshAdvertPosPolicySet(on);
+      showToast(on ? "Position shared in adverts" : "Position not shared");
+      break;
+    }
+
+    case A_MapRecentre:
+      om::mapSetView(46.0569, 14.5058, 13);
+      showToast("Map recentred");
+      break;
+    case A_MapClear:
+      om::mapClearMarker();
+      showToast("Marker cleared");
+      break;
+    case A_RptrForget:
+      g_rptrNode[0] = 0;
+      showToast("Repeater forgotten");
+      break;
+
+    // Chat tab: the same channel, reached from the open chat.
+    case A_ChatOpen:
+      if (ch >= 0) openChannelPage(ch, true);
+      return;
+    case A_ChatEnabled:
+      if (ch >= 0) {
+        om::mcChannelSetEnabled(ch, !om::mcChannelEnabled(ch));
+      }
+      break;
+    case A_ChatSound:
+      if (ch >= 0) {
+        om::mcChannelSetMuted(ch, !om::mcChannelMuted(ch));
+      }
+      break;
+    case A_ChatRename:
+      if (ch >= 0) {
+        s_setNameNode = false;
+        g_editNew = false;
+        g_editCh = ch;
+        snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::mcChannelName(ch));
+        g_setPage = SetPage::NameEdit;
+        g_setScroll = 0;
+      }
+      break;
+    case A_ChatDelete:
+      if (ch >= 0) {
+        if (!g_deleteArmed) {
+          g_deleteArmed = true;
+        } else {
+          g_deleteArmed = false;
+          om::mcChannelRemove(ch);
+          om::meshLinkReloadChannels();
+          refreshChats();
+          showToast("Channel removed");
+          g_setPage = SetPage::ChatRoot;
+          g_setScroll = 0;
+        }
+      }
+      break;
+    case A_ChatMsgSound: openSoundPicker(0, true); return;
+    case A_ChatDmSound:  openSoundPicker(1, true); return;
+    case A_ChatMenSound: openSoundPicker(2, true); return;
+
+    case A_SoundMaster:
+      g_soundOn = !g_soundOn;
+      savePrefs();
+      if (g_soundOn) playPattern(g_sndMsg);
+      break;
+    case A_SoundMsg:  openSoundPicker(0, false); return;
+    case A_SoundDm:   openSoundPicker(1, false); return;
+    case A_SoundMen:  openSoundPicker(2, false); return;
+    case A_SoundNew:  openSoundPicker(3, false); return;
+    case A_SoundClick: openSoundPicker(4, false); return;
+    case A_SoundTouch:
+      g_touchSnd = !g_touchSnd;
+      savePrefs();
+      break;
+    case A_SoundDnd:
+      g_dnd = !g_dnd;
+      savePrefs();
+      break;
+    case A_SoundWelcome:
+      g_welcome = !g_welcome;
+      savePrefs();
+      if (g_welcome) playWelcome();
+      break;
+
+    case A_SoundPickUse:
+      if (g_setSoundEvent == 4) {
+        g_touchIdx = (uint8_t)g_setSoundPending;
+      } else {
+        patternFor((uint8_t)g_setSoundEvent) = (uint8_t)g_setSoundPending;
+      }
+      savePrefs();
+      g_setPage = s_pickerFromChat ? SetPage::ChatRoot : SetPage::Sound;
+      g_setScroll = 0;
+      showToast("Sound saved");
+      break;
+
+    case A_ChanAdd:
+      g_setPage = SetPage::ChanAdd;
+      g_setScroll = 0;
+      break;
+    case A_AddCreate:
+    case A_AddPrivate:
+    case A_AddHashtag:
+      g_addKind = id == A_AddCreate ? 1 : (id == A_AddPrivate ? 2 : 3);
+      g_editNew = true;
+      s_setNameNode = false;
+      g_editBuf[0] = 0;
+      g_setPage = SetPage::NameEdit;
+      g_setScroll = 0;
+      break;
+    case A_AddPublic: {
+      const int slot = om::mcChannelAdd("Public", om::mcPublicPsk());
+      if (slot >= 0) {
+        om::meshLinkReloadChannels();
+        openChannelPage(slot, false);
+        return;
+      }
+      showToast("Channel table is full");
+      break;
+    }
+
+    case A_ChanRename:
+      s_setNameNode = false;
+      g_editNew = false;
+      g_editCh = g_chanPage;
+      snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::mcChannelName(g_chanPage));
+      g_setPage = SetPage::NameEdit;
+      g_setScroll = 0;
+      break;
+    case A_ChanEnabled:
+      om::mcChannelSetEnabled(g_chanPage, !om::mcChannelEnabled(g_chanPage));
+      break;
+    case A_ChanSound:
+      om::mcChannelSetMuted(g_chanPage, !om::mcChannelMuted(g_chanPage));
+      break;
+    case A_ChanClear:
+      om::meshClearUnread(g_chanPage);
+      break;
+    case A_ChanDelete:
+      if (!g_deleteArmed) {
+        g_deleteArmed = true;
+      } else {
+        g_deleteArmed = false;
+        om::mcChannelRemove(g_chanPage);
+        om::meshLinkReloadChannels();
+        refreshChats();
+        showToast("Channel removed");
+        g_setPage = s_setFromChat ? SetPage::ChatRoot : SetPage::Channels;
+        g_setScroll = 0;
+      }
+      break;
+
+    case A_CustomOpen:
+      g_custom = g_radio.prefs();   // the Custom page opens on the live values
+      g_setPage = SetPage::PresetCustom;
+      g_setScroll = 0;
+      break;
+    case A_CustomApply:
+      g_setPresetPending = om::ui::kRadioCustomPreset;
+      g_setPage = SetPage::ConfirmPreset;
+      g_setScroll = 0;
+      break;
+    case A_TimeApply: {
+      uint32_t epoch = 0;
+      const bool made = om::localEpochFromCivil(g_setTime.year, g_setTime.month, g_setTime.day,
+                                                g_setTime.hour, g_setTime.minute, 0, epoch);
+      if (made && om::saneEpoch(epoch) &&
+          om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
+        saveTimeFloor();
+        showToast("Time set");
+        g_setPage = SetPage::Time;
+      } else {
+        showToast("Time not set");
+      }
+      break;
+    }
+    case A_Apply:
+      if (g_setPage == SetPage::ConfirmHash) {
+        if (om::meshPathHashSet((uint8_t)g_setHashPending)) showToast("Path hash saved");
+        else showToast("Path hash refused");
+        g_setPage = SetPage::Hash;
+      } else if (g_setPresetPending >= 0 &&
+                 g_setPresetPending < om::ui::kRadioPresetCount) {
+        if (g_radio.setPreset(g_setPresetPending)) {
+          g_custom = g_radio.prefs();
+          showToast("Radio preset saved");
+        } else {
+          showToast("Preset refused");
+        }
+        g_setPage = SetPage::Preset;
+      } else {
+        if (g_radio.setRadio(g_custom.freqKhz, g_custom.bwHz, g_custom.sf, g_custom.cr)) {
+          g_custom = g_radio.prefs();
+          showToast("Radio preset saved");
+        } else {
+          showToast("Preset refused");
+        }
+        g_setPage = SetPage::Preset;
+      }
+      g_setScroll = 0;
+      break;
+    case A_Cancel:
+      g_setPage = g_setPage == SetPage::ConfirmHash ? SetPage::Hash : SetPage::Preset;
+      if (g_setPresetPending == om::ui::kRadioCustomPreset) g_custom = g_radio.prefs();
+      g_setScroll = 0;
+      break;
+
+    default:
+      if (id >= A_PresetBase && id < A_PresetBase + om::ui::kRadioPresetCount) {
+        g_setPresetPending = (int)(id - A_PresetBase);
+        g_setPage = SetPage::ConfirmPreset;
+        g_setScroll = 0;
+      } else if (id >= A_HashBase && id < A_HashBase + 3) {
+        g_setHashPending = (int)(id - A_HashBase) + 1;
+        g_setPage = SetPage::ConfirmHash;
+        g_setScroll = 0;
+      } else if (id >= A_PickBase && id < A_ChanBase) {
+        const bool click = g_setSoundEvent == 4;
+        const int count = click ? kClickCount : kChimeCount + 1;
+        const int idx = (int)(id - A_PickBase);
+        if (idx >= 0 && idx < count) {
+          g_setSoundPending = idx;
+          if (click) playClickIdx(idx);
+          else if (idx < kChimeCount) playPattern((uint8_t)idx);
+        }
+      } else if (id >= A_ChanBase && id < A_ChanBase + om::kMaxChannels) {
+        openChannelPage((int)(id - A_ChanBase), false);
+        return;
+      }
+      break;
+  }
+  drawSettings();
+}
+
+// The +/- keys of a stepper row.
+static void handleSettingsStep(uint16_t id, int dir) {
+  if (dir == 0) return;
+  switch (id) {
+    case A_TxPower: {
+      const int tx = (int)g_radio.prefs().tx + dir;
+      g_radio.setTx((int8_t)om::ui::clampTxPower(tx));
+      break;
+    }
+    case A_SoundVolume: {
+      int v = (int)g_volume + dir * 10;
+      if (v < 0) v = 0;
+      if (v > 100) v = 100;
+      g_volume = (uint8_t)v;
+      savePrefs();
+      om::audioVolume(g_volume);
+      break;
+    }
+    case A_Brightness: {
+      int b = (int)g_setBrightness + dir * 20;
+      if (b < 20) b = 20;
+      if (b > 255) b = 255;
+      g_setBrightness = (uint8_t)b;
+      om::boardSetBrightness(g_setBrightness);
+      g_prefs.putUChar("bright", g_setBrightness);
+      break;
+    }
+    case A_CustomFreq: {
+      int64_t f = (int64_t)g_custom.freqKhz + (int64_t)dir * 100;
+      if (f < (int64_t)om::ui::kRadioFreqMin) f = om::ui::kRadioFreqMin;
+      if (f > (int64_t)om::ui::kRadioFreqMax) f = om::ui::kRadioFreqMax;
+      g_custom.freqKhz = (uint32_t)f;
+      break;
+    }
+    case A_CustomBw: {
+      static const uint32_t kBandwidths[] = {7800,  10400, 15600, 20800, 31250,
+                                             41700, 62500, 125000, 250000, 500000};
+      int at = (int)(sizeof(kBandwidths) / sizeof(kBandwidths[0])) - 1;
+      for (int i = 0; i < (int)(sizeof(kBandwidths) / sizeof(kBandwidths[0])) - 1; ++i) {
+        if (g_custom.bwHz <= kBandwidths[i]) { at = i; break; }
+      }
+      at += dir;
+      if (at < 0) at = 0;
+      if (at > (int)(sizeof(kBandwidths) / sizeof(kBandwidths[0])) - 1) {
+        at = (int)(sizeof(kBandwidths) / sizeof(kBandwidths[0])) - 1;
+      }
+      g_custom.bwHz = kBandwidths[at];
+      break;
+    }
+    case A_CustomSf: {
+      int s = (int)g_custom.sf + dir;
+      if (s < (int)om::ui::kRadioSfMin) s = om::ui::kRadioSfMin;
+      if (s > (int)om::ui::kRadioSfMax) s = om::ui::kRadioSfMax;
+      g_custom.sf = (uint8_t)s;
+      break;
+    }
+    case A_CustomCr: {
+      int c = (int)g_custom.cr + dir;
+      if (c < (int)om::ui::kRadioCrMin) c = om::ui::kRadioCrMin;
+      if (c > (int)om::ui::kRadioCrMax) c = om::ui::kRadioCrMax;
+      g_custom.cr = (uint8_t)c;
+      break;
+    }
+    default:
+      if (id >= A_TimeFieldBase && id < A_TimeFieldBase + (uint16_t)om::ui::TimeField::Count) {
+        g_setTime = om::ui::stepCivilTime(g_setTime, (om::ui::TimeField)(id - A_TimeFieldBase), dir);
+      }
+      break;
+  }
+  drawSettings();
+}
+
+static void settingsEditorOk() {
+  if (g_setPage == SetPage::TimeEdit) {
+    uint32_t epoch = 0;
+    const bool made = om::localEpochFromCivil(g_setTime.year, g_setTime.month, g_setTime.day,
+                                              g_setTime.hour, g_setTime.minute, 0, epoch);
+    if (made && om::saneEpoch(epoch) &&
+        om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
+      saveTimeFloor();
+      showToast("Time set");
+      g_setPage = SetPage::Time;
+    } else {
+      showToast("Time not set");
+    }
+    g_setScroll = 0;
+    drawSettings();
+    return;
+  }
+
+  if (g_setPage == SetPage::NameEdit) {
+    if (s_setNameNode) {
+      om::meshNodeNameSet(g_editBuf);
+      showToast("Name saved");
+      g_setPage = SetPage::Node;
+    } else if (g_editNew) {
+      if (g_addKind == 2) {   // join private: ask for the key next
+        g_keyText[0] = 0;
+        g_setPage = SetPage::ChanKey;
+      } else {
+        const int slot = g_addKind == 1 ? om::mcChannelCreatePrivate(g_editBuf)
+                                        : om::mcChannelAddHashtag(g_editBuf);
+        if (slot >= 0) {
+          om::meshLinkReloadChannels();
+          refreshChats();
+          g_setPage = SetPage::Channel;
+          g_chanPage = slot;
+          s_setFromChat = false;
+          showToast("Channel added");
+        } else {
+          showToast("Channel not added");
+          g_setPage = SetPage::ChanAdd;
+        }
+      }
+    } else {
+      om::mcChannelSetName(g_editCh, g_editBuf);
+      g_chanPage = g_editCh;
+      g_setPage = SetPage::Channel;
+      showToast("Channel renamed");
+    }
+    g_setScroll = 0;
+    drawSettings();
+    return;
+  }
+
+  if (g_setPage == SetPage::ChanKey) {
+    const int slot = om::mcChannelAddFromB64(g_editBuf, g_keyText);
+    if (slot >= 0) {
+      om::meshLinkReloadChannels();
+      refreshChats();
+      g_chanPage = slot;
+      s_setFromChat = false;
+      g_setPage = SetPage::Channel;
+      showToast("Channel joined");
+    } else {
+      showToast("That key is not a 16-byte base64 key");
+    }
+    g_setScroll = 0;
+    drawSettings();
+    return;
+  }
+}
+
+// A tap on a settings page. All rectangles come from the view the drawing used.
+static void handleSettingsTap(int x, int y) {
+  buildSettingsRows();
+  const om::ui::SettingsView v = settingsView();
+
+  if (om::ui::settingsBackHit(v, x, y)) {
+    settingsBack();
+    return;
+  }
+
+  if (g_setEditor != om::ui::SettingsEditor::None) {
+    const int key = om::ui::settingsEditorKeyHit(v, x, y);
+    if (key >= 0) {
+      const char* chars = g_setEditor == om::ui::SettingsEditor::Base64
+                              ? om::ui::kSettingsBase64Chars
+                              : om::ui::kSettingsNameChars;
+      char* buf = g_setPage == SetPage::ChanKey ? g_keyText : g_editBuf;
+      const size_t cap = g_setPage == SetPage::ChanKey ? sizeof(g_keyText) : sizeof(g_editBuf);
+      const size_t len = strlen(buf);
+      if (key < (int)strlen(chars) && len + 1 < cap) {
+        buf[len] = chars[key];
+        buf[len + 1] = 0;
+      }
+      drawSettings();
+      return;
+    }
+    if (om::ui::settingsEditorDelHit(v, x, y)) {
+      char* buf = g_setPage == SetPage::ChanKey ? g_keyText : g_editBuf;
+      const size_t len = strlen(buf);
+      if (len > 0) buf[len - 1] = 0;
+      drawSettings();
+      return;
+    }
+    if (om::ui::settingsEditorOkHit(v, x, y)) {
+      settingsEditorOk();
+      return;
+    }
+    return;
+  }
+
+  const int tab = om::ui::settingsTabHit(v, x, y);
+  if (tab >= 0) {
+    g_setTab = (om::ui::SettingsTab)tab;
+    g_setPage = setRootForTab(g_setTab);
+    g_setScroll = 0;
+    g_deleteArmed = false;
+    drawSettings();
+    return;
+  }
+
+  const int row = om::ui::settingsRowHit(v, x, y);
+  if (row < 0) return;
+  const int part = om::ui::settingsStepperHit(v, x, y);
+  if (part != 0) {
+    handleSettingsStep(g_setRows[row].id, part);
+    return;
+  }
+  handleSettingsRow(g_setRows[row].id);
+}
+
+// The two MeshCore-backed callbacks the radio store calls. Nothing here is a second store: the read
+// comes from NodePrefs and the write is the same savePrefs + radio apply the phone commands use.
+static bool radioPrefsRead(void*, om::ui::RadioPrefs& out) {
+  om::MeshRadioPrefs p;
+  if (!om::meshRadioPrefsGet(&p)) return false;
+  out.freqKhz = p.freq_khz;
+  out.bwHz = p.bw_hz;
+  out.sf = p.sf;
+  out.cr = p.cr;
+  out.tx = p.tx;
+  return true;
+}
+
+static bool radioPrefsWrite(void*, const om::ui::RadioPrefs& p) {
+  om::MeshRadioPrefs m{p.freqKhz, p.bwHz, p.sf, p.cr, p.tx};
+  return om::meshRadioPrefsSet(m);
+}
+
+static void settingsBegin() {
+  g_radio.begin(radioPrefsRead, radioPrefsWrite, nullptr);
+  const bool seeded = g_radio.load();
+  g_custom = g_radio.prefs();
+  if (seeded) Serial.println("[set] radio prefs seeded from the build values");
+}
 
 void setup() {
   Serial.begin(115200);
@@ -1720,6 +2493,11 @@ void setup() {
   g_touchIdx = (uint8_t)(g_prefs.getUChar("tone", 0) % kClickCount);
   g_welcome = g_prefs.getBool("welc", true);
   loadEmojiRecent();
+  // EST-347: the one brightness setting, in NVS as "bright". The fade starts from it.
+  g_setBrightness = g_prefs.getUChar("bright", om::kScreenBrightness);
+  if (g_setBrightness < 20) g_setBrightness = 20;
+  om::boardSetBrightness(g_setBrightness);
+  g_fade.reset(g_setBrightness);
   Serial.printf("[prefs] sound=%d vol=%u msg=%u dm=%u men=%u new=%u dnd=%d tsnd=%d tone=%u emoji_rec=%u\n",
                 g_soundOn, g_volume, g_sndMsg, g_sndDm, g_sndMen, g_sndNew, g_dnd, g_touchSnd,
                 g_touchIdx, (unsigned)g_emojiRecent.count);
@@ -1748,6 +2526,9 @@ void setup() {
   if (!meshOk && om::radioFaultState().set(om::RadioFault::Mesh)) {
     Serial.printf("[radio] fault: %s\n", om::radioFaultToken(om::RadioFault::Mesh));
   }
+  // EST-347: Settings edits the radio through NodePrefs. The store is loaded (and seeded from the
+  // build values when /prefs.json has none) before the first page can be opened.
+  settingsBegin();
 #endif
 
   om::gpsBegin();
@@ -1958,13 +2739,8 @@ static void handleTap(int x, int y, bool longPress) {
       return;
     }
     if (L.gear().contains(x, y)) {
-      g_settings = true;
-      g_settingsScreen = 0;
-      g_setScroll = 0;
-      g_selRow = -1;
-      g_pickerSel = -1;
-      g_chanSel = -1;
-      drawSettings();
+      // EST-347: the gear opens Settings on the tab of THIS screen, and Back returns here.
+      openSettings(0, om::ui::SettingsTab::Nodes);
       return;
     }
     // The radio fault mark: a tap explains it, an empty slot does nothing.
@@ -1987,22 +2763,10 @@ static void handleTap(int x, int y, bool longPress) {
 
   if (!g_settings) {
     if (g_tab == 2 && y >= 8 && y <= 34 && x <= 60) {
-      g_settings = true;
-      g_settingsScreen = 4;
-      drawMapSettings();
+      openSettings(2, om::ui::SettingsTab::Map);
     } else if (topRight && g_tab != 2) {
-      g_settings = true;
-      g_setScroll = 0;
-      g_selRow = -1;
-      g_pickerSel = -1;
-      g_chanSel = -1;
-      if (g_tab == 3) {
-        g_settingsScreen = 5;
-        drawRptrSettings();
-      } else {
-        g_settingsScreen = 0;
-        drawSettings();
-      }
+      openSettings(g_tab == 3 ? 3 : 0,
+                   g_tab == 3 ? om::ui::SettingsTab::Rptr : om::ui::SettingsTab::General);
     } else if (g_tab == 2 && y >= 8 && y <= 40 && x >= 256) {
       om::mapZoomBy(x >= 292 ? 1 : -1);
       g_mapInfo = false;
@@ -2067,372 +2831,9 @@ static void handleTap(int x, int y, bool longPress) {
     return;
   }
 
-  if (g_settingsScreen == 4) {   // map options
-    if (topRight || y < 40) { drawPageForTab(); return; }
-    if (y >= 58 && y <= 80) {
-      om::mapSetView(46.0569, 14.5058, 13);
-      drawPageForTab();
-    } else if (y >= 82 && y <= 104) {
-      om::mapClearMarker();
-      drawPageForTab();
-    } else if (y >= 106 && y <= 128) {
-      g_settingsScreen = 0;
-      drawSettings();
-    }
-    return;
-  }
-
-  if (g_settingsScreen == 5) {   // repeater options
-    if (topRight || y < 40) { drawPageForTab(); return; }
-    if (y >= 92 && y <= 114) {
-      g_settingsScreen = 0;
-      drawSettings();
-    }
-    return;
-  }
-
-  if (g_settingsScreen == 2) {   // channel list
-    if (topRight || y < 40) {
-      drawPageForTab();
-      return;
-    }
-    if (y >= 56 && y < 56 + om::mcChannelCount() * 20) {
-      const int idx = (y - 56) / 20;         // the rows are drawn at 60 + i*20
-      if (idx >= 0 && idx < om::mcChannelCount()) {
-        // A tap opens that channel's own page; the hide-and-hold gestures this screen used to have
-        // (hold to rename, hold to toggle) were the reason the page felt like it only led to sound.
-        g_chanPage = idx;
-        g_chanSel = -1;
-        g_deleteArmed = false;      // a half-armed delete must never carry over to another channel
-        g_settingsScreen = 6;
-        drawChannelPage();
-      }
-      return;
-    }
-    if (y >= 206 && om::mcChannelCount() < om::kMaxChannels) {   // "+ Add channel"
-      g_settingsScreen = 7;
-      g_addSel = -1;
-      drawAddSheet();
-    }
-    return;
-  }
-
-  if (g_settingsScreen == 7) {   // add channel
-    if (topRight || y < 40) {
-      g_settingsScreen = 2;
-      drawChannelSettings();
-      return;
-    }
-    if (y >= 50 && y < 50 + 4 * 30) {
-      const int row = (y - 50) / 30;
-      g_addSel = row;
-      drawAddSheet();
-      g_addSel = -1;
-      if (row == 0 || row == 1 || row == 3) {      // all three start with a name
-        g_addKind = (row == 0) ? 1 : (row == 1 ? 2 : 3);
-        g_editNew = true;
-        g_editBuf[0] = 0;
-        g_settingsScreen = 3;
-        drawNameEditor();
-      } else {                                     // join Public: the key is well known
-        const int slot = om::mcChannelAdd("Public", om::mcPublicPsk());
-        if (slot >= 0) {
-          om::meshLinkReloadChannels();
-          g_chanPage = slot;
-          g_settingsScreen = 6;
-          drawChannelPage();
-        } else {
-          g_settingsScreen = 2;                    // table full
-          drawChannelSettings();
-        }
-      }
-      return;
-    }
-    return;
-  }
-
-  if (g_settingsScreen == 8) {   // base64 key entry
-    if (topRight || y < 40) {
-      g_settingsScreen = 7;
-      drawAddSheet();
-      return;
-    }
-    if (y >= 216) {
-      if (x < 110) {                               // DEL
-        const size_t n = strlen(g_keyText);
-        if (n > 0) g_keyText[n - 1] = 0;
-        drawKeyEntry();
-      } else if (x > 200) {                        // JOIN
-        const int slot = om::mcChannelAddFromB64(g_editBuf, g_keyText);
-        if (slot >= 0) {
-          om::meshLinkReloadChannels();
-          g_keyText[0] = 0;
-          g_chanPage = slot;
-          g_settingsScreen = 6;
-          drawChannelPage();
-        } else {
-          Serial.println("[mc] that key is not a 16-byte base64 channel key");
-          drawKeyEntry();
-        }
-      }
-      return;
-    }
-    if (y >= 72 && y < 72 + 5 * 28) {
-      const int r = (y - 72) / 28;
-      const int c = (x - 10) / 23;
-      const int idx = r * 13 + c;
-      const size_t len = strlen(g_keyText);
-      if (c >= 0 && c < 13 && idx < (int)strlen(kBase64Chars) && len + 1 < sizeof(g_keyText)) {
-        g_keyText[len] = kBase64Chars[idx];
-        g_keyText[len + 1] = 0;
-        drawKeyEntry();
-      }
-      return;
-    }
-    return;
-  }
-
-  if (g_settingsScreen == 6) {   // one channel
-    if (topRight || y < 40) {
-      g_deleteArmed = false;
-      g_settingsScreen = 2;
-      drawChannelSettings();
-      return;
-    }
-    if (y >= 50 && y < 50 + 7 * 24) {
-      const int row = (y - 50) / 24;
-      if (row >= 0 && row < 7) {
-        const int idx = g_chanPage;
-        switch (row) {
-          case 0:                     // rename
-            g_editCh = idx;
-            snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::mcChannelName(idx));
-            g_settingsScreen = 3;
-            drawNameEditor();
-            break;
-          case 1:
-            om::mcChannelSetEnabled(idx, !om::mcChannelEnabled(idx));
-            drawChannelPage();
-            break;
-          case 2:
-            om::mcChannelSetMuted(idx, !om::mcChannelMuted(idx));
-            Serial.printf("[mc] channel %d sound %s\n", idx, om::mcChannelMuted(idx) ? "muted" : "on");
-            drawChannelPage();
-            break;
-          case 3:
-            om::meshClearUnread(idx);
-            drawChannelPage();
-            break;
-          case 4:                     // the key is shown for sharing; nothing to change here
-            break;
-          case 5:                     // delete needs a second tap: a channel is not a hotel towel
-            if (!g_deleteArmed) {
-              g_deleteArmed = true;
-              drawChannelPage();
-            } else {
-              g_deleteArmed = false;
-              Serial.printf("[mc] channel %d removed\n", idx);
-              om::mcChannelRemove(idx);
-              om::meshLinkReloadChannels();
-              g_settingsScreen = 2;
-              drawChannelSettings();
-            }
-            break;
-          case 6:
-            g_settingsScreen = 0;
-            drawSettings();
-            break;
-          default:
-            break;
-        }
-      }
-      return;
-    }
-    return;
-  }
-
-  if (g_settingsScreen == 3) {   // name editor
-    if (topRight || y < 40) {
-      if (g_editNew) {
-        g_editNew = false;
-        g_settingsScreen = 7;
-        drawAddSheet();
-      } else {
-        g_chanPage = g_editCh;              // a rename starts on the channel page, so BACK returns there
-        g_settingsScreen = 6;
-        drawChannelPage();
-      }
-      return;
-    }
-    if (y >= 186) {
-      if (x < 110) {
-        const size_t n = strlen(g_editBuf);
-        if (n > 0) g_editBuf[n - 1] = 0;
-        drawNameEditor();
-      } else if (x > 210) {
-        if (g_editNew) {
-          // A new channel's name decides what happens next: create needs a random key, join needs
-          // one typed in, and a #tag derives its key from the name itself.
-          g_editNew = false;
-          int slot = -1;
-          if (g_addKind == 1) slot = om::mcChannelCreatePrivate(g_editBuf);
-          else if (g_addKind == 3) slot = om::mcChannelAddHashtag(g_editBuf);
-          if (g_addKind == 2) {               // join private: ask for the key next
-            g_keyText[0] = 0;
-            g_settingsScreen = 8;
-            drawKeyEntry();
-            return;
-          }
-          if (slot >= 0) {
-            om::meshLinkReloadChannels();
-            g_chanPage = slot;
-            g_settingsScreen = 6;
-            drawChannelPage();
-          } else {
-            g_settingsScreen = 7;
-            drawAddSheet();
-          }
-        } else {
-          om::mcChannelSetName(g_editCh, g_editBuf);
-          g_chanPage = g_editCh;              // renaming comes from the channel page, so go back there
-          g_settingsScreen = 6;
-          drawChannelPage();
-        }
-      }
-      return;
-    }
-    if (y >= 70 && y < 70 + 4 * 28) {
-      const int r = (y - 70) / 28;
-      const int c = (x - 8) / 31;
-      if (c >= 0 && c < 10) {
-        const int idx = r * 10 + c;
-        const size_t len = strlen(g_editBuf);
-        if (idx < (int)strlen(kKeyChars) && len + 1 < sizeof(g_editBuf)) {
-          g_editBuf[len] = kKeyChars[idx];
-          g_editBuf[len + 1] = 0;
-          drawNameEditor();
-        }
-      }
-      return;
-    }
-    return;
-  }
-
-  if (g_settingsScreen == 1) {   // the picker
-    if (topRight) {
-      g_settingsScreen = 0;
-      drawSettings();
-      return;
-    }
-    if (y >= 186) {   // USE THIS SOUND
-      if (g_pickerKind) {
-        g_touchIdx = (uint8_t)g_clickPending;
-      } else {
-        patternFor(g_pickerEvent) = (uint8_t)g_pickerPending;
-      }
-      savePrefs();
-      g_settingsScreen = 0;
-      drawSettings();
-      return;
-    }
-    const int count = g_pickerKind ? kClickCount : kChimeCount + 1;   // EST-342: Off is a row
-    if (y >= 56 && y < 56 + 6 * 22) {
-      const int idx = g_pickerScroll + (y - 56) / 22;
-      if (idx >= 0 && idx < count) {
-        if (!longPress || g_pickerSel != idx) {
-          g_pickerSel = idx;                  // highlight + preview
-          if (g_pickerKind) playClickIdx(idx);
-          else if (idx < kChimeCount) playPattern((uint8_t)idx);   // Off previews as silence
-          drawPicker();
-          return;
-        }
-        if (g_pickerKind) {
-          g_touchIdx = (uint8_t)idx;
-        } else {
-          patternFor(g_pickerEvent) = (uint8_t)idx;
-        }
-        savePrefs();
-        g_settingsScreen = 0;
-        drawSettings();
-      }
-    }
-    return;
-  }
-
-  if (topRight) {
-    drawPageForTab();
-    return;
-  }
-
-  // Settings: a tap selects the row (gold), a hold on the selected row acts. The volume -/+ pair
-  // is the exception and reacts to a single tap.
-  const int cy = y - g_setScroll;
-  int row = -1;
-  for (int i = 0; i < 10; ++i) {
-    if (cy >= kSetRowY[i] - 4 && cy <= kSetRowY[i] + 14) { row = i; break; }
-  }
-  if (row < 0) return;
-
-  if (row == 1 && x >= 228 && x <= 292) {
-    if (x <= 258 && g_volume > 0) g_volume = (uint8_t)(g_volume - 10);
-    else if (x > 258 && g_volume < 100) g_volume = (uint8_t)(g_volume + 10);
-    savePrefs();
-    om::audioVolume(g_volume);
-    drawSettings();
-    return;
-  }
-
-  if (!longPress || g_selRow != row) {
-    g_selRow = row;
-    drawSettings();
-    return;
-  }
-
-  switch (row) {
-    case 0:
-      g_soundOn = !g_soundOn;
-      savePrefs();
-      if (g_soundOn) playPattern(g_sndMsg);
-      drawSettings();
-      break;
-    case 2: case 3: case 4:
-    case 9: {   // EST-342: the new-node sound, same picker
-      g_pickerKind = 0;
-      g_pickerEvent = (uint8_t)(row == 9 ? 3 : row - 2);
-      g_pickerPending = (int)patternFor(g_pickerEvent);
-      g_pickerSel = -1;
-      g_pickerScroll = 0;
-      g_settingsScreen = 1;
-      drawPicker();
-      break;
-    }
-    case 5:
-      g_touchSnd = !g_touchSnd;
-      savePrefs();
-      drawSettings();
-      break;
-    case 6:
-      g_pickerKind = 1;
-      g_clickPending = (int)g_touchIdx;
-      g_pickerSel = -1;
-      g_pickerScroll = 0;
-      g_settingsScreen = 1;
-      drawPicker();
-      break;
-    case 7:
-      g_dnd = !g_dnd;
-      savePrefs();
-      drawSettings();
-      break;
-    case 8:
-      g_welcome = !g_welcome;
-      savePrefs();
-      if (g_welcome) playWelcome();
-      drawSettings();
-      break;
-    default:
-      break;
-  }
+  // Every settings page: tabs, back, rows, steppers and the two text editors, from the view the
+  // drawing used. No coordinate appears here.
+  handleSettingsTap(x, y);
 }
 
 // Draw whatever the user is looking at, right now. The wake path needs it: the panel comes back
@@ -2442,17 +2843,7 @@ static void handleTap(int x, int y, bool longPress) {
 // sheet and the chat selector all survive a wake with their own content.
 static void redrawCurrentScreen() {
   if (g_settings) {
-    switch (g_settingsScreen) {
-      case 1: drawPicker(); break;
-      case 2: drawChannelSettings(); break;
-      case 3: drawNameEditor(); break;
-      case 4: drawMapSettings(); break;
-      case 5: drawRptrSettings(); break;
-      case 6: drawChannelPage(); break;
-      case 7: drawAddSheet(); break;
-      case 8: drawKeyEntry(); break;
-      default: drawSettings(); break;
-    }
+    drawSettings();
     return;
   }
   if (g_tab == 0) drawHome();
@@ -2886,6 +3277,14 @@ void loop() {
           g_nodeScroll = clamped;
           if (g_drag || changed) drawHome();
         }
+        // The settings list's give is snapped back the same way; the last 60 ms of a fast drag may
+        // not have been drawn, so the final position is always drawn here.
+        if (g_settings) {
+          const int clamped = om::ui::settingsSnapScroll(g_setScroll, g_setMaxScroll);
+          const bool changed = clamped != g_setScroll;
+          g_setScroll = clamped;
+          if (g_drag || changed) drawSettings();
+        }
       }
     }
   } else if (!g_down) {
@@ -2893,7 +3292,6 @@ void loop() {
     g_downMs = millis();
     g_sx = x;
     g_sy = y;
-    g_scroll0 = g_pickerScroll;
     g_chatScroll0 = g_chatScroll;
     g_selScroll0 = g_selScroll;
     g_emojiScroll0 = g_emojiScroll;
@@ -3032,20 +3430,17 @@ void loop() {
       handleTap(x, y, true);
     }
     if (g_drag && !g_spent) {
-      if (g_settingsScreen == 1) {
-        const int count = g_pickerKind ? kClickCount : kChimeCount + 1;
-        int next = g_scroll0 + dy / 22;
-        if (next < 0) next = 0;
-        if (next > count - 6) next = count - 6;
-        if (next < 0) next = 0;
-        if (next != g_pickerScroll) { g_pickerScroll = next; drawPicker(); }
-      } else if (g_settings && g_settingsScreen == 0) {
-        // Only the Sound page scrolls. This branch used to fire for ANY settings screen, so a drag
-        // inside the channel list drew the Sound page - a scroll that "launched" you into settings.
-        int next = g_setScroll0 - dy;
-        if (next < 0) next = 0;
-        if (next > 0) next = 0;   // EST-342: all ten rows are on screen; the page does not scroll
-        if (next != g_setScroll) { g_setScroll = next; drawSettings(); }
+      if (g_settings) {
+        // Every settings page scrolls with the finger, through the one shared drag rule
+        // (settings_layout.h: the chat list's sign and give), and snaps back on release.
+        const int next = om::ui::settingsDragScroll(g_setScroll0, dy, g_setMaxScroll);
+        if (next != g_setScroll) {
+          g_setScroll = next;
+          if (millis() - g_lastRender > 60) {
+            g_lastRender = millis();
+            drawSettings();
+          }
+        }
       } else if (g_tab == 1 && g_kb.open && g_kb.emoji()) {
         // The emoji grid follows the fingertip, with the same sign and give as the selector list.
         const int next = om::ui::selDragScroll(g_emojiScroll0, dy, g_emojiMaxScroll);

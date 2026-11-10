@@ -58,12 +58,14 @@ def test_face(path, name):
     records_end = 24 + 28 * count
     check(records_end <= len(blob), "%s: glyph count runs past the blob" % path)
     codes = []
+    advances = {}
     bitmaps = 0
     named_bitmap = {}
     for i in range(count):
         off = 24 + 28 * i
         code, h, w, adv, dy, dx, pad = struct.unpack(">IIIIiiI", blob[off:off + 28])
         codes.append(code)
+        advances[code] = adv
         check(pad == 0, "%s: U+%04X has nonzero padding" % (path, code))
         check(w <= 255 and h <= 255, "%s: U+%04X does not fit the byte fields" % (path, code))
         check(adv >= 1, "%s: U+%04X has a zero advance" % (path, code))
@@ -72,6 +74,16 @@ def test_face(path, name):
         bitmaps += w * h
     check(codes == sorted(codes), "%s: glyph records are not sorted by code point" % path)
     check(len(set(codes)) == len(codes), "%s: duplicate code points" % path)
+    if path.endswith("font_mono10.cpp"):
+        # EST-347: the settings tab labels are mono, so their width comes from this advance.
+        # The firmware's kSetMonoAdvance is 6; every ASCII glyph must agree and the five labels
+        # (Longest: General) must fit one of the five 64 px tabs with their 5 px padding.
+        ascii_adv = sorted(set(advances[c] for c in range(FIRST, LAST + 1)))
+        check(ascii_adv == [6], "%s: mono ASCII advance is %s, expected [6]" % (path, ascii_adv))
+        for label in ("General", "Nodes", "Chat", "Map", "RPTR"):
+            w = sum(advances[ord(ch)] for ch in label)
+            check(w + 2 * 5 <= 320 // 5,
+                  "%s: settings tab label %r is %d px, does not fit 64 px" % (path, label, w))
     expect = list(range(FIRST, LAST + 1)) + list(range(LATIN_FIRST, LATIN_LAST + 1))
     check(codes == expect, "%s: glyph set is not ASCII 0x20-0x7E + U+00A0..U+017F "
                            "(missing %s, extra %s)" %

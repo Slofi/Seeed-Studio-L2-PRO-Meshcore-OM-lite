@@ -1456,3 +1456,155 @@ Built on `69c6881`. Nothing in `lib/` touched, `.git` untouched, nothing committ
 ## 2026-11-10 13:40 (Claude): EST-346 on the device
 - Font preview checked first (`docs/shots/2026-11-10-1340-fonts-latin1-1x.png`): č š ž ć đ Č Š Ž ä ö ü ß and "SI-Ivančna Gorica" in all four faces. Built in the sandbox (exit 0, RAM 151,528 B, flash 1,660,249 B), tests exit 0, reviewed binary flashed (1,660,608 B).
 - By USB: keyboard opened, 123, closed, reopened: letters page. Long press on s, c, z then a short tap on s: the draft reads "ščžs" (`docs/shots/2026-11-10-1339-szc-keyboard.png`); the test text was deleted again. Toast 5 s + touch dismiss: Filip to see with the next real toast.
+
+## 2026-11-10 14:05 (DeepSeek): EST-347 Settings rebuilt with tabs in the mock's style
+
+Built on `69c6881`. Nothing in `lib/` was touched, `.git` untouched, nothing committed. Read
+REBUILD.md, the end of this log, the mock's `renderSettings()` and its `.setwrap/.sect/.setrow/.lbl/.val/.chev/.check/.warn` CSS first.
+
+**The old settings screens 0..8, and where each one went** (the first question in the ticket):
+
+- **0 the sound list** -> Settings > General > SOUND > Sound. Same master / volume / per-event chimes /
+  touch clicks / click tone / DND / welcome rows, same NVS keys.
+- **1 the chime and click picker** -> Sound > Message / Direct message / Mention / New node / Click tone.
+  Tap previews (the row gets the filled dot), **Use this sound** applies and saves. Use is now ABOVE
+  the list: 18 rows would otherwise put it a long scroll away.
+- **2 the channel list** -> Settings > General > Channels, and the Chat tab's "This chat" section.
+  `Manage channels` in the chat selector opens the same page.
+- **3 the name editor** -> Settings > Node > Name, and Channels > a channel > Name. The same 10x4
+  letter grid and the same 19-character buffer, restyled as key boxes in the frame.
+- **4 map options** -> Settings > Map tab. Recentre and Clear marker kept; the tile source is shown
+  read-only (SD card / no card). "Follow my position" and "show node names" are not built, so they
+  are not shown (a note says so).
+- **5 repeater options** -> Settings > RPTR tab. Shows the remembered repeater and a Forget row; the
+  login exchange and auto-login are still not built and the page says exactly that.
+- **6 one channel's page** -> Settings > Channels > <channel>, with Name / Enabled / Sound / Unread /
+  Clear / Key / Delete. Delete still needs the second tap. The Chat tab shows the same rows for the
+  open channel.
+- **7 the add-channel sheet** -> Settings > Channels > + Add channel: Create private, Join private,
+  Join Public, Join #tag (same model calls as before).
+- **8 the base64 key entry** -> Channels > Add > Join private > Channel key. Same 13x5 base64 grid,
+  same `mcChannelAddFromB64` check.
+
+**What is new**
+
+- **Tabs, per the final shape.** General | Nodes | Chat | Map | RPTR, five equal 64 px taps under the
+  26 px status bar, mono labels, the selected tab's 2 px gold underline and `kSelBg`. The gear opens
+  Settings on the tab of the screen it was pressed on (`settingsTabForMainTab`: Nodes -> Nodes, Chat ->
+  Chat, Map -> Map, RPTR -> RPTR); General is one tap away. Back at a root returns to that same screen.
+  On the Tanmatsu the same five entries become the sidebar: `settingsLayoutFor(w, h, subPage)` takes
+  the size as a parameter and the tab row is just the L2 arrangement.
+- **One page = one flat list of `SettingRow`.** Section, Value, Chevron, Check, Toggle, Stepper,
+  Button, Warn and Note rows at the mock's 30 px minimum (Section 20, Warn 44, Note 22). The row
+  rectangle draws the row AND answers the tap; the stepper's +/- keys are rectangles inside that same
+  row. Everything draws into `omFrameBegin/omFrameEnd`; the shared `settingsDragScroll` gives the
+  constant 10 px of give and the release snaps back, exactly the chat list's rule.
+- **Radio & mesh through NodePrefs, not a second store.** `meshRadioPrefsGet/Set`, `meshTxPowerSet`,
+  `meshNodeNameSet`, `meshAdvertPosPolicyGet/Set` and `meshPubKeyShort` in `mesh_link.h/.cpp` write
+  the same NodePrefs fields, call `MyMesh::savePrefs()` and then `radio_driver.setParams/setTxPower`,
+  which is what the phone's CMD_SET_RADIO_PARAMS / _TX_POWER / _ADVERT_NAME / _OTHER_PARAMS handlers
+  do. `ui/settings_prefs.h` is only the pure arithmetic (presets, ranges, a store with an injected
+  backend); the firmware's backend is those calls. `/prefs.json` remains the only store. A missing or
+  invalid radio record is seeded at boot from `LORA_FREQ/BW/SF/CR/TX` (the values the radio already
+  runs), so nothing changes on the air; the boot log says `radio prefs seeded from build` only then.
+  A preset never resets TX power, which has its own stepper.
+- **Confirmations.** A preset (including Custom) and a path hash open a confirm page with the mock's
+  warning ("A node with the wrong preset is deaf..."), Apply and Cancel. TX power is a +/- stepper and
+  applies live without a confirm; it cannot make the node deaf. Say if you want a confirm there too.
+- **General tab** holds Radio & mesh (preset, TX power, path hash, Node, Channels), Connections
+  (Wi-Fi, Bluetooth -> pages that say "Not built yet", never a fake switch), Sound, Display
+  (brightness, saved as NVS `bright`; there is no screen-timeout setting today, so no row), Time
+  (now, "GPS, 2 min ago" or "not set", Set manually with +/- steppers that call
+  `setFromSource(..., Manual)`), GPS (satellites, fix, position; there is no GPS on/off setting, so no
+  row; Share position is `advert_loc_policy` through NodePrefs) and About (firmware date, node id,
+  battery, free heap, SD card).
+- **Tabs with nothing behind them say so:** Nodes ("No node list settings yet", plus the real node
+  count). Chat shows "This chat: <name>" with Enabled / Sound / Rename / Key / Delete for a channel,
+  then the three sound rows; for a DM it says DM settings are not built yet. Map and RPTR as above.
+  The "show ages" and "text size" Chat rows were left out: neither exists in the app.
+- **Old code deleted.** `main.cpp`: **905 lines removed** (the old drawing for screens 0..8, the old
+  picker, the old tap branches and their state). The new row builders and action dispatch add 1,300
+  lines, so the file is 3,435 -> 3,830 (+395); no coordinate is left in it. All geometry and pixels
+  are in `ui/settings_layout.h` and `ui/screen_settings.cpp`.
+- **New files:** `src/ui/settings_layout.h` (pure: tabs, layout, rows, scroll, steppers, civil time),
+  `src/ui/settings_prefs.h` (pure: presets, ranges, store), `src/ui/screen_settings.h/.cpp` (the
+  frame drawing and the hit tests), `test/host/test_settings.cpp`.
+
+**Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS. RAM **157,464 B** of
+327,680 (48.1 %, previous 151,528, **+5,936 B**), flash **1,676,981 B** of 6,553,600 (25.6 %, previous
+1,660,249, **+16,732 B**), `firmware.bin` **1,677,344 B** (previous 1,660,608, **+16,736 B**). No
+warnings except the two pre-existing RadioLib ones. The RAM is almost all the 28 `SettingRow`s
+(160-byte labels so the mock's warning texts are not cut); the flash is the new drawing, the row
+actions and the MeshCore pref calls.
+
+**Tests**: `test/host/run.sh` exit 0 (18 C++ binaries + 5 Python checks). New `test_settings.cpp`:
+the five tabs (labels and 6 px mono advance, every label + padding inside 64 px at 320 and 160 px at
+800, five taps that tile exactly, tab row under the status bar, no tab row on a sub-page, the
+gear-to-tab mapping for all four screens); a 6-row page (content height, contiguous row rectangles,
+the hit test at both edges, a row scrolled above the body not tappable, maxScroll, the 10 px give and
+the snap); the stepper keys (inside the row, not overlapping, in minus/value/plus order, each hit);
+the manual-time stepper (31/30/28/29 days, 2000 and 2024 leap, 2100 not, every minute/hour/day/month/
+year wrap, 31 Jan + 1 month = 28/29 Feb, 29 Feb + 1 year = 28 Feb and + 4 years = 29 Feb); the radio
+prefs (the seed IS the first SLO preset and the build plan, every range boundary accepted/refused,
+frequency and bandwidth text, the store seeding once from the Build values, a refused edit changing
+nothing, a preset keeping TX power, a corrupt record reseeded, a failed save reported but not losing
+the RAM value, a persistence round trip through the fake backend). `test_fonts.py` now also proves the
+mono face's ASCII advance is 6 and that the five tab labels fit 64 px, so the constant is checked
+against the real blob, not assumed.
+
+**Could not check** (no device and no radio in the sandbox): the glass. Claude/Filip need to see the
+five tabs at 320 px, the mono labels and gold underline, the settings pages at the mock's spacing, a
+3-line warning box, the letter and base64 grids, the stepper keys under a real finger, scrolling with
+one finger and the snap, the back key returning to the right screen, a preset change actually moving
+the SX1262 (and the phone still agreeing through `/prefs.json`), the boot seed line absent on a normal
+boot, and the brightness change. The host tests prove the arithmetic and the drawing never sees a
+second set of coordinates, not the panel.
+
+**Exact USB checks for Claude** (`tools/cmd.py`, then `tools/shot.py docs/shots/<name>.png`; x = tab
+centres are 32/96/160/224/288 at y 38; root back is 30,64, a sub-page back 30,39; every drag starts
+inside the body):
+1. **Open and the tab it came from:** on Nodes `tap 307 12` (the status gear) -> shot
+   `2026-11-10-settings-nodes-tab`. `tap 30 64` -> back on Nodes. `tap 120 227` (Chat tab), `tap 307 12`
+   -> shot `...-settings-chat-tab`, `tap 30 64` -> back on Chat. On Map: `tap 224 38` after the gear ->
+   shot `...-settings-map-tab`; RPTR likewise with `tap 288 38`.
+2. **General, radio:** from the gear `tap 32 38` -> shot `...-settings-general`. `tap 120 112`
+   (Region / preset) -> shot `...-settings-presets`; `tap 120 87` (EU 868 (SLO)) -> confirm shot
+   `...-settings-preset-confirm`; `tap 120 171` (Cancel), `tap 30 39` (back). `tap 120 172` (Path hash)
+   -> shot `...-settings-hash`; `tap 120 117` (2B) -> confirm; Cancel; back. `tap 120 202` (Node) ->
+   shot `...-settings-node`; `tap 120 87` (Name) -> name editor shot; back twice.
+3. **Channels:** from General `tap 120 232` (Channels, partly visible at scroll 0) -> shot
+   `...-settings-channels`; `tap 120 87` (first channel) -> shot `...-settings-channel`; back twice.
+4. **Connections:** `drag 160 200 160 10 700` (190 px) then `tap 120 92` (Wi-Fi) -> shot
+   `...-settings-wifi` (must read "Not built yet."); back; `tap 120 122` (Bluetooth) -> shot
+   `...-settings-bt`; back.
+5. **Sound:** reopen General to reset the scroll (`tap 30 64`, `tap 307 12`, `tap 32 38`), then
+   `drag 160 200 160 80 700` twice (240 px), `tap 120 122` (Sound) -> shot `...-settings-sound`;
+   `tap 120 147` (Message) -> shot `...-settings-sound-picker`; `tap 120 117` (first chime, previews),
+   `tap 120 87` (Use this sound) -> back on Sound; shot `...-settings-sound-saved`; back.
+6. **Display, Time, GPS, About:** reopen General, `drag 160 200 160 100 700` three times (300 px),
+   `tap 303 112` (brightness +) -> shot `...-settings-brightness`. Reopen General, drags to 350 px
+   (100 x3 then `drag 160 200 160 150 700`), `tap 120 112` (Time) -> shot `...-settings-time`;
+   `tap 120 147` (Set manually) -> shot `...-settings-time-edit`; `drag 160 200 160 180 700` (20 px),
+   `tap 120 217` (Set the clock) -> shot `...-settings-time-set`. Reopen General, drags to 400 px,
+   `tap 120 202` (Share position) -> shot `...-settings-gps`; reopen and drag to 560 px -> shot
+   `...-settings-about`.
+7. **Chat tab rows:** Chat screen, gear, Chat tab: `tap 120 102` (Open channel) -> the same channel
+   page; back. The sound rows are at `tap 120 252` (Message sound) after a small scroll
+   (`drag 160 200 160 160 700`, 40 px) because five "This chat" rows come first.
+Coords come from `settingsLayoutFor` and the row heights; a tap one row off is a test-script
+coordinate, not a missing rectangle.
+
+**Known limits, said plainly:** the Nodes list sort/hide filters, the Chat show-ages and text-size
+rows, map follow-me and node names, RPTR login/auto-login, Wi-Fi/Bluetooth and the BLE PIN are not
+implemented, so those rows are absent (or the page says "Not built yet"); there is no GPS on/off and
+no screen-timeout setting today; the name editor keeps its old 19-character limit; TX power steps
+write `/prefs.json` on each tap (one NVS write per tap, not per finger sample).
+
+**Next step**: Claude flashes this image and runs the script above, then decides whether the empty
+Nodes/Map/RPTR tabs are the right shape until their features arrive (the "rows with nothing behind
+them" rule), and moves on to the remaining MeshCore features and the sounds from REBUILD.md.
+
+## 2026-11-10 14:01 (Claude): EST-347 on the device
+- Reviewed the radio path (NodePrefs + savePrefs + radio setParams/setTxPower, upstream's limits). Built in the sandbox (exit 0, RAM 157,464 B, flash 1,676,981 B), tests exit 0, reviewed binary flashed (1,677,344 B). `status`: contacts=2 (one node rediscovered since the clean-up).
+- By USB: the gear from Chat opens Settings on the Chat tab ("This chat: Public": open, enabled, sound, rename, key); the General tab shows Radio & mesh (preset EU 868 (SLO), TX 22 dBm stepper, 2B, Node, 5 channels) (`docs/shots/2026-11-10-1401-settings-*.png`).
+- Note for the restyle ticket: main.cpp is 3,830 lines (905 removed, the new shell added); the target remains setup + loop + dispatch.

@@ -178,8 +178,8 @@ constexpr int16_t kTabY       = kScreenH - kTabH;
 // the status line: 11 px (the brief) made "MC · EU868 · 2B" collide with the node count at 320 px,
 // so the status uses the same 10 px mono as the row metadata.
 // One glyph outside ASCII: mono carries U+00B7 MIDDLE DOT, the mock's status separator, added by
-// tools/mkvlw.py --extra 0xb7. The settings cog stays a vector (drawGear) so the sans9 metrics and
-// the tab labels do not move.
+// tools/mkvlw.py --extra 0xb7. The settings cog is the mask rendered from U+2699 by tools/mkicons.py
+// (drawGear blends it), so the sans9 metrics and the tab labels do not move.
 enum class FontRole : uint8_t {
   SansBody = 0,    // list names, empty state              (11 px, mock 10 px)
   SansTitle,       // detail heading                       (14 px, mock 13 px)

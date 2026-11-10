@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "ui/fonts.h"
+#include "ui/icons.h"
 
 namespace om {
 namespace ui {
@@ -41,17 +42,25 @@ void drawBattery(lgfx::LovyanGFX* d, int x, int cy, int pct) {
   d->fillRect(x + 1, y + 1, fill, kBattH - 2, c);
 }
 
-// A cog, not a crosshair: a filled body with eight teeth and a punched-out centre. Vector rather
-// than the mock's U+2699 glyph because at 9 px the glyph's thin stroke breaks up into a ring
-// (checked at 26x zoom before flashing); the teeth are what says "gear". bg punches the hub hole.
+// Blend a foreground RGB565 colour over a known background by a 0..255 coverage value. The widget
+// always knows the surface it draws on (the status bar's kBar, the tab's kSelBg), so no pixel read
+// from the frame is needed.
+uint16_t blend565(uint16_t fg, uint16_t bg, uint8_t a) {
+  if (a == 0) return bg;
+  if (a == 255) return fg;
+  const uint32_t fr = (fg >> 11) & 0x1F, fg6 = (fg >> 5) & 0x3F, fb = fg & 0x1F;
+  const uint32_t br = (bg >> 11) & 0x1F, bg6 = (bg >> 5) & 0x3F, bb = bg & 0x1F;
+  const uint32_t inv = 255U - a;
+  const uint32_t r = (fr * a + br * inv + 127U) / 255U;
+  const uint32_t g = (fg6 * a + bg6 * inv + 127U) / 255U;
+  const uint32_t b = (fb * a + bb * inv + 127U) / 255U;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// A cog that is the mock's U+2699 glyph (tools/mkicons.py), not a hand-built crosshair. The mask is
+// blended over the bar colour, so its antialiased edge matches the surrounding text.
 void drawGear(lgfx::LovyanGFX* d, const Rect& r, uint16_t col, uint16_t bg) {
-  const int cx = r.x + r.w / 2;
-  const int cy = r.y + r.h / 2;
-  d->fillCircle(cx, cy, 3, col);
-  static const int8_t ox[8] = {3, 2, 0, -2, -3, -2, 0, 2};
-  static const int8_t oy[8] = {0, 2, 3, 2, 0, -2, -3, -2};
-  for (int i = 0; i < 8; ++i) d->fillRect(cx + ox[i] - 1, cy + oy[i] - 1, 2, 2, col);
-  d->fillCircle(cx, cy, 1, bg);
+  drawIcon(d, kIconGear, r.x, r.y, col, bg);
 }
 
 // Four 11x11 icons, drawn with primitives so there is no missing glyph and no icon font in flash.
@@ -88,6 +97,17 @@ void drawTabIcon(lgfx::LovyanGFX* d, Tab t, int cx, int cy, uint16_t col) {
 }
 
 }  // namespace
+
+void drawIcon(lgfx::LovyanGFX* d, const IconMask& icon, int x, int y, uint16_t fg, uint16_t bg) {
+  if (!d || !icon.alpha || icon.w == 0 || icon.h == 0) return;
+  for (int yy = 0; yy < icon.h; ++yy) {
+    for (int xx = 0; xx < icon.w; ++xx) {
+      const uint8_t a = icon.alpha[(size_t)yy * icon.w + xx];
+      if (a == 0) continue;
+      d->drawPixel((int16_t)(x + xx), (int16_t)(y + yy), blend565(fg, bg, a));
+    }
+  }
+}
 
 // Text helpers, public because the screens use the same role fonts and colour pairs. They draw into
 // the surface passed in, exactly like everything else here.

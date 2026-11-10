@@ -23,9 +23,12 @@ const char* meshMsgText(int idx);
 int meshMsgChannel(int idx);
 const char* meshMsgName(int idx);
 bool meshMsgMine(int idx);
-uint32_t meshMsgTs(int idx);   // uptime seconds when it was stored (there is no RTC on this board)
+uint32_t meshMsgTs(int idx);   // uptime seconds when it was stored (monotonic, clock-jump proof)
 int meshMsgHops(int idx);      // path hops the packet carried, -1 = local echo / unknown
 int meshMsgSnrQ(int idx);      // SNR x 4 as int8 (MeshCore's own unit), 0 = unknown
+// Monotonic sequence number of a stored message (1, 2, 3...). Stable across ring shifts: the UI holds
+// this instead of an index, so REPLY / INFO / an open menu cannot move to another message.
+uint32_t meshMsgSeq(int idx);
 int meshUnread(int channelIdx);
 void meshClearUnread(int channelIdx);
 

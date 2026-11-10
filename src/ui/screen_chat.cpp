@@ -26,8 +26,8 @@ int measureRange(void* ctx, const char* text, int len) {
   return measureText(c->d, c->role, text, len);
 }
 
-// There is no RTC on this board: the stamp is uptime seconds, and the list says so by showing an
-// elapsed time (mock .tm) instead of a clock it cannot know.
+// Message ages use the monotonic uptime stamps, not the wall clock: a GPS sync can jump the system
+// time forward mid-session, and an age must not go negative or leap by months because of it.
 void ageText(char* out, size_t cap, uint32_t nowSec, uint32_t ts) {
   const uint32_t age = (nowSec >= ts) ? (nowSec - ts) : 0;
   if (age < 60) snprintf(out, cap, "%us", (unsigned)age);
@@ -118,7 +118,7 @@ int wrapMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, con
 // on the block the eye sees.
 int chatMsgHeights(const ChatView& v, int16_t* out, int max) {
   lgfx::LovyanGFX* d = om_display();
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replyMsg >= 0, v.nums);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
   int n = 0;
   if (d == nullptr) return 0;
   for (int i = 0; i < v.msgCount && i < max; ++i) {
@@ -277,11 +277,13 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->fillRoundRect(g.sheet.x, g.sheet.y, g.sheet.w, g.sheet.h + kOskRadius, kOskRadius, kSheet);
   d->drawFastHLine(g.sheet.x, g.sheet.y, g.sheet.w, kLine);
 
-  if (g.replyBar.w > 0 && v.replyMsg >= 0 && v.replyMsg < v.msgCount) {
+  if (g.replyBar.w > 0 && v.replySeq != 0) {
     d->fillRoundRect(g.replyBar.x, g.replyBar.y, g.replyBar.w, g.replyBar.h, kRadiusSm, kReplyBg);
     d->drawRoundRect(g.replyBar.x, g.replyBar.y, g.replyBar.w, g.replyBar.h, kRadiusSm, kReplyLine);
     char bar[48];
-    snprintf(bar, sizeof(bar), "RE %s", v.msgs[v.replyMsg].name);
+    // The name was copied when REPLY was tapped, so this bar still names the right sender even after
+    // the ring has shifted and v.msgs no longer contains that message.
+    snprintf(bar, sizeof(bar), "RE %s", v.replyName ? v.replyName : "");
     drawTextEllipsis(d, FontRole::MonoMeta, kReplyInk, kReplyBg, g.replyBar.x + kFieldPadX,
                      g.replyBar.y + g.replyBar.h / 2, g.replyBar.w - 2 * kFieldPadX, bar);
   }
@@ -374,7 +376,7 @@ void chatScreenDraw(const ChatView& v) {
     return;
   }
   const Layout& L = l2();
-  const ChatLayout g = chatLayoutFor(L, v.osk, v.replyMsg >= 0, v.nums);
+  const ChatLayout g = chatLayoutFor(L, v.osk, v.replySeq != 0, v.nums);
 
   d->fillScreen(kScreen);
   drawStatusBar(d, L, v.status);
@@ -395,7 +397,7 @@ void chatScreenDraw(const ChatView& v) {
 
 ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   ChatHitResult r;
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replyMsg >= 0, v.nums);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
 
   // Overlays first: a tap anywhere closes INFO (old behaviour), and a tap outside the message menu
   // closes the menu.
@@ -408,6 +410,7 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
       if (g.menuRow[i].contains(x, y)) {
         r.hit = (i == 0) ? ChatHit::MenuReply : (i == 1 ? ChatHit::MenuInfo : ChatHit::MenuCopy);
         r.index = v.menuMsg;
+        r.seq = v.menuSeq;
         return r;
       }
     }
@@ -442,6 +445,7 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
       if (i >= 0) {
         r.hit = ChatHit::Msg;
         r.index = i;
+        r.seq = v.msgs[i].seq;
         return r;
       }
     }
@@ -483,6 +487,7 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
     if (i >= 0) {
       r.hit = ChatHit::Msg;
       r.index = i;
+      r.seq = v.msgs[i].seq;
     }
   }
   return r;
@@ -495,14 +500,14 @@ int chatContentHeight(const ChatView& v) {
 }
 
 int chatMaxScroll(const ChatView& v) {
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replyMsg >= 0, v.nums);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
   int16_t heights[kMaxChatMsgs];
   const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
   return msgMaxScroll(g.msgs, heights, n);
 }
 
 int chatChipScrollInto(const ChatView& v, int chip) {
-  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replyMsg >= 0, v.nums);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums);
   int16_t widths[kMaxChips];
   const int n = chipWidths(v, widths, kMaxChips);
   return chipScrollTo(v.chipScroll, widths, n, chip, g.chipScroll.w);

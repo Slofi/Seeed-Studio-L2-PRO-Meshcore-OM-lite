@@ -271,3 +271,78 @@
 ## 2026-11-10 07:36 (Claude): EST-330 checked
 - Built in the sandbox (exit 0, RAM 77,340 B, flash 834,813 B), host tests exit 0, OTA ok (835,184 B), boots to Nodes (screenshot `docs/shots/2026-11-10-0736-boot.png`). The Chat screen itself is not yet seen on the panel (needs a finger on the tab).
 - Review finding, to fix in the next ticket: `g_replyTo`, `g_bubMenu` and `g_bubInfo` are indexes into the per-channel view rebuilt from the shared 32-message ring. Once the ring is full, every new message drops the oldest and shifts the indexes, so a reply typed while a message arrives can go to the wrong sender, and an open menu/INFO can switch to another message. Hold the message's sequence number (and copy the reply name at the moment REPLY is tapped) instead of an index.
+
+## 2026-11-10 (DS, EST-331, clock + gear + chat reply fix)
+
+- **What this ticket is**: EST-331, three parts asked for in one run. (1) Replace MeshCore's
+  `VolatileRTCClock` (15 May 2024 on every boot, so other nodes dropped our adverts as a replay) with
+  the system clock fed by ranked sources. (2) Replace the hand-built cog with the mock's U+2699 glyph,
+  rendered as an alpha mask by a host tool, and prepare Wi-Fi/Bluetooth icons. (3) Fix Claude's EST-330
+  finding: reply/menu/INFO held indexes into the ring view, which shift when a 33rd message arrives.
+- **Clock, source ranking and the floor** (new `src/timekeeper.h/.cpp`, plain POSIX C++, no Arduino):
+  - One clock: `settimeofday()`/`time()`. MeshCore gets `OmRTCClock` in `mesh_link.cpp`; its
+    `getCurrentTime()` reads the system clock and `setCurrentTime()` writes it (plumbing only, never
+    marks a trusted source). `VolatileRTCClock` is no longer used.
+  - Sources, best first: GPS > Wi-Fi > phone > manual. A lower source may set the clock only when no
+    higher source has set it in the last 6 hours; an equal source may refresh it. Manual always
+    applies when the user does it. The 6-hour history is kept per source, so a Wi-Fi set does not
+    block a phone that was waiting for a GPS set from 7 hours ago.
+  - GPS: `board.cpp` keeps reading NMEA and now also parses `$..RMC` and `$..ZDA`; the parser checks
+    the XOR checksum, RMC status `A`, a real calendar date and the 2025..2099 range, so the module's
+    default date before its first satellite never reaches the clock. `GpsState.timeEpoch` carries the
+    latest sentence. A real source below the floor is refused, so time can never go backwards.
+  - Floor: `tfloor` in NVS, saved on every applied sync and at least every 10 minutes (a failed NVS
+    write is retried on the next 10-minute cadence, not every loop). Boot starts the system clock at
+    `max(saved floor, build time)`; `__DATE__`/`__TIME__` are local Europe/Ljubljana and are converted
+    to UTC with the same POSIX TZ rule. The floor is not a real time: `realSinceBoot()` stays false.
+  - Removed `bootstrapRTCfromContacts()` from the contact loader: it would set the clock to
+    `latest contact lastmod + 1` (a 2024-era timestamp) and move the new clock backwards.
+  - Status bar: `buildStatus()` shows `HH:MM` (24 h, `CET-1CEST,M3.5.0,M10.5.0/3`) only after a real
+    source has set the clock; otherwise `--:--`. A once-a-minute repaint keeps it live. Getters for
+    Settings: `timeKeeper().source()`, `sourceAgeSec()`, `timeSourceName()`.
+  - Ages: chat messages deliberately keep monotonic uptime stamps, so a forward clock sync cannot
+    make an age negative or leap by months. The Nodes "last heard" keeps `meshNow()` but now shows
+    `--` for a future timestamp and `30d+` instead of a huge day count (old contacts can carry a
+    timestamp from a previous boot/clock).
+  - Sent messages now use `meshNow()` for MeshCore's sender timestamp (they used uptime seconds).
+- **Gear and icons** (new `tools/mkicons.py`, `src/ui/icons.cpp/.h`): the gear is DejaVu Sans U+2699,
+  rendered at 9x9 (`4x` supersampled, LANCZOS down, coverage stretched to full 0..255) and blended
+  over the bar colour by `drawIcon()`; `drawGear()` now calls the mask. Wi-Fi (three arcs + dot) and
+  Bluetooth (rune) are 11x11 masks ready for the later tabs. The generator writes both the C++ tables
+  and `docs/shots/icons-preview.png`, a contact sheet with each icon at 1:1 and 8x.
+- **Chat fix**: `mesh_link.cpp` now stores a monotonic `seq` with every message and exposes
+  `meshMsgSeq(idx)`. The shell holds `g_bubMenuSeq`, `g_bubInfoSeq`, `g_replySeq` (0 = none) instead
+  of indexes; `buildChatView()` resolves each id to the current view slot. `g_replyName` is copied
+  when REPLY is tapped, so the `@Name` reply still goes to the right sender even if that message is
+  the one the ring drops. An open menu/INFO stays on its message across a new arrival and closes only
+  when its target has really fallen out of the 32-message ring. The new `src/ui/chat_model.h` carries
+  the plain view type and `chatMsgIndexBySeq()` so the rule is host-testable.
+- **Build** (`pio run -e om_lite_l2`, the command from REBUILD.md): exit 0, SUCCESS.
+  RAM 77,572 B of 327,680 (23.7%), flash 849,885 B of 6,553,600 (13.0%). Previous run 77,340 B /
+  834,813 B, so this ticket added **+232 B RAM and +15,072 B flash** (the clock module, the icon
+  tables/tool, and the MeshCore adapter). No new font blobs.
+- **Tests**: `test/host/run.sh` exit 0. The 9 Python screenshot tests, layout, contact-store and chat
+  tests still pass. New `test/host/test_timekeeper.cpp` (g++, `-Wall -Wextra -Werror`) proves: valid
+  RMC/GP RMC/ZDA; void RMC, 2024 default date, bad checksum, split line, impossible date and missing
+  date all rejected; `__DATE__`/`__TIME__` converted from local CET/CEST; winter/summer clock format;
+  both 2026 DST change instants (last Sunday March and October); floor never backwards and
+  max(saved, build); the real-source flag; GPS > Wi-Fi > phone > manual with the 6-hour hold, equal
+  refresh, manual always applying and a later GPS taking over; same-second refresh without an NVS
+  write; `setHardware()` raising the clock without making it real; and the 10-minute save cadence.
+  `test_chat.cpp` adds the ring-shift test: a full 32-message view plus one new message keeps the
+  held menu and reply ids on the same names/texts, and the copied reply name still matches.
+- **Could not check** (no device in the sandbox): that the L76K's real RMC/ZDA lines pass the checksum
+  and date gate on hardware, and how long the first fix takes; the status bar actually switching from
+  `--:--` to `HH:MM`; the floor surviving a reboot (needs `tfloor` in NVS and a second boot); the 9x9
+  U+2699 mask on the panel (see `docs/shots/icons-preview.png` first); the Chat menu staying on its
+  message under live traffic. To check: boot with no fix (clock must stay `--:--`), wait for a fix,
+  watch `[time] GPS -> ...` and the status bar, reboot and confirm the clock continues rising (not
+  2024) before the next fix, and open a message menu/reply while a second node sends.
+- **Next step**: Claude flashes and screenshots the status bar and the gear (1:1 mask preview is in
+  `docs/shots/icons-preview.png`), then checks the Chat menu under a live message. Settings (work
+  order item 4) can now show "GPS, 2 min ago" through `timeKeeper().source()`/`sourceAgeSec()` and
+  call `setFromSource(..., TimeSource::Manual)` for a manual set; Wi-Fi and Bluetooth only need to
+  call the same entry.
+## 2026-11-10 08:40 (Claude): EST-331 checked
+- Built in the sandbox (exit 0, RAM 77,572 B, flash 849,885 B), host tests exit 0. Not flashed yet: it goes to the device together with the chat polish (one interruption for Filip).
+- Review: clock design as asked (ranking, floor, honest `--:--`); the reply/menu fix holds sequence numbers. **Icons not accepted:** the 9x9 U+2699 reads as a ring with a dot and the Bluetooth mask as a diamond (`docs/shots/icons-preview.png`). Claude drew candidates (`docs/shots/2026-11-10-icons-claude-try-8x.png`, left to right: DS 9 px glyph, glyph 13 px, vector gear 11, **vector gear 13 px 8 teeth (chosen)**, 6 teeth, Bluetooth rune 13 and 15 px). The chosen shapes and their exact code go in the next ticket.

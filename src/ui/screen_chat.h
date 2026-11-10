@@ -8,13 +8,12 @@
 #include <stdint.h>
 
 #include "ui/chat_layout.h"
+#include "ui/chat_model.h"
 #include "ui/widgets.h"
 
 namespace om {
 namespace ui {
 
-// MeshCore's ring in mesh_link.cpp keeps 32 messages; the view never has more than that.
-constexpr int kMaxChatMsgs = 32;
 constexpr int kMaxChips = 12;   // eight channels plus DMs, matching om::kMaxChannels
 
 struct ChatChip {
@@ -22,17 +21,6 @@ struct ChatChip {
   uint16_t unread = 0;
   bool dm = false;
   bool muted = false;
-};
-
-struct ChatMsgView {
-  int16_t meshIdx = -1;     // index in the mesh ring, for REPLY / INFO / COPY
-  const char* name = "";
-  const char* text = "";
-  const char* chanName = "";
-  uint32_t ts = 0;          // uptime seconds when it was stored
-  int8_t hops = -1;         // packet hops, -1 = local echo / unknown
-  int8_t snrq = 0;          // SNR x 4 (MeshCore's unit), 0 = unknown
-  bool mine = false;
 };
 
 struct ChatView {
@@ -44,14 +32,17 @@ struct ChatView {
   const ChatMsgView* msgs = nullptr;
   int msgCount = 0;
   int scroll = 0;           // px scrolled up from the newest message (0 = at the bottom)
-  uint32_t nowSec = 0;
+  uint32_t nowSec = 0;      // monotonic uptime; chat ages survive a clock sync
   bool osk = false;
   bool shift = false;
   bool nums = false;
   const char* draft = "";
-  int replyMsg = -1;        // index into msgs
-  int menuMsg = -1;
+  uint32_t replySeq = 0;    // held message id, 0 = no reply
+  const char* replyName = "";   // copied at the moment REPLY was tapped
+  int menuMsg = -1;         // resolved index into msgs, -1 = closed / fell out of the ring
+  uint32_t menuSeq = 0;     // held message id, what the tap returns
   int infoMsg = -1;
+  uint32_t infoSeq = 0;
   int unread = 0;           // chat badge on the tab bar
 };
 
@@ -64,7 +55,8 @@ enum class ChatHit : uint8_t {
 
 struct ChatHitResult {
   ChatHit hit = ChatHit::None;
-  int index = -1;       // chip or message index
+  int index = -1;       // chip or message index (a snapshot, never held)
+  uint32_t seq = 0;     // message id to hold for REPLY / INFO / the menu
   int keyRow = -1;
   int keyCol = -1;
   KeyKind keyKind = KeyKind::Char;

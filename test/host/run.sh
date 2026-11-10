@@ -11,12 +11,18 @@ python3 -B test_shot.py
 BIN="$(mktemp /tmp/om-lite-layout.XXXXXX)"
 BIN2="$(mktemp /tmp/om-lite-contacts.XXXXXX)"
 BIN3="$(mktemp /tmp/om-lite-chat.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3"' EXIT
+BIN4="$(mktemp /tmp/om-lite-time.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_contact_store.cpp -o "$BIN2"
 "$BIN2"
-# Chat: the word wrapper, the chip strip, the message band and the keyboard sheet arithmetic.
+# Chat: the word wrapper, the chip strip, the message band, the keyboard sheet and the held
+# message sequence numbers (a full ring plus one new message must not move a reply target).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_chat.cpp \
   ../../src/ui/chat_layout.cpp ../../src/ui/text_wrap.cpp -o "$BIN3"
+# Time: NMEA RMC/ZDA, the source ranking, the floor and the Ljubljana DST clock.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_timekeeper.cpp \
+  ../../src/timekeeper.cpp -o "$BIN4"
 "$BIN3"
+"$BIN4"

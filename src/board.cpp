@@ -12,6 +12,7 @@
 #include <lgfx/v1/panel/Panel_NV3031B.hpp>
 
 #include "fonts.h"
+#include "timekeeper.h"
 
 namespace om {
 namespace {
@@ -476,6 +477,12 @@ void gpsPoll(GpsState& out) {
           out.lat = nmeaToDegrees(fields[2], fields[3]);
           out.lon = nmeaToDegrees(fields[4], fields[5]);
         }
+      } else if (strlen(s_nmea) >= 6 &&
+                 (strncmp(s_nmea + 3, "RMC", 3) == 0 || strncmp(s_nmea + 3, "ZDA", 3) == 0)) {
+        // Time (and date) from RMC/ZDA. The parser checks the checksum, the fix status and the date
+        // range, so the module's default date before its first fix never reaches the clock.
+        const ParsedTime t = parseNmeaTime(s_nmea);
+        if (t.ok) out.timeEpoch = t.epoch;
       }
       continue;
     }

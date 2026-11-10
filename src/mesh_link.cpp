@@ -25,6 +25,7 @@
 #include "contact_store.h"
 #include "mc_board.h"
 #include "target.h"
+#include "timekeeper.h"
 
 namespace om {
 namespace {
@@ -53,7 +54,8 @@ struct Msg {
   uint8_t mine;
   int8_t hops;     // packet path hops, -1 = local echo / unknown
   int8_t snr4;     // SNR x 4 (MeshCore's unit), 0 = unknown
-  uint32_t ts;     // uptime seconds when it was stored (no RTC on this board)
+  uint32_t ts;     // uptime seconds when it was stored (monotonic: a GPS sync cannot disturb ages)
+  uint32_t seq;    // stable message id across ring shifts, see meshMsgSeq()
   char name[20];
   char text[96];
 };
@@ -154,9 +156,9 @@ public:
       ci.sync_since = s_contactRecs[i].sync_since;
       if (addContact(ci)) ++added;
     }
-    // MeshCore's clock restarts from its built-in epoch on every boot, so restored timestamps would
-    // look like the future. MeshCore has the same hook for contacts restored from storage.
-    bootstrapRTCfromContacts();
+    // Do NOT call MeshCore's bootstrapRTCfromContacts(): it sets the clock to latest contact lastmod+1,
+    // which is a timestamp from an older boot (2024-era under VolatileRTCClock) and would move the
+    // new floor-backed clock backwards. Our clock already starts at max(saved floor, build time).
     Serial.printf("[mc] contacts: loaded %d of %d from flash\n", added, n);
     return added == n;
   }
@@ -274,6 +276,7 @@ public:
     }
     snprintf(s_lastText, sizeof(s_lastText), "%s", text ? text : "");
     const int slot = slotFor(s_msgCount);
+    s_msgs[slot].seq = s_msgSeq + 1;
     s_msgs[slot].ch = (uint8_t)(s_lastChannel < 0 ? 0 : s_lastChannel);
     s_msgs[slot].mine = 0;
     s_msgs[slot].ts = millis() / 1000;
@@ -306,6 +309,16 @@ public:
   }
 };
 
+// MeshCore's clock is the system clock. It used to be VolatileRTCClock, which restarted at 15 May
+// 2024 on every boot (so other nodes dropped our adverts as a replay). OmRTCClock reads and writes
+// what timekeeper.h owns; setCurrentTime() is plumbing and never marks a trusted source.
+class OmRTCClock : public mesh::RTCClock {
+ public:
+  uint32_t getCurrentTime() override { return om::timeKeeper().now(); }
+  void setCurrentTime(uint32_t time) override { om::timeKeeper().setHardware(time); }
+  void tick() override {}
+};
+
 // Lazily created; the constructor only runs inside meshLinkBegin(), after USB is up.
 struct Ctx {
   Ctx() : mod(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi), radio(&mod) {}
@@ -316,7 +329,7 @@ struct Ctx {
   OmBoard board;
   StdRNG rng;
   ArduinoMillis ms;
-  VolatileRTCClock rtc;
+  OmRTCClock rtc;
   StaticPoolPacketManager mgr{16};
   SimpleMeshTables tables;
   CustomSX1262Wrapper* wrapper = nullptr;
@@ -467,6 +480,11 @@ uint32_t meshMsgTs(int idx) {
   return s_msgs[slotFor(idx)].ts;
 }
 
+uint32_t meshMsgSeq(int idx) {
+  if (idx < 0 || idx >= s_msgCount) return 0;
+  return s_msgs[slotFor(idx)].seq;
+}
+
 int meshMsgHops(int idx) {
   if (idx < 0 || idx >= s_msgCount) return -1;
   return s_msgs[slotFor(idx)].hops;
@@ -548,12 +566,13 @@ bool meshLinkSend(int channelIdx, const char* text) {
   }
   Serial.printf("[mc] send: hash %02x secret %02x textlen %d\n", cd.channel.hash[0],
                 cd.channel.secret[0], (int)strlen(text));
-  const bool ok = s_ctx->mesh->sendGroupMessage((uint32_t)(millis() / 1000), cd.channel, "OM Lite",
-                                                text, (int)strlen(text));
+  const bool ok = s_ctx->mesh->sendGroupMessage(meshNow(), cd.channel, "OM Lite", text,
+                                                (int)strlen(text));
   Serial.printf("[mc] sendGroupMessage -> %d\n", (int)ok);
   if (ok) {
     // Locally echo what we sent, so the channel view shows the outgoing message too.
     const int slot = slotFor(s_msgCount);
+    s_msgs[slot].seq = s_msgSeq + 1;
     s_msgs[slot].ch = (uint8_t)channelIdx;
     s_msgs[slot].mine = 1;
     s_msgs[slot].ts = millis() / 1000;

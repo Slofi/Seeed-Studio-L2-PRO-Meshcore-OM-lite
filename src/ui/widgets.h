@@ -7,6 +7,7 @@
 
 #include "layout.h"
 #include "theme.h"
+#include "ui/icons.h"
 
 namespace om {
 namespace ui {
@@ -45,6 +46,10 @@ void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RowModel& row);
 
 // Centred two-line empty state (sans title, dim text).
 void drawEmptyState(lgfx::LovyanGFX* d, const Rect& area, const char* title, const char* sub);
+
+// Blend an 8-bit alpha icon (tools/mkicons.py) in fg over bg, pixel by pixel. The caller knows the
+// surface colour, so no read from the frame is needed.
+void drawIcon(lgfx::LovyanGFX* d, const IconMask& icon, int x, int y, uint16_t fg, uint16_t bg);
 
 // Exposed for tests / later screens; they use the same colours as the widgets.
 uint16_t typeColour(NodeType t);

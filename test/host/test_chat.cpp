@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "ui/chat_layout.h"
+#include "ui/chat_model.h"
 #include "ui/text_wrap.h"
 
 using namespace om::ui;
@@ -304,11 +305,65 @@ static void testMessages() {
   CHECK(msgMaxScroll(o.msgs, many, 20) > maxS);
 }
 
+
+// The reply target and the open menu hold a message sequence number, not an index into the view.
+// A full ring plus one new message drops its oldest entry and shifts every index by one; the held ids
+// must resolve to the same message afterwards.
+static void testRingShift() {
+  ChatMsgView msgs[kMaxChatMsgs];
+  char names[kMaxChatMsgs + 1][12];
+  char texts[kMaxChatMsgs + 1][12];
+  for (int i = 0; i < kMaxChatMsgs; ++i) {
+    snprintf(names[i], sizeof(names[i]), "n%d", i + 1);
+    snprintf(texts[i], sizeof(texts[i]), "m%d", i + 1);
+    msgs[i].seq = (uint32_t)(i + 1);
+    msgs[i].name = names[i];
+    msgs[i].text = texts[i];
+  }
+
+  // The user opens the menu on the 6th message and taps REPLY on the 21st.
+  const uint32_t menuSeq = msgs[5].seq;
+  const uint32_t replySeq = msgs[20].seq;
+  char replyName[sizeof(names[0])];
+  snprintf(replyName, sizeof(replyName), "%s", msgs[20].name);
+  CHECK(chatMsgIndexBySeq(msgs, kMaxChatMsgs, menuSeq) == 5);
+  CHECK(chatMsgIndexBySeq(msgs, kMaxChatMsgs, replySeq) == 20);
+
+  // One new message arrives while the ring is full: drop the oldest, shift, append seq 33.
+  memmove(&msgs[0], &msgs[1], sizeof(msgs[0]) * (kMaxChatMsgs - 1));
+  const uint32_t newSeq = 33;
+  msgs[kMaxChatMsgs - 1] = ChatMsgView{};
+  msgs[kMaxChatMsgs - 1].seq = newSeq;
+  msgs[kMaxChatMsgs - 1].name = names[kMaxChatMsgs];
+  msgs[kMaxChatMsgs - 1].text = texts[kMaxChatMsgs];
+  snprintf(names[kMaxChatMsgs], sizeof(names[0]), "n33");
+  snprintf(texts[kMaxChatMsgs], sizeof(texts[0]), "m33");
+
+  // The same ids now resolve one slot lower but to the same names/texts.
+  const int menuAt = chatMsgIndexBySeq(msgs, kMaxChatMsgs, menuSeq);
+  const int replyAt = chatMsgIndexBySeq(msgs, kMaxChatMsgs, replySeq);
+  CHECK(menuAt == 4);
+  CHECK(replyAt == 19);
+  CHECK(strcmp(msgs[menuAt].text, "m6") == 0);
+  CHECK(strcmp(msgs[replyAt].text, "m21") == 0);
+  CHECK(strcmp(replyName, "n21") == 0);   // copied at tap time, so still the right sender
+
+  // Only a target that really fell out of the ring is gone (the old first message).
+  CHECK(chatMsgIndexBySeq(msgs, kMaxChatMsgs, 1) == -1);
+  CHECK(chatMsgIndexBySeq(msgs, kMaxChatMsgs, newSeq) == kMaxChatMsgs - 1);
+
+  // 0 is "no message" and a null list is never dereferenced.
+  CHECK(chatMsgIndexBySeq(msgs, kMaxChatMsgs, 0) == -1);
+  CHECK(chatMsgIndexBySeq(nullptr, kMaxChatMsgs, 7) == -1);
+  CHECK(chatMsgIndexBySeq(msgs, 0, 7) == -1);
+}
+
 int main() {
   testWrap();
   testChips();
   testComposeAndSheet();
   testMessages();
+  testRingShift();
 
   if (g_fail) {
     printf("%d chat check(s) FAILED\n", g_fail);

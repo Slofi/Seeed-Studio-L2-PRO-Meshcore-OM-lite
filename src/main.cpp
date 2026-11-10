@@ -18,6 +18,7 @@
 #include "channels.h"
 #include "ota.h"
 #include "radio.h"
+#include "timekeeper.h"
 #include "fonts.h"
 #include "ui/fonts.h"
 #include "ui/layout.h"
@@ -92,9 +93,10 @@ static bool g_compose = false;    // the keyboard sheet is open
 static bool g_kbNums = false;     // numbers/symbols page
 static bool g_kbShift = false;    // capitals
 static char g_kbText[96];
-static int g_bubMenu = -1;        // message menu, index into g_chatMsgs, -1 = closed
-static int g_bubInfo = -1;        // INFO panel, index into g_chatMsgs, -1 = closed
-static int g_replyTo = -1;        // the message the next send answers, index into g_chatMsgs
+static uint32_t g_bubMenuSeq = 0; // message menu target: monotonic message id, 0 = closed
+static uint32_t g_bubInfoSeq = 0; // INFO panel target: monotonic message id, 0 = closed
+static uint32_t g_replySeq = 0;   // the message the next send answers (id), 0 = none
+static char g_replyName[20] = ""; // the sender, copied when REPLY was tapped
 static om::ui::ChatChip g_chips[om::ui::kMaxChips];
 static int g_chipCount = 0;
 static om::ui::ChatMsgView g_chatMsgs[om::ui::kMaxChatMsgs];
@@ -184,6 +186,18 @@ static void savePrefs() {
   g_prefs.putBool("tsnd", g_touchSnd);
   g_prefs.putUChar("tone", g_touchIdx);
   g_prefs.putBool("welc", g_welcome);
+}
+
+// The floor is persisted every 10 minutes and on every applied sync (the caller calls this then). It
+// is a lower bound only: the next boot starts at max(floor, build time) and still reports "--:--"
+// until a real source sets the clock.
+static void saveTimeFloor() {
+  const uint32_t floor = om::timeKeeper().floor();
+  const bool ok = g_prefs.putUInt("tfloor", floor) == sizeof(uint32_t);
+  // Rate-limit even a failed write: retrying every loop would hammer NVS. A failed save is retried
+  // with the normal 10-minute cadence, and the floor is still raised in RAM.
+  om::timeKeeper().onFloorSaved(millis() / 1000);
+  if (!ok) Serial.printf("[time] floor %lu not saved to NVS\n", (unsigned long)floor);
 }
 
 // ----------------------------------------------------------------------------- drawing
@@ -503,7 +517,10 @@ static void ageText(char* out, size_t cap, uint32_t lastmod, uint32_t now) {
     return;
   }
   const uint32_t s = now - lastmod;
-  if (s < 60) snprintf(out, cap, "now");
+  // Contacts saved before the clock had a real source carry an old-boot timestamp. Never print
+  // "730d": beyond a month the honest answer is only "older than that".
+  if (s >= 30UL * 86400UL) snprintf(out, cap, "30d+");
+  else if (s < 60) snprintf(out, cap, "now");
   else if (s < 3600) snprintf(out, cap, "%lum", (unsigned long)(s / 60));
   else if (s < 86400) snprintf(out, cap, "%luh", (unsigned long)(s / 3600));
   else snprintf(out, cap, "%lud", (unsigned long)(s / 86400));
@@ -545,8 +562,15 @@ static void buildStatus(om::ui::StatusModel& s) {
   s.gpsValid = g_gps.valid;
   s.gpsSats = g_gps.sats;
   s.batteryPct = batteryPercent(g_battMv);
-  // No RTC on this board and GPS time is not parsed yet: show a dash, never an invented clock.
-  s.clock = "--:--";
+  // Data honesty: show HH:MM only after a real source (GPS today) has set the clock since boot.
+  // Before that the time is only the floor (max saved, build time), which is not a real time.
+  static char clockText[8];
+  if (om::timeKeeper().realSinceBoot()) {
+    om::formatClock(om::timeKeeper().now(), clockText, sizeof(clockText));
+    s.clock = clockText;
+  } else {
+    s.clock = "--:--";
+  }
 }
 
 // The old home screen is gone; this name is kept because every old tab switch already calls it.
@@ -596,7 +620,7 @@ static void refreshChatMessages() {
   for (int i = 0; i < om::meshMsgCount() && g_chatMsgCount < om::ui::kMaxChatMsgs; ++i) {
     if (om::meshMsgChannel(i) != chan) continue;
     om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
-    m.meshIdx = (int16_t)i;
+    m.seq = om::meshMsgSeq(i);
     m.name = om::meshMsgName(i);
     m.text = om::meshMsgText(i);
     m.chanName = om::mcChannelName(chan);
@@ -624,9 +648,18 @@ static void buildChatView(om::ui::ChatView& v) {
   v.shift = g_kbShift;
   v.nums = g_kbNums;
   v.draft = g_kbText;
-  v.replyMsg = g_replyTo;
-  v.menuMsg = g_bubMenu;
-  v.infoMsg = g_bubInfo;
+  // The UI holds message ids, never indexes: when the 32-message ring shifts, the reply target and
+  // the open menu resolve to the same message. A name copied at REPLY time survives even if the
+  // message itself falls out of the ring.
+  v.replySeq = g_replySeq;
+  v.replyName = g_replyName;
+  v.menuSeq = g_bubMenuSeq;
+  v.menuMsg = om::ui::chatMsgIndexBySeq(g_chatMsgs, g_chatMsgCount, g_bubMenuSeq);
+  v.infoSeq = g_bubInfoSeq;
+  v.infoMsg = om::ui::chatMsgIndexBySeq(g_chatMsgs, g_chatMsgCount, g_bubInfoSeq);
+  // The target fell out of the ring: the overlay has nothing left to show, so close it.
+  if (g_bubMenuSeq != 0 && v.menuMsg < 0) g_bubMenuSeq = 0;
+  if (g_bubInfoSeq != 0 && v.infoMsg < 0) g_bubInfoSeq = 0;
   v.unread = unreadTotal();
 }
 
@@ -660,9 +693,10 @@ static void chatSelectChip(int chip) {
   buildChatView(v);
   g_chipScroll = om::ui::chatChipScrollInto(v, chip);
   g_chatScroll = 0;
-  g_bubMenu = -1;
-  g_bubInfo = -1;
-  g_replyTo = -1;
+  g_bubMenuSeq = 0;
+  g_bubInfoSeq = 0;
+  g_replySeq = 0;
+  g_replyName[0] = 0;
 }
 
 // Send on the selected channel. A reply travels as "@Name text": MeshCore's message format has no
@@ -671,8 +705,8 @@ static bool chatSend() {
   const int chan = chipChannel(g_chatSel);
   if (chan < 0 || g_kbText[0] == 0) return false;
   char wire[sizeof(g_kbText) + 32];
-  if (g_replyTo >= 0 && g_replyTo < g_chatMsgCount) {
-    snprintf(wire, sizeof(wire), "@%s %s", g_chatMsgs[g_replyTo].name, g_kbText);
+  if (g_replySeq != 0 && g_replyName[0] != 0) {
+    snprintf(wire, sizeof(wire), "@%s %s", g_replyName, g_kbText);
   } else {
     snprintf(wire, sizeof(wire), "%s", g_kbText);
   }
@@ -704,7 +738,8 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
     case om::ui::KeyKind::Send:
       if (chatSend()) {
         g_kbText[0] = 0;
-        g_replyTo = -1;
+        g_replySeq = 0;
+        g_replyName[0] = 0;
         g_compose = false;
       }
       break;
@@ -734,35 +769,39 @@ static void handleChatTap(int x, int y) {
       openChannelList();
       return;
     case om::ui::ChatHit::Msg:
-      g_bubMenu = hit.index;
-      g_bubInfo = -1;
+      g_bubMenuSeq = hit.seq;   // hold the message id, not its position in the ring
+      g_bubInfoSeq = 0;
       g_compose = false;   // the menu needs the room, and the sheet would cover it
       break;
     case om::ui::ChatHit::MenuReply:
-      g_replyTo = hit.index;
-      g_bubMenu = -1;
+      g_replySeq = hit.seq;
+      // Copy the name now: the ring may shift before Send, and the reply must still address the sender
+      // the user tapped, even if this message is the one that gets dropped.
+      snprintf(g_replyName, sizeof(g_replyName), "%s", g_chatMsgs[hit.index].name);
+      g_bubMenuSeq = 0;
       g_kbText[0] = 0;
       g_kbNums = false;
       g_kbShift = false;
       g_compose = true;
-      Serial.printf("[chat] reply to %s\n", g_chatMsgs[hit.index].name);
+      Serial.printf("[chat] reply to %s\n", g_replyName);
       break;
     case om::ui::ChatHit::MenuInfo:
-      g_bubInfo = hit.index;
-      g_bubMenu = -1;
+      g_bubInfoSeq = hit.seq;
+      g_bubMenuSeq = 0;
       break;
     case om::ui::ChatHit::MenuCopy:
       snprintf(g_kbText, sizeof(g_kbText), "%s", g_chatMsgs[hit.index].text);
-      g_replyTo = -1;
-      g_bubMenu = -1;
+      g_replySeq = 0;
+      g_replyName[0] = 0;
+      g_bubMenuSeq = 0;
       g_compose = true;
       Serial.printf("[chat] copied a message into the draft\n");
       break;
     case om::ui::ChatHit::MenuClose:
-      g_bubMenu = -1;
+      g_bubMenuSeq = 0;
       break;
     case om::ui::ChatHit::InfoClose:
-      g_bubInfo = -1;
+      g_bubInfoSeq = 0;
       break;
     case om::ui::ChatHit::Field:
     case om::ui::ChatHit::KbdBtn:
@@ -771,7 +810,8 @@ static void handleChatTap(int x, int y) {
     case om::ui::ChatHit::Send:
       if (chatSend()) {
         g_kbText[0] = 0;
-        g_replyTo = -1;
+        g_replySeq = 0;
+        g_replyName[0] = 0;
       }
       break;
     case om::ui::ChatHit::Key:
@@ -969,6 +1009,17 @@ void setup() {
   om::ui::loadFonts();                // anti-aliased VLW tables, needed before the first Nodes draw
 
   g_prefs.begin("omlite", false);
+  // One clock, seeded before MeshCore exists: max(saved floor, build time). It is not real time yet;
+  // buildStatus() keeps showing "--:--" until GPS (or a later Wi-Fi/phone/manual source) sets it.
+  {
+    uint32_t buildEpoch = 0;
+    om::parseBuildTimestamp(__DATE__, __TIME__, buildEpoch);
+    const uint32_t savedFloor = g_prefs.getUInt("tfloor", 0);
+    om::timeKeeper().begin(savedFloor, buildEpoch, millis() / 1000);
+    Serial.printf("[time] floor %lu s (saved %lu, build %lu), waiting for a real source\n",
+                  (unsigned long)om::timeKeeper().floor(), (unsigned long)savedFloor,
+                  (unsigned long)buildEpoch);
+  }
   g_soundOn = g_prefs.getBool("sound", true);
   g_volume = g_prefs.getUChar("vol", 60);
   g_sndMsg = g_prefs.getUChar("msg", 0) % kChimeCount;
@@ -1029,9 +1080,10 @@ static void showTab(int tab) {
     return;
   }
   g_tab = tab;
-  g_bubMenu = -1;
-  g_bubInfo = -1;
-  g_replyTo = -1;
+  g_bubMenuSeq = 0;
+  g_bubInfoSeq = 0;
+  g_replySeq = 0;
+  g_replyName[0] = 0;
   g_mapInfo = false;
   Serial.printf("[tab] %s\n", kTabs[g_tab]);
   if (tab == 0) drawHome();
@@ -1148,9 +1200,10 @@ static void handleTap(int x, int y, bool longPress) {
       if (tab >= 0 && tab < 4 && tab != g_tab) {
         g_tab = tab;
         // Leaving the chat drops any overlay or reply target; they belong to the view we close.
-        g_bubMenu = -1;
-        g_bubInfo = -1;
-        g_replyTo = -1;
+        g_bubMenuSeq = 0;
+        g_bubInfoSeq = 0;
+        g_replySeq = 0;
+        g_replyName[0] = 0;
         Serial.printf("[tab] %s\n", kTabs[g_tab]);
         if (g_tab == 2) drawMapTab();
         else if (g_tab == 1) drawChat();
@@ -1555,6 +1608,24 @@ void loop() {
   }
 
   om::gpsPoll(g_gps);
+  // Feed the GPS time to the one clock. RMC repeats every second; timekeeper refreshes the source's
+  // 6-hour hold each time but only writes/NVS-saves when the clock is off by more than a second.
+  {
+    static uint32_t lastGpsTime = 0;
+    if (g_gps.timeEpoch != 0 && g_gps.timeEpoch != lastGpsTime) {
+      lastGpsTime = g_gps.timeEpoch;
+      const bool applied = om::timeKeeper().setFromSource(
+          g_gps.timeEpoch, om::TimeSource::Gps, millis() / 1000);
+      if (applied) {
+        saveTimeFloor();
+        Serial.printf("[time] GPS -> %lu s, floor %lu s (%s)\n",
+                      (unsigned long)g_gps.timeEpoch, (unsigned long)om::timeKeeper().floor(),
+                      om::timeSourceName(om::timeKeeper().source()));
+      }
+    }
+  }
+  // The floor is a one-way lower bound; persistence every 10 minutes is enough once a sync has set it.
+  if (om::timeKeeper().saveDue(millis() / 1000)) saveTimeFloor();
   static bool gpsRetried = false;
   if (!gpsRetried && millis() > 10000 && g_gps.bytes == 0) {
     gpsRetried = true;
@@ -1600,6 +1671,27 @@ void loop() {
                   g_tab, g_settings, g_volume, g_soundOn, g_dnd);
   }
 
+  // Repaint once a minute so the status bar's HH:MM is live. Before a real source the text stays
+  // "--:--", so a floor that merely advances never causes a redraw.
+  {
+    static char shownClock[8] = "";
+    char clockText[8];
+    if (om::timeKeeper().realSinceBoot()) {
+      om::formatClock(om::timeKeeper().now(), clockText, sizeof(clockText));
+    } else {
+      snprintf(clockText, sizeof(clockText), "--:--");
+    }
+    if (strcmp(shownClock, clockText) != 0) {
+      snprintf(shownClock, sizeof(shownClock), "%s", clockText);
+      if (screenOn && !g_settings) {
+        if (g_tab == 0) drawHome();
+        else if (g_tab == 1) drawChat();
+        else if (g_tab == 2) drawMapTab();
+        else drawRptrTab();
+      }
+    }
+  }
+
   // Touch is a gesture: press, drag, release. A drag scrolls (picker rows, settings pixels) or
   // pans the map, and NEVER selects; only a release without a drag is a tap.
   om::otaPoll();   // first: the mesh loop can block for seconds and overrun the CDC FIFO
@@ -1619,8 +1711,9 @@ void loop() {
       lastSeen = serial;
       const int chan = chipChannel(g_chatSel);
       if (chan >= 0) om::meshClearUnread(chan);
-      g_bubMenu = -1;   // a redraw would otherwise leave an overlay pointing at stale geometry
-      g_bubInfo = -1;
+      // Deliberately do NOT close the menu or INFO here: both hold the message id, so buildChatView
+      // resolves them to the same message after the ring shifts. It closes one only when its message
+      // has actually fallen out of the 32-message ring.
       om::ui::ChatView v;
       buildChatView(v);
       const int grown = om::ui::chatContentHeight(v) - g_chatTotal;

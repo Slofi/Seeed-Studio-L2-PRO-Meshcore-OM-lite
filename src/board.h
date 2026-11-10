@@ -84,6 +84,7 @@ struct GpsState {
   double lon = 0.0;
   uint32_t bytes = 0;      // bytes received on the UART (0 = the module is not talking to us)
   uint32_t sentences = 0;  // complete NMEA lines
+  uint32_t timeEpoch = 0;  // latest UTC time from RMC/ZDA, 0 = none yet
 };
 void gpsBegin(bool swapPins = false);
 void gpsPoll(GpsState& out);

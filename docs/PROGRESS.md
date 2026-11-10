@@ -1918,3 +1918,139 @@ host test proves the API contract, not SD timing.
 - Built in the sandbox (exit 0, RAM 164,472 B, flash 1,701,681 B), tests exit 0, reviewed binary flashed (1,702,048 B).
 - `history "ERA-3 (SI)" 5` and `history "Don't Panic" 5`: answered, no panic (the stored log includes Filip's "HISTORY TEST 15.15" from ERA-3). DS's cause (loop-task stack: ~7.3 KB of the 8 KB used by the nested command + FatFs chain) fits both panics; the command now runs after otaPoll() returns.
 - Settings: General > Node opens the Node page (Name / Public key / Share position) (`docs/shots/2026-11-10-1517-settings-node.png`); the Chat tab's "THIS CHAT" row opens the chat dropdown inside Settings (`docs/shots/2026-11-10-1518-settings-chat-picker.png`). Seen: the node-name editor is still the old upper-case grid, not the chat keyboard (restyle ticket).
+
+## 2026-11-10 15:40 (DeepSeek): EST-351 the map and RPTR move to the new layer; the loop stack is 16 KB
+
+Built on `7665823`. Nothing in `lib/` touched, `.git` untouched, nothing committed. Read REBUILD.md,
+the end of this log, `ui-mock/index.html` (the L2 Map and RPTR screens, the modal/sheet/toast styles)
+and the Nodes/Settings screens first. **This run is deliberately partial**: the map, the RPTR tab and
+the loop stack are done; the two old text grids in Settings (name editor, channel key) are not, and
+the audit says so. The build is clean and the host tests pass.
+
+**1. Map: the mock's chrome over the same tiles.**
+- `src/ui/map_chrome.{h,cpp}` is pure C++: `mapChromeFor(L, zoom, lat, selected)` hands out the chip,
+  the two zoom keys, the lock key, the scale rail and the callout; `mapHitAt()` answers with the same
+  rectangles. `mapMetresPerPixel()` is Web-Mercator `156543.03392 * cos(lat) / 2^z`; the scale takes
+  the largest 1-2-5 distance whose bar fits 92 px, and its labels are the half and the full distance
+  ("500m" / "1km"), not ages.
+- `src/ui/screen_map.{h,cpp}` draws one frame: `om::mapRender()` (tiles, SD reads, pan and the
+  attribution, unchanged), contact markers coloured by MeshCore type (client blue, repeater green,
+  room amber, sensor dim), our own fix as the white dot with the gold halo, the "offline · z13" chip,
+  `+` / `-` / lock bottom-right, the scale bottom-left and the tapped marker's callout (dark gold,
+  gold edge, name plus one mono line of type, path and time). It ends with the status bar and tab
+  bar; the toast is the frame overlay.
+- `map.cpp` no longer draws any chrome: the in-canvas zoom buttons, the debug state line and the old
+  marker dot are gone; it gained `mapProject(lat, lon, x, y)` for the chrome. The tile loader, the
+  PSRAM cache and the z18 2x path are untouched. The no-pack case is a normal empty state.
+- The map pans with the finger as before; a drag drops the follow lock and closes the callout. Lock
+  recentres on the GPS fix on every draw. Tapping a marker opens its callout; tapping empty map
+  closes it. "On map" from a message or a node opens the map at that contact with its callout already
+  selected.
+
+**2. RPTR: the mock's list and repeater page, honest about the rest.**
+- `src/ui/rptr_layout.{h,cpp}` (pure) owns the header, the Scan chip, the 34 px rows, the list scroll
+  clamp and the detail page's back key, status card, login field/button and note; `rptrHitAt()` is the
+  one hit test. `src/ui/screen_rptr.{h,cpp}` draws the list (green dot, name, path and SNR) and the
+  page (back, name, "repeater · path · time", a five-line status card, the password field and Login).
+- The list is the real contact table filtered to `ADV_TYPE_REPEATER`; the status card shows what the
+  mesh knows today (contact, path, last heard time, hops, public-key prefix). Scan and Login say
+  "not built yet" in a 5 s toast; the note says the remote admin set (overview, radio, regions,
+  neighbours, actions) is not built. "Admin" from a repeater's Nodes menu opens its page directly.
+  The list scrolls with the finger and snaps back like every other list.
+
+**3. Loop task stack (ticket addition b).** `main.cpp` calls `SET_LOOP_TASK_STACK_SIZE(16384)` at
+file scope (Arduino-ESP32's own macro; a `-D` flag collides with Arduino.h's function-like
+definition). `status` now prints `loop_stack_free=<high-water mark> loop_stack_size=16384`; the
+`[hb]` line already printed the mark. `test_build_flags.py` fails if the macro is missing/duplicated,
+if it moves back into a `-D` flag, or if `status` loses either field.
+
+**Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS. RAM **170,384 B** of
+327,680 (52.0 %, previous 164,472, **+5,912 B**), flash **1,705,169 B** of 6,553,600 (26.0 %,
+previous 1,701,681, **+3,488 B**), `firmware.bin` **1,705,536 B** (previous 1,702,048, **+3,488 B**).
+Only the two pre-existing RadioLib warnings. The RAM is the map/RPTR view models (32 markers, 32
+repeater rows) plus the new drawing code; flash is the two new screens and their pure layout units.
+
+**Tests**: `test/host/run.sh` exit 0 (**20 C++ binaries + 5 Python checks**). New
+`test_est351.cpp`: the Mercator scale (one zoom step halves it, cos(lat) at 46 degrees, a 1-2-5
+distance that fits 92 px, the 500m/1km and 250m/500m label pairs); the chrome rectangles (the map
+above the tab bar, the chip under the status bar, the three keys right-aligned and non-overlapping in
+lock/+/- order, the scale at the bottom left, the callout 8 px in from both edges); the hit test (each
+key, the callout, empty map, the status bar answering None, a marker winning over a key, the 11 px
+marker radius); the RPTR list (header/list split, 34 px rows, visible-part row hits under scroll, the
+scroll clamp) and the detail page (back, card, login field and button, note inside the screen).
+`test_build_flags.py` gained the loop-stack checks.
+
+**Audit (the ticket's target 0, measured on this tree).**
+- Calls in `main.cpp` that draw straight to the panel: **0**. `rg "fillRect|drawString|fillScreen|
+  drawFastHLine" src/main.cpp` returns nothing; `om_display()` in `main.cpp` is only passed to
+  `useAppFont` at boot. The old `drawTabs`, `drawStatus`, `drawTopBar`, `drawInfoPanel`,
+  `drawDirectToast` and their `kGold/kDim/kBg/kTabY/kTabW/kTabs` are deleted, together with the old
+  map/rptr tap branches that repeated those numbers.
+- Hard-coded colours outside `src/ui/theme.h`: **1**, and it is allowed: `board.cpp:259`
+  `s_frame.fillScreen(0x0000)` in the frame probe. No `TFT_*`, no RGB565 literal, no named local
+  palette in any screen (`rg` for `TFT_|0xF800|0x2945|0x0000` finds only that probe; the other
+  0xFFFFFFFF hits are CRC sentinels, not colours). `map.cpp`'s old `kGold`/`kCredit` are now
+  `theme.h`'s `kAcc`/`kMapCredit`.
+- Screens that draw without `omFrameBegin()`: **0**. `map.cpp` and `ui/chat_selector.cpp` contain
+  drawing calls but are only ever called from a screen that already opened the frame; every other
+  drawing file opens its own. The only push to the panel is `board.cpp`'s `omFrameEnd()` (allowed).
+- **Boot screen:** there was none to restyle. `boardBegin()` lights the panel and the first frame
+  drawn is the new Nodes screen; the old top bar was deleted with the rest.
+- **`main.cpp` is 4,165 lines** (previous 4,084, +81 net). Target setup/loop/dispatch is **not met**:
+  the file still holds the app state, the settings row builders, the USB command shell and the new
+  map/RPTR view models. Drawing and every coordinate are out of it (0 draw calls), but the data
+  building is not. The next cut is `buildSettingsRows` (375 lines) and the USB command cases.
+
+**What is left from this ticket, plainly.**
+- **Ticket addition (a) is NOT done**: the node-name editor and the channel-key entry still draw the
+  old upper-case 4x10 / 5x13 grids in `ui/screen_settings.cpp`. They need the chat keyboard sheet
+  (letters, 123, the s/c/z long press) with their own allowed characters; that means a shared
+  keyboard-sheet widget or exposing `drawSheet` from `screen_chat.cpp`, plus its own host tests. This
+  is the one screen family still in the old style.
+- Every overlay the ticket lists except those editors is already on the new layer from EST-336/344/
+  347: the message menu and INFO panel (`message_sheet.cpp`, `screen_node_info.cpp`), toasts as frame
+  overlays for 5 s, the confirm pages and the add-channel sheet (`screen_settings.cpp`). They were
+  reviewed, not rewritten.
+- Map features the mock draws but the mesh cannot answer yet are absent rather than faked: traces,
+  the MSGS rail, and "share position" from the map. The lock only follows our own GPS fix.
+- RPTR login, Scan and the remote admin set are "not built yet"; the page and list exist and work.
+
+**Exact `tools/cmd.py` steps for Claude** (one reader on the port; `OM_PORT=/dev/ttyACM0`;
+`tools/shot.py docs/shots/<name>.png` after each step):
+1. Flash `firmware.bin` (1,705,536 B). `tools/cmd.py status` -> ends with
+   `loop_stack_free=NNNN loop_stack_size=16384`; note both.
+2. **Map chrome:** `tap 160 227` (Map tab) -> shot `2026-11-10-est351-map`. The top chip must read
+   `offline · z<zoom>`, the scale bottom-left must show two labels, and `+`/`-`/lock are bottom-right.
+3. **Zoom:** `tap 302 169` (`+`) -> shot `...-map-zoom-in`; `tap 302 197` (`-`) -> shot
+   `...-map-zoom-out`. `status` is unchanged; the serial prints `[map] zoom N`.
+4. **Pan:** `drag 160 100 160 150 400` -> shot `...-map-panned`; the callout must be closed and the
+   lock off. `tap 302 141` (lock) with a GPS fix -> shot `...-map-lock`; the map recentres and the
+   lock key is gold.
+5. **Node callout:** Nodes tab, long-press a contact (`tools/cmd.py` has no long-press command today;
+   use the Nodes menu's "On map" from the glass or send a message and use the message sheet's "On
+   map"). The map opens centred on that contact; `tap 160 107` (its marker, which is at the view
+   centre) -> shot `...-map-callout`. The panel names the node, its type, path and time.
+6. **RPTR list:** `tap 280 227` (RPTR tab) -> shot `...-rptr-list`. The header says
+   `REPEATERS IN RANGE` with a Scan chip; every repeater contact is a row with path and SNR.
+   `tap 283 39` (Scan) -> a `Scan: not built yet` toast, no fake scan.
+7. **RPTR page:** `tap 160 69` (first row) -> shot `...-rptr-page`: back, name, `repeater · path ·
+   time`, the five-line status card, the password field and Login. `tap 274 180` (Login) -> a
+   `Login: not built yet` toast. `tap 40 39` (back) -> the list. A list longer than the body:
+   `drag 160 180 160 80 400` then `tap 160 69` opens the right row, and the release snaps back.
+8. **Loop stack:** after the RPTR and map steps, `tools/cmd.py status` again. `loop_stack_size=16384`
+   and `loop_stack_free` must stay well above the EST-350 number (the point of the change).
+9. **Old grids (known gap):** Settings > General > Node > Name and Settings > Channels > a channel >
+   Key still show the old grids. Do not shoot them as new; the next ticket replaces them.
+10. **Toasts:** any map/RPTR toast lasts 5 s; a touch during it dismisses it and is spent (the next
+    press acts). The map's callout is a frame overlay like the toast, so a redraw does not wipe it.
+
+**Could not check** (no device, no card, no radio in the sandbox): the glass, the real marker
+positions, the scale's readability over a busy tile, the callout's fit with a long contact name, the
+loop task's real high-water mark on the device, and the map still panning on the same tiles. The host
+tests prove the rectangles and the arithmetic, not the panel.
+
+## 2026-11-10 15:35 (Claude): EST-351 on the device
+- Built in the sandbox (exit 0, RAM 170,384 B, flash 1,705,169 B), tests exit 0, reviewed binary flashed (1,705,536 B). `status`: loop_stack_size=16384, loop_stack_free=11160.
+- Map (`docs/shots/2026-11-10-1534-map-colours.png`): the new chrome is there (offline · z13 chip, locate / + / - bottom-right, scale bottom-left), but **the tile colours are wrong** (magenta/cyan noise on the topo map): most likely the decoded RGB565 byte order does not match the off-screen frame now that the map draws into it (the frame stores byte-swapped pixels, EST-? "frame probe 89ed -> push swap ON"). The scale's "500" and "1km" overlap.
+- RPTR (`docs/shots/2026-11-10-1534-rptr.png`): "REPEATERS IN RANGE" + Scan, one row (SI-KP-Slavnik), second line "--".
+- Not done (DS said so): the name/key editors still use the old grids; main.cpp 4,165 lines.

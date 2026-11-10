@@ -59,6 +59,7 @@ constexpr uint16_t kReplyInk  = rgb565(0xbcd8f0);
 constexpr uint16_t kTagInk    = rgb565(0x9ad7ff);
 constexpr uint16_t kMapBg     = rgb565(0x191816);  // mock .mapwrap
 constexpr uint16_t kMapSide   = rgb565(0x11100e);  // mock .map-side
+constexpr uint16_t kMapCredit = rgb565(0x727a86);  // tile attribution, readable on a dark map
 constexpr uint16_t kWarnBg    = rgb565(0x2a1e10);
 constexpr uint16_t kWarnLine  = rgb565(0x5c4320);
 constexpr uint16_t kWarnInk   = rgb565(0xffd08a);

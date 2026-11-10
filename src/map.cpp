@@ -14,6 +14,7 @@
 #include <math.h>
 
 #include "board.h"
+#include "ui/theme.h"
 
 namespace om {
 // om_display() is declared in board.h (it can hand out the off-screen frame instead of the panel).
@@ -27,9 +28,11 @@ constexpr uint32_t kRec = 24;
 constexpr int kCache = 8;
 constexpr int kZMin = 9;
 constexpr int kZMax = 18;   // data to z17; 18 == z17 magnified 2x
-// Same gold as the UI (#e8b04f); this file does not include main.cpp.
-constexpr uint16_t kGold = (29 << 11) | (44 << 5) | 9;
-constexpr uint16_t kCredit = (14 << 11) | (28 << 5) | 14;   // quiet grey, still legible
+// Colours come from ui/theme.h (EST-351): no palette here.
+using ui::kBad;
+using ui::kInk;
+using ui::kMapBg;
+using ui::kMapCredit;
 const char* kIdxPath = "/maps/slo/tiles.idx";
 const char* kPackPath = "/maps/slo/tiles.pack";
 
@@ -338,6 +341,21 @@ void mapSetMarker(double lat, double lon) {
 
 void mapClearMarker() { s_marker = false; }
 
+// EST-351: the map chrome projects a contact or our own fix into the same 320x214 view the tiles
+// use. False only when the pack is not open; a point outside the view is still projected (the
+// caller decides whether it is worth drawing).
+bool mapProject(double lat, double lon, int& x, int& y) {
+  if (!s_ready) return false;
+  const bool mag = (s_z == 18);
+  const int rz = mag ? 17 : s_z;
+  const double scale = mag ? 2.0 : 1.0;
+  const double cpx = lonToXf(s_cLon, rz) * kTile;
+  const double cpy = latToYf(s_cLat, rz) * kTile;
+  x = (int)lround((lonToXf(lon, rz) * kTile - cpx) * scale + kViewW / 2.0);
+  y = (int)lround((latToYf(lat, rz) * kTile - cpy) * scale + kViewH / 2.0);
+  return true;
+}
+
 void canvasFill(uint16_t* c, int w, int x, int y, int rw, int rh, uint16_t color) {
   for (int yy = y; yy < y + rh; ++yy) {
     if (yy < 0) continue;
@@ -353,11 +371,7 @@ void canvasFill(uint16_t* c, int w, int x, int y, int rw, int rh, uint16_t color
 void mapRender() {
   auto* d = om_display();
   if (!s_ready) {
-    d->fillRect(0, 0, kViewW, kViewH, 0x0000);
-    d->setTextColor(0xF800, 0x0000);
-    d->setTextSize(1);
-    d->setTextDatum(lgfx::textdatum_t::top_left);
-    d->drawString("map: pack not open (see serial)", 8, 96);
+    d->fillRect(0, 0, kViewW, kViewH, kMapBg);
     return;
   }
 
@@ -403,12 +417,8 @@ void mapRender() {
     }
   }
 
-  // Zoom buttons live IN the canvas: drawing them after the push made them blink on every pan.
-  canvasFill(s_canvas, kViewW, 262, 12, 24, 24, kGold);
-  canvasFill(s_canvas, kViewW, 290, 12, 24, 24, kGold);
-  canvasFill(s_canvas, kViewW, 268, 23, 12, 2, 0x2945);   // minus
-  canvasFill(s_canvas, kViewW, 296, 23, 12, 2, 0x2945);   // plus: horizontal ...
-  canvasFill(s_canvas, kViewW, 301, 18, 2, 12, 0x2945);   // ... and vertical stroke
+  // EST-351: the zoom / lock keys, the markers and the scale are ui/screen_map.cpp's chrome,
+  // drawn over this canvas inside the same frame. The canvas holds tiles and nothing else.
 
   // One pushImage is capped by the 16-bit SPI transfer length (~64 KB, ~100 rows at 320 px).
   for (int yy = 0; yy < kViewH; yy += 16) {
@@ -419,28 +429,12 @@ void mapRender() {
   d->setTextDatum(lgfx::textdatum_t::top_left);
   d->setTextSize(1);
   // Attribution is a licence requirement; one-argument setTextColor = transparent background.
-  d->setTextColor(kCredit);
+  d->setTextColor(kMapCredit);
+  d->setTextSize(1);
   d->drawString("Esri, HERE, Garmin, OSM", 4, kViewH - 13);
 
-  if (s_marker) {
-    const int mx = (int)lround((lonToXf(s_mLon, rz) * kTile - left) * scale);
-    const int my = (int)lround((latToYf(s_mLat, rz) * kTile - top) * scale);
-    if (mx >= 3 && mx < kViewW - 3 && my >= 3 && my < kViewH - 3) {
-      d->fillCircle(mx, my, 4, kGold);
-      d->drawCircle(mx, my, 6, 0x0000);
-    }
-  }
-
-  // On-screen state line: it answers "why is it black" without a serial session.
-  {
-    char dbg[64];
-    if (mag) snprintf(dbg, sizeof(dbg), "z17 x2 %d/%d %dt", tx0, ty0, drawn);
-    else snprintf(dbg, sizeof(dbg), "z%d %d/%d %dt", s_z, tx0, ty0, drawn);
-    d->setTextDatum(lgfx::textdatum_t::top_left);
-    d->setTextSize(1);
-    d->setTextColor(drawn ? kCredit : 0xF800);
-    d->drawString(dbg, 4, 2);
-  }
+  // The on-screen state line is gone (EST-351): the chip in ui/screen_map.cpp says the zoom, and
+  // the serial still says whether any tile was drawn.
   if (drawn == 0) {
     Serial.printf("[map] BLANK z%d (render z%d) tx %d..%d ty %d..%d\n", s_z, rz, tx0, tx1,
                   ty0, ty1);

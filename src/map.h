@@ -23,6 +23,9 @@ void mapZoomBy(int delta);                        // clamp inside the pack's ran
 int mapZoom();
 
 void mapScreenToLatLon(int x, int y, double& lat, double& lon);
+// Project a geographic point into the 320x214 view the tiles use (EST-351). False when the pack
+// is not open; a point outside the view is still projected, the caller filters it.
+bool mapProject(double lat, double lon, int& x, int& y);
 void mapSetMarker(double lat, double lon);
 void mapClearMarker();
 bool mapHasMarker();

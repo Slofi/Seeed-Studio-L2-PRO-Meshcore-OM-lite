@@ -22,6 +22,7 @@ INI = ROOT / "platformio.ini"
 MYMESH = ROOT / "lib" / "meshcore_companion" / "MyMesh.h"
 BASECHAT = ROOT / "lib" / "meshcore" / "helpers" / "BaseChatMesh.h"
 MESHLINK = ROOT / "src" / "mesh_link.cpp"
+MAIN = ROOT / "src" / "main.cpp"
 
 EXPECTED = 100
 
@@ -95,6 +96,23 @@ def main() -> int:
             failures += 1
     else:
         print("build flags: lib/meshcore/helpers/BaseChatMesh.h is missing")
+        failures += 1
+
+    # EST-351: the loop task's stack is set through Arduino's own macro at file scope (a -D flag
+    # would collide with Arduino.h's function-like definition) and status prints the high-water mark.
+    if MAIN.exists():
+        main_text = MAIN.read_text()
+        if main_text.count("SET_LOOP_TASK_STACK_SIZE(16384)") != 1:
+            print("build flags: src/main.cpp must call SET_LOOP_TASK_STACK_SIZE(16384) exactly once")
+            failures += 1
+        if "loop_stack_free=" not in main_text or "loop_stack_size=" not in main_text:
+            print("build flags: status lost loop_stack_free / loop_stack_size")
+            failures += 1
+        if any("SET_LOOP_TASK_STACK_SIZE" in f for f in build_flags):
+            print("build flags: SET_LOOP_TASK_STACK_SIZE must be in source, not a -D flag")
+            failures += 1
+    else:
+        print("build flags: src/main.cpp is missing")
         failures += 1
 
     # The compile-time guard that names the failure if the define ever disappears.

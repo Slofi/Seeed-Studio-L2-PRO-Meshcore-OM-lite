@@ -40,8 +40,12 @@
 #include "ui/long_press.h"
 #include "ui/new_node.h"
 #include "ui/node_info.h"
+#include "ui/map_chrome.h"
+#include "ui/rptr_layout.h"
 #include "ui/screen_chat.h"
 #include "ui/screen_node_info.h"
+#include "ui/screen_map.h"
+#include "ui/screen_rptr.h"
 #include "ui/screen_nodes.h"
 #include "ui/screen_settings.h"
 #include "ui/settings_prefs.h"
@@ -52,13 +56,15 @@
 
 // om_display(), omFrameBegin/End() and omTouch() come from board.h.
 
-// OM's gold: #e8b04f -> RGB565 (R 232>>3=29, G 176>>2=44, B 79>>3=9)
-static constexpr uint16_t kGold = (29 << 11) | (44 << 5) | 9;   // 0xED89
-static constexpr uint16_t kDim = (15 << 11) | (30 << 5) | 15;   // #787878
-static constexpr uint16_t kBg = (5 << 11) | (10 << 5) | 5;      // ~#282828 grey
-static constexpr int kTabY = 214;
-static constexpr int kTabW = 80;
-static const char* kTabs[4] = {"NODES", "CHAT", "MAP", "RPTR"};
+// EST-351: the loop task's stack. The USB command path measured ~7.3 KB of the 8 KB default (EST-350);
+// one FatFs call nested another 1 KB deep would have been enough. Arduino-ESP32 takes this as a
+// function definition at file scope (it overrides the weak getArduinoLoopTaskStackSize), not as a
+// -D flag: Arduino.h defines the same name as a macro. status prints the high-water mark and this size.
+SET_LOOP_TASK_STACK_SIZE(16384);
+static constexpr unsigned kLoopStackSize = 16384;
+
+// EST-351: the old palette and the old tab bar are gone from this file. Every colour, size and
+// rectangle comes from src/ui/ (theme.h, layout.h and the screen's own layout header).
 // Ten chimes: two-note intervals, three-note arpeggios and a four-note run. Short, distinct and
 // synthesised, so no WAV files are needed; the picker lists them by their notes.
 struct Chime {
@@ -115,6 +121,7 @@ static char g_setEditText[64] = "";
 static const char* g_setOkLabel = "OK";
 static int g_chanPage = 0;           // the channel whose page is open
 static bool g_deleteArmed = false;   // Delete needs a second tap, as today
+static char g_editBuf[20];           // the name editor's text (EST-351 still uses the old grid)
 static bool g_editNew = false;       // the name editor is naming a NEW channel
 static int g_editCh = 0;             // the channel the name editor renames
 static int g_addKind = 0;            // 1 create private, 2 join private, 3 join #tag
@@ -369,120 +376,87 @@ static void saveTimeFloor() {
 
 // ----------------------------------------------------------------------------- drawing
 
-// One thin bar for every page: 26 px, so the content gets the other 214.
-static void drawTabs() {
-  auto* d = om::om_display();
-  d->fillRect(0, kTabY, 320, 240 - kTabY, kBg);
-  d->drawFastHLine(0, kTabY, 320, kDim);
-  for (int i = 0; i < 4; ++i) {
-    const bool on = (i == g_tab);
-    d->setTextDatum(lgfx::textdatum_t::middle_center);
-    d->setTextSize(1);
-    d->setTextColor(on ? kGold : kDim, kBg);
-    d->drawString(kTabs[i], i * kTabW + kTabW / 2, kTabY + 14);
-    if (on) d->fillRect(i * kTabW + 30, kTabY + 23, kTabW - 60, 2, kGold);
-    // EST-342: the new-node dot, on the old tab bar too (Map and RPTR still use it), so the notice
-    // is visible wherever the user is.
-    if (i == 0 && g_newNodeDot) {
-      d->fillCircle(i * kTabW + kTabW / 2 + 9, kTabY + 7, om::ui::kNewDotR + 1, kBg);
-      d->fillCircle(i * kTabW + kTabW / 2 + 9, kTabY + 7, om::ui::kNewDotR, om::ui::kAcc);
+// ----------------------------------------------------------------------------- Map (EST-351)
+static void buildStatus(om::ui::StatusModel& s);
+// The tiles and the pan live in map.cpp; the chrome is ui/screen_map.cpp. This builds the ONE view
+// the drawing and the hit test share, from the real contact table and our own fix.
+static bool g_mapLock = false;          // follow our own position
+static char g_mapSelName[32] = "";      // the marker whose callout is open ("" = none)
+static char g_mapNodeStamp[24] = "";    // its "last heard" text, built once per draw
+
+static const char* contactTypeName(uint8_t type) {
+  return type == 2 ? "repeater" : (type == 3 ? "room" : (type == 4 ? "sensor" : "client"));
+}
+
+static void appendInfoLine(om::ui::RptrView& v, const char* label, const char* value) {
+  if (v.infoCount >= om::ui::kRptrInfoLines) return;
+  snprintf(v.info[v.infoCount], sizeof(v.info[0]), "%s|%s", label, value);
+  ++v.infoCount;
+}
+
+static void buildMapView(om::ui::MapView& v) {
+  v = om::ui::MapView();
+  buildStatus(v.status);
+  v.zoom = om::mapZoom();
+  v.locked = g_mapLock;
+  v.hasFix = g_gps.valid;
+  v.markerCount = 0;
+
+  // Our own position: the white dot with the gold halo.
+  if (g_gps.valid) {
+    int x = 0, y = 0;
+    if (om::mapProject(g_gps.lat, g_gps.lon, x, y) && x >= 0 && x < 320 && y >= 0 && y < 214) {
+      om::ui::MapMarker& m = v.markers[v.markerCount++];
+      m = om::ui::MapMarker();
+      m.x = (int16_t)x;
+      m.y = (int16_t)y;
+      m.type = 1;
+      m.name = om::meshNodeName();
+      m.self = true;
     }
   }
-}
 
-static void drawStatus() {
-  auto* d = om::om_display();
-  d->fillRect(8, 116, 304, 82, kBg);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString(g_sdOk ? "SD  mounted" : "SD  absent", 10, 120);
-  d->setTextColor(TFT_WHITE, kBg);
-  if (g_sdOk && g_packMb) {
-    d->drawString((String("map pack ") + g_packMb + " MB").c_str(), 10, 136);
+#if defined(OM_ENABLE_MESH)
+  static om::MeshContact list[32];
+  const int n = om::meshContactList(list, 32);
+  const uint32_t nowWall = om::timeKeeper().now();
+  const uint32_t nowUp = millis() / 1000;
+  const bool nowReal = om::timeKeeper().realSinceBoot();
+  for (int i = 0; i < n && v.markerCount < om::ui::kMapMaxMarkers; ++i) {
+    if (!list[i].has_pos) continue;
+    int x = 0, y = 0;
+    if (!om::mapProject((double)list[i].lat_e6 / 1e6, (double)list[i].lon_e6 / 1e6, x, y)) continue;
+    if (x < -4 || x >= 324 || y < -4 || y >= 218) continue;
+    om::ui::MapMarker& m = v.markers[v.markerCount++];
+    m = om::ui::MapMarker();
+    m.x = (int16_t)x;
+    m.y = (int16_t)y;
+    m.type = list[i].type;
+    m.name = list[i].name;
+    if (g_mapSelName[0] && strcmp(g_mapSelName, list[i].name) == 0) {
+      m.selected = true;
+      v.callout = true;
+      snprintf(v.calloutTitle, sizeof(v.calloutTitle), "%s", list[i].name);
+      char stamp[24] = "--";
+      om::ui::stampText(stamp, sizeof(stamp),
+                        om::ui::Stamp{list[i].lastmod, list[i].lastmodUp, list[i].lastmodReal},
+                        nowWall, nowUp, nowReal, om::ui::StampForm::DayTime);
+      char path[48] = "";
+      om::meshContactPathText(list[i].name, path, sizeof(path));
+      snprintf(v.calloutLine, sizeof(v.calloutLine), "%s \xC2\xB7 %s \xC2\xB7 %s",
+               contactTypeName(list[i].type), path, stamp);
+    }
   }
-  d->drawString(g_battMv ? (String("battery ") + (g_battMv / 1000.0f) + " V").c_str()
-                         : "battery --", 10, 152);
-  char gps[48];
-  if (g_gps.valid) {
-    snprintf(gps, sizeof(gps), "GPS fix %u sats %.4f,%.4f", g_gps.sats, g_gps.lat, g_gps.lon);
-    d->setTextColor(kGold, kBg);
-  } else if (g_gps.sentences == 0) {
-    snprintf(gps, sizeof(gps), "GPS no data (uart silent)");
-    d->setTextColor(TFT_RED, kBg);
-  } else {
-    snprintf(gps, sizeof(gps), "GPS %u sats - no fix", g_gps.sats);
-    d->setTextColor(kDim, kBg);
-  }
-  d->drawString(gps, 10, 172);
-}
-
-static void drawTopBar(const char* right) {
-  auto* d = om::om_display();
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextColor(kGold);
-  d->setFont(&om::font18);
-  d->drawString("OM LITE", 10, 5);
-  om::useAppFont(d);
-  d->setTextColor(kGold, kBg);
-  d->setTextDatum(lgfx::textdatum_t::top_right);
-  d->drawString(right, 312, 14);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->drawFastHLine(8, 32, 304, kGold);
-}
-
-static int g_mapZoom = 13;
-
-static bool g_mapInfo = false;
-static double g_infoLat = 0.0, g_infoLon = 0.0;
-static const char* g_infoMsg = "";
-static bool g_infoMarked = false;
-
-// The map page gets a thinner bar than the other pages, so the map keeps more height.
-static void drawTabsCompact() { drawTabs(); }
-
-static void drawInfoPanel() {
-  auto* d = om::om_display();
-  d->fillRect(8, 144, 304, 58, kBg);
-  d->drawRect(8, 144, 304, 58, kGold);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString((String(g_infoLat, 5) + ", " + String(g_infoLon, 5)).c_str(), 14, 148);
-  if (g_infoMsg[0]) {
-    d->setTextColor(TFT_RED);
-    d->drawString(g_infoMsg, 14, 164);
-  }
-  d->setTextColor(kGold, kBg);
-  d->drawRect(140, 180, 72, 18, kGold);
-  d->drawRect(218, 180, 72, 18, kGold);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->drawString("MARK", 176, 189);
-  d->drawString("SHARE", 254, 189);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-}
-
-static char g_editBuf[20];
-
-// Some of the old screens draw straight to the panel and never open a frame, so the overlay that
-// omFrameEnd() runs for every framed redraw never gets its turn. Those paths end with this: the
-// active toast is still drawn last, on top of everything (EST-344).
-static void drawDirectToast() {
-  om::ui::drawToastOverlay(om::om_display(), millis());
+#endif
+  if (g_mapSelName[0] && !v.callout) g_mapSelName[0] = 0;
 }
 
 static void drawMapTab() {
-  om::mapRender();
-  auto* d = om::om_display();
-  // The zoom buttons are composited by om::mapRender() so they do not flicker while panning.
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold);
-  d->drawString("SET", 4, 16);
-  drawTabsCompact();
-  if (g_mapInfo) drawInfoPanel();
-  drawDirectToast();
+  // Follow mode: a locked map recentres on our fix before the tiles are composed.
+  if (g_mapLock && g_gps.valid) om::mapSetView(g_gps.lat, g_gps.lon, om::mapZoom());
+  om::ui::MapView v;
+  buildMapView(v);
+  om::ui::mapScreenDraw(v);
 }
 
 static void drawHome();
@@ -1270,9 +1244,9 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
         const double lat = (double)c.lat_e6 / 1e6;
         const double lon = (double)c.lon_e6 / 1e6;
         g_bubMenuSeq = 0;
-        g_mapInfo = false;
+        g_mapLock = false;
+        snprintf(g_mapSelName, sizeof(g_mapSelName), "%s", m.name);
         om::mapSetView(lat, lon, om::mapZoom());
-        om::mapSetMarker(lat, lon);
         Serial.printf("[chat] map %s %.6f,%.6f\n", m.name, lat, lon);
         showTab(2);
         return;
@@ -1445,28 +1419,83 @@ static const char* chatOverlayName(om::ui::ChatOverlay which) {
   }
 }
 
-static void drawRptrTab() {
-  auto* d = om::om_display();
-  d->fillScreen(kBg);
-  drawTopBar("SET");
-  d->setTextDatum(lgfx::textdatum::top_left);
-  d->setTextSize(1);
-  d->setTextColor(kGold, kBg);
-  d->drawString("RPTR", 10, 44);
-  d->setTextColor(TFT_WHITE, kBg);
-  // EST-342: "Log in (RPTR)" opens this tab with its node remembered. The login exchange itself is
-  // still a later ticket, so the tab says exactly that instead of pretending to log in.
-  if (g_rptrNode[0]) {
-    d->drawString((String("node: ") + g_rptrNode).c_str(), 10, 66);
-    d->setTextColor(kDim, kBg);
-    d->drawString("Login exchange: not built yet.", 10, 82);
-  } else {
-    d->drawString("No repeater configured yet.", 10, 66);
-    d->setTextColor(kDim, kBg);
-    d->drawString("Settings > RPTR will manage it.", 10, 82);
+// ----------------------------------------------------------------------------- RPTR (EST-351)
+// The list is the real contact table filtered to MeshCore's ADV_TYPE_REPEATER (2). The repeater
+// page shows what the mesh knows today; login and the remote admin set say "not built yet".
+static bool g_rptrDetail = false;
+static char g_rptrSelName[32] = "";
+static int g_rptrScroll = 0;
+static int g_rptrScroll0 = 0;
+static int g_rptrCount = 0;      // the last build's row count (for the drag clamp)   // finger-down base for the list drag
+
+static void hexPrefix(const uint8_t* key, int n, char* out, size_t cap) {
+  static const char* kHex = "0123456789abcdef";
+  size_t o = 0;
+  for (int i = 0; i < n && o + 2 < cap; ++i) {
+    out[o++] = kHex[key[i] >> 4];
+    out[o++] = kHex[key[i] & 0xF];
   }
-  drawTabs();
-  drawDirectToast();
+  out[o] = 0;
+}
+
+static void buildRptrView(om::ui::RptrView& v) {
+  v = om::ui::RptrView();
+  buildStatus(v.status);
+  v.detail = g_rptrDetail;
+  v.selected = -1;
+  v.scroll = g_rptrScroll;
+#if defined(OM_ENABLE_MESH)
+  static om::MeshContact list[32];
+  const int n = om::meshContactList(list, 32);
+  const uint32_t nowWall = om::timeKeeper().now();
+  const uint32_t nowUp = millis() / 1000;
+  const bool nowReal = om::timeKeeper().realSinceBoot();
+  for (int i = 0; i < n && v.count < om::ui::kRptrMaxItems; ++i) {
+    if (list[i].type != 2) continue;
+    om::ui::RptrItem& it = v.items[v.count++];
+    snprintf(it.name, sizeof(it.name), "%s", list[i].name);
+    char path[28] = "";
+    om::meshContactPathText(list[i].name, path, sizeof(path));
+    char snr[16] = "";
+    if (list[i].adv_snr_known) {
+      snprintf(snr, sizeof(snr), "SNR %d.%d dB", list[i].adv_snr4 / 4,
+               (list[i].adv_snr4 % 4) * 25);
+    }
+    snprintf(it.meta, sizeof(it.meta), "%s%s%s", path, snr[0] ? " \xC2\xB7 " : "", snr);
+    if (g_rptrSelName[0] && strcmp(g_rptrSelName, list[i].name) == 0) {
+      v.selected = v.count - 1;
+      snprintf(v.name, sizeof(v.name), "%s", list[i].name);
+      char stamp[24] = "--";
+      om::ui::stampText(stamp, sizeof(stamp),
+                        om::ui::Stamp{list[i].lastmod, list[i].lastmodUp, list[i].lastmodReal},
+                        nowWall, nowUp, nowReal, om::ui::StampForm::DayTime);
+      snprintf(v.sub, sizeof(v.sub), "repeater \xC2\xB7 %s \xC2\xB7 %s", path, stamp);
+      appendInfoLine(v, "contact", list[i].name);
+      appendInfoLine(v, "path", path);
+      appendInfoLine(v, "last heard", stamp);
+      char hops[16];
+      if (list[i].path_hops < 0) snprintf(hops, sizeof(hops), "unknown");
+      else snprintf(hops, sizeof(hops), "%d", list[i].path_hops);
+      appendInfoLine(v, "hops", hops);
+      char key[20] = "";
+      if (list[i].has_key) hexPrefix(list[i].pub_key, 6, key, sizeof(key));
+      appendInfoLine(v, "public key", key[0] ? key : "unknown");
+    }
+  }
+#endif
+  g_rptrCount = v.count;
+  if (g_rptrSelName[0] && v.selected < 0) {
+    // The contact was removed or is no longer a repeater: leave the page rather than show a ghost.
+    g_rptrSelName[0] = 0;
+    g_rptrDetail = false;
+    v.detail = false;
+  }
+}
+
+static void drawRptrTab() {
+  om::ui::RptrView v;
+  buildRptrView(v);
+  om::ui::rptrScreenDraw(v);
 }
 
 // --------------------------------------------------------------------------------- settings shell
@@ -2755,8 +2784,13 @@ static void showTab(int tab) {
   g_replySeq = 0;
   g_replyName[0] = 0;
   g_selector = false;   // the dropdown belongs to the chat we are leaving
-  g_mapInfo = false;
-  Serial.printf("[tab] %s\n", kTabs[g_tab]);
+  g_mapSelName[0] = 0;
+  if (tab == 3 && g_rptrNode[0]) {
+    // Coming from the Nodes menu's "Admin": open that repeater's page, not the list.
+    snprintf(g_rptrSelName, sizeof(g_rptrSelName), "%s", g_rptrNode);
+    g_rptrDetail = true;
+  }
+  Serial.printf("[tab] %s\n", om::ui::tabLabel((om::ui::Tab)g_tab));
   if (tab == 0) drawHome();
   else if (tab == 1) drawChat();
   else if (tab == 2) drawMapTab();
@@ -2793,9 +2827,9 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
         const double lat = (double)contact.lat_e6 / 1e6;
         const double lon = (double)contact.lon_e6 / 1e6;
         closeNodeSheets();
-        g_mapInfo = false;
+        g_mapLock = false;
+        snprintf(g_mapSelName, sizeof(g_mapSelName), "%s", name);
         om::mapSetView(lat, lon, om::mapZoom());
-        om::mapSetMarker(lat, lon);
         Serial.printf("[nodes] map %s %.6f,%.6f\n", name, lat, lon);
         showTab(2);
       }
@@ -2868,8 +2902,11 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
       return;
     case om::ui::NodeAction::LoginRptr:
       snprintf(g_rptrNode, sizeof(g_rptrNode), "%s", name);
+      snprintf(g_rptrSelName, sizeof(g_rptrSelName), "%s", name);
+      g_rptrDetail = true;
+      g_rptrScroll = 0;
       closeNodeSheets();
-      showTab(3);   // the RPTR tab for that node; the login exchange is a later ticket
+      showTab(3);   // the RPTR page for that node; login itself is still "not built yet"
       return;
     case om::ui::NodeAction::None:
     default:
@@ -2950,74 +2987,96 @@ static void handleTap(int x, int y, bool longPress) {
     return;
   }
 
-  if (!g_settings) {
-    if (g_tab == 2 && y >= 8 && y <= 34 && x <= 60) {
-      openSettings(2, om::ui::SettingsTab::Map);
-    } else if (topRight && g_tab != 2) {
-      openSettings(g_tab == 3 ? 3 : 0,
-                   g_tab == 3 ? om::ui::SettingsTab::Rptr : om::ui::SettingsTab::General);
-    } else if (g_tab == 2 && y >= 8 && y <= 40 && x >= 256) {
-      om::mapZoomBy(x >= 292 ? 1 : -1);
-      g_mapInfo = false;
-      Serial.printf("[map] zoom %d\n", om::mapZoom());
-      drawMapTab();
-    } else if (g_tab == 2) {
-      if (y >= 210) {
-        const int tab = x / kTabW;
-        if (tab >= 0 && tab < 4 && tab != g_tab) {
-          g_tab = tab;
-          g_mapInfo = false;
-          Serial.printf("[tab] %s\n", kTabs[g_tab]);
-          if (g_tab == 2) drawMapTab();
-          else if (g_tab == 1) drawChat();
-          else drawHome();
+  if (!g_settings && g_tab == 2) {
+    const om::ui::Layout& L = om::ui::l2();
+    const int tab = L.tabAt(x, y);
+    if (tab >= 0) { showTab(tab); return; }
+    if (L.gear().contains(x, y)) { openSettings(2, om::ui::SettingsTab::Map); return; }
+    if (L.radioFault().contains(x, y)) { showRadioFaultToast(); return; }
+
+    // The chrome's rectangles and the hit test are one function: no number is repeated here.
+    om::ui::MapView v;
+    buildMapView(v);
+    const om::ui::MapChrome c = om::ui::mapScreenChrome(v);
+    const om::ui::MapHit hit = om::ui::mapHitAt(c, v.markers, v.markerCount, x, y);
+    switch (hit.kind) {
+      case om::ui::MapHitKind::ZoomIn:
+      case om::ui::MapHitKind::ZoomOut: {
+        om::mapZoomBy(hit.kind == om::ui::MapHitKind::ZoomIn ? 1 : -1);
+        g_mapSelName[0] = 0;
+        Serial.printf("[map] zoom %d\n", om::mapZoom());
+        drawMapTab();
+        return;
+      }
+      case om::ui::MapHitKind::Lock: {
+        g_mapLock = !g_mapLock;
+        if (g_mapLock && g_gps.valid) om::mapSetView(g_gps.lat, g_gps.lon, om::mapZoom());
+        Serial.printf("[map] follow %s\n", g_mapLock ? "on" : "off");
+        drawMapTab();
+        return;
+      }
+      case om::ui::MapHitKind::Marker: {
+        const om::ui::MapMarker& m = v.markers[hit.marker];
+        if (m.self) {
+          showToast("Your position");
+          return;
+        }
+        snprintf(g_mapSelName, sizeof(g_mapSelName), "%s", m.name);
+        Serial.printf("[map] select %s\n", g_mapSelName);
+        drawMapTab();
+        return;
+      }
+      case om::ui::MapHitKind::Map:
+      case om::ui::MapHitKind::Callout: {
+        // A tap on empty map closes the callout; a drag is still the pan (below, in the loop).
+        if (g_mapSelName[0]) {
+          g_mapSelName[0] = 0;
+          drawMapTab();
         }
         return;
       }
-      if (g_mapInfo) {
-        if (y >= 178 && y <= 200 && x >= 136 && x <= 214) {
-          g_infoMarked = true;      // keep the pin
-          g_mapInfo = false;
-          g_infoMsg = "";
-          Serial.printf("[map] marked %.6f,%.6f\n", g_infoLat, g_infoLon);
-          drawMapTab();
-        } else if (y >= 178 && y <= 200 && x >= 214 && x <= 292) {
-          g_infoMsg = "share: needs mesh (P3)";
-          drawMapTab();
-        } else if (y < 140) {
-          if (!g_infoMarked) om::mapClearMarker();
-          g_mapInfo = false;
-          drawMapTab();
-        } else {
-          om::mapScreenToLatLon(x, y, g_infoLat, g_infoLon);
-          om::mapSetMarker(g_infoLat, g_infoLon);
-          g_infoMarked = false;
-          g_infoMsg = "";
-          drawMapTab();
-        }
-      } else if (y < 210) {
-        om::mapScreenToLatLon(x, y, g_infoLat, g_infoLon);
-        om::mapSetMarker(g_infoLat, g_infoLon);   // live pin while the panel is open
-        g_infoMarked = false;
-        g_infoMsg = "";
-        g_mapInfo = true;
-        drawMapTab();
-      }
-    } else if (y >= kTabY - 6) {
-      const int tab = x / kTabW;
-      if (tab >= 0 && tab < 4 && tab != g_tab) {
-        g_tab = tab;
-        // Leaving the chat drops any overlay or reply target; they belong to the view we close.
-        g_bubMenuSeq = 0;
-        g_replySeq = 0;
-        g_replyName[0] = 0;
-        Serial.printf("[tab] %s\n", kTabs[g_tab]);
-        if (g_tab == 2) drawMapTab();
-        else if (g_tab == 1) drawChat();
-        else { drawHome(); }
-      }
+      default:
+        return;
     }
-    return;
+  }
+
+  if (!g_settings && g_tab == 3) {
+    const om::ui::Layout& L = om::ui::l2();
+    const int tab = L.tabAt(x, y);
+    if (tab >= 0) { showTab(tab); return; }
+    if (L.gear().contains(x, y)) { openSettings(3, om::ui::SettingsTab::Rptr); return; }
+    if (L.radioFault().contains(x, y)) { showRadioFaultToast(); return; }
+
+    om::ui::RptrView v;
+    buildRptrView(v);
+    const om::ui::RptrLayout r = om::ui::rptrLayoutFor(L, v.detail);
+    const om::ui::RptrHitResult hit = om::ui::rptrHitAt(r, v.detail, v.count, v.scroll, x, y);
+    switch (hit.kind) {
+      case om::ui::RptrHit::Scan:
+        showToast("Scan: not built yet");
+        return;
+      case om::ui::RptrHit::Row:
+        if (hit.row >= 0 && hit.row < v.count) {
+          snprintf(g_rptrSelName, sizeof(g_rptrSelName), "%s", v.items[hit.row].name);
+          g_rptrDetail = true;
+          g_rptrScroll = 0;
+          Serial.printf("[rptr] open %s\n", g_rptrSelName);
+          drawRptrTab();
+        }
+        return;
+      case om::ui::RptrHit::Back:
+        g_rptrDetail = false;
+        g_rptrSelName[0] = 0;
+        g_rptrScroll = 0;
+        drawRptrTab();
+        return;
+      case om::ui::RptrHit::LoginField:
+      case om::ui::RptrHit::LoginButton:
+        showToast("Login: not built yet");
+        return;
+      default:
+        return;
+    }
   }
 
   // Every settings page: tabs, back, rows, steppers and the two text editors, from the view the
@@ -3493,6 +3552,16 @@ void loop() {
           g_nodeScroll = clamped;
           if (g_drag || changed) drawHome();
         }
+        // The repeater list snaps its give back the same way.
+        if (g_tab == 3 && !g_settings && !g_rptrDetail) {
+          const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
+          const int maxScroll = om::ui::rptrMaxScroll(rr, g_rptrCount);
+          const int clamped = g_rptrScroll < 0 ? 0
+                            : (g_rptrScroll > maxScroll ? maxScroll : g_rptrScroll);
+          const bool changed = clamped != g_rptrScroll;
+          g_rptrScroll = clamped;
+          if (g_drag || changed) drawRptrTab();
+        }
         // The settings list's give is snapped back the same way; the last 60 ms of a fast drag may
         // not have been drawn, so the final position is always drawn here.
         if (g_settings) {
@@ -3521,6 +3590,7 @@ void loop() {
     g_setScroll0 = g_setScroll;
     g_setSelScroll0 = g_setSelScroll;
     g_nodeScroll0 = g_nodeScroll;
+    g_rptrScroll0 = g_rptrScroll;
     g_drag = false;
     g_acted = false;
     g_nodeHoldArmed = false;
@@ -3703,14 +3773,24 @@ void loop() {
         g_chatScroll = next;
         if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
       } else if (g_tab == 2) {
-        // Pan the map; redraw at most every ~60 ms (tiles come from the cache).
-        g_mapInfo = false;
+        // Pan the map; redraw at most every ~60 ms (tiles come from the cache). Dragging drops a
+        // follow lock and closes the callout, exactly as the mock says.
+        g_mapSelName[0] = 0;
+        g_mapLock = false;
         om::mapPan(g_lastX - (int)x, g_lastY - (int)y);
         g_lastX = x;
         g_lastY = y;
         if (millis() - g_lastRender > 60) {
           g_lastRender = millis();
           drawMapTab();
+        }
+      } else if (g_tab == 3 && !g_rptrDetail) {
+        // The repeater list follows the finger; the release snaps the give back.
+        const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
+        const int next = om::ui::selDragScroll(g_rptrScroll0, dy, om::ui::rptrMaxScroll(rr, g_rptrCount));
+        if (next != g_rptrScroll) {
+          g_rptrScroll = next;
+          if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
         }
       } else if (g_tab == 0 && !g_settings) {
         // Nodes scrolls WITH the finger: selDragScroll is the one tested sign (EST-334's bug class,
@@ -4015,13 +4095,14 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       snprintf(reply, cap,
                "[cmd] ok status mesh=%s name=\"%s\" path=%s channels=%d contacts=%d dm=%d "
                "unread=%d clock=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
-               "hist_worst_us=%lu hist_dropped=%lu loop_stack_free=%u",
+               "hist_worst_us=%lu hist_dropped=%lu loop_stack_free=%u loop_stack_size=%u",
                om::meshLinkReady() ? "up" : "down", name, path, om::mcChannelCount(), g_nodeCount,
                om::meshDmCount(), unreadTotal(),
                om::timeSourceName(om::timeKeeper().source()),
                !hs.ready ? "off" : (hs.sd ? "sd" : "spiffs"), (unsigned long)hs.bytes, hs.slots,
                (unsigned long)hs.records, (unsigned long)hs.worstFlushUs,
-               (unsigned long)hs.dropped, (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+               (unsigned long)hs.dropped, (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+               kLoopStackSize);
       return;
     }
 

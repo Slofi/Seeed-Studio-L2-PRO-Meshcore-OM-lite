@@ -37,7 +37,8 @@ BIN16="$(mktemp /tmp/om-lite-emoji.XXXXXX)"
 BIN17="$(mktemp /tmp/om-lite-est346.XXXXXX)"
 BIN18="$(mktemp /tmp/om-lite-settings.XXXXXX)"
 BIN19="$(mktemp /tmp/om-lite-history.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19"' EXIT
+BIN20="$(mktemp /tmp/om-lite-est351.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -116,6 +117,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_settings.cpp \
 # last record (detected and repaired), update records applied on load, backwards paging, rotation to
 # .old, unread/seen across a reload, the SPIFFS fallback and the chat ids.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_history.cpp -o "$BIN19"
+# EST-351: the map chrome's scale arithmetic, key rectangles and hit test; the RPTR list and page.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est351.cpp \
+  ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp -o "$BIN20"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -133,3 +137,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_history.cpp -o "$BIN1
 "$BIN17"
 "$BIN18"
 "$BIN19"
+"$BIN20"

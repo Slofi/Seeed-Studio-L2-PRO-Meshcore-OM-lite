@@ -64,11 +64,30 @@ struct KeyboardState {
 // encodes it, so the mapping and the composer budget never disagree about the bytes.
 uint32_t accentCodePoint(char key, bool shift);
 
+// EST-352: the one shared keyboard sheet, used by the chat composer and by the Settings text
+// editors. Each FIELD says which characters it accepts, how many bytes it holds, and whether the
+// accented s/c/z long press and the emoji page belong to it. The key rows are still the same sheet
+// (letters, 123, Del, Send); a field only filters the character keys it cannot accept.
+enum class KeyboardField : uint8_t { Chat = 0, NodeName, Base64Key };
+
+// MeshCore's names: node_name[32] and ChannelDetails::name[32], so 31 bytes. AdvertDataParser::
+// isValidName rejects exactly [ ] \ : , ? * and accepts the rest of printable ASCII.
+constexpr int kKeyboardNameMaxBytes = 31;
+// A channel key is 16 bytes; base64 of 16 bytes is 22 significant chars plus "==", 24 in all.
+constexpr int kKeyboardBase64MaxBytes = 24;
+
+bool keyboardAllowsChar(KeyboardField field, char c);
+int keyboardMaxBytes(KeyboardField field);           // 0 for Chat (its own draft budget applies)
+bool keyboardAcceptsBytes(KeyboardField field, int usedBytes, int addBytes);
+bool keyboardAccents(KeyboardField field);           // the s/c/z long press
+bool keyboardEmoji(KeyboardField field);             // the smiley key / emoji page
+
 // The four key rows of the sheet: 10/9/9/3 keys in letters, 10/10/10/2 in numbers. Labels are the
 // device keyboard's own characters (QWERTZ letters as today) with the mock's row structure. Glyphs
 // the ASCII-only faces do not carry (the mock's shift arrow and backspace) are drawn as vectors by
-// screen_chat.cpp; the label stays empty for Del.
-int keyRow(bool nums, int row, KeyDef* out);
+// ui/widgets.cpp; the label stays empty for Del. A non-Chat field drops the character keys it does
+// not accept (and the space / emoji key when the field has no use for them).
+int keyRow(bool nums, int row, KeyDef* out, KeyboardField field = KeyboardField::Chat);
 
 struct ChatLayout {
   Rect head;        // the header row: the whole row toggles the selector
@@ -96,10 +115,13 @@ struct KeyHit {
   int col = -1;
 };
 
-ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector);
+ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector,
+                         KeyboardField field = KeyboardField::Chat);
 
-// The key under (x, y), or {-1,-1}. The caller has already clamped into the screen.
-KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y);
+// The key under (x, y), or {-1,-1}. The caller has already clamped into the screen. `field` must be
+// the same one chatLayoutFor() built the rectangles with.
+KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y,
+             KeyboardField field = KeyboardField::Chat);
 
 // A touch inside the keyboard sheet never closes it (only the fingers on a key, the draft, or a tap
 // on the sheet's own header/close do something). Only a touch ABOVE the sheet closes it. Plain

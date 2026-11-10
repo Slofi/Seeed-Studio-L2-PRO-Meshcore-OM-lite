@@ -3,6 +3,7 @@
 // proves the rectangles and the hit test; screen_rptr.cpp only fills them with the mock's look.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "layout.h"
@@ -36,6 +37,18 @@ struct RptrRow {
 };
 
 RptrLayout rptrLayoutFor(const Layout& L, bool detail);
+
+// EST-352: the row's second line. It is built from facts that exist, each NAMED: the last-heard
+// TIME (never a bare age here), the SNR, the path (the route MeshCore's advert took). An unknown
+// path ("--" from decodeOutPathLen) and an unknown time are dropped rather than printed as a lone
+// dash, so a row with nothing to say is one line instead of a puzzle. Empty `out` means: draw no
+// second line at all.
+struct RptrRowFacts {
+  const char* path = "";    // "direct", "a1 > b2", or "--" when the encoded path is unknown
+  const char* heard = "";   // already formatted by stampText: "14:02", "Mon 14:02", or "--"
+  const char* snr = "";     // "SNR 7.5 dB", empty when the advert carried none
+};
+void rptrRowMeta(char* out, size_t cap, const RptrRowFacts& facts);
 
 // The row's rectangle in screen coordinates (may be above/below the list body under scroll).
 RptrRow rptrRow(const RptrLayout& r, int index, int scroll);

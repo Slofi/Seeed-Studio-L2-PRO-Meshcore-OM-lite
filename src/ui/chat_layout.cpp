@@ -21,8 +21,9 @@ const char kNumbers0[] = "1234567890";
 const char kNumbers1[] = "@#$%&*()!-";   // 10 keys, the old row plus "!"
 const char kSymbols[] = "+=/:;!?_";   // 8: the numbers row already carries "-"
 
-int addChars(KeyDef* out, int at, const char* chars) {
+int addChars(KeyboardField field, KeyDef* out, int at, const char* chars) {
   for (int i = 0; chars[i]; ++i) {
+    if (!keyboardAllowsChar(field, chars[i])) continue;
     out[at].label[0] = chars[i];
     out[at].label[1] = 0;
     out[at].units = kKeyUnit;
@@ -38,7 +39,54 @@ void put(KeyDef& k, const char* label, uint8_t units, KeyKind kind) {
   k.kind = kind;
 }
 
+// A character key the field accepts, or nothing. Space is a character here too: a name takes it, a
+// base64 key does not.
+void putChar(KeyboardField field, KeyDef* out, int& n, const char* label, uint8_t units,
+             KeyKind kind) {
+  if (kind == KeyKind::Space && !keyboardAllowsChar(field, ' ')) return;
+  if (kind == KeyKind::Char && !keyboardAllowsChar(field, label[0])) return;
+  put(out[n++], label, units, kind);
+}
+
 }  // namespace
+
+// --- the shared sheet's per-field rules (EST-352) ----------------------------------------------
+bool keyboardAllowsChar(KeyboardField field, char c) {
+  const unsigned char u = (unsigned char)c;
+  switch (field) {
+    case KeyboardField::Base64Key:
+      return (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z') || (u >= '0' && u <= '9') ||
+             u == '+' || u == '/' || u == '=';
+    case KeyboardField::NodeName:
+      // MeshCore's own rule (AdvertDataParser::isValidName): printable ASCII except these seven.
+      if (u < 0x20 || u == 0x7F) return false;
+      switch (u) {
+        case '[': case ']': case '\\': case ':': case ',': case '?': case '*': return false;
+        default: return true;
+      }
+    case KeyboardField::Chat:
+    default:
+      return true;   // the chat's own key table is already the set it offers
+  }
+}
+
+int keyboardMaxBytes(KeyboardField field) {
+  switch (field) {
+    case KeyboardField::NodeName: return kKeyboardNameMaxBytes;
+    case KeyboardField::Base64Key: return kKeyboardBase64MaxBytes;
+    default: return 0;   // chat: the draft budget is composeAllowance()
+  }
+}
+
+bool keyboardAcceptsBytes(KeyboardField field, int usedBytes, int addBytes) {
+  if (usedBytes < 0) usedBytes = 0;
+  if (addBytes <= 0) return true;
+  const int cap = keyboardMaxBytes(field);
+  return cap == 0 || usedBytes + addBytes <= cap;
+}
+
+bool keyboardAccents(KeyboardField field) { return field != KeyboardField::Base64Key; }
+bool keyboardEmoji(KeyboardField field) { return field == KeyboardField::Chat; }
 
 // EST-346: the three keys with a long-press accent. Slovenian: s -> š (U+0161), c -> č (U+010D),
 // z -> ž (U+017E); with shift the capital (Š U+0160, Č U+010C, Ž U+017D). Anything else is 0, so the
@@ -52,55 +100,75 @@ uint32_t accentCodePoint(char key, bool shift) {
   }
 }
 
-int keyRow(bool nums, int row, KeyDef* out) {
+int keyRow(bool nums, int row, KeyDef* out, KeyboardField field) {
   if (out == nullptr || row < 0 || row > 3) return 0;
   int n = 0;
   if (!nums) {
     switch (row) {
       case 0:
-        return addChars(out, 0, kLetters0);
+        return addChars(field, out, 0, kLetters0);
       case 1:
-        return addChars(out, 0, kLetters1);
+        return addChars(field, out, 0, kLetters1);
       case 2:
         put(out[n++], "shift", kKeyUnitWide, KeyKind::Shift);
-        n = addChars(out, n, kLetters2);
+        n = addChars(field, out, n, kLetters2);
         put(out[n++], "", kKeyUnitWide, KeyKind::Del);
         return n;
       default:
         // Filip, 2026-11-10: "where are the dot and comma?" The bottom row is
         // 123, emoji, comma, space, dot, Send. The smiley opens the emoji page.
         put(out[n++], "123", kKeyUnitWide, KeyKind::Mode);
-        put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
-        put(out[n++], ",", kKeyUnit, KeyKind::Char);
-        put(out[n++], "space", kKeyUnitSpace, KeyKind::Space);
-        put(out[n++], ".", kKeyUnit, KeyKind::Char);
+        if (keyboardEmoji(field)) put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
+        putChar(field, out, n, ",", kKeyUnit, KeyKind::Char);
+        putChar(field, out, n, "space", kKeyUnitSpace, KeyKind::Space);
+        putChar(field, out, n, ".", kKeyUnit, KeyKind::Char);
+        put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
+        return n;
+    }
+  }
+  // The key entry is base64: its 123 page is digits plus the three base64 symbols, so "+ / =" are
+  // one tap away without a row of keys the field would have to reject.
+  if (field == KeyboardField::Base64Key) {
+    switch (row) {
+      case 0: return addChars(field, out, 0, kNumbers0);
+      case 1: return addChars(field, out, 0, "+/=");
+      case 2:
+        put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
+        put(out[n++], "", kKeyUnitWide, KeyKind::Del);
+        return n;
+      default:
+        put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
+        put(out[n++], "+", kKeyUnit, KeyKind::Char);
+        put(out[n++], "/", kKeyUnit, KeyKind::Char);
+        put(out[n++], "=", kKeyUnit, KeyKind::Char);
         put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
         return n;
     }
   }
   switch (row) {
     case 0:
-      return addChars(out, 0, kNumbers0);
+      return addChars(field, out, 0, kNumbers0);
     case 1:
-      return addChars(out, 0, kNumbers1);
+      return addChars(field, out, 0, kNumbers1);
     case 2:
       put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
-      n = addChars(out, n, kSymbols);
+      n = addChars(field, out, n, kSymbols);
       put(out[n++], "", kKeyUnitWide, KeyKind::Del);
       return n;
     default:
       // The dot and the comma stay on the 123 page too, and the smiley is always one key away.
       put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
-      put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
-      put(out[n++], "space", kKeyUnitSpace, KeyKind::Space);
-      put(out[n++], ",", kKeyUnit, KeyKind::Char);
-      put(out[n++], ".", kKeyUnit, KeyKind::Char);
+      if (keyboardEmoji(field)) put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
+      putChar(field, out, n, "space", kKeyUnitSpace, KeyKind::Space);
+      putChar(field, out, n, ",", kKeyUnit, KeyKind::Char);
+      putChar(field, out, n, ".", kKeyUnit, KeyKind::Char);
       put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
       return n;
   }
 }
 
-ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector) {
+ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector,
+                         KeyboardField field) {
   ChatLayout g;
   g.osk = osk;
   g.selector = selector;
@@ -157,7 +225,7 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
     y += kOskDraftH + kOskDraftGap;
     for (int r = 0; r < 4; ++r) {
       KeyDef defs[10];
-      const int n = keyRow(nums, r, defs);
+      const int n = keyRow(nums, r, defs, field);
       uint8_t units[10];
       for (int i = 0; i < n; ++i) units[i] = defs[i].units;
       const Rect row{kOskPad, (int16_t)y, innerW, kOskKeyH};
@@ -187,11 +255,11 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
   return g;
 }
 
-KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y) {
+KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y, KeyboardField field) {
   KeyHit hit;
   for (int r = 0; r < 4; ++r) {
     KeyDef defs[10];
-    const int n = keyRow(nums, r, defs);
+    const int n = keyRow(nums, r, defs, field);
     for (int c = 0; c < n && c < g.keyCount[r]; ++c) {
       if (!g.keyHit[r][c].contains(x, y)) continue;
       hit.row = r;

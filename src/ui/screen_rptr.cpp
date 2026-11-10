@@ -27,7 +27,10 @@ void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RptrItem& it, bool sel
   d->fillCircle(r.x + kRowPadX + 3, r.y + 12, 3, kGreen);
   drawTextEllipsis(d, FontRole::SansBody, kInk, bg, r.x + kRowPadX + 12, r.y + 11,
                    r.w - 28, it.name);
-  drawTextRight(d, FontRole::MonoMeta, kDim, bg, r.right() - kRowPadX, r.y + 24, it.meta);
+  // EST-352: no second line when there is nothing real to say (it used to be a lone "--").
+  if (it.meta[0]) {
+    drawTextRight(d, FontRole::MonoMeta, kDim, bg, r.right() - kRowPadX, r.y + 24, it.meta);
+  }
   d->drawFastHLine(r.x + kRowPadX, r.bottom() - 1, r.w - 2 * kRowPadX, kRowLine);
 }
 

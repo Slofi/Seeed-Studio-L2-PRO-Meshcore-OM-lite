@@ -11,6 +11,7 @@
 #include "ui/emoji_table.h"
 #include "ui/fonts.h"
 #include "ui/icons.h"
+#include "ui/keyboard_draw.h"   // one key-cap / accent-bubble drawing for the shared sheet (EST-352)
 #include "ui/status_cells.h"
 #include "ui/toast.h"
 #include "ui/text_wrap.h"
@@ -543,6 +544,74 @@ void drawEmptyState(lgfx::LovyanGFX* d, const Rect& area, const char* title, con
   if (!hasSub) return;
   d->setTextColor(kDim, kScreen);
   d->drawString(sub, cx, cy + 9);
+}
+
+// --- the shared keyboard sheet's drawing (EST-352) ---------------------------------------------
+
+void drawKeyCap(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
+  const bool on = (k.kind == KeyKind::Send) || (k.kind == KeyKind::Shift && shift);
+  const uint16_t bg = on ? kSelBg2 : kKeyBg;
+  d->fillRoundRect(r.x, r.y, r.w, r.h, kKeyRadius, bg);
+  d->drawRoundRect(r.x, r.y, r.w, r.h, kKeyRadius, on ? kAcc : kKeyLine);
+  const uint16_t fg = on ? kAccInk : kInk;
+  const int cx = r.x + r.w / 2;
+  const int cy = r.y + r.h / 2;
+  if (k.kind == KeyKind::Del) {   // a vector: the ASCII faces carry no backspace glyph
+    const int hw = 4;
+    const int hh = 4;
+    d->drawLine(cx + hw, cy - hh, cx - hw, cy - hh, fg);
+    d->drawLine(cx - hw, cy - hh, cx - hw - 3, cy, fg);
+    d->drawLine(cx - hw - 3, cy, cx - hw, cy + hh, fg);
+    d->drawLine(cx - hw, cy + hh, cx + hw, cy + hh, fg);
+    d->drawLine(cx + hw, cy + hh, cx + hw, cy - hh, fg);
+    d->drawLine(cx - 3, cy - 2, cx + 1, cy + 2, fg);
+    d->drawLine(cx + 1, cy - 2, cx - 3, cy + 2, fg);
+    return;
+  }
+  if (k.kind == KeyKind::Emoji) {   // a vector smiley, for the same reason
+    const int rad = 5;
+    for (int y = -rad; y <= rad; ++y) {
+      for (int x = -rad; x <= rad; ++x) {
+        const int dd = x * x + y * y;
+        if (dd <= rad * rad && dd >= (rad - 1) * (rad - 1)) {
+          d->drawPixel((int16_t)(cx + x), (int16_t)(cy + y), fg);
+        }
+      }
+    }
+    d->drawPixel((int16_t)(cx - 2), (int16_t)(cy - 1), fg);
+    d->drawPixel((int16_t)(cx + 2), (int16_t)(cy - 1), fg);
+    d->drawLine(cx - 2, cy + 2, cx, cy + 3, fg);
+    d->drawLine(cx, cy + 3, cx + 2, cy + 2, fg);
+    return;
+  }
+  char label[8];
+  snprintf(label, sizeof(label), "%s",
+           k.kind == KeyKind::Shift ? (shift ? "CAPS" : "shift") : k.label);
+  if (shift && label[0] >= 'a' && label[0] <= 'z') label[0] = (char)(label[0] - 32);
+  setRole(d, FontRole::MonoMeta);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(fg, bg);
+  d->drawString(label, cx, cy);
+}
+
+void drawAccentBubble(lgfx::LovyanGFX* d, const Rect& key, uint32_t cp) {
+  if (d == nullptr || cp == 0) return;
+  int16_t x = (int16_t)(key.x + key.w / 2 - kAccentBubbleW / 2);
+  int16_t y = (int16_t)(key.y - kAccentBubbleGap - kAccentBubbleH);
+  if (x < 2) x = 2;
+  if (x > kScreenW - 2 - kAccentBubbleW) x = (int16_t)(kScreenW - 2 - kAccentBubbleW);
+  if (y < kStatusH + 2) y = (int16_t)(kStatusH + 2);
+
+  char letter[5] = {0};
+  const int n = utf8Encode(cp, letter);
+  if (n <= 0) return;
+  letter[n] = 0;
+  d->fillRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kPanel2);
+  d->drawRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kAcc);
+  setRole(d, FontRole::SansTitle);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(kInk, kPanel2);
+  d->drawString(letter, x + kAccentBubbleW / 2, y + kAccentBubbleH / 2);
 }
 
 }  // namespace ui

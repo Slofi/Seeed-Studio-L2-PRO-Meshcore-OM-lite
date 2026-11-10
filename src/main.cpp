@@ -116,12 +116,21 @@ static int g_setScroll0 = 0;         // its value when the finger went down
 static int g_setMaxScroll = 0;       // the last build's clamp
 static char g_setTitle[40] = "Settings";
 static bool g_setSubPage = false;
+static constexpr int kNameBufBytes = om::ui::kKeyboardNameMaxBytes + 1;   // 32, MeshCore's own size
 static om::ui::SettingsEditor g_setEditor = om::ui::SettingsEditor::None;
 static char g_setEditText[64] = "";
 static const char* g_setOkLabel = "OK";
+// EST-352: the shared keyboard sheet's page for the open editor (letters / 123, shift), and the
+// held s/c/z key whose accented letter the release enters.
+static bool g_setEditNums = false;
+static bool g_setEditShift = false;
+static int g_setAccentRow = -1;
+static int g_setAccentCol = -1;
+static uint32_t g_setAccentCp = 0;
+static bool g_setAccentPreview = false;
 static int g_chanPage = 0;           // the channel whose page is open
 static bool g_deleteArmed = false;   // Delete needs a second tap, as today
-static char g_editBuf[20];           // the name editor's text (EST-351 still uses the old grid)
+static char g_editBuf[kNameBufBytes];  // the name editor's text: MeshCore's 31 bytes + terminator
 static bool g_editNew = false;       // the name editor is naming a NEW channel
 static int g_editCh = 0;             // the channel the name editor renames
 static int g_addKind = 0;            // 1 create private, 2 join private, 3 join #tag
@@ -1461,18 +1470,27 @@ static void buildRptrView(om::ui::RptrView& v) {
       snprintf(snr, sizeof(snr), "SNR %d.%d dB", list[i].adv_snr4 / 4,
                (list[i].adv_snr4 % 4) * 25);
     }
-    snprintf(it.meta, sizeof(it.meta), "%s%s%s", path, snr[0] ? " \xC2\xB7 " : "", snr);
+    // EST-352: one labelled last-heard TIME (the same formatter as everywhere else). "--" means the
+    // clock was not real at that moment, and rptrRowMeta drops it rather than printing a bare dash.
+    char heard[24] = "";
+    om::ui::stampText(heard, sizeof(heard),
+                      om::ui::Stamp{list[i].lastmod, list[i].lastmodUp, list[i].lastmodReal},
+                      nowWall, nowUp, nowReal, om::ui::StampForm::DayTime);
+    om::ui::RptrRowFacts facts;
+    facts.path = path;
+    facts.heard = heard;
+    facts.snr = snr;
+    om::ui::rptrRowMeta(it.meta, sizeof(it.meta), facts);
     if (g_rptrSelName[0] && strcmp(g_rptrSelName, list[i].name) == 0) {
       v.selected = v.count - 1;
       snprintf(v.name, sizeof(v.name), "%s", list[i].name);
-      char stamp[24] = "--";
-      om::ui::stampText(stamp, sizeof(stamp),
-                        om::ui::Stamp{list[i].lastmod, list[i].lastmodUp, list[i].lastmodReal},
-                        nowWall, nowUp, nowReal, om::ui::StampForm::DayTime);
-      snprintf(v.sub, sizeof(v.sub), "repeater \xC2\xB7 %s \xC2\xB7 %s", path, stamp);
+      // The page's one mono line uses the same labelled facts (no bare "--" here either).
+      char meta[64] = "";
+      om::ui::rptrRowMeta(meta, sizeof(meta), facts);
+      snprintf(v.sub, sizeof(v.sub), "repeater%s%s", meta[0] ? " \xC2\xB7 " : "", meta);
       appendInfoLine(v, "contact", list[i].name);
       appendInfoLine(v, "path", path);
-      appendInfoLine(v, "last heard", stamp);
+      appendInfoLine(v, "last heard", heard);
       char hops[16];
       if (list[i].path_hops < 0) snprintf(hops, sizeof(hops), "unknown");
       else snprintf(hops, sizeof(hops), "%d", list[i].path_hops);
@@ -1561,6 +1579,16 @@ static void setGo(SetPage p) {
   g_setScroll = 0;
   g_setSelOpen = false;
   g_deleteArmed = false;
+  // EST-352: every door into a text editor opens the shared sheet on the letters page with shift
+  // off, exactly the chat sheet's rule; the accented-letter hold starts clean.
+  if (p == SetPage::NameEdit || p == SetPage::ChanKey) {
+    g_setEditNums = false;
+    g_setEditShift = false;
+    g_setAccentRow = -1;
+    g_setAccentCol = -1;
+    g_setAccentCp = 0;
+    g_setAccentPreview = false;
+  }
 }
 
 // Back from an action (Join, Apply, Use, Delete) to the page it was opened from: the same step, run
@@ -2046,6 +2074,11 @@ static om::ui::SettingsView settingsView() {
   v.editor = g_setEditor;
   v.editText = g_setEditText;
   v.okLabel = g_setOkLabel;
+  v.editNums = g_setEditNums;
+  v.editShift = g_setEditShift;
+  v.accentRow = g_setAccentPreview ? g_setAccentRow : -1;
+  v.accentCol = g_setAccentPreview ? g_setAccentCol : -1;
+  v.accentCp = g_setAccentPreview ? g_setAccentCp : 0;
   // EST-350: the chat selector. `selected` is g_setChat, not g_chatSel: what this page edits.
   v.selector = g_setSelOpen;
   v.sel.chats = g_chats;
@@ -2058,6 +2091,41 @@ static om::ui::SettingsView settingsView() {
   v.sel.nowWall = om::timeKeeper().now();
   v.sel.nowReal = om::timeKeeper().realSinceBoot();
   return v;
+}
+
+// --- the editor's shared sheet (EST-352) --------------------------------------------------------
+// One place that knows which field is open and which buffer it edits. The character filter and the
+// byte limit come from ui/chat_layout.h, the same rules the host test checks.
+static om::ui::KeyboardField settingsEditField() {
+  return om::ui::settingsEditorField(g_setEditor);
+}
+
+static char* settingsEditBuf() { return g_setPage == SetPage::ChanKey ? g_keyText : g_editBuf; }
+
+static bool settingsEditAppendBytes(const char* bytes, int n) {
+  if (bytes == nullptr || n <= 0) return false;
+  char* buf = settingsEditBuf();
+  const size_t cap = g_setPage == SetPage::ChanKey ? sizeof(g_keyText) : sizeof(g_editBuf);
+  const int used = (int)strlen(buf);
+  if (!om::ui::keyboardAcceptsBytes(settingsEditField(), used, n)) return false;
+  if ((size_t)used + (size_t)n >= cap) return false;
+  memcpy(buf + used, bytes, (size_t)n);
+  buf[used + n] = 0;
+  return true;
+}
+
+static bool settingsEditAppendChar(char ch) {
+  if (!om::ui::keyboardAllowsChar(settingsEditField(), ch)) return false;
+  return settingsEditAppendBytes(&ch, 1);
+}
+
+// The release of a held s/c/z: two UTF-8 bytes through the same byte budget as any other key.
+static bool settingsEditAppendAccent() {
+  if (g_setAccentCp == 0) return false;
+  char bytes[4] = {0};
+  const int n = om::ui::utf8Encode(g_setAccentCp, bytes);
+  if (n <= 0) return false;
+  return settingsEditAppendBytes(bytes, n);
 }
 
 static void redrawMainTab() {
@@ -2570,32 +2638,36 @@ static void handleSettingsTap(int x, int y) {
   }
 
   if (g_setEditor != om::ui::SettingsEditor::None) {
-    const int key = om::ui::settingsEditorKeyHit(v, x, y);
-    if (key >= 0) {
-      const char* chars = g_setEditor == om::ui::SettingsEditor::Base64
-                              ? om::ui::kSettingsBase64Chars
-                              : om::ui::kSettingsNameChars;
-      char* buf = g_setPage == SetPage::ChanKey ? g_keyText : g_editBuf;
-      const size_t cap = g_setPage == SetPage::ChanKey ? sizeof(g_keyText) : sizeof(g_editBuf);
-      const size_t len = strlen(buf);
-      if (key < (int)strlen(chars) && len + 1 < cap) {
-        buf[len] = chars[key];
-        buf[len + 1] = 0;
-      }
-      drawSettings();
-      return;
+    // EST-352: the sheet owns the page. One key, one action, through the same key tables and byte
+    // filters the chat uses. A tap above the sheet (the hint line) does nothing, and Back above it
+    // was handled before this branch.
+    const om::ui::SettingsKeyHit key = om::ui::settingsEditorKeyAt(v, x, y);
+    if (!key.pressed) return;
+    switch (key.kind) {
+      case om::ui::KeyKind::Shift:
+        g_setEditShift = !g_setEditShift;
+        break;
+      case om::ui::KeyKind::Mode:
+        g_setEditNums = !g_setEditNums;
+        g_setEditShift = false;
+        break;
+      case om::ui::KeyKind::Del:
+        om::ui::composeBackspace(settingsEditBuf());   // one whole code point, never half an accent
+        break;
+      case om::ui::KeyKind::Send:
+        settingsEditorOk();   // draws its own frame
+        return;
+      case om::ui::KeyKind::Space:
+        settingsEditAppendChar(' ');
+        break;
+      case om::ui::KeyKind::Char:
+        settingsEditAppendChar(key.ch);
+        break;
+      case om::ui::KeyKind::Emoji:
+      default:
+        break;   // an editor's sheet offers no emoji page
     }
-    if (om::ui::settingsEditorDelHit(v, x, y)) {
-      char* buf = g_setPage == SetPage::ChanKey ? g_keyText : g_editBuf;
-      const size_t len = strlen(buf);
-      if (len > 0) buf[len - 1] = 0;
-      drawSettings();
-      return;
-    }
-    if (om::ui::settingsEditorOkHit(v, x, y)) {
-      settingsEditorOk();
-      return;
-    }
+    drawSettings();
     return;
   }
 
@@ -3480,6 +3552,7 @@ void loop() {
       // tap, no rubber band, no redraw). Only the NEXT new press acts on what was behind (EST-339).
       const bool spent = g_spent;
       const bool accent = g_accentPreview;   // the hold's bubble: the release enters that letter
+      const bool setAccent = g_setAccentPreview;   // the same hold on a Settings editor (EST-352)
       g_dismiss.onRelease();
       g_spent = false;
       g_nodeHoldArmed = false;
@@ -3487,12 +3560,16 @@ void loop() {
       g_keyHoldArmed = false;
       g_keyHold.release();
       g_accentPreview = false;
+      g_setAccentPreview = false;
       if (!spent) {
         // EST-346: the release of a s/c/z hold enters the accented letter; it is not a tap, so the
         // plain letter is never typed as well.
         if (accent) {
           chatAccentCommit();
           drawChat();
+        } else if (setAccent) {
+          settingsEditAppendAccent();   // the name field only; the filter refuses a base64 key
+          drawSettings();
         } else if (!g_drag && !g_acted) {
           handleTap(g_sx, g_sy, false);
         }
@@ -3597,6 +3674,8 @@ void loop() {
     g_keyHoldArmed = false;
     g_accentPreview = false;
     g_accentCp = 0;
+    g_setAccentPreview = false;
+    g_setAccentCp = 0;
     // EST-346: any touch while a toast is showing dismisses it and is CONSUMED, exactly like the press
     // that closes an overlay (EST-339): this press, its release and any drag of it do nothing else, and
     // only the NEXT new press acts. A toast that has already run out is not showing, so its touch is
@@ -3679,6 +3758,31 @@ void loop() {
         }
       }
     }
+    // EST-352: the same hold on a Settings text editor's sheet. Only a field that accepts accents
+    // offers it (a name does, a base64 key does not), and only on the letters page, where s/c/z are.
+    if (!g_spent && g_settings && g_setEditor != om::ui::SettingsEditor::None && !g_setEditNums &&
+        om::ui::keyboardAccents(settingsEditField())) {
+      const om::ui::KeyboardField field = settingsEditField();
+      const om::ui::ChatLayout kg =
+          om::ui::chatLayoutFor(om::ui::l2(), true, false, false, false, field);
+      const om::ui::KeyHit key = om::ui::keyAt(kg, false, (int)x, (int)y, field);
+      if (key.row >= 0) {
+        om::ui::KeyDef defs[10];
+        const int n = om::ui::keyRow(false, key.row, defs, field);
+        if (key.col < n && defs[key.col].kind == om::ui::KeyKind::Char) {
+          const uint32_t cp = om::ui::accentCodePoint(defs[key.col].label[0], g_setEditShift);
+          if (cp != 0) {
+            g_keyHold.press((int)x, (int)y, millis());
+            g_keyHoldArmed = true;
+            g_setAccentRow = key.row;
+            g_setAccentCol = key.col;
+            g_setAccentCp = cp;
+            Serial.printf("[set] accent armed: %c -> U+%04lX\n", defs[key.col].label[0],
+                          (unsigned long)cp);
+          }
+        }
+      }
+    }
     // This panel lifts between samples during a drag, so a press that lands near the previous
     // release shortly after it is treated as the same gesture (pan), not a tap.
     const bool cont = (g_tab == 2 && !g_settings && g_upMs && !g_spent &&
@@ -3706,9 +3810,15 @@ void loop() {
       } else if (g_keyHold.update((int)x, (int)y, millis())) {
         g_acted = true;         // the generic hold below must not type the plain letter
         accentFired = true;
-        g_accentPreview = true;
-        Serial.printf("[chat] accent preview U+%04lX\n", (unsigned long)g_accentCp);
-        drawChat();             // the bubble, above the held key
+        if (g_settings) {       // EST-352: the Settings editor's sheet
+          g_setAccentPreview = true;
+          Serial.printf("[set] accent preview U+%04lX\n", (unsigned long)g_setAccentCp);
+          drawSettings();
+        } else {                // the chat composer's sheet
+          g_accentPreview = true;
+          Serial.printf("[chat] accent preview U+%04lX\n", (unsigned long)g_accentCp);
+          drawChat();           // the bubble, above the held key
+        }
       }
     }
     if (!accentFired && !g_spent && !g_acted && g_nodeHoldArmed) {

@@ -61,6 +61,23 @@ void mapScaleLabels(int32_t metres, char* mid, size_t midCap, char* right, size_
   fmt(right, rightCap, metres);
 }
 
+MapScaleLabelLayout mapScaleLabelLayout(const Rect& bar, int midW, int rightW, int gap) {
+  MapScaleLabelLayout out;
+  if (midW < 0) midW = 0;
+  if (rightW < 0) rightW = 0;
+  if (gap < 0) gap = 0;
+  // The end label is the one that must always be readable: it is right-aligned to the bar's right
+  // end and clamped to the bar's left when it is wider than the rail.
+  int16_t rightX = (int16_t)(bar.right() - rightW);
+  if (rightX < bar.x) rightX = bar.x;
+  out.rightX = rightX;
+  out.midX = bar.x;
+  // One space of air between the two labels, measured by the caller with the same font. If the half
+  // label and that space cannot fit before the end label, the half label is dropped.
+  out.showMid = midW > 0 && (int)bar.x + midW + gap <= (int)rightX;
+  return out;
+}
+
 MapChrome mapChromeFor(const Layout& L, int zoom, double lat, bool selected) {
   MapChrome c;
   const int16_t w = L.width;

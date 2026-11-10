@@ -117,9 +117,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_settings.cpp \
 # last record (detected and repaired), update records applied on load, backwards paging, rotation to
 # .old, unread/seen across a reload, the SPIFFS fallback and the chat ids.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_history.cpp -o "$BIN19"
-# EST-351: the map chrome's scale arithmetic, key rectangles and hit test; the RPTR list and page.
+# EST-351 / EST-352: the map chrome's scale arithmetic and the two end-anchored labels; the RPTR
+# list and page and the row's labelled second line; the native RGB565 byte-order round trip; the
+# shared keyboard sheet's per-field filters, limits, key tables and rectangles (chat_layout.cpp).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est351.cpp \
-  ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp -o "$BIN20"
+  ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp ../../src/ui/chat_layout.cpp -o "$BIN20"
 "$BIN3"
 "$BIN4"
 "$BIN5"

@@ -15,6 +15,7 @@
 #include "gps_mode.h"
 #include "timekeeper.h"
 #include "ui/layout.h"   // clampTouchToScreen: the same edge rule the hit tests use
+#include "ui/rgb565.h"   // the one byte-order rule for native image pushes (EST-352)
 
 namespace om {
 namespace {
@@ -239,6 +240,19 @@ lgfx::LovyanGFX* om_display() {
   return &s_display;
 }
 
+void omPushRgb565(lgfx::LovyanGFX* d, int x, int y, int w, int h, const uint16_t* pixels) {
+  if (d == nullptr || pixels == nullptr || w <= 0 || h <= 0) return;
+  // pushImage(uint16_t*) takes the SOURCE byte order from this flag: ON means "native RGB565
+  // words", OFF means "already in this surface's stored order". Our buffers are always native
+  // (JPEGDEC writes little-endian RGB565), so the flag is ON for every push, whatever surface it
+  // is: the frame sprite converts native -> its stored order, the panel converts native -> wire
+  // order. One rule, and it is the one the host test proves with a known colour (EST-352).
+  const bool wasSwap = d->getSwapBytes();
+  if (!wasSwap) d->setSwapBytes(true);
+  d->pushImage(x, y, w, h, pixels);
+  if (!wasSwap) d->setSwapBytes(false);
+}
+
 static bool ensureFrameBuffer() {
   if (s_frame.getBuffer() != nullptr) return true;
   s_frame.setPsram(true);
@@ -261,7 +275,28 @@ static bool ensureFrameBuffer() {
   useAppFont(&s_frame);   // every framed view draws with the app font
   Serial.printf("[om] frame probe %04x (native gold %04x) -> push swap %s\n", stored, kProbeGold,
                 s_frameNeedsSwap ? "ON" : "OFF");
+  // EST-352: the gold probe above only says what fillScreen stores. Prove the actual IMAGE path too:
+  // one native word through omPushRgb565 (the map tiles' rule) and back out of omFramePixel.
+  uint16_t goldStored = 0, goldBack = 0;
+  const bool goldOk = omFrameColourProbe(kProbeGold, goldStored, goldBack);
+  Serial.printf("[om] colour push probe gold %04x -> stored %04x -> back %04x %s\n", kProbeGold,
+                goldStored, goldBack, goldOk ? "OK" : "FAILED");
+  s_frame.fillScreen(0x0000);
   return true;
+}
+
+bool omFrameColourProbe(uint16_t native, uint16_t& stored, uint16_t& back) {
+  stored = 0;
+  back = 0;
+  if (!ensureFrameBuffer() || s_frame.getBuffer() == nullptr) return false;
+  uint16_t* px = (uint16_t*)s_frame.getBuffer();
+  const uint16_t saved = px[0];      // the frame belongs to the screen: put its pixel back
+  omPushRgb565(&s_frame, 0, 0, 1, 1, &native);
+  stored = px[0];
+  back = omFramePixel(0, 0);
+  px[0] = saved;
+  const uint16_t expectStored = s_frameNeedsSwap ? ui::rgb565FrameStore(native) : native;
+  return stored == expectStored && back == native;
 }
 
 // Allocate at boot: the log then says whether the off-screen path exists, instead of the first tap
@@ -331,7 +366,7 @@ uint16_t omFramePixel(int x, int y) {
   // The push above sends the stored words as they lie in memory when the probe found them swapped;
   // the host wants the native value (low byte first). Undo the sprite's order here, once, so the
   // screenshot tool never has to know which way this panel happens to store colour.
-  return s_frameNeedsSwap ? (uint16_t)((stored >> 8) | (stored << 8)) : stored;
+  return s_frameNeedsSwap ? ui::rgb565FrameRead(stored) : stored;
 }
 
 // A plain I2C sweep. Its output is the first thing to read when a rail or a device is silent:

@@ -55,9 +55,21 @@ struct MapChrome {
 double mapMetresPerPixel(int zoom, double lat);
 
 // The largest 1-2-5 "nice" distance whose bar fits kMapScaleMaxW, and the bar's width. The labels
-// are the half and the full distance, as the mock's 500 / 1km pair.
+// are the half and the full distance, as the mock's 500m / 1km pair.
 int32_t mapScaleDistance(int zoom, double lat, int16_t* pxOut);
 void mapScaleLabels(int32_t metres, char* mid, size_t midCap, char* right, size_t rightCap);
+
+// EST-352: where the scale's two labels go. The bar's two ends carry them (the half distance left,
+// the full distance right), with at least `gap` measured pixels between. When the bar is too short
+// for both, only the end label is shown: two labels on top of each other read as one wrong number.
+// The widths are the font's, measured by the caller; plain arithmetic here so host tests can prove
+// the fit without a display.
+struct MapScaleLabelLayout {
+  bool showMid = false;
+  int16_t midX = 0;     // left edge of the half-distance label
+  int16_t rightX = 0;   // left edge of the end label (right-aligned to the bar)
+};
+MapScaleLabelLayout mapScaleLabelLayout(const Rect& bar, int midW, int rightW, int gap);
 
 // All rectangles from the screen size and the zoom/latitude. `selected` adds the callout; it sits
 // over the bottom of the map like the mock's .callout.

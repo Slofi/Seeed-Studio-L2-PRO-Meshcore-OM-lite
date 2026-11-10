@@ -16,10 +16,13 @@
 namespace om {
 namespace ui {
 
-// The two text pages keep the existing on-screen editor: a 10x4 letter grid for a name and the
-// 13x5 base64 alphabet for a channel key. Their keys are drawn and hit-tested from the same
-// rectangles in screen_settings.cpp.
+// The two text pages use the SAME keyboard sheet as the chat composer (EST-352): letters, 123, Del,
+// the s/c/z long press, no emoji. The old 10x4 letter grid and 13x5 base64 alphabet are gone.
 enum class SettingsEditor : uint8_t { None = 0, Letters, Base64 };
+
+// The sheet field one editor means: a name (MeshCore's allowed characters and 31-byte limit) or a
+// channel key (base64 alphabet, 24 bytes = a 16-byte secret with its "==" padding).
+KeyboardField settingsEditorField(SettingsEditor editor);
 
 struct SettingsView {
   StatusModel status;
@@ -34,6 +37,11 @@ struct SettingsView {
   SettingsEditor editor = SettingsEditor::None;
   const char* editText = "";
   const char* okLabel = "OK";
+  bool editNums = false;         // the sheet's page: letters or 123
+  bool editShift = false;
+  int accentRow = -1;            // the held s/c/z key while its preview is up
+  int accentCol = -1;
+  uint32_t accentCp = 0;
   // EST-350: the chat selector dropped down over the body. `sel.selected` is the chat whose settings
   // the page is showing — in Settings that is NOT the chat open on the Chat tab, on purpose.
   bool selector = false;
@@ -42,22 +50,27 @@ struct SettingsView {
 
 void settingsScreenDraw(const SettingsView& v);
 
+// One key of the editor's sheet, resolved to what the shell does with it. `ch` is the character for
+// KeyKind::Char with shift already applied; `row`/`col` locate the drawn key for the accent bubble.
+struct SettingsKeyHit {
+  bool pressed = false;
+  KeyKind kind = KeyKind::Char;
+  char ch = 0;
+  int row = -1;
+  int col = -1;
+};
+
 // All hit tests are pure reads of the same layout the drawing used.
 int settingsTabHit(const SettingsView& v, int x, int y);          // 0..4 or -1
 bool settingsBackHit(const SettingsView& v, int x, int y);
 int settingsRowHit(const SettingsView& v, int x, int y);          // row index or -1
 int settingsStepperHit(const SettingsView& v, int x, int y);      // -1 / +1 on a stepper, else 0
-int settingsEditorKeyHit(const SettingsView& v, int x, int y);    // index into the editor's chars
-bool settingsEditorDelHit(const SettingsView& v, int x, int y);
-bool settingsEditorOkHit(const SettingsView& v, int x, int y);
+// The sheet key under (x, y); pressed=false when the point is not on a key (above the sheet, a gap).
+SettingsKeyHit settingsEditorKeyAt(const SettingsView& v, int x, int y);
 // EST-350: the dropdown's press rule (a row picks, the pinned row opens the channel list, anything
 // else closes it and is spent), from the same rectangles it was drawn in. It is the Chat tab's own
 // rule (chat_selector.h selectorPress): while the dropdown is open nothing behind it can be hit.
 SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y);
-
-// The editor's character set (the same strings the old screens used).
-extern const char* const kSettingsNameChars;
-extern const char* const kSettingsBase64Chars;
 
 }  // namespace ui
 }  // namespace om

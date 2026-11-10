@@ -149,4 +149,18 @@ bool omTouch(uint16_t& x, uint16_t& y);
 bool omFrameSize(int& width, int& height);
 uint16_t omFramePixel(int x, int y);
 
+// --- native RGB565 images (EST-352) -------------------------------------------------------------
+// ONE rule for every native RGB565 buffer pushed into a drawing surface (map tiles today, anything
+// else that decodes an image later): the buffer holds native little-endian words, while the frame
+// sprite and the panel both work in the byte-exchanged rgb565_2Byte order. pushImage(uint16_t*)
+// takes the SOURCE order from the surface's swap flag, so setting that flag for the push is the
+// whole conversion; it is restored afterwards. Pushing without it is what made the topo tiles
+// magenta/cyan (the sprite's default flag is off, its stored order is swapped).
+void omPushRgb565(lgfx::LovyanGFX* d, int x, int y, int w, int h, const uint16_t* pixels);
+
+// The boot self-test for that rule: push one native word through omPushRgb565 into the frame and
+// read the frame's stored word and the screenshot read-back. `ok` means stored is the order the
+// frame probe measured AND the read-back equals the native colour. No panel push, no visible frame.
+bool omFrameColourProbe(uint16_t native, uint16_t& stored, uint16_t& back);
+
 }  // namespace om

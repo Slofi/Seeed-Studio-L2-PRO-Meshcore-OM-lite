@@ -1,8 +1,44 @@
 // SPDX-License-Identifier: MIT
 #include "ui/rptr_layout.h"
 
+#include <stdio.h>
+#include <string.h>
+
 namespace om {
 namespace ui {
+
+void rptrRowMeta(char* out, size_t cap, const RptrRowFacts& facts) {
+  if (out == nullptr || cap == 0) return;
+  out[0] = 0;
+  size_t n = 0;
+  // "--" is MeshCore's "this byte cannot be decoded" and a stamp's "no honest time". Neither is a
+  // fact, so neither is printed; a row with no facts keeps one line.
+  auto known = [](const char* v) { return v != nullptr && v[0] != 0 && strcmp(v, "--") != 0; };
+  auto separator = [&]() {
+    if (n == 0) return true;
+    if (n + 4 >= cap) return false;
+    memcpy(out + n, " \xC2\xB7 ", 4);
+    n += 4;
+    out[n] = 0;
+    return true;
+  };
+  // `label` is prepended with one space; the SNR arrives already labelled.
+  auto add = [&](const char* label, const char* value, bool alreadyLabelled) {
+    if (!known(value)) return;
+    if (!separator()) return;
+    const int w = alreadyLabelled ? snprintf(out + n, cap - n, "%s", value)
+                                  : snprintf(out + n, cap - n, "%s %s", label, value);
+    if (w < 0) { out[n] = 0; return; }
+    const size_t room = cap - n;
+    n += (size_t)w < room ? (size_t)w : room - 1;
+    out[n] = 0;
+  };
+  // Most useful first (Filip: a time gives better info than an age), the path last: the row's box is
+  // 40 bytes, so a long route is what gets cut, never the time or the signal.
+  add("heard", facts.heard, false);
+  add("", facts.snr, true);
+  add("path", facts.path, false);
+}
 
 RptrLayout rptrLayoutFor(const Layout& L, bool detail) {
   (void)detail;   // the two pages share the header/list rectangles; the drawing picks the fields

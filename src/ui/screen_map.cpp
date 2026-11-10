@@ -124,10 +124,17 @@ void mapScreenDraw(const MapView& v) {
     d->drawFastVLine(x, c.scale.bottom() - 10, 4, kInk);
   }
   const int midW = measureText(d, FontRole::MonoMeta, c.scaleMid, (int)strlen(c.scaleMid));
-  drawTextLeft(d, FontRole::MonoMeta, kInk, kMapBg, c.scale.x + c.scalePx / 2 - midW / 2,
-               c.scale.bottom() - 1, c.scaleMid);
-  drawTextRight(d, FontRole::MonoMeta, kInk, kMapBg, c.scale.x + c.scalePx,
-                c.scale.bottom() - 1, c.scaleRight);
+  const int rightW = measureText(d, FontRole::MonoMeta, c.scaleRight, (int)strlen(c.scaleRight));
+  // EST-352: one measured space between the two labels. If the rail cannot hold both, the half
+  // label is dropped and the end label (right-aligned to the rail) stays readable.
+  const int spaceW = measureText(d, FontRole::MonoMeta, " ", 1);
+  const MapScaleLabelLayout sl =
+      mapScaleLabelLayout(c.scale, midW, rightW, spaceW > 0 ? spaceW : 1);
+  if (sl.showMid) {
+    drawTextLeft(d, FontRole::MonoMeta, kInk, kMapBg, sl.midX, c.scale.bottom() - 1, c.scaleMid);
+  }
+  drawTextLeft(d, FontRole::MonoMeta, kInk, kMapBg, sl.rightX, c.scale.bottom() - 1,
+               c.scaleRight);
 
   // The tapped marker's panel (mock .callout): dark gold, gold edge, the name then one mono line.
   if (v.callout && !c.callout.empty()) {

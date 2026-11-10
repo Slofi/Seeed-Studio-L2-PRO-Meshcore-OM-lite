@@ -7,47 +7,17 @@
 
 #include "board.h"
 #include "../fonts.h"   // om::useAppFont: the old screens' 12 px default after the frame closes
+#include "ui/keyboard_draw.h"   // the chat sheet's key caps and accent bubble (EST-352)
 #include "ui/text_wrap.h"
 
 namespace om {
 namespace ui {
 
-const char* const kSettingsNameChars = "QWERTZUIOPASDFGHJKL_YXCVBNM.,-1234567890";
-const char* const kSettingsBase64Chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+KeyboardField settingsEditorField(SettingsEditor e) {
+  return e == SettingsEditor::Base64 ? KeyboardField::Base64Key : KeyboardField::NodeName;
+}
 
 namespace {
-
-// --------------------------------------------------------------------------------------- geometry
-int editorColumns(SettingsEditor e) { return e == SettingsEditor::Base64 ? 13 : 10; }
-int editorRows(SettingsEditor e) { return e == SettingsEditor::Base64 ? 5 : 4; }
-int editorKeyW(SettingsEditor e) { return e == SettingsEditor::Base64 ? 22 : 28; }
-int editorKeyH(SettingsEditor e) { return e == SettingsEditor::Base64 ? 22 : 24; }
-int editorPitchX(SettingsEditor e) { return e == SettingsEditor::Base64 ? 23 : 31; }
-int editorPitchY(SettingsEditor e) { return e == SettingsEditor::Base64 ? 24 : 28; }
-int editorStartX(SettingsEditor e) { return e == SettingsEditor::Base64 ? 10 : 8; }
-int editorStartY(const SettingsLayout& L) { return L.body.y + 34; }
-
-Rect editorFieldRect(const SettingsLayout& L) {
-  return Rect{(int16_t)(L.body.x + 8), (int16_t)(L.body.y + 4), (int16_t)(L.body.w - 16), 24};
-}
-
-Rect editorKeyRect(const SettingsLayout& L, SettingsEditor e, int index) {
-  const int cols = editorColumns(e);
-  const int r = index / cols;
-  const int c = index % cols;
-  return Rect{(int16_t)(editorStartX(e) + c * editorPitchX(e)),
-              (int16_t)(editorStartY(L) + r * editorPitchY(e)), (int16_t)editorKeyW(e),
-              (int16_t)editorKeyH(e)};
-}
-
-Rect editorDelRect(const SettingsLayout& L) {
-  return Rect{(int16_t)(L.body.x + 8), (int16_t)(L.body.bottom() - 32), 90, 24};
-}
-
-Rect editorOkRect(const SettingsLayout& L) {
-  return Rect{(int16_t)(L.body.right() - 8 - 90), (int16_t)(L.body.bottom() - 32), 90, 24};
-}
 
 // ---------------------------------------------------------------------------------------- drawing
 void drawKeyBox(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line, const char* text,
@@ -256,31 +226,51 @@ void drawRow(lgfx::LovyanGFX* d, const SettingRow& row, const Rect& r) {
   if (lineBelow) d->drawFastHLine(r.x, r.bottom() - 1, r.w, kRowLine);
 }
 
+// EST-352: the editor IS the chat keyboard sheet. chatLayoutFor() hands out the sheet, the draft
+// line and the four key rows; keyRow() gives that field's keys; drawKeyCap() draws them; settings
+// never holds a key coordinate of its own. The old 4x10 letter grid and 5x13 base64 grid are gone.
 void drawEditor(lgfx::LovyanGFX* d, const SettingsLayout& L, const SettingsView& v) {
-  const Rect field = editorFieldRect(L);
-  d->fillRect(field.x, field.y, field.w, field.h, kCodeBg);
-  d->drawRect(field.x, field.y, field.w, field.h, kLine);
-  if (v.editText != nullptr && v.editText[0]) {
-    drawTextEllipsis(d, FontRole::SansBody, kInk, kCodeBg, field.x + 6, field.y + field.h / 2,
-                     field.w - 12, v.editText);
+  const KeyboardField field = settingsEditorField(v.editor);
+  const ChatLayout g = chatLayoutFor(l2(), true, false, v.editNums, false, field);
+  const char* hint = field == KeyboardField::Base64Key
+                         ? "Channel key, base64, 24 characters"
+                         : "Name, MeshCore characters, 31 maximum";
+  drawTextLeft(d, FontRole::MonoMeta, kDimmer, kScreen, kSetPadX, L.body.y + 10, hint);
+
+  d->fillRoundRect(g.sheet.x, g.sheet.y, g.sheet.w, g.sheet.h + kOskRadius, kOskRadius, kSheet);
+  d->drawFastHLine(g.sheet.x, g.sheet.y, g.sheet.w, kLine);
+
+  d->fillRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kCodeBg);
+  d->drawRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kAcc);
+  const bool empty = v.editText == nullptr || v.editText[0] == 0;
+  if (empty) {
+    drawTextLeft(d, FontRole::MonoMeta, kDimmer, kCodeBg, g.draft.x + kFieldPadX,
+                 g.draft.y + g.draft.h / 2, "(type on the keys below)");
   } else {
-    drawTextLeft(d, FontRole::SansBody, kDimmer, kCodeBg, field.x + 6, field.y + field.h / 2,
-                 "(tap the letters)");
+    drawTextEllipsis(d, FontRole::MonoMeta, kInk, kCodeBg, g.draft.x + kFieldPadX,
+                     g.draft.y + g.draft.h / 2, g.draft.w - 2 * kFieldPadX - 34, v.editText);
+  }
+  char used[16];
+  const int maxBytes = keyboardMaxBytes(field);
+  snprintf(used, sizeof(used), "%d/%d", (int)strlen(v.editText ? v.editText : ""), maxBytes);
+  drawTextRight(d, FontRole::MonoMeta, kDimmer, kCodeBg, g.draft.right() - kFieldPadX,
+                g.draft.y + g.draft.h / 2, used);
+
+  for (int r = 0; r < 4; ++r) {
+    KeyDef defs[10];
+    const int n = keyRow(v.editNums, r, defs, field);
+    for (int c = 0; c < n && c < g.keyCount[r]; ++c) {
+      if (defs[c].kind == KeyKind::Send) {
+        snprintf(defs[c].label, sizeof(defs[c].label), "%s", v.okLabel ? v.okLabel : "OK");
+      }
+      drawKeyCap(d, g.keys[r][c], defs[c], v.editShift);
+    }
   }
 
-  const char* chars =
-      v.editor == SettingsEditor::Base64 ? kSettingsBase64Chars : kSettingsNameChars;
-  const int total = (int)strlen(chars);
-  const int rows = editorRows(v.editor);
-  const int cols = editorColumns(v.editor);
-  for (int i = 0; i < total && i < rows * cols; ++i) {
-    const Rect kr = editorKeyRect(L, v.editor, i);
-    char ch[2] = {chars[i], 0};
-    drawKeyBox(d, kr, kKeyBg, kKeyLine, ch, kInk);
+  if (v.accentCp != 0 && v.accentRow >= 0 && v.accentRow <= 3 && v.accentCol >= 0 &&
+      v.accentCol < g.keyCount[v.accentRow]) {
+    drawAccentBubble(d, g.keys[v.accentRow][v.accentCol], v.accentCp);
   }
-
-  drawKeyBox(d, editorDelRect(L), kPanel2, kLine, "< DEL", kInk);
-  drawKeyBox(d, editorOkRect(L), kSelBg2, kAcc, v.okLabel ? v.okLabel : "OK", kAccInk);
 }
 
 }  // namespace
@@ -349,28 +339,25 @@ int settingsStepperHit(const SettingsView& v, int x, int y) {
   return settingsStepperPart(settingsRowRect(L, v.rows, v.rowCount, i, v.scroll), x, y);
 }
 
-int settingsEditorKeyHit(const SettingsView& v, int x, int y) {
-  if (v.editor == SettingsEditor::None) return -1;
-  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage);
-  const char* chars =
-      v.editor == SettingsEditor::Base64 ? kSettingsBase64Chars : kSettingsNameChars;
-  const int total = (int)strlen(chars);
-  for (int i = 0; i < total; ++i) {
-    if (editorKeyRect(L, v.editor, i).contains(x, y)) return i;
+SettingsKeyHit settingsEditorKeyAt(const SettingsView& v, int x, int y) {
+  SettingsKeyHit out;
+  if (v.editor == SettingsEditor::None) return out;
+  const KeyboardField field = settingsEditorField(v.editor);
+  const ChatLayout g = chatLayoutFor(l2(), true, false, v.editNums, false, field);
+  const KeyHit key = keyAt(g, v.editNums, x, y, field);
+  if (key.row < 0) return out;
+  KeyDef defs[10];
+  const int n = keyRow(v.editNums, key.row, defs, field);
+  if (key.col < 0 || key.col >= n) return out;
+  out.pressed = true;
+  out.kind = defs[key.col].kind;
+  out.row = key.row;
+  out.col = key.col;
+  out.ch = defs[key.col].label[0];
+  if (v.editShift && !v.editNums && out.ch >= 'a' && out.ch <= 'z') {
+    out.ch = (char)(out.ch - 32);
   }
-  return -1;
-}
-
-bool settingsEditorDelHit(const SettingsView& v, int x, int y) {
-  if (v.editor == SettingsEditor::None) return false;
-  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage);
-  return editorDelRect(L).contains(x, y);
-}
-
-bool settingsEditorOkHit(const SettingsView& v, int x, int y) {
-  if (v.editor == SettingsEditor::None) return false;
-  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage);
-  return editorOkRect(L).contains(x, y);
+  return out;
 }
 
 SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y) {

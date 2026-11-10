@@ -1,5 +1,7 @@
 // EST-351 host test: the map chrome's scale arithmetic, key rectangles and hit test; the RPTR list
-// and page rectangles. Plain g++, no Arduino.
+// and page rectangles. EST-352 adds: the scale's two end-anchored labels, the RPTR row's labelled
+// second line, the native RGB565 byte-order round trip and the shared keyboard sheet's per-field
+// filters, limits and geometry. Plain g++, no Arduino.
 #include <math.h>
 
 #ifndef M_PI
@@ -8,7 +10,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ui/chat_layout.h"
 #include "ui/map_chrome.h"
+#include "ui/rgb565.h"
 #include "ui/rptr_layout.h"
 
 using namespace om::ui;
@@ -157,15 +161,249 @@ static void testRptr() {
         RptrHit::LoginButton);
 }
 
+// --- EST-352 ------------------------------------------------------------------------------------
+
+static void testRgb565RoundTrip() {
+  // The theme gold, #e8b04f, is the frame probe's own colour.
+  CHECK(rgb565FromRgb(232, 176, 79) == 0xED89);
+  CHECK(rgb565Swab(0xED89) == 0x89ED);
+  // The frame sprite stores rgb565_2Byte (bytes exchanged); a native push must end up stored that
+  // way, and the screenshot read-back must undo it. Known colour in -> same colour out.
+  CHECK(rgb565FrameStore(0xED89) == 0x89ED);
+  CHECK(rgb565FrameRead(rgb565FrameStore(0xED89)) == 0xED89);
+  // A tile colour from the topo (water blue): the same round trip, not just gold.
+  const uint16_t water = rgb565FromRgb(170, 211, 223);
+  CHECK(rgb565FrameRead(rgb565FrameStore(water)) == water);
+  // If the push forgot the conversion (stored the native word), the read-back would be the swapped
+  // colour: exactly the magenta/cyan the device showed. The test catches that mistake.
+  CHECK(rgb565FrameRead(0xED89) != 0xED89);
+  bool identity = true;
+  for (uint32_t v = 0; v <= 0xFFFF; ++v) {
+    if (rgb565FrameRead(rgb565FrameStore((uint16_t)v)) != (uint16_t)v) identity = false;
+  }
+  CHECK(identity);
+}
+
+static void testScaleLabels() {
+  // z13 near Ljubljana: the bar is 75 px; "500m" + one space + "1km" fit at the two ends.
+  int16_t px = 0;
+  const int32_t metres = mapScaleDistance(13, 46.05, &px);
+  char mid[12], right[12];
+  mapScaleLabels(metres, mid, sizeof(mid), right, sizeof(right));
+  const int midW = 6 * (int)strlen(mid);     // mono advance, the same face the map draws with
+  const int rightW = 6 * (int)strlen(right);
+  const Rect bar{6, (int16_t)(l2().tabbar.y - 6 - kMapScaleH), px, kMapScaleH};
+  const MapScaleLabelLayout l = mapScaleLabelLayout(bar, midW, rightW, 6);
+  CHECK(l.showMid);
+  CHECK(l.midX == bar.x);                                  // the half label at the left end
+  CHECK(l.rightX == bar.right() - rightW);                 // the end label at the right end
+  CHECK((int)l.midX + midW + 6 <= (int)l.rightX);          // at least one measured space
+  CHECK(l.rightX + rightW <= bar.right());                 // the end label never runs past the rail
+
+  // A rail too short for both: only the end label.
+  const Rect shortBar{6, bar.y, (int16_t)(midW + 6 + rightW - 1), kMapScaleH};
+  CHECK(!mapScaleLabelLayout(shortBar, midW, rightW, 6).showMid);
+  // Exactly enough room: both, with the one space touching.
+  const Rect exact{6, bar.y, (int16_t)(midW + 6 + rightW), kMapScaleH};
+  const MapScaleLabelLayout e = mapScaleLabelLayout(exact, midW, rightW, 6);
+  CHECK(e.showMid);
+  CHECK((int)e.midX + midW + 6 == (int)e.rightX);
+  // No half label (an empty string): nothing to show.
+  CHECK(!mapScaleLabelLayout(bar, 0, rightW, 6).showMid);
+}
+
+static void testRptrMeta() {
+  char buf[64];
+  RptrRowFacts f;
+  rptrRowMeta(buf, sizeof(buf), f);
+  CHECK(buf[0] == 0);   // nothing known: no second line at all
+
+  f.path = "--";        // MeshCore's unknown path byte
+  f.heard = "--";       // no honest time
+  f.snr = "";
+  rptrRowMeta(buf, sizeof(buf), f);
+  CHECK(buf[0] == 0);   // the lone dash is gone
+
+  f.path = "a1 > b2";
+  f.heard = "14:02";
+  f.snr = "SNR 7.5 dB";
+  rptrRowMeta(buf, sizeof(buf), f);
+  CHECK(strcmp(buf, "heard 14:02 \xC2\xB7 SNR 7.5 dB \xC2\xB7 path a1 > b2") == 0);
+
+  f.path = "direct";
+  f.heard = "--";
+  f.snr = "";
+  rptrRowMeta(buf, sizeof(buf), f);
+  CHECK(strcmp(buf, "path direct") == 0);
+
+  f.path = "";
+  f.heard = "Mon 14:02";
+  f.snr = "";
+  rptrRowMeta(buf, sizeof(buf), f);
+  CHECK(strcmp(buf, "heard Mon 14:02") == 0);
+
+  f.path = "";
+  f.heard = "";
+  f.snr = "SNR 3 dB";
+  rptrRowMeta(buf, sizeof(buf), f);
+  CHECK(strcmp(buf, "SNR 3 dB") == 0);
+
+  // A short buffer is truncated, never overrun, and always terminated.
+  char tiny[8];
+  f.path = "a1 > b2";
+  f.heard = "14:02";
+  f.snr = "SNR 7.5 dB";
+  rptrRowMeta(tiny, sizeof(tiny), f);
+  CHECK(strlen(tiny) < sizeof(tiny));
+}
+
+static void testKeyboardFilters() {
+  // Names: MeshCore's isValidName rejects exactly [ ] \ : , ? * and takes the rest of printable ASCII.
+  for (char c = 0x20; c < 0x7F; ++c) {
+    const bool expected = c != '[' && c != ']' && c != '\\' && c != ':' && c != ',' &&
+                          c != '?' && c != '*';
+    CHECK(keyboardAllowsChar(KeyboardField::NodeName, c) == expected);
+  }
+  CHECK(keyboardAllowsChar(KeyboardField::NodeName, ' '));
+  CHECK(keyboardAllowsChar(KeyboardField::NodeName, '.'));
+  CHECK(keyboardAllowsChar(KeyboardField::NodeName, '-'));
+  CHECK(keyboardAllowsChar(KeyboardField::NodeName, '_'));
+  CHECK(!keyboardAllowsChar(KeyboardField::NodeName, '\n'));
+
+  // Base64: letters, digits, + / = and nothing else (no space, comma, dot or dash).
+  CHECK(keyboardAllowsChar(KeyboardField::Base64Key, 'A'));
+  CHECK(keyboardAllowsChar(KeyboardField::Base64Key, 'z'));
+  CHECK(keyboardAllowsChar(KeyboardField::Base64Key, '0'));
+  CHECK(keyboardAllowsChar(KeyboardField::Base64Key, '+'));
+  CHECK(keyboardAllowsChar(KeyboardField::Base64Key, '/'));
+  CHECK(keyboardAllowsChar(KeyboardField::Base64Key, '='));
+  CHECK(!keyboardAllowsChar(KeyboardField::Base64Key, ' '));
+  CHECK(!keyboardAllowsChar(KeyboardField::Base64Key, ','));
+  CHECK(!keyboardAllowsChar(KeyboardField::Base64Key, '.'));
+  CHECK(!keyboardAllowsChar(KeyboardField::Base64Key, '-'));
+  CHECK(!keyboardAllowsChar(KeyboardField::Base64Key, '_'));
+
+  // Lengths are BYTES: MeshCore's name buffers are 32 bytes, a 16-byte key is 24 base64 chars.
+  CHECK(keyboardMaxBytes(KeyboardField::NodeName) == 31);
+  CHECK(keyboardMaxBytes(KeyboardField::Base64Key) == 24);
+  CHECK(keyboardMaxBytes(KeyboardField::Chat) == 0);
+  CHECK(keyboardAcceptsBytes(KeyboardField::NodeName, 30, 1));
+  CHECK(!keyboardAcceptsBytes(KeyboardField::NodeName, 31, 1));
+  CHECK(!keyboardAcceptsBytes(KeyboardField::NodeName, 30, 2));   // an accented letter is 2 bytes
+  CHECK(keyboardAcceptsBytes(KeyboardField::Base64Key, 23, 1));
+  CHECK(!keyboardAcceptsBytes(KeyboardField::Base64Key, 24, 1));
+
+  CHECK(keyboardAccents(KeyboardField::NodeName));
+  CHECK(!keyboardAccents(KeyboardField::Base64Key));
+  CHECK(keyboardEmoji(KeyboardField::Chat));
+  CHECK(!keyboardEmoji(KeyboardField::NodeName));
+  CHECK(!keyboardEmoji(KeyboardField::Base64Key));
+}
+
+static bool rowHasKind(bool nums, int row, KeyboardField f, KeyKind kind) {
+  KeyDef defs[10];
+  const int n = keyRow(nums, row, defs, f);
+  for (int i = 0; i < n; ++i) if (defs[i].kind == kind) return true;
+  return false;
+}
+
+static bool rowHasChar(bool nums, int row, KeyboardField f, char ch) {
+  KeyDef defs[10];
+  const int n = keyRow(nums, row, defs, f);
+  for (int i = 0; i < n; ++i) {
+    if (defs[i].kind == KeyKind::Char && defs[i].label[0] == ch) return true;
+  }
+  return false;
+}
+
+static void testKeyboardSheet() {
+  const Layout& L = l2();
+  // Every field and page draws a sheet with non-empty rows, and every character key it offers is
+  // one the field accepts.
+  const KeyboardField fields[] = {KeyboardField::Chat, KeyboardField::NodeName,
+                                  KeyboardField::Base64Key};
+  for (KeyboardField f : fields) {
+    for (int nums = 0; nums <= 1; ++nums) {
+      const ChatLayout g = chatLayoutFor(L, true, false, nums != 0, false, f);
+      CHECK(!g.sheet.empty());
+      CHECK(g.sheet.y == L.height - g.sheet.h);       // bottom-anchored, the same for every field
+      CHECK(g.sheet.bottom() == L.height);
+      for (int r = 0; r < 4; ++r) {
+        KeyDef defs[10];
+        const int n = keyRow(nums != 0, r, defs, f);
+        CHECK(n > 0);
+        CHECK(n <= 10);
+        CHECK((int)g.keyCount[r] == n);
+        CHECK(g.keys[r][n - 1].right() == L.width - kOskPad);   // the row tiles the sheet exactly
+        for (int c = 0; c < n; ++c) {
+          CHECK(g.keys[r][c].x >= 0 && g.keys[r][c].right() <= L.width);
+          CHECK(g.keys[r][c].y >= g.sheet.y && g.keys[r][c].bottom() <= g.sheet.bottom());
+          if (defs[c].kind == KeyKind::Char) {
+            CHECK(keyboardAllowsChar(f, defs[c].label[0]));
+          }
+          // One rectangle drives drawing and touch: the centre of each key hits that key.
+          const KeyHit hit = keyAt(g, nums != 0, g.keys[r][c].x + g.keys[r][c].w / 2,
+                                   g.keys[r][c].y + g.keys[r][c].h / 2, f);
+          CHECK(hit.row == r && hit.col == c);
+        }
+      }
+      // The base64 key's 123 page carries + / = as the ticket requires; the name's 123 page carries
+      // digits. Neither editor offers the emoji page, but the chat still does.
+      if (f == KeyboardField::Base64Key && nums) {
+        CHECK(rowHasChar(true, 1, f, '+'));
+        CHECK(rowHasChar(true, 1, f, '/'));
+        CHECK(rowHasChar(true, 1, f, '='));
+      }
+      if (f == KeyboardField::NodeName && !nums) {
+        CHECK(rowHasKind(false, 3, f, KeyKind::Space));    // a name takes a space
+        CHECK(!rowHasChar(false, 3, f, ','));              // MeshCore forbids a comma in a name
+        CHECK(rowHasChar(false, 3, f, '.'));               // but a dot is fine
+        CHECK(rowHasKind(false, 2, f, KeyKind::Shift));
+        CHECK(rowHasKind(false, 2, f, KeyKind::Del));
+      }
+      if (f == KeyboardField::Base64Key && !nums) {
+        CHECK(!rowHasKind(false, 3, f, KeyKind::Space));
+        CHECK(!rowHasChar(false, 3, f, ','));
+        CHECK(rowHasKind(false, 3, f, KeyKind::Send));
+      }
+      if (f != KeyboardField::Chat) {
+        for (int r = 0; r < 4; ++r) CHECK(!rowHasKind(nums != 0, r, f, KeyKind::Emoji));
+      }
+      // A tap above the sheet is not a key.
+      CHECK(keyAt(g, nums != 0, 160, g.sheet.y - 1, f).row < 0);
+    }
+  }
+  // The chat's own rows are unchanged by the refactor: same counts as EST-346.
+  KeyDef defs[10];
+  CHECK(keyRow(false, 0, defs) == 10);
+  CHECK(keyRow(false, 1, defs) == 9);
+  CHECK(keyRow(false, 2, defs) == 9);
+  CHECK(keyRow(false, 3, defs) == 6);
+  CHECK(keyRow(true, 0, defs) == 10);
+  CHECK(keyRow(true, 1, defs) == 10);
+  CHECK(keyRow(true, 2, defs) == 10);
+  CHECK(keyRow(true, 3, defs) == 6);
+  // The sheet's rectangle does not depend on the field: one widget, one height.
+  CHECK(chatLayoutFor(L, true, false, false, false, KeyboardField::Chat).sheet.y ==
+        chatLayoutFor(L, true, false, false, false, KeyboardField::Base64Key).sheet.y);
+  CHECK(chatLayoutFor(L, true, false, false, false, KeyboardField::NodeName).draft.y ==
+        chatLayoutFor(L, true, false, false, false, KeyboardField::Chat).draft.y);
+}
+
 int main() {
   testMapScale();
   testMapChrome();
   testMapHit();
   testRptr();
+  testRgb565RoundTrip();
+  testScaleLabels();
+  testRptrMeta();
+  testKeyboardFilters();
+  testKeyboardSheet();
   if (g_fail) {
     printf("est351: %d failure(s)\n", g_fail);
     return 1;
   }
-  printf("est351: map chrome and RPTR layout ok\n");
+  printf("est351: map chrome, RPTR layout, RGB565 round trip and the shared keyboard sheet ok\n");
   return 0;
 }

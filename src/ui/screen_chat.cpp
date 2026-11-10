@@ -16,6 +16,7 @@
 #include "ui/dm_delivery.h"
 #include "ui/emoji_picker.h"
 #include "ui/fonts.h"
+#include "ui/keyboard_draw.h"   // the one key-cap / accent-bubble drawing (EST-352)
 #include "ui/text_wrap.h"
 #include "ui/theme.h"
 
@@ -77,20 +78,8 @@ const char* tailFits(lgfx::LovyanGFX* d, FontRole role, int maxW, const char* s)
   return p;
 }
 
-// A backspace key without a glyph: the mock's ⌫ is not in the ASCII-only faces.
-void drawBackspace(lgfx::LovyanGFX* d, const Rect& r, uint16_t col) {
-  const int cx = r.x + r.w / 2;
-  const int cy = r.y + r.h / 2;
-  const int hw = 4;
-  const int hh = 4;
-  d->drawLine(cx + hw, cy - hh, cx - hw, cy - hh, col);
-  d->drawLine(cx - hw, cy - hh, cx - hw - 3, cy, col);
-  d->drawLine(cx - hw - 3, cy, cx - hw, cy + hh, col);
-  d->drawLine(cx - hw, cy + hh, cx + hw, cy + hh, col);
-  d->drawLine(cx + hw, cy + hh, cx + hw, cy - hh, col);
-  d->drawLine(cx - 3, cy - 2, cx + 1, cy + 2, col);
-  d->drawLine(cx + 1, cy - 2, cx - 3, cy + 2, col);
-}
+// A backspace key without a glyph lives in ui/widgets.cpp (drawKeyCap), so the chat and the
+// Settings editors draw the same key.
 
 // The header's and the Manage row's chevrons: vectors, because the faces carry no arrows.
 void drawChevron(lgfx::LovyanGFX* d, int x, int cy, uint16_t col, bool up, bool right) {
@@ -293,80 +282,16 @@ void drawCompose(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   drawDraft(d, g.field, kFieldBg, v, false);
 }
 
-// The smiley key's face: a vector, because the ASCII faces carry no glyph for it.
-void drawSmiley(lgfx::LovyanGFX* d, const Rect& r, uint16_t col) {
-  const int cx = r.x + r.w / 2;
-  const int cy = r.y + r.h / 2;
-  const int rad = 5;
-  const int l = cx - 2;
-  const int rr = cx + 2;
-  // A round outline plus the two eyes and the mouth: reads as an emoji key at 22 px.
-  for (int y = -rad; y <= rad; ++y) {
-    for (int x = -rad; x <= rad; ++x) {
-      const int dd = x * x + y * y;
-      if (dd <= rad * rad && dd >= (rad - 1) * (rad - 1)) {
-        d->drawPixel((int16_t)(cx + x), (int16_t)(cy + y), col);
-      }
-    }
-  }
-  d->drawPixel((int16_t)l, (int16_t)(cy - 1), col);
-  d->drawPixel((int16_t)rr, (int16_t)(cy - 1), col);
-  d->drawLine(l, cy + 2, cx, cy + 3, col);
-  d->drawLine(cx, cy + 3, rr, cy + 2, col);
-}
-
-void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
-  const bool on = (k.kind == KeyKind::Send) || (k.kind == KeyKind::Shift && shift);
-  const uint16_t bg = on ? kSelBg2 : kKeyBg;
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kKeyRadius, bg);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kKeyRadius, on ? kAcc : kKeyLine);
-  const uint16_t fg = on ? kAccInk : kInk;
-  const int cx = r.x + r.w / 2;
-  const int cy = r.y + r.h / 2;
-  if (k.kind == KeyKind::Del) {
-    drawBackspace(d, r, fg);
-    return;
-  }
-  if (k.kind == KeyKind::Emoji) {
-    drawSmiley(d, r, fg);
-    return;
-  }
-  char label[8];
-  snprintf(label, sizeof(label), "%s", k.kind == KeyKind::Shift ? (shift ? "CAPS" : "shift")
-                                                               : k.label);
-  if (shift && label[0] >= 'a' && label[0] <= 'z') label[0] = (char)(label[0] - 32);
-  setRole(d, FontRole::MonoMeta);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(fg, bg);
-  d->drawString(label, cx, cy);
-}
-
 // EST-346: the long press's preview, a small bubble ABOVE the key being held, with the letter that a
 // release will enter (š / č / ž, or the capital with shift). Its rectangle comes from the key the
-// layout already handed out, so the bubble always sits over the right key. Clamped below the status
-// bar for the top row and inside the screen's sides.
+// layout already handed out, so the bubble always sits over the right key. The drawing itself is
+// ui/widgets.cpp's drawAccentBubble, shared with the Settings editors (EST-352).
 void drawAccentBubble(lgfx::LovyanGFX* d, const ChatLayout& g, const ChatView& v) {
   if (v.accentCp == 0 || v.accentRow < 0 || v.accentRow > 3 || v.accentCol < 0 ||
       v.accentCol >= g.keyCount[v.accentRow]) {
     return;
   }
-  const Rect key = g.keys[v.accentRow][v.accentCol];
-  int16_t x = (int16_t)(key.x + key.w / 2 - kAccentBubbleW / 2);
-  int16_t y = (int16_t)(key.y - kAccentBubbleGap - kAccentBubbleH);
-  if (x < 2) x = 2;
-  if (x > kScreenW - 2 - kAccentBubbleW) x = (int16_t)(kScreenW - 2 - kAccentBubbleW);
-  if (y < kStatusH + 2) y = (int16_t)(kStatusH + 2);
-
-  char letter[5] = {0};
-  const int n = utf8Encode(v.accentCp, letter);
-  if (n <= 0) return;
-  letter[n] = 0;
-  d->fillRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kPanel2);
-  d->drawRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kAcc);
-  setRole(d, FontRole::SansTitle);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kInk, kPanel2);
-  d->drawString(letter, x + kAccentBubbleW / 2, y + kAccentBubbleH / 2);
+  ui::drawAccentBubble(d, g.keys[v.accentRow][v.accentCol], v.accentCp);
 }
 
 // The emoji page: a rail of group icons plus "abc", the Recent strip with Send, and the scrolling
@@ -459,7 +384,7 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
     for (int r = 0; r < 4; ++r) {
       KeyDef defs[10];
       const int n = keyRow(v.nums, r, defs);
-      for (int c = 0; c < n && c < g.keyCount[r]; ++c) drawKey(d, g.keys[r][c], defs[c], v.shift);
+      for (int c = 0; c < n && c < g.keyCount[r]; ++c) drawKeyCap(d, g.keys[r][c], defs[c], v.shift);
     }
     // Above the keys, after them: the held key's preview bubble (EST-346).
     drawAccentBubble(d, g, v);

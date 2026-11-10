@@ -14,6 +14,7 @@
 #include <math.h>
 
 #include "board.h"
+#include "ui/rgb565.h"
 #include "ui/theme.h"
 
 namespace om {
@@ -241,6 +242,44 @@ uint16_t* cacheGet(int z, int tx, int ty) {
   return e.frame;
 }
 
+// EST-352: boot self-test for the tile colour path. Decode the tile under the view centre, take one
+// pixel the JPEG decoder produced (that value IS the JPEG colour), push it through the same
+// omPushRgb565 the map render uses, and read it back out of the frame. A byte-order mistake is then
+// a FAILED line at boot, the same way the gold frame probe catches it, instead of a magenta map
+// that has to be diagnosed from a screenshot. The chosen pixel is one whose two bytes differ, so a
+// broken swap cannot pass by accident.
+void tilePixelProbe() {
+  const int rz = (s_z == 18) ? 17 : s_z;
+  const int tx = (int)floor(lonToXf(s_cLon, rz));
+  const int ty = (int)floor(latToYf(s_cLat, rz));
+  const uint16_t* frame = cacheGet(rz, tx, ty);
+  if (frame == nullptr) {
+    Serial.printf("[map] tile probe: no tile at z%d %d/%d\n", rz, tx, ty);
+    return;
+  }
+  int px = -1, py = -1;
+  uint16_t jpeg = 0;
+  for (int y = 0; y < kTile && px < 0; ++y) {
+    for (int x = 0; x < kTile; ++x) {
+      const uint16_t p = frame[(size_t)y * kTile + x];
+      if (p != 0 && ui::rgb565Swab(p) != p) {   // content, and not byte-symmetric
+        jpeg = p;
+        px = x;
+        py = y;
+        break;
+      }
+    }
+  }
+  if (px < 0) {
+    Serial.println("[map] tile probe: no byte-asymmetric pixel in the tile");
+    return;
+  }
+  uint16_t stored = 0, back = 0;
+  const bool ok = omFrameColourProbe(jpeg, stored, back);
+  Serial.printf("[map] tile pixel probe z%d %d/%d at %d,%d jpeg %04x -> stored %04x -> back %04x %s\n",
+                rz, tx, ty, px, py, jpeg, stored, back, ok ? "OK" : "FAILED");
+}
+
 }  // namespace
 
 bool mapReady() { return s_ready; }
@@ -293,6 +332,8 @@ bool mapBegin() {
   centreFromLatLon();
   Serial.printf("[map] index %u tiles (%u bytes), cache %d x %u KB\n", s_count,
                 (unsigned)mapIndexBytes(), kCache, (unsigned)(kTile * kTile * 2 / 1024));
+  // EST-352: boot check of one decoded tile pixel through the same push the render uses.
+  tilePixelProbe();
   return true;
 }
 
@@ -421,9 +462,11 @@ void mapRender() {
   // drawn over this canvas inside the same frame. The canvas holds tiles and nothing else.
 
   // One pushImage is capped by the 16-bit SPI transfer length (~64 KB, ~100 rows at 320 px).
+  // EST-352: the canvas holds native RGB565 words; omPushRgb565 is the one rule that makes the
+  // frame store them correctly (pushing the words raw every pixel landed byte-swapped).
   for (int yy = 0; yy < kViewH; yy += 16) {
     const int h = (yy + 16 <= kViewH) ? 16 : (kViewH - yy);
-    d->pushImage(0, yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
+    omPushRgb565(d, 0, yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
   }
 
   d->setTextDatum(lgfx::textdatum_t::top_left);

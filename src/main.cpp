@@ -559,7 +559,7 @@ static void buildStatus(om::ui::StatusModel& s) {
   s.nodes = g_nodeCount;
   s.gpsValid = g_gps.valid;
   s.gpsSats = g_gps.sats;
-  s.gpsInView = g_gps.inViewTotal;
+  s.gpsHeard = g_gps.heardTotal;
   s.gpsTalked = g_gps.sentences > 0;
   s.batteryPct = batteryPercent(g_battMv);
   // Data honesty: show HH:MM only after a real source (GPS today) has set the clock since boot.
@@ -1754,15 +1754,18 @@ void loop() {
   }
   static uint32_t lastGps = 0;
   static uint8_t lastSats = 255;
+  static uint8_t lastHeard = 255;
   static bool lastValid = false;
   if (millis() - lastGps > 1000) {
     lastGps = millis();
-    if (g_gps.sats != lastSats || g_gps.valid != lastValid) {
+    if (g_gps.sats != lastSats || g_gps.valid != lastValid || g_gps.heardTotal != lastHeard) {
       lastSats = g_gps.sats;
       lastValid = g_gps.valid;
+      lastHeard = g_gps.heardTotal;
       if (g_tab == 0 && !g_settings && screenOn) drawHome();
-      Serial.printf("[gps] %s used=%u view=%u snr=%u\n", g_gps.valid ? "fix" : "no-fix",
-                    g_gps.sats, g_gps.inViewTotal, g_gps.bestSnr);
+      Serial.printf("[gps] %s used=%u expected=%u heard=%u best=%u maxheard=%u\n",
+                    g_gps.valid ? "fix" : "no-fix", g_gps.sats, g_gps.expectedTotal,
+                    g_gps.heardTotal, g_gps.bestSnr, g_gps.maxHeard);
     }
   }
 
@@ -1792,15 +1795,20 @@ void loop() {
 #endif
                   g_tab, g_settings, g_volume, g_soundOn, g_dnd);
     // GPS diagnostics on the same beat: a module that talks and a module that hears nothing look
-    // identical in GGA's "0 used", so bytes, sentences, the checksum failures and the GSV in-view
-    // counts are the evidence. view=g/l/b/a is GPS/GLONASS/BeiDou/Galileo (GN's own count when the
-    // module only speaks GNGSV); snr is the best C/N0 of the current GSV cycle in dB-Hz.
-    Serial.printf("[hb] gps bytes=%lu nmea=%lu bad=%lu view=%u(g%u l%u b%u a%u) used=%u snr=%u fix=%d\n",
+    // identical in GGA's "0 used", so bytes, sentences, the checksum failures and the GSV counts are
+    // the evidence. expected=g/l/b/a is what the almanac lists per constellation, heard=g/l/b/a is
+    // what the module actually received (a C/N0 above zero; GN's own count when it only speaks
+    // GNGSV). best is the best C/N0 of the last 60 s in dB-Hz, maxheard the most heard at once since
+    // boot, both kept even when nothing is plugged in during the test.
+    Serial.printf("[hb] gps bytes=%lu nmea=%lu bad=%lu expected=%u(g%u l%u b%u a%u) "
+                  "heard=%u(g%u l%u b%u a%u) used=%u best=%u maxheard=%u fix=%d\n",
                   (unsigned long)g_gps.bytes, (unsigned long)g_gps.sentences,
-                  (unsigned long)g_gps.checksumBad, g_gps.inViewTotal,
-                  g_gps.inView[om::kGpsUs], g_gps.inView[om::kGpsGlonass],
-                  g_gps.inView[om::kGpsBeiDou], g_gps.inView[om::kGpsGalileo],
-                  g_gps.sats, g_gps.bestSnr, g_gps.valid ? 1 : 0);
+                  (unsigned long)g_gps.checksumBad, g_gps.expectedTotal,
+                  g_gps.expected[om::kGpsUs], g_gps.expected[om::kGpsGlonass],
+                  g_gps.expected[om::kGpsBeiDou], g_gps.expected[om::kGpsGalileo],
+                  g_gps.heardTotal, g_gps.heard[om::kGpsUs], g_gps.heard[om::kGpsGlonass],
+                  g_gps.heard[om::kGpsBeiDou], g_gps.heard[om::kGpsGalileo],
+                  g_gps.sats, g_gps.bestSnr, g_gps.maxHeard, g_gps.valid ? 1 : 0);
   }
 
   // Repaint once a minute so the status bar's HH:MM is live. Before a real source the text stays

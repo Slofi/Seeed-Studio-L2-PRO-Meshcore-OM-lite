@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
-// The status bar's GPS cell and the arithmetic that proves the row fits.
+// The status bar's GPS cell, the node count cell, and the arithmetic that proves the row fits.
 //
-// Why: GGA's satellite count only counts the satellites USED in the fix, so a receiver that hears
-// nothing and one that hears plenty but too weakly both report 0. GSV's "in view" separates them,
-// so while searching the cell reads "GPS 0/5" (used/in view) instead of "GPS --". With a fix the
+// Why the GPS cell changed: GGA's satellite count only counts the satellites USED in the fix, and
+// GSV's "in view" number is what the module's ALMANAC expects, not what it hears. So while
+// searching the cell reads "GPS 0/4" (used/heard) and indoors it reads "GPS 0/0"; with a fix the
 // count that matters is the used one: "GPS 7".
 //
 // The row is 320 px and the mono face advances 6 px per glyph, so the text is short on purpose and
-// the widths below are measured, not guessed: widgets.cpp measures with the real font and asks
-// statusRowFits() before it commits, and test/host repeats the measurement. When the full cell
-// would push the node count into the left group, the short form ("0/5") is drawn instead.
+// every width below is measured, not guessed: widgets.cpp measures with the real font and asks
+// chooseStatusRow() before it commits, and test/host repeats the measurement.
+//
+// Fitting order (the ticket's rule): the full row first; if it does not fit, drop the node count's
+// word ("12 nodes" -> "12"); only then shorten the GPS cell ("GPS 0/13" -> "0/13"); as the last
+// resort drop the node cell. Adjacent cells are always at least kStatusGap apart, including the gap
+// between the left group and the right one, so the two groups can never run into each other.
 //
 // Plain C++ (no Arduino, no LovyanGFX), so test/host compiles it with the system g++.
 #pragma once
@@ -26,24 +30,25 @@ namespace ui {
 // xAdvance for all 96 glyphs). Used by the host test to repeat the status-row measurement.
 constexpr int kMonoStatusAdvancePx = 6;
 
-constexpr int kGpsCellMax = 12;   // "GPS 0/99" is 8 chars plus room
+constexpr int kGpsCellMax = 12;    // "GPS 0/99" is 8 chars plus room
+constexpr int kNodeCellMax = 16;   // "255 nodes" is 9 chars plus room
 
 struct GpsCell {
   bool valid = false;    // a fix: show the satellites used
   bool talked = false;   // at least one complete NMEA sentence from the module
   int used = 0;          // GGA satellite count (used in the fix)
-  int inView = 0;        // GSV satellites in view, all constellations
+  int heard = 0;         // GSV satellites with a C/N0 value above zero, all constellations
 };
 
 // Clamped to two digits: the cell may never outgrow the row.
 inline int gpsCountClamp(int v) { return v < 0 ? 0 : (v > 99 ? 99 : v); }
 
-// "GPS 7" with a fix, "GPS 0/5" while searching, "GPS --" when the module has said nothing at all.
+// "GPS 7" with a fix, "GPS 0/4" while searching (used/heard), "GPS --" when the module never talked.
 inline void gpsCellText(char* out, size_t cap, const GpsCell& g) {
   if (!out || cap == 0) return;
   if (g.valid) snprintf(out, cap, "GPS %d", gpsCountClamp(g.used));
   else if (!g.talked) snprintf(out, cap, "GPS --");
-  else snprintf(out, cap, "GPS %d/%d", gpsCountClamp(g.used), gpsCountClamp(g.inView));
+  else snprintf(out, cap, "GPS %d/%d", gpsCountClamp(g.used), gpsCountClamp(g.heard));
 }
 
 // The same cell without the label, for a row that would otherwise collide with the left group.
@@ -51,28 +56,72 @@ inline void gpsCellTextShort(char* out, size_t cap, const GpsCell& g) {
   if (!out || cap == 0) return;
   if (g.valid) snprintf(out, cap, "%d", gpsCountClamp(g.used));
   else if (!g.talked) snprintf(out, cap, "--");
-  else snprintf(out, cap, "%d/%d", gpsCountClamp(g.used), gpsCountClamp(g.inView));
+  else snprintf(out, cap, "%d/%d", gpsCountClamp(g.used), gpsCountClamp(g.heard));
 }
 
-// Widths of the right-hand cells in px, as measured by the caller with the mono face.
+// The node count cell: "2 nodes" normally, just "2" when the row is tight (the ticket's first thing
+// to drop). A count of 1 uses "node". The number is clamped to three digits: a status cell, not a
+// table, and the clamp keeps the text provably inside kNodeCellMax for the snprintf.
+inline void nodeCellText(char* out, size_t cap, int nodes, bool withWord) {
+  if (!out || cap == 0) return;
+  const int n = nodes < 0 ? 0 : (nodes > 999 ? 999 : nodes);
+  if (withWord) snprintf(out, cap, "%d %s", n, n == 1 ? "node" : "nodes");
+  else snprintf(out, cap, "%d", n);
+}
+
+// Widths of the right-hand cells in px, as measured by the caller with the real mono face.
 struct StatusRightWidths {
-  int nodes = 0;
-  int gps = 0;
-  int pct = 0;
-  int clock = 0;
+  int nodes = 0;        // "2 nodes"
+  int nodesNumber = 0;  // "2"
+  int gps = 0;          // "GPS 0/13"
+  int gpsShort = 0;     // "0/13"
+  int pct = 0;          // "97%"
+  int clock = 0;        // "08:53"
 };
 
-// The whole right-hand group, from the outer edge of the node count to the screen edge: it includes
-// the gear and its padding, exactly as drawStatusBar lays them out.
-inline int statusRightWidth(const StatusRightWidths& w) {
-  return w.nodes + kStatusGap + w.gps + kStatusGap + kBattW + kBattGap + w.pct + kStatusGap +
-         w.clock + kStatusGap + kGearSize + kStatusPadX;
+// Which form of the right-hand group is drawn. The order is the fitting order above.
+enum class StatusRowForm : uint8_t {
+  Full = 0,             // "2 nodes" + "GPS 0/13"
+  NodeNumber,           // "2" + "GPS 0/13"
+  NodeNumberGpsShort,   // "2" + "0/13"
+  NodesDropped,         // no node cell + "0/13" (last resort; nothing to shorten any more)
+};
+
+// The whole right-hand group, from its leftmost pixel to the screen edge: the gear and its padding
+// included, and every adjacent pair separated by exactly kStatusGap, as drawStatusBar lays it out.
+inline int statusRightWidth(const StatusRightWidths& w, StatusRowForm form) {
+  int nodes = 0;
+  switch (form) {
+    case StatusRowForm::Full: nodes = w.nodes; break;
+    case StatusRowForm::NodeNumber:
+    case StatusRowForm::NodeNumberGpsShort: nodes = w.nodesNumber; break;
+    case StatusRowForm::NodesDropped: nodes = 0; break;
+  }
+  const bool shortGps = (form == StatusRowForm::NodeNumberGpsShort ||
+                         form == StatusRowForm::NodesDropped);
+  const int gps = shortGps ? w.gpsShort : w.gps;
+  int width = gps + kStatusGap + kBattW + kBattGap + w.pct + kStatusGap + w.clock + kStatusGap +
+              kGearSize + kStatusPadX;
+  if (form != StatusRowForm::NodesDropped) width += nodes + kStatusGap;
+  return width;
 }
 
 // leftEnd = x one past the left group's last pixel. True when the right group starts at least
 // kStatusGap to the right of it.
-inline bool statusRowFits(int screenW, int leftEnd, const StatusRightWidths& w) {
-  return leftEnd + kStatusGap <= screenW - statusRightWidth(w);
+inline bool statusRowFits(int screenW, int leftEnd, const StatusRightWidths& w, StatusRowForm form) {
+  return leftEnd + kStatusGap <= screenW - statusRightWidth(w, form);
+}
+
+// The widest form that fits, tried in the ticket's order. NodesDropped is the narrowest, so it is
+// also the answer when even that is too wide (the caller then draws it; with the current left group
+// that cannot happen, and test/host sweeps the realistic widths to say so).
+inline StatusRowForm chooseStatusRow(int screenW, int leftEnd, const StatusRightWidths& w) {
+  const StatusRowForm order[] = {StatusRowForm::Full, StatusRowForm::NodeNumber,
+                                 StatusRowForm::NodeNumberGpsShort, StatusRowForm::NodesDropped};
+  for (StatusRowForm form : order) {
+    if (statusRowFits(screenW, leftEnd, w, form)) return form;
+  }
+  return StatusRowForm::NodesDropped;
 }
 
 }  // namespace ui

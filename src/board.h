@@ -9,6 +9,8 @@
 #include <Arduino.h>
 #include <LovyanGFX.hpp>
 
+#include "gps_sky.h"
+
 namespace om {
 
 // --- I2C bus (shared by the expander, touch, codec, battery ADC and backlight driver) ---
@@ -92,31 +94,10 @@ uint16_t batteryMilliVolts();
 // latest GGA/GSV state; it never blocks. gpsBegin() sends the L76K's constellation mode once the
 // module's power and reset sequence is done (see board.cpp).
 //
-// GSV talkers map to these; GGA's satellite count is the "used" one and cannot tell "hears nothing"
-// from "hears plenty, too weakly", which is exactly what the in-view counts are for.
-enum GpsConstellation : uint8_t {
-  kGpsUs = 0,        // GPGSV
-  kGpsGlonass,       // GLGSV
-  kGpsBeiDou,        // BDGSV / GBGSV
-  kGpsGalileo,       // GAGSV
-  kGpsOther,         // GQGSV (QZSS), GNGSV (combined), anything else
-  kGpsConstellationCount
-};
-
-struct GpsState {
-  bool valid = false;      // fix quality > 0
-  uint8_t sats = 0;        // satellites USED in the fix (GGA field 7)
-  double lat = 0.0;
-  double lon = 0.0;
-  uint32_t bytes = 0;      // bytes received on the UART (0 = the module is not talking to us)
-  uint32_t sentences = 0;  // complete NMEA lines
-  uint32_t checksumBad = 0;  // lines whose '*' checksum did not match (skipped, never parsed)
-  uint32_t timeEpoch = 0;  // latest UTC time from RMC/ZDA, 0 = none yet
-  // GSV: satellites in view per constellation, and the best C/N0 of the current GSV cycle in dB-Hz.
-  uint8_t inView[kGpsConstellationCount] = {0, 0, 0, 0, 0};
-  uint8_t inViewTotal = 0;   // sum of the named constellations, or GN's own count when only GN talks
-  uint8_t bestSnr = 0;       // 0 = no SNR reported yet
-};
+// GpsState and the GSV half of the parser live in gps_sky.h (plain C++): GSV's "in view" number is
+// what the module's almanac EXPECTS, and only a satellite with a C/N0 value above zero is HEARD, so
+// the two counts are kept apart. That header also holds the 60 s best-C/N0 window and the most
+// satellites heard at once since boot.
 void gpsBegin(bool swapPins = false);
 void gpsPoll(GpsState& out);
 

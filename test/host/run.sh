@@ -14,7 +14,8 @@ BIN3="$(mktemp /tmp/om-lite-chat.XXXXXX)"
 BIN4="$(mktemp /tmp/om-lite-time.XXXXXX)"
 BIN5="$(mktemp /tmp/om-lite-gate.XXXXXX)"
 BIN6="$(mktemp /tmp/om-lite-age.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6"' EXIT
+BIN7="$(mktemp /tmp/om-lite-gps.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_contact_store.cpp -o "$BIN2"
@@ -31,10 +32,15 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_timekeeper.cpp \
 # Wake touch gate: a finger held through the wake is ignored, a new press after 300 ms counts.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_touch_gate.cpp \
   ../../src/touch_gate.cpp -o "$BIN5"
-# "Last heard" text (a stamp older than the build says "--") and the status bar's GPS cell widths.
+# "Last heard" text (a stamp older than the build says "--") and the status bar: the GPS cell, the
+# node count cell, and the fitting order that keeps the two groups kStatusGap apart at 320 px.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_age.cpp \
   ../../src/ui/age.cpp -o "$BIN6"
+# GSV: expected vs heard (an empty C/N0 field is not a reception), per constellation, the new-cycle
+# reset, the 60 s best-C/N0 window and the most heard at once since boot.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps.cpp -o "$BIN7"
 "$BIN3"
 "$BIN4"
 "$BIN5"
 "$BIN6"
+"$BIN7"

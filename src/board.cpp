@@ -435,12 +435,10 @@ uint16_t batteryMilliVolts() {
 
 // The L76K talks NMEA at 9600. GGA gives fix/satellites-used/position, GSV gives satellites in view
 // per constellation and their signal strengths, RMC/ZDA give time. The parser keeps a line buffer
-// and never blocks, so the UI stays responsive whatever the module is doing.
+// and never blocks, so the UI stays responsive whatever the module is doing. The GSV counting, the
+// checksum and the 60 s best-C/N0 window are in gps_sky.h so test/host can prove them.
 static char s_nmea[128];
 static uint8_t s_nmeaLen = 0;
-// Best C/N0 of the CURRENT GSV cycle, per constellation. A cycle starts at message 1 and the last
-// message is not announced, so the best value is kept until the next cycle begins.
-static uint8_t s_gsvBestSnr[kGpsConstellationCount] = {0, 0, 0, 0, 0};
 
 static double nmeaToDegrees(const char* field, const char* hemi) {
   if (!field || !*field) return 0.0;
@@ -450,91 +448,6 @@ static double nmeaToDegrees(const char* field, const char* hemi) {
   double result = deg + minutes / 60.0;
   if (hemi && (*hemi == 'S' || *hemi == 'W')) result = -result;
   return result;
-}
-
-static int hexDigit(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  return -1;
-}
-
-// XOR of everything between '$' and '*'. A line without a readable checksum is not data we can
-// trust (the L76K always sends one), so it is counted bad and skipped instead of parsed.
-static bool nmeaChecksumOk(const char* line) {
-  if (!line || line[0] != '$') return false;
-  const char* star = strrchr(line, '*');
-  if (!star || star[1] == 0 || star[2] == 0) return false;
-  const int hi = hexDigit(star[1]);
-  const int lo = hexDigit(star[2]);
-  if (hi < 0 || lo < 0) return false;
-  uint8_t sum = 0;
-  for (const char* p = line + 1; p < star; ++p) sum ^= (uint8_t)*p;
-  return (int)sum == hi * 16 + lo;
-}
-
-// GSV talker -> constellation. GN (combined) and GQ (QZSS) and anything unknown land in kGpsOther.
-static int constellationOf(const char* line) {
-  if (!line || line[0] != '$' || strlen(line) < 5) return -1;
-  const char a = line[1];
-  const char b = line[2];
-  if (a == 'G' && b == 'P') return kGpsUs;
-  if (a == 'G' && b == 'L') return kGpsGlonass;
-  if ((a == 'B' && b == 'D') || (a == 'G' && b == 'B')) return kGpsBeiDou;
-  if (a == 'G' && b == 'A') return kGpsGalileo;
-  return kGpsOther;
-}
-
-// The total the status bar and the heartbeat use. A receiver that only speaks GNGSV reports the
-// whole sky in that one sentence, so GN's count is used only when no named constellation has said
-// anything; otherwise it would be counted twice.
-static void refreshInView(GpsState& out) {
-  unsigned sum = (unsigned)out.inView[kGpsUs] + out.inView[kGpsGlonass] +
-                 out.inView[kGpsBeiDou] + out.inView[kGpsGalileo];
-  if (sum == 0) sum = out.inView[kGpsOther];
-  out.inViewTotal = (uint8_t)(sum > 255 ? 255 : sum);
-  uint8_t best = 0;
-  for (int i = 0; i < kGpsConstellationCount; ++i) {
-    if (s_gsvBestSnr[i] > best) best = s_gsvBestSnr[i];
-  }
-  out.bestSnr = best;
-}
-
-// $..GSV,total messages,message number,satellites in view,
-//        prn,elevation,azimuth,snr, prn,elevation,azimuth,snr, ...
-// The "in view" total on its own cannot say whether a fix is near: the SNRs next to it can.
-static void parseGsv(const char* line, GpsState& out) {
-  const int c = constellationOf(line);
-  if (c < 0) return;
-  const char* star = strchr(line, '*');
-  const size_t len = star ? (size_t)(star - line - 1) : strlen(line) - 1;
-  char body[120];
-  if (len == 0 || len >= sizeof(body)) return;
-  memcpy(body, line + 1, len);
-  body[len] = 0;
-
-  char* fields[28] = {nullptr};
-  int n = 0;
-  char* p = body;
-  while (p && n < 28) {
-    fields[n++] = p;
-    char* comma = strchr(p, ',');
-    if (!comma) break;
-    *comma = 0;
-    p = comma + 1;
-  }
-  if (n < 4) return;
-
-  const int msgNo = atoi(fields[2]);
-  const int inView = atoi(fields[3]);
-  out.inView[c] = (uint8_t)(inView < 0 ? 0 : (inView > 255 ? 255 : inView));
-  if (msgNo <= 1) s_gsvBestSnr[c] = 0;   // a new cycle: the previous cycle's best no longer applies
-  for (int i = 4; i + 3 < n; i += 4) {
-    if (fields[i + 3][0] == 0) continue;  // an empty SNR field means "not measured"
-    const int snr = atoi(fields[i + 3]);
-    if (snr > (int)s_gsvBestSnr[c]) s_gsvBestSnr[c] = (uint8_t)(snr > 255 ? 255 : snr);
-  }
-  refreshInView(out);
 }
 
 // MeshCore's MicroNMEALocationProvider::configureL76K() (MIT, helpers/sensors/
@@ -589,7 +502,9 @@ void gpsBegin(bool swapPins) {
     Serial1.begin(9600, SERIAL_8N1, 18, 17);
   }
   s_nmeaLen = 0;
-  for (int i = 0; i < kGpsConstellationCount; ++i) s_gsvBestSnr[i] = 0;
+  // The sky counts (expected/heard, the 60 s window, max heard) live in the caller's GpsState now,
+  // which starts zeroed. The only re-begin is the 10 s pin retry, and that runs only while no byte
+  // has ever arrived (bytes == 0), so there is no sky state to clear here.
   // After the board's power/reset sequence (expanderBegin) and with the UART up, tell the module
   // which constellations to use. Also on the swapped-pin retry: the first attempt's bytes may have
   // gone nowhere, and a module left GPS-only is the failure this ticket is about.
@@ -605,7 +520,7 @@ void gpsPoll(GpsState& out) {
       ++out.sentences;
       s_nmea[s_nmeaLen] = 0;
       s_nmeaLen = 0;
-      if (!nmeaChecksumOk(s_nmea)) {
+      if (!gpsNmeaChecksumOk(s_nmea)) {
         ++out.checksumBad;   // a garbled line is never parsed, so it cannot move the fix or the clock
         continue;
       }
@@ -628,9 +543,9 @@ void gpsPoll(GpsState& out) {
           out.lon = nmeaToDegrees(fields[4], fields[5]);
         }
       } else if (strlen(s_nmea) >= 6 && strncmp(s_nmea + 3, "GSV", 3) == 0) {
-        // Satellites in view per constellation and their SNRs: the only way to tell "hears
-        // nothing" from "hears plenty, too weakly for a fix".
-        parseGsv(s_nmea, out);
+        // Satellites EXPECTED (almanac "in view") and HEARD (a C/N0 above zero), per constellation:
+        // the only way to tell "hears nothing" from "hears plenty, too weakly for a fix".
+        gpsParseGsv(s_nmea, out, millis());
       } else if (strlen(s_nmea) >= 6 &&
                  (strncmp(s_nmea + 3, "RMC", 3) == 0 || strncmp(s_nmea + 3, "ZDA", 3) == 0)) {
         // Time (and date) from RMC/ZDA. The parser checks the checksum, the fix status and the date
@@ -642,6 +557,9 @@ void gpsPoll(GpsState& out) {
     }
     if (s_nmeaLen < sizeof(s_nmea) - 1) s_nmea[s_nmeaLen++] = c;
   }
+  // Once per poll, with no data needed: the 60 s best-C/N0 window has to expire even when the module
+  // has gone quiet (a stale "best" from the last satellite heard would otherwise stay for ever).
+  gpsSkyRefresh(out, millis());
 }
 
 bool setAudioPa(bool on) { return setOutput(kBitAudioPa, on); }

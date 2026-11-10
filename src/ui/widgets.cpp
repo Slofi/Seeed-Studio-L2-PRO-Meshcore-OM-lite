@@ -299,31 +299,47 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   drawBattery(d, rx - kBattW, cy, m.batteryPct);
   rx -= kBattW + kStatusGap;
 
-  // "GPS 7" with a fix, "GPS 0/5" while searching (used/in view), "GPS --" when the module has
-  // never talked. The cell is measured against the row before it is drawn: if the full one would
-  // push the node count into the left group, the short form ("0/5") is used instead.
-  char nodes[16];
-  snprintf(nodes, sizeof(nodes), "%d %s", m.nodes, m.nodes == 1 ? "node" : "nodes");
-
+  // "GPS 7" with a fix, "GPS 0/4" while searching (used/heard), "GPS --" when the module has never
+  // talked. The row is measured before anything on the right is drawn: the fitting order is the
+  // ticket's (drop the node count's "nodes" word first, then shorten the GPS cell, then drop the
+  // node cell), so the left group and the right group are always at least kStatusGap apart.
   GpsCell cell;
   cell.valid = m.gpsValid;
   cell.talked = m.gpsTalked;
   cell.used = m.gpsSats;
-  cell.inView = m.gpsInView;
-  char gps[kGpsCellMax];
-  gpsCellText(gps, sizeof(gps), cell);
+  cell.heard = m.gpsHeard;
+
+  char nodesFull[kNodeCellMax];
+  char nodesNumber[kNodeCellMax];
+  nodeCellText(nodesFull, sizeof(nodesFull), m.nodes, true);
+  nodeCellText(nodesNumber, sizeof(nodesNumber), m.nodes, false);
+
+  char gpsFull[kGpsCellMax];
+  char gpsShort[kGpsCellMax];
+  gpsCellText(gpsFull, sizeof(gpsFull), cell);
+  gpsCellTextShort(gpsShort, sizeof(gpsShort), cell);
 
   StatusRightWidths widths;
-  widths.nodes = textWidth(d, FontRole::MonoStatus, nodes);
-  widths.gps = textWidth(d, FontRole::MonoStatus, gps);
+  widths.nodes = textWidth(d, FontRole::MonoStatus, nodesFull);
+  widths.nodesNumber = textWidth(d, FontRole::MonoStatus, nodesNumber);
+  widths.gps = textWidth(d, FontRole::MonoStatus, gpsFull);
+  widths.gpsShort = textWidth(d, FontRole::MonoStatus, gpsShort);
   widths.pct = textWidth(d, FontRole::MonoStatus, pct);
   widths.clock = textWidth(d, FontRole::MonoStatus, m.clock);
-  if (!statusRowFits(r.w, leftX + textWidth(d, FontRole::MonoStatus, left), widths)) {
-    gpsCellTextShort(gps, sizeof(gps), cell);
-  }
-  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, gps) + kStatusGap;
 
-  drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, nodes);
+  const int leftEnd = leftX + textWidth(d, FontRole::MonoStatus, left);
+  const StatusRowForm form = chooseStatusRow(r.w, leftEnd, widths);
+  const char* nodes = nodesFull;
+  const char* gps = gpsFull;
+  switch (form) {
+    case StatusRowForm::Full: break;
+    case StatusRowForm::NodeNumber: nodes = nodesNumber; break;
+    case StatusRowForm::NodeNumberGpsShort: nodes = nodesNumber; gps = gpsShort; break;
+    case StatusRowForm::NodesDropped: nodes = nullptr; gps = gpsShort; break;
+  }
+
+  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, gps) + kStatusGap;
+  if (nodes != nullptr) drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, nodes);
 }
 
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {

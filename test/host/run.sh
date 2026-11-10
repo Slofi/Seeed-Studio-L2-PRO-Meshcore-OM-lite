@@ -5,6 +5,9 @@ set -eu
 cd "$(dirname "$0")"
 # -B: no __pycache__ left behind in the tree the reviewer diffs.
 python3 -B test_shot.py
+# EST-343: tools/cmd.py quotes argv for the device's tokenizer, frames OMCMD1 and stops on the one
+# answer line (data lines are printed first).
+python3 -B test_cmd.py
 # The vendored MeshCore folders must match lib/MESHCORE_VERSION (a hand edit fails this).
 python3 -B test_meshcore_manifest.py
 # EST-341: one MAX_CONTACTS for every TU (a second layout made the global MyMesh too small).
@@ -25,7 +28,8 @@ BIN10="$(mktemp /tmp/om-lite-fault.XXXXXX)"
 BIN11="$(mktemp /tmp/om-lite-fade.XXXXXX)"
 BIN12="$(mktemp /tmp/om-lite-crash.XXXXXX)"
 BIN13="$(mktemp /tmp/om-lite-dm.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13"' EXIT
+BIN14="$(mktemp /tmp/om-lite-usbcmd.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -75,6 +79,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_crash_report.cpp \
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_dm.cpp \
   ../../src/ui/chat_layout.cpp ../../src/ui/text_wrap.cpp ../../src/ui/node_menu.cpp \
   ../../src/ui/message_sheet.cpp -o "$BIN13"
+# EST-343: the OMCMD1 frame reader (magic in one byte at a time, split frames, junk before the magic,
+# wrong length, header and body timeouts) and the command language (quoted names such as
+# "Don't Panic", arguments, and the refusal of everything not on the list).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_usb_cmd.cpp \
+  ../../src/usb_cmd_logic.cpp -o "$BIN14"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -86,3 +95,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_dm.cpp \
 "$BIN11"
 "$BIN12"
 "$BIN13"
+"$BIN14"

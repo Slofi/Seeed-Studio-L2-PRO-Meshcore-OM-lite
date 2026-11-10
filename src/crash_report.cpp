@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <esp_attr.h>
 #include <esp_core_dump.h>
+#include <esp_partition.h>
 #include <esp_system.h>
 
 #include "crash_report_logic.h"
@@ -20,6 +21,18 @@ namespace {
 // rejects. It is written on every checkpoint, so it always names the step that was running.
 RTC_NOINIT_ATTR BootCheckpoint s_ckpt;
 uint32_t s_ckptSeq = 0;
+
+// True when the coredump partition's first four bytes (the dump's data_size) read as erased flash.
+// ESP-IDF 4.4's check returns ESP_ERR_INVALID_SIZE for exactly that, so this separates "empty" from
+// a real format failure (EST-343). A missing partition or a failed read is not "erased".
+bool coreDumpPartitionErased() {
+  const esp_partition_t* part = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+  if (part == nullptr) return false;
+  uint32_t first = 0;
+  if (esp_partition_read(part, 0, &first, sizeof(first)) != ESP_OK) return false;
+  return first == 0xFFFFFFFFu;
+}
 
 BootEnd mapResetReason(esp_reset_reason_t r) {
   switch (r) {
@@ -103,16 +116,21 @@ void crashReportBegin() {
       formatCoreDumpState(line, sizeof(line), CoreDumpState::Corrupt, (int)serr);
       Serial.println(line);
     }
-  } else if (err == ESP_ERR_NOT_FOUND) {
-    // "No dump" is only worth a line when a dump was expected. The dump from a crash survives an
-    // OTA of the next image, so the presence check runs on every boot, not only after a panic.
-    if (bootEndIsCrash(end)) {
-      formatCoreDumpState(line, sizeof(line), CoreDumpState::None, (int)err);
+  } else {
+    // ESP_ERR_NOT_FOUND means there is no coredump partition; INVALID_SIZE means the partition's
+    // first word is erased (see coreDumpPartitionErased()). Both are "no dump", worth a line only
+    // when a dump was expected, exactly like NOT_FOUND has always been. A real CRC or format failure
+    // (e.g. ESP_ERR_INVALID_CRC 0x109) stays "unreadable".
+    const bool erased = (err == ESP_ERR_INVALID_SIZE) && coreDumpPartitionErased();
+    if (classifyCoreDumpCheck((int)err, erased) == CoreDumpState::None) {
+      if (bootEndIsCrash(end)) {
+        formatCoreDumpState(line, sizeof(line), CoreDumpState::None, (int)err);
+        Serial.println(line);
+      }
+    } else {
+      formatCoreDumpState(line, sizeof(line), CoreDumpState::Unreadable, (int)err);
       Serial.println(line);
     }
-  } else {
-    formatCoreDumpState(line, sizeof(line), CoreDumpState::Unreadable, (int)err);
-    Serial.println(line);
   }
 
   // 3. This boot is now checkpointed from the first mesh step on.

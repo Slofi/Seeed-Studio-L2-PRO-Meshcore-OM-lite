@@ -7,12 +7,17 @@
 // Host -> device, screenshot: "OMSHOT" (6). Device answers "OMSHOT1 <w> <h> <bytes>\n" and then the
 // off-screen frame as native RGB565 little-endian, row by row from the top left; or "OMSHOT0 no
 // frame\n" when there is no frame buffer. See tools/shot.py.
+// Host -> device, test command (EST-343): "OMCMD1 <len>\n" then <len> bytes of UTF-8 text. The answer
+// is one line "[cmd] ok ..." or "[cmd] error <reason>"; `nodes` and `msgs` print their data lines
+// first. See tools/cmd.py.
 // The magics are only looked for at the start of a transfer, so ordinary serial logs are unaffected.
 #include "ota.h"
 
 #include <Update.h>
 
 #include "board.h"
+#include "usb_cmd.h"
+#include "usb_frames.h"
 
 namespace om {
 namespace {
@@ -36,23 +41,25 @@ bool readExact(uint8_t* dst, size_t len, uint32_t timeoutMs) {
   return true;
 }
 
-// One six-byte prefix matcher: exactly the state machine the OTA reader has always used, unchanged.
-// It advances on a matching byte and, on a miss, restarts at 1 if this byte could begin the magic
-// again, otherwise at 0. Two matchers are fed the same byte stream independently, which is how a
-// second command is added without altering what the OTA path does.
-struct Magic {
-  const char* text;
-  uint8_t match;
-};
+// The one six-byte prefix matcher (usb_frames.h). The OTA and screenshot machines are the same ones
+// ota.cpp has always used; a third machine (OMCMD1) is fed the identical byte stream, which is how a
+// command is added without altering what the other two do.
+using usb::Magic;
 
-bool feed(Magic& m, char c) {
-  if (c == m.text[m.match]) {
-    if (++m.match < 6) return false;
-    m.match = 0;
-    return true;
+bool feed(Magic& m, char c) { return usb::feedMagic(m, c); }
+
+// One completed (or failed) OMCMD1 frame. Data lines for `nodes`/`msgs` are printed by the shell
+// before the final "[cmd] ok ..." line. A framing failure still answers with the same shape, so the
+// host never waits for a line that cannot come.
+void handleCommandFrame(usb::CommandFrame& frame) {
+  if (frame.event() == usb::CommandFrame::Event::Ready) {
+    char reply[256];
+    om::usbCommandExecute(frame.text(), reply, sizeof(reply));
+    Serial.println(reply);
+  } else {
+    Serial.printf("[cmd] error %s\n", frame.error());
   }
-  m.match = (c == m.text[0]) ? 1 : 0;
-  return false;
+  frame.consume();
 }
 
 // Send the off-screen frame. In 256-byte chunks, the size of the CDC's TX ring buffer, so a write
@@ -90,23 +97,43 @@ bool otaActive() { return s_active; }
 void otaPoll() {
   if (s_active) return;
 
-  // Scan for either magic ONE BYTE AT A TIME. The old version read six bytes and threw them away when
-  // they did not match, which leaves 1-5 bytes behind on a partial write - and since the reader then
-  // always takes six, the stream stays misaligned for ever and no later upload is ever recognised
-  // (observed: the device printed heartbeats and ignored every header until it was reset).
-  // A prefix state machine recovers from any garbage, including that residue. The OTA machine is the
-  // same one as before; the screenshot machine is a second copy fed the identical bytes.
+  // Scan for the three magics ONE BYTE AT A TIME. The old version read six bytes and threw them
+  // away when they did not match, which leaves 1-5 bytes behind on a partial write - and since the
+  // reader then always takes six, the stream stays misaligned for ever and no later upload is ever
+  // recognised (observed: the device printed heartbeats and ignored every header until it was reset).
+  // A prefix state machine recovers from any garbage, including that residue. The OTA and screenshot
+  // machines are the same ones as before; the command machine is a third copy fed the identical
+  // bytes, and it never enters a blocking read while idle (the S492 lesson).
   static Magic ota = {kMagic, 0};
   static Magic shot = {kShotMagic, 0};
+  static usb::CommandFrame command;
   bool gotMagic = false;
   bool gotShot = false;
   while (Serial.available() > 0) {
-    const int c = Serial.read();
-    if (c < 0) break;
-    const bool isOta = feed(ota, (char)c);
-    const bool isShot = feed(shot, (char)c);
+    const int ci = Serial.read();
+    if (ci < 0) break;
+    const char c = (char)ci;
+
+    // A command frame in progress owns every byte until it is complete or has failed, but only for
+    // the bytes that are already in the FIFO. When none are left, the loop returns to the mesh,
+    // the touch poll and the screen; poll() below is what ends a stalled frame on its deadline.
+    if (command.busy()) {
+      if (command.feed(c, millis()) != usb::CommandFrame::Event::None) handleCommandFrame(command);
+      continue;
+    }
+
+    const bool isOta = feed(ota, c);
+    const bool isShot = feed(shot, c);
+    const bool isCmd = command.scan(c);
+    if (isCmd) {
+      // The bytes of one magic must not count towards another.
+      ota.match = 0;
+      shot.match = 0;
+      command.begin(millis());
+      continue;   // the length line follows in this same stream
+    }
     if (isShot && !isOta) {
-      ota.match = 0;   // the bytes of one magic must not count towards the other
+      ota.match = 0;
       gotShot = true;
       break;
     }
@@ -115,6 +142,12 @@ void otaPoll() {
       gotMagic = true;
       break;
     }
+  }
+  // A command frame that arrived in pieces, or one whose host vanished, is advanced even when the
+  // FIFO is empty: this is the only blocking made impossible by construction.
+  if (command.busy() &&
+      command.poll(millis()) != usb::CommandFrame::Event::None) {
+    handleCommandFrame(command);
   }
   // A screenshot leaves nothing to read afterwards; anything the host sent later waits in the FIFO for
   // the next poll, so the OTA reader is exactly where it was.

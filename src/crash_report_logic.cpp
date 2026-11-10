@@ -159,4 +159,16 @@ int formatCoreDumpState(char* out, size_t cap, CoreDumpState state, int err) {
   return (int)at;
 }
 
+CoreDumpState classifyCoreDumpCheck(int err, bool erased) {
+  // ESP-IDF 4.4's esp_core_dump_image_check() calls esp_core_dump_partition_and_size_get(), which
+  // reads the first four bytes of the coredump partition as data_size. An erased partition reads
+  // 0xFFFFFFFF, and that path returns ESP_ERR_INVALID_SIZE ("Incorrect size of core dump image").
+  // The partition is intact and simply empty, so this is NOT a finding. A missing partition is
+  // ESP_ERR_NOT_FOUND. Anything else (notably ESP_ERR_INVALID_CRC after the checksum comparison) is
+  // a real failure and stays "unreadable".
+  if (err == kEspErrNotFound) return CoreDumpState::None;
+  if (err == kEspErrInvalidSize && erased) return CoreDumpState::None;
+  return CoreDumpState::Unreadable;
+}
+
 }  // namespace om

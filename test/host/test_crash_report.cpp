@@ -190,6 +190,23 @@ static void testCoreDumpState() {
   CHECK(terminated(small, sizeof(small)));
 }
 
+static void testCoreDumpCheck() {
+  using om::CoreDumpState;
+  // No coredump partition: "none", whether or not a dump was expected (the caller decides whether
+  // the line is printed).
+  CHECK(om::classifyCoreDumpCheck(om::kEspErrNotFound, false) == CoreDumpState::None);
+  CHECK(om::classifyCoreDumpCheck(om::kEspErrNotFound, true) == CoreDumpState::None);
+  // ESP_ERR_INVALID_SIZE on an erased partition is what ESP-IDF 4.4 returns for an empty dump
+  // (data_size reads 0xFFFFFFFF); it is "none", not damage. The same error with a real size field
+  // is a format failure and stays "unreadable".
+  CHECK(om::classifyCoreDumpCheck(om::kEspErrInvalidSize, true) == CoreDumpState::None);
+  CHECK(om::classifyCoreDumpCheck(om::kEspErrInvalidSize, false) == CoreDumpState::Unreadable);
+  // A checksum mismatch is the real corruption case.
+  CHECK(om::classifyCoreDumpCheck(0x109, false) == CoreDumpState::Unreadable);   // INVALID_CRC
+  CHECK(om::classifyCoreDumpCheck(0x109, true) == CoreDumpState::Unreadable);
+  CHECK(om::classifyCoreDumpCheck(0x102, false) == CoreDumpState::Unreadable);   // INVALID_ARG
+}
+
 static void testCauseNames() {
   CHECK(strcmp(om::excCauseName(0), "IllegalInstruction") == 0);
   CHECK(strcmp(om::excCauseName(20), "InstFetchProhibited") == 0);   // a call through NULL
@@ -204,6 +221,7 @@ int main() {
   testPreviousBoot();
   testCrashSummary();
   testCoreDumpState();
+  testCoreDumpCheck();
   testCauseNames();
   if (g_fail) {
     printf("%d crash_report check(s) FAILED\n", g_fail);

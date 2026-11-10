@@ -24,6 +24,10 @@
 #include "target.h"
 #include "timekeeper.h"
 #include "touch_gate.h"
+#include "usb_cmd.h"
+#include "usb_cmd_logic.h"
+#include "usb_frames.h"
+#include "usb_touch.h"
 #include "fonts.h"
 #include "ui/age.h"
 #include "ui/compose_text.h"
@@ -2335,7 +2339,15 @@ void loop() {
   (void)g_setScroll0;
 
   bool pressed = false;
-  if (om::wakePressed(pressed)) {
+  // A physical press or, when the `key wake` test command is running, the same two edges injected
+  // into this one handler. Everything below is the code the glass button drives.
+  bool havePress = om::wakePressed(pressed);
+  bool injectedEdge = false;
+  if (om::usbWakeSample(millis(), &injectedEdge)) {
+    pressed = injectedEdge;
+    havePress = true;
+  }
+  if (havePress) {
     if (pressed && !wakePrev) {
       if (screenOn) {
         // Sleep: fade the backlight out over kFadeOutMs, THEN put the panel to sleep. Any gesture in
@@ -2655,7 +2667,18 @@ void loop() {
   uint16_t x = 0, y = 0;
   // Touch is read only while the screen is on, and the wake gate has the last word: for 300 ms after
   // a wake, and for any finger that was already down then, accept() returns false, so no tap fires.
-  const bool rawDown = screenOn && om::omTouch(x, y);
+  // A USB tap/drag replaces the raw sample for a few passes; the gate and every gesture rule below
+  // are the same code the glass drives, so a test cannot skip them.
+  bool rawDown = false;
+  uint16_t injectedX = 0, injectedY = 0;
+  bool injectedDown = false;
+  if (om::usbTouchSample(millis(), &injectedX, &injectedY, &injectedDown)) {
+    x = injectedX;
+    y = injectedY;
+    rawDown = screenOn && injectedDown;
+  } else {
+    rawDown = screenOn && om::omTouch(x, y);
+  }
   const bool isDown = g_touchGate.accept(millis(), rawDown);
   if (!isDown) {
     if (g_down) {
@@ -2852,3 +2875,341 @@ void loop() {
   // fade-in (150 ms out); otherwise keep the old 20 ms loop (mesh, touch, draw).
   delay(g_fade.active() ? 1 : 20);
 }
+
+// --------------------------------------------------------------------------- USB test commands
+// The frame reader lives in ota.cpp; everything here is the shell. Each command goes through the
+// same functions the screen uses, so a test proves the real path: send and dm use the exact facade
+// calls the composer and the DM composer use, tap/drag/wake inject raw samples into the loop's own
+// gesture and wake code, and no command can read a key or a secret. One log line per command, one
+// final "[cmd] ok/error" line, and data lines only where the ticket asks for them.
+
+namespace {
+
+void cmdError(char* reply, size_t cap, const char* reason) {
+  snprintf(reply, cap, "[cmd] error %s", reason != nullptr ? reason : "unknown");
+}
+
+// One printable line: control bytes and the quote that would end the field become apostrophes.
+void cmdSafe(char* out, size_t cap, const char* in) {
+  if (out == nullptr || cap == 0) return;
+  size_t n = 0;
+  if (in != nullptr) {
+    for (; *in != 0 && n + 1 < cap; ++in) {
+      const unsigned char c = (unsigned char)*in;
+      out[n++] = (c < 0x20 || c == 0x7F || c == '"') ? '\'' : (char)c;
+    }
+  }
+  out[n] = 0;
+}
+
+int cmdChannelByName(const char* name) {
+  if (name == nullptr) return -1;
+  for (int i = 0; i < om::mcChannelCount(); ++i) {
+    if (strcmp(om::mcChannelName(i), name) == 0) return i;
+  }
+  return -1;
+}
+
+int cmdHexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// A public-key prefix as hex (the first 8 hex characters a `nodes` line prints, or more). Only the
+// PUBLIC key is compared; no command ever formats a private key or a channel secret.
+bool cmdKeyHasPrefix(const uint8_t* key, const char* hex) {
+  if (key == nullptr || hex == nullptr) return false;
+  const size_t len = strlen(hex);
+  if (len < 2 || (len % 2) != 0 || len > 64) return false;
+  for (size_t i = 0; i < len / 2; ++i) {
+    const int hi = cmdHexNibble(hex[i * 2]);
+    const int lo = cmdHexNibble(hex[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    if (key[i] != (uint8_t)((hi << 4) | lo)) return false;
+  }
+  return true;
+}
+
+// Contact by public-key prefix. refreshNodes() gives the current names; the key comes from the
+// facade one contact at a time, so this needs no second 64-contact buffer.
+bool cmdContactByKeyPrefix(const char* hex, om::MeshContact* out) {
+  refreshNodes();
+  for (int i = 0; i < g_nodeCount; ++i) {
+    om::MeshContact c{};
+    if (!om::meshContactByName(g_nodes[i].name, &c)) continue;
+    if (cmdKeyHasPrefix(c.pub_key, hex)) {
+      if (out) *out = c;
+      return true;
+    }
+  }
+  return false;
+}
+
+void cmdStamp(char* out, size_t cap, uint32_t wall, uint32_t uptime, bool wallReal) {
+  om::ui::Stamp stamp;
+  stamp.wall = wall;
+  stamp.uptime = uptime;
+  stamp.wallReal = wallReal;
+  om::ui::stampText(out, cap, stamp, om::timeKeeper().now(), millis() / 1000,
+                    om::timeKeeper().realSinceBoot(), om::ui::StampForm::DayTime);
+}
+
+int cmdPrintNodes() {
+  refreshNodes();
+  for (int i = 0; i < g_nodeCount; ++i) {
+    om::MeshContact c{};
+    const bool known = om::meshContactByName(g_nodes[i].name, &c);
+    char key[9] = "--------";
+    const char* type = "node";
+    int hops = -1;
+    if (known) {
+      snprintf(key, sizeof(key), "%02x%02x%02x%02x", c.pub_key[0], c.pub_key[1], c.pub_key[2],
+               c.pub_key[3]);
+      type = om::ui::advTypeName(c.type);
+      if (c.path_len == 0) {
+        hops = 0;
+      } else if (c.path_len != 0xFF) {
+        const int hashSize = (int)om::meshPathHashBytes();
+        if (hashSize > 0) hops = (int)c.path_len / hashSize;
+      }
+    }
+    char name[64];
+    char heard[32];
+    cmdSafe(name, sizeof(name), g_nodes[i].name);
+    cmdSafe(heard, sizeof(heard), g_nodes[i].age);
+    Serial.printf("[node] name=\"%s\" type=%s key=%s heard=%s hops=%d\n", name, type, key, heard,
+                  hops);
+  }
+  return g_nodeCount;
+}
+
+// The last n messages of both rings, oldest first. The channel and DM rings each keep 32, so 64 is
+// the whole history; refs only carry scalars, and each DM text is resolved at print time from the
+// one shared copy buffer, which keeps this out of RAM.
+struct CmdMsgRef {
+  uint32_t ts;
+  uint32_t seq;
+  uint8_t dm;
+  uint8_t thread;
+  uint16_t index;
+};
+
+int cmdPrintMsgs(int want) {
+  if (want < 0) want = 10;
+  if (want > 64) want = 64;
+  CmdMsgRef refs[64];
+  int n = 0;
+  for (int i = 0; i < om::meshMsgCount() && n < 64; ++i) {
+    CmdMsgRef& r = refs[n++];
+    r.ts = om::meshMsgTs(i);
+    r.seq = om::meshMsgSeq(i);
+    r.dm = 0;
+    r.thread = 0;
+    r.index = (uint16_t)i;
+  }
+  for (int t = 0; t < om::meshDmCount() && n < 64; ++t) {
+    const int k = om::meshDmList(t, g_dmScratch, om::ui::kMaxChatMsgs);
+    for (int j = 0; j < k && n < 64; ++j) {
+      CmdMsgRef& r = refs[n++];
+      r.ts = g_dmScratch[j].ts;
+      r.seq = g_dmScratch[j].seq;
+      r.dm = 1;
+      r.thread = (uint8_t)t;
+      r.index = 0;
+    }
+  }
+  // Insertion sort by uptime, stable on equal stamps: the two rings can share a second.
+  for (int i = 1; i < n; ++i) {
+    const CmdMsgRef key = refs[i];
+    int j = i - 1;
+    while (j >= 0 && refs[j].ts > key.ts) {
+      refs[j + 1] = refs[j];
+      --j;
+    }
+    refs[j + 1] = key;
+  }
+  const int shown = want < n ? want : n;
+  int printed = 0;
+  for (int at = n - shown; at < n; ++at) {
+    const CmdMsgRef& r = refs[at];
+    char where[64], from[64], text[192], when[24];
+    const char* state = "";
+    if (!r.dm) {
+      const int i = (int)r.index;
+      const int ch = om::meshMsgChannel(i);
+      cmdSafe(where, sizeof(where), ch >= 0 ? om::mcChannelName(ch) : "?");
+      cmdSafe(from, sizeof(from), om::meshMsgName(i));
+      cmdSafe(text, sizeof(text), om::meshMsgText(i));
+      cmdStamp(when, sizeof(when), om::meshMsgWallTs(i), om::meshMsgTs(i), om::meshMsgWallReal(i));
+      state = om::meshMsgMine(i) ? "sent" : "recv";
+    } else {
+      const int k = om::meshDmList((int)r.thread, g_dmScratch, om::ui::kMaxChatMsgs);
+      const om::MeshDm* found = nullptr;
+      for (int j = 0; j < k; ++j) {
+        if (g_dmScratch[j].seq == r.seq) {
+          found = &g_dmScratch[j];
+          break;
+        }
+      }
+      if (found == nullptr) continue;   // it fell out of the ring while we printed
+      cmdSafe(where, sizeof(where), om::meshDmName((int)r.thread));
+      cmdSafe(from, sizeof(from), found->name);
+      cmdSafe(text, sizeof(text), found->text);
+      cmdStamp(when, sizeof(when), found->wall, found->ts, found->wallReal);
+      state = om::ui::dmStateToken((om::ui::DmState)found->state);
+    }
+    Serial.printf("[msg] seq=%lu where=\"%s\" from=\"%s\" at=%s state=%s text=\"%s\"\n",
+                  (unsigned long)r.seq, where, from, when, state, text);
+    ++printed;
+  }
+  return printed;
+}
+
+}  // namespace
+
+namespace om {
+
+void usbCommandExecute(char* text, char* reply, size_t cap) {
+  if (reply == nullptr || cap == 0) return;
+  reply[0] = 0;
+
+  // Exactly one log line per executed command. The ">" keeps it from ever looking like the answer
+  // line: a command whose text began with "ok" must not be read as [cmd] ok by the host tool. The
+  // text is made printable so a stray control byte cannot split the log, and it is printed before
+  // the parser edits the line in place.
+  char logged[om::usb::kMaxCommandBytes + 1];
+  cmdSafe(logged, sizeof(logged), text);
+  Serial.printf("[cmd] > %s\n", logged[0] != 0 ? logged : "(empty)");
+
+  const om::usb::Command cmd = om::usb::parseCommand(text);
+  if (cmd.error != nullptr) {
+    cmdError(reply, cap, cmd.error);
+    return;
+  }
+
+  switch (cmd.kind) {
+    case om::usb::Kind::Send: {
+      if (!om::meshLinkReady()) {
+        cmdError(reply, cap, "mesh down");
+        return;
+      }
+      const int chan = cmdChannelByName(cmd.target);
+      if (chan < 0) {
+        cmdError(reply, cap, "no such channel");
+        return;
+      }
+      const int allow = om::meshOwnTextMaxFor(om::meshNodeName());
+      const int len = (int)strlen(cmd.text);
+      if (len > allow) {
+        snprintf(reply, cap, "[cmd] error text too long (%d > %d)", len, allow);
+        return;
+      }
+      // The same facade call the composer's Send key reaches (via chatSend), so the stored ring,
+      // the budget and the air path are the real ones.
+      if (!om::meshLinkSend(chan, cmd.text)) {
+        cmdError(reply, cap, "send failed");
+        return;
+      }
+      char channel[64];
+      cmdSafe(channel, sizeof(channel), om::mcChannelName(chan));
+      snprintf(reply, cap, "[cmd] ok send channel=\"%s\" bytes=%d", channel, len);
+      return;
+    }
+
+    case om::usb::Kind::Dm: {
+      if (!om::meshLinkReady()) {
+        cmdError(reply, cap, "mesh down");
+        return;
+      }
+      om::MeshContact contact{};
+      bool known = om::meshContactByName(cmd.target, &contact);
+      if (!known) known = cmdContactByKeyPrefix(cmd.target, &contact);
+      if (!known) {
+        cmdError(reply, cap, "no such contact");
+        return;
+      }
+      // The DM composer's own door: the same thread the message sheet's "Direct message" row
+      // opens, then the same sendMessage() path chatSend() calls.
+      int thread = -1;
+      if (!om::meshDmOpenByName(contact.name, &thread)) {
+        cmdError(reply, cap, "no dm thread");
+        return;
+      }
+      const int len = (int)strlen(cmd.text);
+      if (len > om::kMeshDmTextMax) {
+        snprintf(reply, cap, "[cmd] error text too long (%d > %d)", len, om::kMeshDmTextMax);
+        return;
+      }
+      if (!om::meshDmSend(thread, cmd.text)) {
+        cmdError(reply, cap, "dm send failed");
+        return;
+      }
+      const int n = om::meshDmList(thread, g_dmScratch, om::ui::kMaxChatMsgs);
+      const uint32_t seq = n > 0 ? g_dmScratch[n - 1].seq : 0;
+      char name[64];
+      cmdSafe(name, sizeof(name), contact.name);
+      snprintf(reply, cap, "[cmd] ok dm to=\"%s\" seq=%lu state=sending", name,
+               (unsigned long)seq);
+      return;
+    }
+
+    case om::usb::Kind::Status: {
+      refreshNodes();
+      char name[64];
+      cmdSafe(name, sizeof(name), om::meshLinkReady() ? om::meshNodeName() : "");
+      const char* path = om::meshLinkReady() ? om::meshPathHashLabel() : "?";
+      snprintf(reply, cap,
+               "[cmd] ok status mesh=%s name=\"%s\" path=%s channels=%d contacts=%d dm=%d "
+               "unread=%d clock=%s",
+               om::meshLinkReady() ? "up" : "down", name, path, om::mcChannelCount(), g_nodeCount,
+               om::meshDmCount(), unreadTotal(),
+               om::timeSourceName(om::timeKeeper().source()));
+      return;
+    }
+
+    case om::usb::Kind::Nodes: {
+      // Data lines first, then the one terminating answer; tools/cmd.py prints until that line.
+      const int count = cmdPrintNodes();
+      snprintf(reply, cap, "[cmd] ok nodes %d", count);
+      return;
+    }
+
+    case om::usb::Kind::Msgs: {
+      const int count = cmdPrintMsgs(cmd.count);
+      snprintf(reply, cap, "[cmd] ok msgs %d", count);
+      return;
+    }
+
+    case om::usb::Kind::Tap: {
+      const int x = cmd.nums[0];
+      const int y = cmd.nums[1];
+      om::usbTouchTap((uint16_t)x, (uint16_t)y);
+      snprintf(reply, cap, "[cmd] ok tap %d %d", x, y);
+      return;
+    }
+
+    case om::usb::Kind::Drag: {
+      // The injector clamps only the duration; coordinates outside the glass simply hit nothing,
+      // exactly as a real finger there would.
+      om::usbTouchDrag((uint16_t)cmd.nums[0], (uint16_t)cmd.nums[1], (uint16_t)cmd.nums[2],
+                       (uint16_t)cmd.nums[3], (uint32_t)cmd.nums[4]);
+      snprintf(reply, cap, "[cmd] ok drag %d %d %d %d %d", cmd.nums[0], cmd.nums[1], cmd.nums[2],
+               cmd.nums[3], cmd.nums[4]);
+      return;
+    }
+
+    case om::usb::Kind::KeyWake:
+      om::usbWakePress();
+      snprintf(reply, cap, "[cmd] ok key wake");
+      return;
+
+    case om::usb::Kind::Unknown:
+    default:
+      cmdError(reply, cap, "unknown");
+      return;
+  }
+}
+
+}  // namespace om

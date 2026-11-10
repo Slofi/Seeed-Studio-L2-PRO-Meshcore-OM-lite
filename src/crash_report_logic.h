@@ -110,4 +110,20 @@ enum class CoreDumpState : uint8_t { None, Corrupt, Unreadable };
 // `[crash] stored core dump: none` / `corrupt (err 0x103)` / `unreadable (err 0x105)`.
 int formatCoreDumpState(char* out, size_t cap, CoreDumpState state, int err);
 
+// ------------------------------------------------------------------------------------------------
+// What an unsuccessful esp_core_dump_image_check() means
+// ------------------------------------------------------------------------------------------------
+// ESP-IDF 4.4's esp_core_dump_partition_and_size_get() reads the partition's first four bytes as the
+// dump's data_size; an erased partition reads 0xFFFFFFFF and the function returns
+// ESP_ERR_INVALID_SIZE. That is "there is no dump", not damage. A missing coredump partition is
+// ESP_ERR_NOT_FOUND, also "none". A real CRC/format failure comes back as ESP_ERR_INVALID_CRC
+// (0x109) or another read/format error and stays "unreadable".
+constexpr int kEspErrInvalidSize = 0x104;
+constexpr int kEspErrNotFound = 0x105;
+
+// None when err means there is no dump (NOT_FOUND, or INVALID_SIZE with the partition's first word
+// reading as erased); Unreadable for every other failure. `erased` is computed by the device side by
+// reading those four bytes; this function is pure so test/host proves the mapping.
+CoreDumpState classifyCoreDumpCheck(int err, bool erased);
+
 }  // namespace om

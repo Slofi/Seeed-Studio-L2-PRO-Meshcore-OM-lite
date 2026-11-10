@@ -67,5 +67,15 @@ inline ToastState& toastState() {
   return state;
 }
 
+// EST-346, Filip: any touch while a toast shows dismisses it. The rule is the one EST-339 already
+// applies to a press away from an overlay: that press is CONSUMED, so its release and any drag of it
+// do nothing else, and only the NEXT new press may act. Called on the press edge only.
+// Returns true when this press dismissed a toast and the caller must spend the whole gesture.
+inline bool toastDismissOnPress(ToastState& t, uint32_t nowMs) {
+  if (!t.visible(nowMs)) return false;   // no toast, or one whose time ran out: the touch is free
+  t.clear();
+  return true;
+}
+
 }  // namespace ui
 }  // namespace om

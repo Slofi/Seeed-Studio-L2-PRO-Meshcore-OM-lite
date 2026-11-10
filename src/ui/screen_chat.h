@@ -41,6 +41,11 @@ struct ChatView {
   bool shift = false;
   bool nums = false;
   bool emoji = false;               // the smiley page is open (replaces the four key rows)
+  // The accent preview (EST-346): while a long press on s, c or z is past the threshold, the sheet
+  // draws this letter in a bubble above that key. -1 / 0 when nothing is held.
+  int accentRow = -1;
+  int accentCol = -1;
+  uint32_t accentCp = 0;
   const uint32_t* emojiRecent = nullptr;   // last 16 picks, most recent first
   int emojiRecentCount = 0;
   int emojiGroup = 0;               // faces / hands / hearts / objects / symbols

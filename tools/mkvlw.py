@@ -151,6 +151,9 @@ def main():
     ap.add_argument("--extra", default="")
     ap.add_argument("--preview", default="")
     ap.add_argument("--sample", default="Nodes  Chat  Map  RPTR\nSLO-RPTR-1  direct  2m")
+    # --scale 1 gives the device's own pixel size (the 1:1 proof EST-346 asks for); the default
+    # stays 3 so the older previews look the same.
+    ap.add_argument("--scale", type=int, default=3)
     a = ap.parse_args()
 
     codes = code_points(a.extra)
@@ -159,7 +162,7 @@ def main():
              describe(a.extra))
     print("%s: %d bytes (%d glyphs, ascent %d descent %d)" % (a.out, n, len(glyphs), ascent, descent))
     if a.preview:
-        print(preview(glyphs, ascent, a.size, a.preview, a.sample))
+        print(preview(glyphs, ascent, a.size, a.preview, a.sample, a.scale))
 
 
 if __name__ == "__main__":

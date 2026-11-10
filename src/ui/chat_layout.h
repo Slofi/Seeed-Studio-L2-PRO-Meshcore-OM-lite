@@ -23,6 +23,47 @@ struct KeyDef {
   KeyKind kind = KeyKind::Char;
 };
 
+// The sheet's page state (EST-346). One struct so the opening rule lives in ONE place: every time the
+// sheet opens it starts on the letters page with shift off, whatever page it was closed on (Filip:
+// "when switching to numbers/symbols and then closing the keyboard, next time it should be reset,
+// back to the letters; now it shows the last state"). The draft text is NOT here: it lives in the
+// composer and survives closing the sheet. Plain C++ so test/host proves the transition.
+enum class KeyPage : uint8_t { Letters = 0, Numbers, Emoji };
+
+struct KeyboardState {
+  bool open = false;
+  bool shift = false;
+  KeyPage page = KeyPage::Letters;
+
+  // Every door into the sheet (the compose field, REPLY, COPY, MENTION) calls this, never a bare
+  // `open = true`.
+  void openSheet() {
+    open = true;
+    page = KeyPage::Letters;
+    shift = false;
+  }
+  void close() { open = false; }   // the draft is the caller's and is kept as it was
+  void toggleShift() { shift = !shift; }
+  // The 123 / abc key: numbers <-> letters. Shift is page state, so it goes off with the page.
+  void toggleNumbers() {
+    page = (page == KeyPage::Numbers) ? KeyPage::Letters : KeyPage::Numbers;
+    shift = false;
+  }
+  // The smiley / abc keys: the emoji page replaces the four key rows.
+  void toggleEmoji() {
+    page = (page == KeyPage::Emoji) ? KeyPage::Letters : KeyPage::Emoji;
+    shift = false;
+  }
+  void showLetters() { page = KeyPage::Letters; }
+  bool nums() const { return page == KeyPage::Numbers; }
+  bool emoji() const { return page == KeyPage::Emoji; }
+};
+
+// The accented letter a long press on `key` enters (EST-346: s -> š, c -> č, z -> ž; capitals with
+// shift), or 0 when the key has no accented form. The caller keeps the letter as a code point and
+// encodes it, so the mapping and the composer budget never disagree about the bytes.
+uint32_t accentCodePoint(char key, bool shift);
+
 // The four key rows of the sheet: 10/9/9/3 keys in letters, 10/10/10/2 in numbers. Labels are the
 // device keyboard's own characters (QWERTZ letters as today) with the mock's row structure. Glyphs
 // the ASCII-only faces do not carry (the mock's shift arrow and backspace) are drawn as vectors by

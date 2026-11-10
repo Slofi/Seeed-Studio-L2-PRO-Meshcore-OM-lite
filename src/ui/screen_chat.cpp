@@ -421,6 +421,34 @@ void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
   d->drawString(label, cx, cy);
 }
 
+// EST-346: the long press's preview, a small bubble ABOVE the key being held, with the letter that a
+// release will enter (š / č / ž, or the capital with shift). Its rectangle comes from the key the
+// layout already handed out, so the bubble always sits over the right key. Clamped below the status
+// bar for the top row and inside the screen's sides.
+void drawAccentBubble(lgfx::LovyanGFX* d, const ChatLayout& g, const ChatView& v) {
+  if (v.accentCp == 0 || v.accentRow < 0 || v.accentRow > 3 || v.accentCol < 0 ||
+      v.accentCol >= g.keyCount[v.accentRow]) {
+    return;
+  }
+  const Rect key = g.keys[v.accentRow][v.accentCol];
+  int16_t x = (int16_t)(key.x + key.w / 2 - kAccentBubbleW / 2);
+  int16_t y = (int16_t)(key.y - kAccentBubbleGap - kAccentBubbleH);
+  if (x < 2) x = 2;
+  if (x > kScreenW - 2 - kAccentBubbleW) x = (int16_t)(kScreenW - 2 - kAccentBubbleW);
+  if (y < kStatusH + 2) y = (int16_t)(kStatusH + 2);
+
+  char letter[5] = {0};
+  const int n = utf8Encode(v.accentCp, letter);
+  if (n <= 0) return;
+  letter[n] = 0;
+  d->fillRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kPanel2);
+  d->drawRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kAcc);
+  setRole(d, FontRole::SansTitle);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(kInk, kPanel2);
+  d->drawString(letter, x + kAccentBubbleW / 2, y + kAccentBubbleH / 2);
+}
+
 // The emoji page: a rail of group icons plus "abc", the Recent strip with Send, and the scrolling
 // 22 px grid. Every rectangle comes from emojiPadLayout(), the same one the hit test uses.
 void drawEmojiPage(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
@@ -513,6 +541,8 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
       const int n = keyRow(v.nums, r, defs);
       for (int c = 0; c < n && c < g.keyCount[r]; ++c) drawKey(d, g.keys[r][c], defs[c], v.shift);
     }
+    // Above the keys, after them: the held key's preview bubble (EST-346).
+    drawAccentBubble(d, g, v);
   }
 }
 

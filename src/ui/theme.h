@@ -105,6 +105,10 @@ constexpr int16_t kNodesHeadH = 18;
 // with a margin, so it never covers the bar.
 constexpr int16_t kToastH     = 22;
 constexpr int16_t kToastMargin = 8;
+// How long a toast stays up (EST-346, Filip: 5 s instead of 3 s). ONE constant for every toast: the
+// new-node notice, a ping result, a trace and the radio fault all pass it to showToast(), so a later
+// change is one number. Any touch while a toast shows dismisses it and is spent (main.cpp).
+constexpr uint32_t kToastMs   = 5000;
 
 constexpr int16_t kTabGap     = 2;
 constexpr int16_t kTabIcon    = 11;
@@ -213,6 +217,13 @@ constexpr uint8_t kKeyUnit     = 10;   // a normal key; wide keys are 22 units (
 constexpr uint8_t kKeyUnitWide = 22;
 constexpr uint8_t kKeyUnitSpace = 40;  // the bottom row's space, wider than the comma and the dot
 
+// The accent preview (EST-346): a long press on s, c or z holds a small bubble above that key with the
+// accented letter (š, č, ž, or the capital with shift). 26 px fits the widest glyph at 14 px with air,
+// and the 2 px gap keeps the bubble clear of the key's own border. Clamped below the status bar.
+constexpr int16_t kAccentBubbleW = 26;
+constexpr int16_t kAccentBubbleH = 24;
+constexpr int16_t kAccentBubbleGap = 2;
+
 // The emoji page takes exactly the four key rows' rectangle (94 px), so the sheet height and the
 // message band above it do not move. A group cell is the ticket's 22 px; the Recent strip uses
 // 15 px cells so all 16 fit in one row beside Send, with a 13 px glyph centred in each.
@@ -265,8 +276,10 @@ constexpr int16_t kTabY       = kScreenH - kTabH;
 // Sizes are whole pixels. The mock's 7.5/8/8.5/10 px were rounded up for the device panel, except
 // the status line: 11 px (the brief) made "MC · EU868 · 2B" collide with the node count at 320 px,
 // so the status uses the same 10 px mono as the row metadata.
-// One glyph outside ASCII: mono carries U+00B7 MIDDLE DOT, the mock's status separator, added by
-// tools/mkvlw.py --extra 0xb7. The settings gear is a vector mask (13x13, 8 teeth) drawn by
+// One range outside ASCII: every face carries U+00A0..U+017F (Latin-1 Supplement and Latin Extended-A,
+// added by tools/mkvlw.py --extra, EST-346), so Slovenian, Croatian, German, Italian, Czech and Polish
+// letters draw instead of the placeholder box. That range includes the mock's U+00B7 MIDDLE DOT.
+// The settings gear is a vector mask (13x13, 8 teeth) drawn by
 // tools/mkicons.py and blended by drawGear, so the sans9 metrics and the tab labels do not move.
 // Everything else the faces cannot draw is the screen's dim placeholder box, never the font's
 // full-height missing-glyph rectangle (see widgets drawTextLeft / the text wrap).

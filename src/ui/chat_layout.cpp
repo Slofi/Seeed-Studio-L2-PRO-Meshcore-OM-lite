@@ -40,6 +40,18 @@ void put(KeyDef& k, const char* label, uint8_t units, KeyKind kind) {
 
 }  // namespace
 
+// EST-346: the three keys with a long-press accent. Slovenian: s -> š (U+0161), c -> č (U+010D),
+// z -> ž (U+017E); with shift the capital (Š U+0160, Č U+010C, Ž U+017D). Anything else is 0, so the
+// caller arms no long press and a tap stays exactly what it was.
+uint32_t accentCodePoint(char key, bool shift) {
+  switch (key) {
+    case 's': return shift ? 0x0160u : 0x0161u;
+    case 'c': return shift ? 0x010Cu : 0x010Du;
+    case 'z': return shift ? 0x017Du : 0x017Eu;
+    default: return 0;
+  }
+}
+
 int keyRow(bool nums, int row, KeyDef* out) {
   if (out == nullptr || row < 0 || row > 3) return 0;
   int n = 0;

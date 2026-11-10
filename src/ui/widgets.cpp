@@ -137,9 +137,8 @@ void setRole(lgfx::LovyanGFX* d, FontRole role) {
 }
 
 bool fontHasGlyph(FontRole role, uint32_t cp) {
-  if (cp >= 0x20 && cp <= 0x7E) return true;
-  // Only the mono blob was generated with the mock's U+00B7 MIDDLE DOT (tools/mkvlw.py --extra 0xb7).
-  return cp == 0xB7u && (role == FontRole::MonoMeta || role == FontRole::MonoStatus);
+  (void)role;   // every face carries the same ranges (tools/mkvlw.py --extra, EST-346)
+  return fontCoversCodePoint(cp);
 }
 
 namespace {

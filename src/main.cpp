@@ -121,11 +121,20 @@ static int g_chatScroll = 0;      // px scrolled up from the newest message (0 =
 static int g_chatScroll0 = 0;     // chat scroll when the finger went down (its own base, not the picker's)
 static int g_chatMaxScroll = 0;   // the last draw's clamp
 static int g_chatTotal = 0;       // message band content height of the last draw
-static bool g_compose = false;    // the keyboard sheet is open
-static bool g_kbNums = false;     // numbers/symbols page
-static bool g_kbShift = false;    // capitals
+// The keyboard sheet's state (EST-346): one struct, and every door into the sheet calls openSheet(),
+// so it always starts on the letters page with shift off, whatever page it was last closed on. The
+// draft text (g_kbText) is separate and is kept as it was.
+static om::ui::KeyboardState g_kb;
+// EST-346: the s / c / z long press on the keyboard, driven by the same tested LongPress rule as the
+// Nodes menu (ui/long_press.h). Armed on the press, fired while the finger is still down (the bubble
+// appears), and the release enters the accented letter. A short tap enters the plain letter.
+static om::ui::LongPress g_keyHold;
+static bool g_keyHoldArmed = false;
+static int g_accentRow = -1;
+static int g_accentCol = -1;
+static uint32_t g_accentCp = 0;        // the letter the bubble shows and the release enters
+static bool g_accentPreview = false;   // the hold passed the threshold: the bubble is up
 // The emoji page replaces the four key rows while it is open. Its own scroll follows the finger.
-static bool g_kbEmoji = false;    // the smiley page is open
 static int g_emojiGroup = 0;      // faces / hands / hearts / objects / symbols
 static int g_emojiScroll = 0;     // the selected group's grid scroll, px
 static int g_emojiScroll0 = 0;    // its value when the finger went down
@@ -853,7 +862,7 @@ static void drawHome() {
 static void showRadioFaultToast() {
   const om::RadioFault reason = om::radioFaultState().reason();
   if (reason == om::RadioFault::None) return;
-  if (om::ui::toastState().show(om::radioFaultText(reason), millis(), 2500)) {
+  if (om::ui::toastState().show(om::radioFaultText(reason), millis(), om::ui::kToastMs)) {
     Serial.printf("[radio] fault toast: %s\n", om::ui::toastState().text);
     redrawCurrentScreen();
   }
@@ -1003,10 +1012,14 @@ static void buildChatView(om::ui::ChatView& v) {
   v.nowSec = millis() / 1000;
   v.nowWall = om::timeKeeper().now();
   v.nowReal = om::timeKeeper().realSinceBoot();
-  v.osk = g_compose;
-  v.shift = g_kbShift;
-  v.nums = g_kbNums;
-  v.emoji = g_kbEmoji;
+  v.osk = g_kb.open;
+  v.shift = g_kb.shift;
+  v.nums = g_kb.nums();
+  v.emoji = g_kb.emoji();
+  // The held key's preview (EST-346): only while the bubble is actually up.
+  v.accentRow = g_accentPreview ? g_accentRow : -1;
+  v.accentCol = g_accentPreview ? g_accentCol : -1;
+  v.accentCp = g_accentPreview ? g_accentCp : 0;
   v.emojiRecent = g_emojiRecent.cps;
   v.emojiRecentCount = g_emojiRecent.count;
   v.emojiGroup = g_emojiGroup;
@@ -1080,7 +1093,7 @@ static void chatSelectChat(int chat) {
   g_chatScroll = 0;
   g_selScroll = 0;
   g_selector = false;
-  g_kbEmoji = false;
+  g_kb.showLetters();   // leaving a page does not follow the next open (which resets anyway)
   g_emojiScroll = 0;
   g_bubMenuSeq = 0;
   g_replySeq = 0;
@@ -1135,8 +1148,7 @@ static void chatSendDraft() {
   g_kbText[0] = 0;
   g_replySeq = 0;
   g_replyName[0] = 0;
-  g_compose = false;
-  g_kbEmoji = false;
+  g_kb.close();   // the next open goes through openSheet() and starts on letters, shift off
 }
 
 // One emoji from the keyboard: four UTF-8 bytes at most, refused as a unit when the draft budget
@@ -1156,6 +1168,23 @@ static void chatEmojiPick(uint32_t cp) {
                 (unsigned)g_emojiRecent.count);
 }
 
+// EST-346: the release of a hold on s, c or z enters the accented letter the bubble showed. One code
+// point (two UTF-8 bytes), appended as a whole through the same budget as every other key: a full
+// draft refuses it rather than splitting the sequence.
+static void chatAccentCommit() {
+  if (g_accentCp == 0) return;
+  char bytes[5] = {0};
+  const int n = om::ui::utf8Encode(g_accentCp, bytes);
+  if (n <= 0) return;
+  bytes[n] = 0;
+  if (!om::ui::composeAppend(g_kbText, (int)sizeof(g_kbText), bytes, chatDraftAllowance())) {
+    Serial.printf("[chat] accent U+%04lX refused: draft budget full\n", (unsigned long)g_accentCp);
+    return;
+  }
+  Serial.printf("[chat] accent U+%04lX (%s), %u bytes in the draft\n", (unsigned long)g_accentCp,
+                bytes, (unsigned)strlen(g_kbText));
+}
+
 // The sheet owns the keyboard state; this applies one key and says whether the draft was sent. The
 // draft counts bytes against the same budget the counter shows, and a key that would pass it does
 // nothing at all (Filip, 2026-11-10: no silent cut on send).
@@ -1163,17 +1192,13 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
   const int allow = chatDraftAllowance();
   switch (hit.keyKind) {
     case om::ui::KeyKind::Shift:
-      g_kbShift = !g_kbShift;
+      g_kb.toggleShift();
       break;
     case om::ui::KeyKind::Mode:
-      g_kbNums = !g_kbNums;
-      g_kbShift = false;
-      g_kbEmoji = false;
+      g_kb.toggleNumbers();
       break;
     case om::ui::KeyKind::Emoji:
-      g_kbEmoji = !g_kbEmoji;
-      g_kbShift = false;
-      g_kbNums = false;
+      g_kb.toggleEmoji();
       g_emojiScroll = 0;
       break;
     case om::ui::KeyKind::Space:
@@ -1187,7 +1212,7 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
       break;
     case om::ui::KeyKind::Char: {
       char one[2] = {hit.keyCh, 0};
-      if (g_kbShift && !g_kbNums && one[0] >= 'a' && one[0] <= 'z') one[0] = (char)(one[0] - 32);
+      if (g_kb.shift && !g_kb.nums() && one[0] >= 'a' && one[0] <= 'z') one[0] = (char)(one[0] - 32);
       om::ui::composeAppend(g_kbText, (int)sizeof(g_kbText), one, allow);
       break;
     }
@@ -1233,9 +1258,7 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       snprintf(g_replyName, sizeof(g_replyName), "%s", m.name);
       g_bubMenuSeq = 0;
       g_kbText[0] = 0;
-      g_kbNums = false;
-      g_kbShift = false;
-      g_compose = true;
+      g_kb.openSheet();
       Serial.printf("[chat] reply to %s\n", g_replyName);
       break;
     case om::ui::SheetAction::CopyText:
@@ -1245,7 +1268,7 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       g_replySeq = 0;
       g_replyName[0] = 0;
       g_bubMenuSeq = 0;
-      g_compose = true;
+      g_kb.openSheet();
       Serial.println("[chat] copied a message into the draft");
       break;
     case om::ui::SheetAction::Mention: {
@@ -1256,7 +1279,7 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       g_replySeq = 0;
       g_replyName[0] = 0;
       g_bubMenuSeq = 0;
-      g_compose = true;
+      g_kb.openSheet();
       Serial.printf("[chat] mention %s\n", tag);
       break;
     }
@@ -1331,7 +1354,7 @@ static void handleChatTap(int x, int y) {
     case om::ui::ChatHit::Head:
       // The header is the selector's own door: it opens the dropdown and closes it again.
       g_selector = !g_selector;
-      g_compose = false;
+      g_kb.close();
       g_bubMenuSeq = 0;
       if (g_selector) g_selScroll = 0;
       break;
@@ -1347,7 +1370,7 @@ static void handleChatTap(int x, int y) {
       break;
     case om::ui::ChatHit::Msg:
       g_bubMenuSeq = hit.seq;   // hold the message id, not its position in the ring
-      g_compose = false;        // the sheet needs the room and covers the keyboard anyway
+      g_kb.close();             // the sheet needs the room and covers the keyboard anyway
       break;
     case om::ui::ChatHit::SenderName: {
       // EST-342: a tap on the sender's name is the sheet's "Direct message" row.
@@ -1356,7 +1379,7 @@ static void handleChatTap(int x, int y) {
         return;
       }
       g_bubMenuSeq = hit.seq;
-      g_compose = false;
+      g_kb.close();
       break;
     }
     case om::ui::ChatHit::SheetRow:
@@ -1366,7 +1389,7 @@ static void handleChatTap(int x, int y) {
       g_bubMenuSeq = 0;
       break;
     case om::ui::ChatHit::Field:
-      g_compose = true;   // the draft line rides on top of the keys
+      g_kb.openSheet();   // always on the letters page, shift off (EST-346)
       break;
     case om::ui::ChatHit::Key:
       chatKey(hit);
@@ -1381,7 +1404,7 @@ static void handleChatTap(int x, int y) {
       }
       break;
     case om::ui::ChatHit::EmojiBack:
-      g_kbEmoji = false;
+      g_kb.showLetters();   // back to the letters/numbers keyboard page
       g_emojiScroll = 0;
       break;
     case om::ui::ChatHit::EmojiSend:
@@ -1390,13 +1413,12 @@ static void handleChatTap(int x, int y) {
     case om::ui::ChatHit::Outside:
       // Belt and braces: the shell already closed the sheet on the PRESS that landed above it and
       // spent that gesture (EST-339), so this is only reached if a hit test runs on an open sheet.
-      g_compose = false;
-      g_kbEmoji = false;
+      g_kb.close();
       break;
     case om::ui::ChatHit::None:
       // Not the chat surface: the tab bar (hidden while the sheet is open), the fault mark and the
       // status gear.
-      if (!g_compose) {
+      if (!g_kb.open) {
         const int tab = L.tabAt(x, y);
         if (tab >= 0) { showTab(tab); return; }
       }
@@ -1444,9 +1466,8 @@ static bool closeChatOverlay(om::ui::ChatOverlay which) {
       g_selector = false;
       return true;
     case om::ui::ChatOverlay::Keyboard:
-      if (!g_compose) return false;
-      g_compose = false;
-      g_kbEmoji = false;
+      if (!g_kb.open) return false;
+      g_kb.close();
       return true;
     case om::ui::ChatOverlay::None:
     default:
@@ -1773,11 +1794,12 @@ static void showTab(int tab) {
 }
 
 // A short message on top of the current frame, with its own deadline. The toast never answers a
-// touch: it is drawn only, so it cannot steal anything outside its own rectangle (EST-342). It is
-// drawn by the frame overlay on the redraw this call triggers, so the next repaint carries it too
-// (EST-344); only expiry asks for another redraw.
-static void showToast(const char* text, uint32_t ms) {
-  if (!om::ui::toastState().show(text, millis(), ms)) return;
+// touch itself: it is drawn only, and the loop's press edge dismisses it and spends that gesture
+// (EST-346). It is drawn by the frame overlay on the redraw this call triggers, so the next repaint
+// carries it too (EST-344); only expiry asks for another redraw.
+// One duration for every toast: theme.h kToastMs (5 s, EST-346).
+static void showToast(const char* text) {
+  if (!om::ui::toastState().show(text, millis(), om::ui::kToastMs)) return;
   redrawCurrentScreen();
 }
 
@@ -1814,7 +1836,7 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
       snprintf(text, sizeof(text), sent ? "Ping sent to %s" : "Ping %s: send failed", name);
       closeNodeSheets();
       drawHome();
-      showToast(text, 2500);
+      showToast(text);
       return;
     }
     case om::ui::NodeAction::Trace: {
@@ -1823,7 +1845,7 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
       snprintf(text, sizeof(text), sent ? "Trace sent to %s" : "Trace %s: no path", name);
       closeNodeSheets();
       drawHome();
-      showToast(text, 2500);
+      showToast(text);
       return;
     }
     case om::ui::NodeAction::ResetPath:
@@ -1831,7 +1853,7 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
       // The path-dependent rows (Trace, Reset path) disappear now, so the sheet is rebuilt.
       buildNodeMenu(node);
       drawHome();
-      showToast("Path reset", 2000);
+      showToast("Path reset");
       return;
     case om::ui::NodeAction::Favourite: {
       bool nowFav = false;
@@ -1855,7 +1877,7 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
         buildNodeMenu(at);
       }
       drawHome();
-      showToast(nowFav ? "Favourite removed" : "Favourite added", 2000);
+      showToast(nowFav ? "Favourite removed" : "Favourite added");
       return;
     }
     case om::ui::NodeAction::RemoveContact:
@@ -1872,7 +1894,7 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
       g_nodeInfo = -1;
       refreshNodes();
       drawHome();
-      showToast("Contact removed", 2500);
+      showToast("Contact removed");
       return;
     case om::ui::NodeAction::LoginRptr:
       snprintf(g_rptrNode, sizeof(g_rptrNode), "%s", name);
@@ -2660,7 +2682,7 @@ void loop() {
   om::meshLinkLoop();
 
   // --- EST-342: the asynchronous mesh events -----------------------------------------------------
-  // 1) A contact was ADDED by an advert: one toast for 3 s, a dot on the Nodes tab, the "New node"
+  // 1) A contact was ADDED by an advert: one toast for om::ui::kToastMs, a dot on the Nodes tab, the "New node"
   //    per-event sound (DND and Off silence it). Known contacts never get here (mesh_link queues
   //    only is_new adverts).
   {
@@ -2681,7 +2703,7 @@ void loop() {
         if (notice.sound) playPattern(g_sndNew);
         // showToast redraws the current screen, which also puts the dot on the tab bar of whatever
         // is showing; one push carries both the dot and the toast (EST-344).
-        if (screenOn) showToast(lastText, 3000);
+        if (screenOn) showToast(lastText);
         Serial.printf("[nodes] notice: %s\n", lastText);
       }
     }
@@ -2711,7 +2733,7 @@ void loop() {
       } else if (st == om::MeshPingState::Failed) {
         snprintf(text, sizeof(text), "Ping: send failed");
       }
-      if (text[0] && screenOn) showToast(text, 3000);
+      if (text[0] && screenOn) showToast(text);
       if (text[0]) Serial.printf("[nodes] %s\n", text);
     }
   }
@@ -2740,10 +2762,10 @@ void loop() {
           g_nodeTraceOpen = true;
           g_nodeMenu = -1;
           if (g_tab == 0 && !g_settings && screenOn) drawHome();
-          else if (screenOn) showToast("Trace came back", 2500);
+          else if (screenOn) showToast("Trace came back");
           Serial.printf("[nodes] trace: %d hop(s), %lu ms\n", tv.count, (unsigned long)tv.rttMs);
         } else if (screenOn) {
-          showToast("Trace: no data back", 2500);
+          showToast("Trace: no data back");
         }
       }
     }
@@ -2757,7 +2779,7 @@ void loop() {
   // still. While the keyboard sheet is open the screen is left alone, so the draft cannot jump.
   // Both serials are watched: a channel message and a DM (which also changes its delivery state on
   // an ACK, EST-342).
-  if (g_tab == 1 && !g_compose && !g_settings) {
+  if (g_tab == 1 && !g_kb.open && !g_settings) {
     static uint32_t lastSeenMsg = 0xFFFFFFFFu;
     static uint32_t lastSeenDm = 0xFFFFFFFFu;
     const uint32_t msgSerial = om::meshMsgSerial();
@@ -2805,17 +2827,28 @@ void loop() {
       // A spent gesture was the press that closed an overlay: its release does nothing at all (no
       // tap, no rubber band, no redraw). Only the NEXT new press acts on what was behind (EST-339).
       const bool spent = g_spent;
+      const bool accent = g_accentPreview;   // the hold's bubble: the release enters that letter
       g_dismiss.onRelease();
       g_spent = false;
       g_nodeHoldArmed = false;
       g_nodeHold.release();
+      g_keyHoldArmed = false;
+      g_keyHold.release();
+      g_accentPreview = false;
       if (!spent) {
-        if (!g_drag && !g_acted) handleTap(g_sx, g_sy, false);
+        // EST-346: the release of a s/c/z hold enters the accented letter; it is not a tap, so the
+        // plain letter is never typed as well.
+        if (accent) {
+          chatAccentCommit();
+          drawChat();
+        } else if (!g_drag && !g_acted) {
+          handleTap(g_sx, g_sy, false);
+        }
         // A rubber band needs a spring: clamp the chat back into range when the finger lifts. The
         // selector list and the emoji grid have their own scroll and only move while they are open.
         if (g_tab == 1 && !g_settings) {
           bool redraw = false;
-          if (g_compose && g_kbEmoji) {
+          if (g_kb.open && g_kb.emoji()) {
             const int clamped = g_emojiScroll < 0 ? 0
                               : (g_emojiScroll > g_emojiMaxScroll ? g_emojiMaxScroll
                                                                   : g_emojiScroll);
@@ -2823,7 +2856,7 @@ void loop() {
               g_emojiScroll = clamped;
               redraw = true;
             }
-          } else if (!g_compose) {
+          } else if (!g_kb.open) {
             if (g_selector) {
               const int clamped = g_selScroll < 0 ? 0
                                 : (g_selScroll > g_selMaxScroll ? g_selMaxScroll : g_selScroll);
@@ -2868,12 +2901,26 @@ void loop() {
     g_nodeScroll0 = g_nodeScroll;
     g_drag = false;
     g_acted = false;
+    g_nodeHoldArmed = false;
+    g_keyHoldArmed = false;
+    g_accentPreview = false;
+    g_accentCp = 0;
+    // EST-346: any touch while a toast is showing dismisses it and is CONSUMED, exactly like the press
+    // that closes an overlay (EST-339): this press, its release and any drag of it do nothing else, and
+    // only the NEXT new press acts. A toast that has already run out is not showing, so its touch is
+    // free (the loop's expire() has cleared it by now).
+    if (om::ui::toastDismissOnPress(om::ui::toastState(), millis())) {
+      g_spent = true;
+      g_drag = true;
+      g_acted = true;
+      redrawCurrentScreen();   // the frame without the toast
+      Serial.printf("[tap] %d,%d dismissed the toast, gesture spent\n", (int)x, (int)y);
+    }
     // EST-342: a press that begins on a Nodes ROW arms the long-press rule (ui/long_press.h); a
     // press anywhere else, or while a sheet is open, never does. The release of a short press is
     // still an ordinary tap, so a plain tap keeps doing what it did.
-    g_nodeHoldArmed = false;
-    if (g_tab == 0 && !g_settings && g_nodeInfo < 0 && g_nodeMenu < 0 && !g_nodeTraceOpen &&
-        om::ui::l2().rowAt(x, y, g_nodeScroll, g_nodeCount) >= 0) {
+    if (!g_spent && g_tab == 0 && !g_settings && g_nodeInfo < 0 && g_nodeMenu < 0 &&
+        !g_nodeTraceOpen && om::ui::l2().rowAt(x, y, g_nodeScroll, g_nodeCount) >= 0) {
       g_nodeHold.press(x, y, millis());
       g_nodeHoldArmed = true;
     }
@@ -2889,14 +2936,16 @@ void loop() {
       outsideOverlay = (op.overlay != om::ui::ChatOverlay::None && !op.inside);
       overlay = op.overlay;
     }
-    g_spent = g_dismiss.onPress(outsideOverlay);
-    if (g_spent) {
-      const bool closed = closeChatOverlay(overlay);
-      Serial.printf("[tap] %d,%d away from %s: %s, gesture spent\n", (int)x, (int)y,
-                    chatOverlayName(overlay), closed ? "closed" : "nothing to close");
-      if (closed) drawChat();
-      g_drag = true;    // no drag scroll and no tap on the release
-      g_acted = true;
+    if (!g_spent) {
+      g_spent = g_dismiss.onPress(outsideOverlay);
+      if (g_spent) {
+        const bool closed = closeChatOverlay(overlay);
+        Serial.printf("[tap] %d,%d away from %s: %s, gesture spent\n", (int)x, (int)y,
+                      chatOverlayName(overlay), closed ? "closed" : "nothing to close");
+        if (closed) drawChat();
+        g_drag = true;    // no drag scroll and no tap on the release
+        g_acted = true;
+      }
     }
     // EST-342: a press outside the Nodes long-press sheet closes it and spends its gesture, the same
     // rule the chat overlays follow, so nothing behind the sheet is scrolled or tapped.
@@ -2911,6 +2960,31 @@ void loop() {
         g_acted = true;
         Serial.printf("[tap] %d,%d away from the node sheet: closed, gesture spent\n", (int)x,
                       (int)y);
+      }
+    }
+    // EST-346: a press on s, c or z on the LETTERS page arms the accent hold (the same LongPress rule
+    // the node menu uses). The letter is fixed at the press, so the shift state cannot change under a
+    // finger; the bubble appears when the hold passes the threshold and the release enters it.
+    if (!g_spent && g_tab == 1 && !g_settings && g_kb.open && !g_kb.emoji() &&
+        !g_kb.nums() && !g_selector && g_bubMenuSeq == 0) {
+      const om::ui::ChatLayout kg =
+          om::ui::chatLayoutFor(om::ui::l2(), true, g_replySeq != 0, false, false);
+      const om::ui::KeyHit key = om::ui::keyAt(kg, false, (int)x, (int)y);
+      if (key.row >= 0) {
+        om::ui::KeyDef defs[10];
+        const int n = om::ui::keyRow(false, key.row, defs);
+        if (key.col < n && defs[key.col].kind == om::ui::KeyKind::Char) {
+          const uint32_t cp = om::ui::accentCodePoint(defs[key.col].label[0], g_kb.shift);
+          if (cp != 0) {
+            g_keyHold.press((int)x, (int)y, millis());
+            g_keyHoldArmed = true;
+            g_accentRow = key.row;
+            g_accentCol = key.col;
+            g_accentCp = cp;
+            Serial.printf("[chat] accent armed: %c -> U+%04lX\n", defs[key.col].label[0],
+                          (unsigned long)cp);
+          }
+        }
       }
     }
     // This panel lifts between samples during a drag, so a press that lands near the previous
@@ -2931,14 +3005,29 @@ void loop() {
     // A hold fires while the finger is still down: the menu opens under the finger. A spent gesture
     // never gets here (its overlay was closed on the press). On the Nodes list the timing, the
     // 12 px cancel and the "no tap after a hold" rule are the tested LongPress (EST-342).
-    if (!g_spent && !g_acted && g_nodeHoldArmed) {
+    // EST-346: on the keyboard the same rule holds a s/c/z key: past the threshold the bubble appears
+    // (and the plain letter is NOT typed), and the release enters the accented letter.
+    bool accentFired = false;
+    if (!g_spent && !g_acted && g_keyHoldArmed) {
+      if (g_drag) {
+        g_keyHold.reset();
+      } else if (g_keyHold.update((int)x, (int)y, millis())) {
+        g_acted = true;         // the generic hold below must not type the plain letter
+        accentFired = true;
+        g_accentPreview = true;
+        Serial.printf("[chat] accent preview U+%04lX\n", (unsigned long)g_accentCp);
+        drawChat();             // the bubble, above the held key
+      }
+    }
+    if (!accentFired && !g_spent && !g_acted && g_nodeHoldArmed) {
       if (g_drag) {
         g_nodeHold.reset();
       } else if (g_nodeHold.update((int)x, (int)y, millis())) {
         g_acted = true;
         handleTap(x, y, true);
       }
-    } else if (!g_spent && !g_drag && !g_acted && (millis() - g_downMs) >= 450) {
+    } else if (!accentFired && !g_spent && !g_drag && !g_acted &&
+               (millis() - g_downMs) >= 450) {
       g_acted = true;
       handleTap(x, y, true);
     }
@@ -2957,7 +3046,7 @@ void loop() {
         if (next < 0) next = 0;
         if (next > 0) next = 0;   // EST-342: all ten rows are on screen; the page does not scroll
         if (next != g_setScroll) { g_setScroll = next; drawSettings(); }
-      } else if (g_tab == 1 && g_compose && g_kbEmoji) {
+      } else if (g_tab == 1 && g_kb.open && g_kb.emoji()) {
         // The emoji grid follows the fingertip, with the same sign and give as the selector list.
         const int next = om::ui::selDragScroll(g_emojiScroll0, dy, g_emojiMaxScroll);
         if (next != g_emojiScroll) {
@@ -2973,7 +3062,7 @@ void loop() {
           g_selScroll = next;
           if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
         }
-      } else if (g_tab == 1 && !g_compose) {
+      } else if (g_tab == 1 && !g_kb.open) {
         // A fingertip of give past either end, snapped back on release (see the release path). The
         // base is the chat's own scroll: using g_scroll0 here meant every drag started from the sound
         // picker's position, which made the chat jump when a drag began away from 0.

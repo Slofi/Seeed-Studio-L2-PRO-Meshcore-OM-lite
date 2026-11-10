@@ -12,6 +12,9 @@ python3 -B test_cmd.py
 python3 -B test_meshcore_manifest.py
 # EST-341: one MAX_CONTACTS for every TU (a second layout made the global MyMesh too small).
 python3 -B test_build_flags.py
+# EST-346: the four generated VLW faces really carry ASCII + U+00A0..U+017F (every letter the ticket
+# names has a bitmap), so the fonts and the range constant cannot drift.
+python3 -B test_fonts.py
 
 # Layout / hit testing, the migration bytes and the other pure-C++ logic (no Arduino): build them
 # with the system g++.
@@ -31,7 +34,8 @@ BIN13="$(mktemp /tmp/om-lite-dm.XXXXXX)"
 BIN14="$(mktemp /tmp/om-lite-usbcmd.XXXXXX)"
 BIN15="$(mktemp /tmp/om-lite-est344.XXXXXX)"
 BIN16="$(mktemp /tmp/om-lite-emoji.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16"' EXIT
+BIN17="$(mktemp /tmp/om-lite-est346.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -93,6 +97,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est344.cpp -o "$BIN15
 # skin tone, ZWJ, flag), emoji width measuring and the Recent row.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_emoji.cpp \
   ../../src/ui/text_wrap.cpp ../../src/ui/emoji_picker.cpp -o "$BIN16"
+# EST-346: a touch during a toast dismisses it and fires nothing (the next press acts, an expired
+# toast does not eat the touch), the keyboard always opens on letters with shift off, the s/c/z long
+# press (plain letter on a tap, the accented letter on a release after the hold) and the composer's
+# 2-bytes-per-letter budget at the limit.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est346.cpp \
+  ../../src/ui/chat_layout.cpp ../../src/ui/text_wrap.cpp -o "$BIN17"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -107,3 +117,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_emoji.cpp \
 "$BIN14"
 "$BIN15"
 "$BIN16"
+"$BIN17"

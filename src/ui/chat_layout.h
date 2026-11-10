@@ -33,8 +33,7 @@ struct ChatLayout {
   Rect headDot;     // the gold dot counting unread in the OTHER chats (empty while none wait)
   Rect msgs;        // the message band
   Rect compose;     // the compose line (empty while the sheet is open)
-  Rect field;
-  Rect kbdBtn;
+  Rect field;       // the draft field: the whole compose row (tapping it opens the keyboard)
   bool osk = false;
   Rect sheet;
   Rect replyBar;    // empty when the draft is not answering a message
@@ -62,6 +61,11 @@ int selMaxScroll(const Rect& list, int channelCount, int dmCount);
 int selRowTop(const Rect& list, int channelCount, int dmCount, int entry, int scroll);
 // The entry under py, or -1 (labels, the empty-DM line, the pads and the gaps answer -1).
 int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py);
+// The scroll for a drag that began at `base` while the finger has moved `dyUp` px UP the glass
+// (screen y decreases, so dyUp is startY - nowY). The list follows the finger: dyUp px up moves the
+// rows dyUp px up, and the scroll grows by dyUp. kSelGive px of stretch is allowed past either end;
+// the release path snaps it back into [0, maxScroll].
+int selDragScroll(int base, int dyUp, int maxScroll);
 
 // --- message band -------------------------------------------------------------------------------
 // heights[] is the drawn height of every message block (text lines, no gaps). Oldest first.

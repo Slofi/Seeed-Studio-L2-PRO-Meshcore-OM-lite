@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ui/badge_font.h"
 #include "ui/fonts.h"
 #include "ui/icons.h"
 #include "ui/status_cells.h"
@@ -340,7 +341,7 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {
     }
     const int cx = r.x + r.w / 2;
     const int iconCy = r.y + kTabPadY + kTabIcon / 2;
-    const int labelCy = r.bottom() - 5;
+    const int labelCy = r.bottom() - kTabLabelPadB;
     const uint16_t col = on ? kAcc : kDimmer;
     drawTabIcon(d, t, cx, iconCy, col);
 
@@ -350,19 +351,49 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {
     d->drawString(tabLabel(t), cx, labelCy);
   }
 
+  // The unread count sits on the Chat icon, top-right, on the badge widget (theme.h holds its
+  // geometry). The ring is the bar colour, so the circle separates from the icon under it.
   if (unread > 0) {
-    const Rect chat = L.tab(Tab::Chat);
-    char b[4];
-    if (unread > 9) snprintf(b, sizeof(b), "9");
-    else snprintf(b, sizeof(b), "%d", unread);
-    const int bw = 11;
-    const int bx = chat.x + chat.w / 2 + 7;
-    const int by = chat.y + 2;
-    d->fillRoundRect(bx, by, bw, kBadgeH, kRadius, kBad);
-    setRole(d, FontRole::SansTab);
-    d->setTextDatum(lgfx::textdatum_t::middle_center);
-    d->setTextColor(kWhite, kBad);
-    d->drawString(b, bx + bw / 2, by + kBadgeH / 2);
+    const Rect box = countBadgeRect(L.tab(Tab::Chat), unread > 9);
+    drawCountBadge(d, box, unread, kBar);
+  }
+}
+
+// One badge for every count drawn on red. A smooth circle (13 px) or pill (19x13, two digits), a 1 px
+// ring in `ring`, and the pixel face for the digits: white on the solid fill, no anti-aliasing over
+// the glyph itself.
+void drawCountBadge(lgfx::LovyanGFX* d, const Rect& box, int count, uint16_t ring) {
+  if (d == nullptr || count <= 0 || box.w < kBadgeD || box.h < kBadgeD) return;
+  char text[4];
+  const int chars = badgeText(count, text, (int)sizeof(text));
+  if (chars <= 0) return;
+
+  const int cx = box.x + box.w / 2;
+  const int cy = box.y + box.h / 2;
+  const int r = kBadgeD / 2;   // 6: fillSmoothCircle(cx, cy, 6) spans 13 px
+  if (box.w > box.h) {
+    d->fillSmoothRoundRect(box.x - kBadgeRing, box.y - kBadgeRing, box.w + 2 * kBadgeRing,
+                           box.h + 2 * kBadgeRing, r + kBadgeRing, ring);
+    d->fillSmoothRoundRect(box.x, box.y, box.w, box.h, r, kBad);
+  } else {
+    d->fillSmoothCircle(cx, cy, r + kBadgeRing, ring);
+    d->fillSmoothCircle(cx, cy, r, kBad);
+  }
+
+  int x = cx - badgeTextWidth(chars) / 2;
+  const int y = cy - kBadgeGlyphH / 2;
+  for (int i = 0; i < chars; ++i) {
+    const uint8_t* rows = badgeGlyphRows(text[i]);
+    if (rows != nullptr) {
+      for (int ry = 0; ry < kBadgeGlyphH; ++ry) {
+        for (int rx = 0; rx < kBadgeGlyphW; ++rx) {
+          if (rows[ry] & (uint8_t)(1u << (kBadgeGlyphW - 1 - rx))) {
+            d->drawPixel((int16_t)(x + rx), (int16_t)(y + ry), kWhite);
+          }
+        }
+      }
+    }
+    x += kBadgeGlyphW + kBadgeGlyphGap;
   }
 }
 

@@ -89,6 +89,20 @@ constexpr int16_t kTypeDot    = 6;
 constexpr int16_t kTabGap     = 2;
 constexpr int16_t kTabIcon    = 11;
 constexpr int16_t kTabPadY    = 3;   // icon top: 2 px selected line + 1 px; leaves a 2 px gap to the label
+constexpr int16_t kTabLabelPadB = 5; // label centre, in px up from the tab bar's floor
+
+// The unread badge on the Chat tab (Filip, 2026-11-10: "too fuzzy, make it sharper"). One red shape
+// for every count that sits on kBad: a 13 px circle for one digit, a 19x13 pill for two ("9+"),
+// drawn with LovyanGFX's anti-aliased fills, with a 1 px ring in the bar colour so it separates from
+// the icon underneath. The digits are a pixel face (ui/badge_font.h), never a smooth font: at this
+// size the smooth face's coverage bled white into the red and read pink.
+// Placement: the top-right corner of the tab icon, starting 1 px under the selected tab's gold line
+// (2 px) and ending 1 px above the tab label's line box, so it never touches either.
+constexpr int16_t kBadgeD      = 13;              // diameter, 2 * 6 + 1
+constexpr int16_t kBadgePillW  = 19;              // "9+" (two 5 px digits and a 1 px gap, centred)
+constexpr int16_t kBadgeRing   = 1;               // the separating ring, in the bar colour
+constexpr int16_t kBadgeTop    = kTabTopLine + 1; // tab top -> badge top (clear of the gold line)
+constexpr int16_t kBadgeCxOfs  = kTabIcon / 2;    // tab centre -> badge centre: the icon's right edge
 
 constexpr int16_t kBattW      = 16;
 constexpr int16_t kBattH      = 7;
@@ -102,8 +116,6 @@ constexpr int16_t kRadiusSm   = 3;
 constexpr int16_t kRadius     = 4;
 constexpr int16_t kRadiusLg   = 6;
 
-constexpr int16_t kBadgeH     = 9;
-constexpr int16_t kBadgePadX  = 2;
 constexpr int16_t kGearSize   = 13;  // the vector gear mask (tools/mkicons.py), 8 teeth at 13x13
 
 // Chat (work order item 3). Every number comes from the mock's L2 rules (.chans, .msgs, .compose,
@@ -131,6 +143,9 @@ constexpr int16_t kSelGap       = 6;   // name -> age, preview -> unread count
 constexpr int16_t kSelLine1Cy   = 9;   // from the row's top: name / age
 constexpr int16_t kSelLine2Cy   = 21;  // from the row's top: sender and the start of the text
 constexpr int16_t kSelChevronW  = 5;   // the right chevron of the Manage row
+// A drag stretches the list this many px past either end and the release snaps it back (the same
+// fingertip of give the message band has). The list follows the finger: see selDragScroll().
+constexpr int16_t kSelGive      = 10;
 
 // Message band: .msgs padding 5px 7px, 4px between messages, line-height 1.35 at 9 px -> 14 px pitch.
 constexpr int16_t kMsgPadX     = 7;
@@ -141,15 +156,18 @@ constexpr int16_t kMsgHdrGap   = 4;    // time -> name -> text gaps on the first
 
 // Compose line: .compose padding 4px 6px, a .field of mono 8.5 px with 3px 5px padding and 1 px border.
 // 27 px keeps the field at 20 px and the line 3 px inside the edges. No Send button (Filip,
-// 2026-11-10): the field and the keyboard button, and the keyboard carries the Send key.
+// 2026-11-10) and no keyboard button either (Filip, 2026-11-10: "remove the keyboard icon, tapping
+// the message line already brings it up"): the field is the whole compose row.
 constexpr int16_t kComposeH     = 27;   // 1 px top line + 3 px + 20 px field + 3 px
 constexpr int16_t kComposePadX  = 6;
-constexpr int16_t kComposeGap   = 4;
 constexpr int16_t kFieldH       = 20;
 constexpr int16_t kFieldPadX    = 5;
-constexpr int16_t kKbdBtnW      = 26;
 constexpr int16_t kCaretH       = 9;
 constexpr int16_t kCaretW       = 1;
+// The draft's remaining-byte counter: shown at the right of the draft line once this many bytes are
+// left, in mono dim, so the composer never cuts a message on send without saying why (EST-334).
+constexpr int16_t kComposeWarn  = 20;
+constexpr int16_t kComposeCountGap = 4;   // draft tail -> counter
 
 // A code point the face cannot draw: one small dim box, a space plus 2 px wide (Filip, 2026-11-10:
 // the old path drew LovyanGFX's full-height missing-glyph rectangle, which read as the caret).

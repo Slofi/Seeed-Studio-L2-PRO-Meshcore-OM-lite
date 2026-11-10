@@ -50,7 +50,7 @@ void chatScreenDraw(const ChatView& v);
 
 enum class ChatHit : uint8_t {
   None, Head, SelRow, SelManage, SelClose, Msg, MenuReply, MenuInfo, MenuCopy, MenuClose, InfoClose,
-  Field, KbdBtn, Key, Outside,
+  Field, Key, Outside,
 };
 
 struct ChatHitResult {

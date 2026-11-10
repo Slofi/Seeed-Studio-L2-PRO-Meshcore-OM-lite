@@ -8,6 +8,8 @@
 
 #include "../fonts.h"   // om::useAppFont: leave the 12 px default for the old screens
 #include "board.h"
+#include "ui/badge_font.h"
+#include "ui/compose_text.h"
 #include "ui/fonts.h"
 #include "ui/text_wrap.h"
 #include "ui/theme.h"
@@ -35,10 +37,10 @@ void ageText(char* out, size_t cap, uint32_t nowSec, uint32_t ts) {
   else snprintf(out, cap, "%uh", (unsigned)(age / 3600));
 }
 
-// An unread count as the screens show it: two digits at most.
+// An unread count as the screens show it: one digit, or "9+" above nine (ui/badge_font.h holds the
+// one rule, so the red badge and the gold text can never disagree).
 void countText(char* out, size_t cap, int n) {
-  if (n > 9) snprintf(out, cap, "9+");
-  else snprintf(out, cap, "%d", n);
+  badgeText(n, out, (int)cap);
 }
 
 // The last `maxW` pixels of s: a long draft keeps its tail visible instead of running off the line.
@@ -66,17 +68,6 @@ void drawBackspace(lgfx::LovyanGFX* d, const Rect& r, uint16_t col) {
   d->drawLine(cx + hw, cy + hh, cx + hw, cy - hh, col);
   d->drawLine(cx - 3, cy - 2, cx + 1, cy + 2, col);
   d->drawLine(cx + 1, cy - 2, cx - 3, cy + 2, col);
-}
-
-// A small keyboard, drawn from primitives (used on the compose line's button).
-void drawKbIcon(lgfx::LovyanGFX* d, const Rect& r, uint16_t col) {
-  const int x = r.x + r.w / 2 - 8;
-  const int y = r.y + r.h / 2 - 5;
-  d->drawRect(x, y, 16, 10, col);
-  for (int row = 0; row < 2; ++row) {
-    for (int c = 0; c < 3; ++c) d->fillRect(x + 2 + c * 4, y + 2 + row * 3, 2, 2, col);
-  }
-  d->fillRect(x + 3, y + 7, 10, 1, col);
 }
 
 // The header's and the Manage row's chevrons: vectors, because the faces carry no arrows.
@@ -165,9 +156,11 @@ void drawSelRow(lgfx::LovyanGFX* d, const ChatView& v, const ChatEntry& e, int e
     drawTextRight(d, FontRole::MonoMeta, kAcc, on ? kSelBg : kPanel, textRight, cy2, b);
     textRight -= textWidth(d, FontRole::MonoMeta, b) + kSelGap;
   }
-  char line[96];
+  char line[kMeshNameCap + 2 + kMeshTextCap];   // "from: text", both at MeshCore's own limits
   if (e.hasLast) {
     snprintf(line, sizeof(line), "%s: %s", e.lastFrom, e.lastText);
+    // A preview line may still be too wide: drawTextEllipsis cuts on a code point boundary and ends
+    // the line with "...", never mid-sequence and never without saying so.
     drawTextEllipsis(d, FontRole::MonoMeta, kDim, on ? kSelBg : kPanel, nameX, cy2,
                      textRight - nameX, line);
   } else {
@@ -262,7 +255,7 @@ void drawMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, co
   drawTextLeft(d, FontRole::MonoMeta, m.mine ? kGreen : kAcc, kScreen, padX + timeW + kMsgHdrGap,
                cy, m.name);
 
-  char buf[128];   // one wrapped line of a 96-byte MeshCore message
+  char buf[kMeshTextCap];   // one wrapped line of a MAX_TEXT_LEN message
   for (int r = 0; r < nl; ++r) {
     int len = lines[r].len;
     if (len < 0) len = 0;
@@ -298,35 +291,49 @@ void drawMessages(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->clearClipRect();
 }
 
-// The draft text plus its caret, shared by the compose field and the sheet's draft line.
-void drawDraft(lgfx::LovyanGFX* d, const Rect& field, uint16_t bg, const char* draft, bool focus) {
+// The draft text, its caret and (near the limit) the remaining bytes, shared by the compose field and
+// the sheet's draft line. The counter takes its room out of the text before the tail is measured, so
+// the tail can never run under it (EST-334).
+void drawDraft(lgfx::LovyanGFX* d, const Rect& field, uint16_t bg, const ChatView& v, bool focus) {
+  const char* draft = v.draft ? v.draft : "";
+  // MeshCore counts "<our name>: " against MAX_TEXT_LEN, so our budget is that much smaller, and a
+  // reply spends another "@Name " before the draft even starts.
+  const int allow = composeAllowance(v.replySeq != 0, v.replyName);
+  const int left = composeRemaining(allow, (int)strlen(draft));
+
+  char count[8];
+  int countW = 0;
+  if (left <= kComposeWarn) {
+    snprintf(count, sizeof(count), "%d", left);
+    countW = textWidth(d, FontRole::MonoMeta, count) + kComposeCountGap;
+  }
+
   const int x = field.x + kFieldPadX;
   const int cy = field.y + field.h / 2;
-  const int room = field.w - 2 * kFieldPadX - kCaretW - kHairline;
-  const char* tail = tailFits(d, FontRole::MonoMeta, room, draft ? draft : "");
+  const int room = field.w - 2 * kFieldPadX - kCaretW - kHairline - countW;
+  const char* tail = tailFits(d, FontRole::MonoMeta, room, draft);
   if (*tail == 0) {
     drawTextLeft(d, FontRole::MonoMeta, kDimmer, bg, x, cy, "message");
     if (focus) d->fillRect(x, cy - kCaretH / 2, kCaretW, kCaretH, kAcc);
-    return;
+  } else {
+    const int textW = textWidth(d, FontRole::MonoMeta, tail);
+    drawTextLeft(d, FontRole::MonoMeta, kInk, bg, x, cy, tail);
+    if (focus) d->fillRect(x + textW, cy - kCaretH / 2, kCaretW, kCaretH, kAcc);
   }
-  const int textW = textWidth(d, FontRole::MonoMeta, tail);
-  drawTextLeft(d, FontRole::MonoMeta, kInk, bg, x, cy, tail);
-  if (focus) d->fillRect(x + textW, cy - kCaretH / 2, kCaretW, kCaretH, kAcc);
+  if (countW > 0) {
+    drawTextRight(d, FontRole::MonoMeta, kDim, bg, field.right() - kFieldPadX, cy, count);
+  }
 }
 
-// The compose line: the draft field and the keyboard button only. The Send button is gone (Filip,
-// 2026-11-10); the keyboard's own Send key sends.
+// The compose line: the draft field only. The Send button moved into the keyboard (Filip, 2026-11-10)
+// and the keyboard button is gone as well: a tap anywhere on the field opens the sheet.
 void drawCompose(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->fillRect(g.compose.x, g.compose.y, g.compose.w, g.compose.h, kScreen);
   d->drawFastHLine(g.compose.x, g.compose.y, g.compose.w, kLine);
 
   d->fillRoundRect(g.field.x, g.field.y, g.field.w, g.field.h, kRadius, kFieldBg);
   d->drawRoundRect(g.field.x, g.field.y, g.field.w, g.field.h, kRadius, kLine);
-  drawDraft(d, g.field, kFieldBg, v.draft ? v.draft : "", false);
-
-  d->fillRoundRect(g.kbdBtn.x, g.kbdBtn.y, g.kbdBtn.w, g.kbdBtn.h, kRadius, kPanel2);
-  d->drawRoundRect(g.kbdBtn.x, g.kbdBtn.y, g.kbdBtn.w, g.kbdBtn.h, kRadius, kLine);
-  drawKbIcon(d, g.kbdBtn, kDim);
+  drawDraft(d, g.field, kFieldBg, v, false);
 }
 
 void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
@@ -360,7 +367,7 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   if (g.replyBar.w > 0 && v.replySeq != 0) {
     d->fillRoundRect(g.replyBar.x, g.replyBar.y, g.replyBar.w, g.replyBar.h, kRadiusSm, kReplyBg);
     d->drawRoundRect(g.replyBar.x, g.replyBar.y, g.replyBar.w, g.replyBar.h, kRadiusSm, kReplyLine);
-    char bar[48];
+    char bar[kMeshNameCap + 3];   // "RE " + the whole name, MeshCore's own limit
     // The name was copied when REPLY was tapped, so this bar still names the right sender even after
     // the ring has shifted and v.msgs no longer contains that message.
     snprintf(bar, sizeof(bar), "RE %s", v.replyName ? v.replyName : "");
@@ -370,7 +377,7 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
 
   d->fillRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kCodeBg);
   d->drawRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kAcc);
-  drawDraft(d, g.draft, kCodeBg, v.draft ? v.draft : "", true);
+  drawDraft(d, g.draft, kCodeBg, v, true);
 
   for (int r = 0; r < 4; ++r) {
     KeyDef defs[10];
@@ -560,12 +567,9 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
     r.hit = ChatHit::Head;
     return r;
   }
+  // The whole compose row is the draft field: a tap anywhere on it opens the keyboard sheet.
   if (g.field.contains(x, y)) {
     r.hit = ChatHit::Field;
-    return r;
-  }
-  if (g.kbdBtn.contains(x, y)) {
-    r.hit = ChatHit::KbdBtn;
     return r;
   }
   if (g.msgs.contains(x, y)) {

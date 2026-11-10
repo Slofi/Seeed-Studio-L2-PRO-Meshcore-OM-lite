@@ -22,6 +22,7 @@
 #include "touch_gate.h"
 #include "fonts.h"
 #include "ui/age.h"
+#include "ui/compose_text.h"
 #include "ui/fonts.h"
 #include "ui/layout.h"
 #include "ui/screen_chat.h"
@@ -97,11 +98,11 @@ static int g_chatTotal = 0;       // message band content height of the last dra
 static bool g_compose = false;    // the keyboard sheet is open
 static bool g_kbNums = false;     // numbers/symbols page
 static bool g_kbShift = false;    // capitals
-static char g_kbText[96];
+static char g_kbText[om::kMeshTextCap];   // the draft, sized like MeshCore's longest channel text
 static uint32_t g_bubMenuSeq = 0; // message menu target: monotonic message id, 0 = closed
 static uint32_t g_bubInfoSeq = 0; // INFO panel target: monotonic message id, 0 = closed
 static uint32_t g_replySeq = 0;   // the message the next send answers (id), 0 = none
-static char g_replyName[20] = ""; // the sender, copied when REPLY was tapped
+static char g_replyName[om::kMeshNameCap] = "";   // the sender, copied when REPLY was tapped
 static om::ui::ChatEntry g_chats[om::ui::kMaxChats];
 static int g_chatCount = 0;
 static int g_channelCount = 0;
@@ -731,11 +732,20 @@ static void chatSelectChat(int chat) {
 
 // Send on the open channel. A reply travels as "@Name text": MeshCore's message format has no
 // reply field (checked in Packet/BaseChatMesh), and the mention is what the bots already understand.
+// The budget is MeshCore's MAX_TEXT_LEN minus our own "<name>: " prefix minus the reply mention, the
+// same sum the composer shows next to the draft. Nothing is cut here: an over-long draft is refused
+// and logged instead of going on the air short (EST-334).
 static bool chatSend() {
   const int chan = chatChannel(g_chatSel);
   if (chan < 0 || g_kbText[0] == 0) return false;
-  char wire[sizeof(g_kbText) + 32];
-  if (g_replySeq != 0 && g_replyName[0] != 0) {
+  const bool replying = g_replySeq != 0 && g_replyName[0] != 0;
+  const int allow = om::ui::composeAllowance(replying, g_replyName);
+  if ((int)strlen(g_kbText) > allow) {
+    Serial.printf("[chat] send refused: %u bytes, %d allowed\n", (unsigned)strlen(g_kbText), allow);
+    return false;
+  }
+  char wire[om::kMeshTextCap + om::kMeshNameMax + 4];
+  if (replying) {
     snprintf(wire, sizeof(wire), "@%s %s", g_replyName, g_kbText);
   } else {
     snprintf(wire, sizeof(wire), "%s", g_kbText);
@@ -745,8 +755,12 @@ static bool chatSend() {
   return sent;
 }
 
-// The sheet owns the keyboard state; this applies one key and says whether the draft was sent.
+// The sheet owns the keyboard state; this applies one key and says whether the draft was sent. The
+// draft counts bytes against the same budget the counter shows, and a key that would pass it does
+// nothing at all (Filip, 2026-11-10: no silent cut on send).
 static void chatKey(const om::ui::ChatHitResult& hit) {
+  const bool replying = g_replySeq != 0 && g_replyName[0] != 0;
+  const int allow = om::ui::composeAllowance(replying, g_replyName);
   switch (hit.keyKind) {
     case om::ui::KeyKind::Shift:
       g_kbShift = !g_kbShift;
@@ -755,16 +769,12 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
       g_kbNums = !g_kbNums;
       g_kbShift = false;
       break;
-    case om::ui::KeyKind::Space: {
-      const size_t n = strlen(g_kbText);
-      if (n + 1 < sizeof(g_kbText)) { g_kbText[n] = ' '; g_kbText[n + 1] = 0; }
+    case om::ui::KeyKind::Space:
+      om::ui::composeAppend(g_kbText, (int)sizeof(g_kbText), " ", allow);
       break;
-    }
-    case om::ui::KeyKind::Del: {
-      const size_t n = strlen(g_kbText);
-      if (n > 0) g_kbText[n - 1] = 0;
+    case om::ui::KeyKind::Del:
+      om::ui::composeBackspace(g_kbText);   // one whole code point, never half an emoji
       break;
-    }
     case om::ui::KeyKind::Send:
       if (chatSend()) {
         g_kbText[0] = 0;
@@ -774,10 +784,9 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
       }
       break;
     case om::ui::KeyKind::Char: {
-      char ch = hit.keyCh;
-      if (g_kbShift && !g_kbNums && ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
-      const size_t n = strlen(g_kbText);
-      if (n + 1 < sizeof(g_kbText)) { g_kbText[n] = ch; g_kbText[n + 1] = 0; }
+      char one[2] = {hit.keyCh, 0};
+      if (g_kbShift && !g_kbNums && one[0] >= 'a' && one[0] <= 'z') one[0] = (char)(one[0] - 32);
+      om::ui::composeAppend(g_kbText, (int)sizeof(g_kbText), one, allow);
       break;
     }
   }
@@ -833,7 +842,10 @@ static void handleChatTap(int x, int y) {
       g_bubMenuSeq = 0;
       break;
     case om::ui::ChatHit::MenuCopy:
-      snprintf(g_kbText, sizeof(g_kbText), "%s", g_chatMsgs[hit.index].text);
+      // COPY takes the whole received text, cut only by the composer's own byte budget: on a code
+      // point boundary and with an ellipsis when it has to shorten (composeCopy).
+      om::ui::composeCopy(g_kbText, (int)sizeof(g_kbText), g_chatMsgs[hit.index].text,
+                          om::ui::composeAllowance(false, nullptr));
       g_replySeq = 0;
       g_replyName[0] = 0;
       g_bubMenuSeq = 0;
@@ -847,7 +859,6 @@ static void handleChatTap(int x, int y) {
       g_bubInfoSeq = 0;
       break;
     case om::ui::ChatHit::Field:
-    case om::ui::ChatHit::KbdBtn:
       g_compose = true;   // the draft line rides on top of the keys
       break;
     case om::ui::ChatHit::Key:
@@ -1922,14 +1933,14 @@ void loop() {
         if (next > 30) next = 30;
         if (next != g_setScroll) { g_setScroll = next; drawSettings(); }
       } else if (g_tab == 1 && g_selector) {
-        // The dropdown's list scrolls with the finger, clamped to its content and snapped back on
-        // release; the message band underneath is not touched.
-        constexpr int kGive = 10;
-        int next = g_selScroll0 - dy;
-        if (next < -kGive) next = -kGive;
-        if (next > g_selMaxScroll + kGive) next = g_selMaxScroll + kGive;
-        g_selScroll = next;
-        if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
+        // The dropdown's list follows the finger (selDragScroll holds the sign and the give): the
+        // content moves with the fingertip, and the release path snaps the stretch back. The message
+        // band underneath is not touched.
+        const int next = om::ui::selDragScroll(g_selScroll0, dy, g_selMaxScroll);
+        if (next != g_selScroll) {
+          g_selScroll = next;
+          if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
+        }
       } else if (g_tab == 1 && !g_compose) {
         // A fingertip of give past either end, snapped back on release (see the release path). The
         // base is the chat's own scroll: using g_scroll0 here meant every drag started from the sound

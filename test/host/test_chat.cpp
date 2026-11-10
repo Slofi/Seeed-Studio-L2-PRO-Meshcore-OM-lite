@@ -5,10 +5,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ui/badge_font.h"
 #include "ui/chat_layout.h"
 #include "ui/chat_model.h"
+#include "ui/compose_text.h"
 #include "ui/text_wrap.h"
 
+using namespace om;
 using namespace om::ui;
 
 static int g_fail = 0;
@@ -231,14 +234,14 @@ static void testHeadAndSelector() {
   CHECK(c.headTitle.right() <= c.headDot.x - kElsewhereGap - kElsewhereW);
   CHECK(!c.headTitle.overlaps(c.headDot));
 
-  // --- the compose line: field + keyboard button, no Send button --------------
+  // --- the compose line: the draft field only (no Send, no keyboard button) ---
   CHECK(c.field.x == c.compose.x + kComposePadX);
-  CHECK(c.kbdBtn.right() == c.compose.right() - kComposePadX);
-  CHECK(c.field.right() + kComposeGap == c.kbdBtn.x);
-  CHECK(!c.field.overlaps(c.kbdBtn));
-  CHECK(c.field.h == kFieldH && c.kbdBtn.h == kFieldH);
-  // the freed width: the field is the whole row left of the button
-  CHECK(c.field.w == c.compose.w - 2 * kComposePadX - kKbdBtnW - kComposeGap);
+  CHECK(c.field.right() == c.compose.right() - kComposePadX);
+  CHECK(c.field.w == c.compose.w - 2 * kComposePadX);
+  CHECK(c.field.h == kFieldH);
+  // the field sits inside the row, so the whole compose band is one tap target
+  CHECK(c.field.y > c.compose.y && c.field.bottom() < c.compose.bottom());
+  CHECK(!c.field.empty());
 
   // --- the dropdown covers exactly the message band, closed = empty -----------
   CHECK(c.selPanel.empty() && c.selList.empty() && c.selManage.empty());
@@ -302,7 +305,7 @@ static void testHeadAndSelector() {
   CHECK(o.msgs.y == o.head.bottom());
   CHECK(o.msgs.bottom() == o.sheet.y);
   CHECK(o.sheet.bottom() == L.height);
-  CHECK(o.compose.empty() && o.field.empty() && o.kbdBtn.empty());
+  CHECK(o.compose.empty() && o.field.empty());
   CHECK(o.selPanel.empty());
 
   // a tap on the header with the sheet open is still the header: the shell closes the sheet
@@ -525,6 +528,178 @@ static void testRingShift() {
   CHECK(chatMsgIndexBySeq(msgs, 0, 7) == -1);
 }
 
+// The selector follows the finger: a fingertip moving UP by N px moves the list content up by N px,
+// clamped (with kSelGive of stretch past either end, snapped back on release). This drives the same
+// helper the device's drag branch calls (main.cpp: om::ui::selDragScroll).
+static void testSelectorDrag() {
+  const Layout& L = l2();
+  const ChatLayout s = chatLayoutFor(L, false, false, false, true);
+  const Rect list = s.selList;
+  const int maxS = selMaxScroll(list, 6, 0);
+  CHECK(maxS > 0);
+
+  // The scroll grew by exactly the finger's travel, so every row moved up by the same N px.
+  const int top0 = selRowTop(list, 6, 0, 1, 0);
+  int scroll = selDragScroll(0, 12, maxS);
+  CHECK(scroll == 12);
+  CHECK(selRowTop(list, 6, 0, 1, scroll) == top0 - 12);
+  scroll = selDragScroll(0, 37, maxS);
+  CHECK(scroll == 37);
+  CHECK(selRowTop(list, 6, 0, 1, scroll) == top0 - 37);
+
+  // The sign is the fixed one: a finger moving DOWN must not scroll further up. (The old code did
+  // `base - dy`, which moved the list the other way and is what Filip saw on the device.)
+  CHECK(selDragScroll(20, -8, maxS) == 12);
+  CHECK(selRowTop(list, 6, 0, 1, 12) == top0 - 12);
+
+  // A second sample of the same gesture is measured from the press, not from the previous sample.
+  CHECK(selDragScroll(0, 30, maxS) == 30);
+  CHECK(selDragScroll(0, 40, maxS) == 40);
+
+  // Clamped: kSelGive of stretch past the top, and the same past the end of the list.
+  CHECK(selDragScroll(0, -4, maxS) == -4);
+  CHECK(selDragScroll(0, -kSelGive, maxS) == -kSelGive);
+  CHECK(selDragScroll(0, -kSelGive - 9, maxS) == -kSelGive);
+  CHECK(selDragScroll(maxS, 5, maxS) == maxS + 5);
+  CHECK(selDragScroll(0, maxS + kSelGive, maxS) == maxS + kSelGive);
+  CHECK(selDragScroll(0, maxS + kSelGive + 25, maxS) == maxS + kSelGive);
+
+  // Release snaps the stretch back into [0, max]: the same clamp the loop's release path applies.
+  int released = selDragScroll(0, -kSelGive, maxS);
+  if (released < 0) released = 0;
+  CHECK(released == 0);
+  released = selDragScroll(0, maxS + kSelGive, maxS);
+  if (released > maxS) released = maxS;
+  CHECK(released == maxS);
+
+  // A list that cannot scroll stays put (the stretch is the only movement it allows).
+  CHECK(selDragScroll(0, 0, 0) == 0);
+  CHECK(selDragScroll(0, 30, 0) == kSelGive);
+}
+
+// The composer's byte budget: MeshCore's MAX_TEXT_LEN counts "<our name>: ", a reply spends "@Name "
+// on top, and a key that would pass the limit does nothing (never a silent cut on send).
+static void testComposeBudget() {
+  CHECK(kMeshTextMax == 160);                       // MAX_TEXT_LEN, asserted against MeshCore on device
+  CHECK(kMeshTextCap == 161);
+  CHECK(kMeshOwnPrefix == (int)strlen("OM Lite") + 2);
+  const int allow = composeAllowance(false, nullptr);
+  CHECK(allow == kMeshTextMax - kMeshOwnPrefix);
+  CHECK(allow == 151);
+
+  // A reply pays "@<name> " first, so the draft's budget shrinks by exactly that many bytes.
+  const char* name = "OM Bot Ljubljana";
+  CHECK(composeAllowance(true, name) == allow - (1 + (int)strlen(name) + 1));
+  CHECK(composeAllowance(true, "") == allow);        // replying to nobody is no reply
+  CHECK(composeAllowance(false, name) == allow);     // a name without a reply costs nothing
+
+  // Fill the draft to the limit, then one more key: refused, the draft is untouched.
+  char draft[kMeshTextCap];
+  draft[0] = 0;
+  for (int i = 0; i < allow; ++i) CHECK(composeAppend(draft, (int)sizeof(draft), "x", allow));
+  CHECK((int)strlen(draft) == allow);
+  CHECK(!composeAppend(draft, (int)sizeof(draft), "y", allow));
+  CHECK((int)strlen(draft) == allow);
+  CHECK(composeRemaining(allow, (int)strlen(draft)) == 0);
+  CHECK(composeRemaining(allow, allow - 20) == 20);   // the counter appears from 20 bytes left
+  CHECK(composeRemaining(allow, allow + 5) == 0);      // never negative
+
+  // --- a multi-byte character at the limit -----------------------------------
+  const char* emoji = "\xF0\x9F\x98\x80";   // U+1F600, 4 bytes
+  CHECK(strlen(emoji) == 4);
+  draft[0] = 0;
+  for (int i = 0; i < allow - 5; ++i) composeAppend(draft, (int)sizeof(draft), "x", allow);
+  CHECK(composeRemaining(allow, (int)strlen(draft)) == 5);
+  // 4 of the 5 free bytes: the whole sequence goes in and one byte is left
+  CHECK(composeAppend(draft, (int)sizeof(draft), emoji, allow));
+  CHECK((int)strlen(draft) == allow - 1);
+  CHECK(strcmp(draft + strlen(draft) - 4, emoji) == 0);
+  // 1 byte free: refused as a unit, so no broken sequence is ever written
+  CHECK(!composeAppend(draft, (int)sizeof(draft), emoji, allow));
+  CHECK((int)strlen(draft) == allow - 1);
+  CHECK(strcmp(draft + strlen(draft) - 4, emoji) == 0);
+
+  // Backspace removes the whole code point, not one byte of it.
+  composeBackspace(draft);
+  CHECK((int)strlen(draft) == allow - 5);
+  composeBackspace(draft);
+  CHECK((int)strlen(draft) == allow - 6);
+  composeBackspace(nullptr);   // never dereferenced
+
+  // --- COPY: a message over the budget is cut on a code point boundary --------
+  // 150 'x' then the 4-byte emoji. The budget is 151, so the ellipsis takes 3 and 148 bytes may be
+  // copied: the emoji straddles the cut, so the copy stops before it instead of writing 3 of its 4
+  // bytes (a broken sequence the screen would draw as a placeholder box).
+  char src[256];
+  memset(src, 'x', 150);
+  memcpy(src + 150, emoji, 4);
+  src[154] = 0;
+  char out[kMeshTextCap];
+  composeCopy(out, (int)sizeof(out), src, allow);
+  CHECK((int)strlen(out) == 148 + 3);          // 148 bytes that fit, then "..."
+  CHECK(strcmp(out + 148, "...") == 0);
+  for (int i = 0; i < 148; ++i) CHECK(out[i] == 'x');
+  // a source that fits is copied whole, without an ellipsis
+  composeCopy(out, (int)sizeof(out), "hello", allow);
+  CHECK(strcmp(out, "hello") == 0);
+  composeCopy(out, (int)sizeof(out), "", allow);
+  CHECK(out[0] == 0);
+  composeCopy(out, (int)sizeof(out), nullptr, allow);
+  CHECK(out[0] == 0);
+}
+
+// The unread badge: one red shape for every count, a pixel digit face, and a box that never touches
+// the selected tab's gold line nor the tab label.
+static void testBadge() {
+  const Rect tab = l2().tab(Tab::Chat);
+  const Rect one = countBadgeRect(tab, false);
+  const Rect two = countBadgeRect(tab, true);
+
+  // Geometry from theme.h: a 13 px circle, a 19x13 pill, both on the same centre.
+  CHECK(one.w == kBadgeD && one.h == kBadgeD);
+  CHECK(one.w == 13 && one.h == 13);
+  CHECK(two.w == kBadgePillW && two.h == kBadgeD);
+  CHECK(two.w == 19 && two.h == 13);
+  CHECK(one.x + one.w / 2 == two.x + two.w / 2);
+  CHECK(one.y == two.y && one.bottom() == two.bottom());
+
+  // Clear of the gold selected-tab line (the tab's top 2 px) and of the tab label's line box.
+  CHECK(one.y >= tab.y + kTabTopLine + 1);
+  CHECK(one.y > tab.y + kTabTopLine);
+  // bottom() is exclusive: the last red row is one pixel above the label's line box
+  CHECK(one.bottom() <= tab.bottom() - kTabLabelPadB - kSansTabPx / 2);
+  CHECK(one.bottom() <= tab.bottom());
+  // Inside the tab, to the right of its centre: the icon's top-right corner.
+  CHECK(one.x >= tab.x && one.right() <= tab.right());
+  CHECK(two.x >= tab.x && two.right() <= tab.right());
+  CHECK(one.x + one.w / 2 > tab.x + tab.w / 2);
+
+  // The count rule: 1..9, then "9+" (never a bare "9" above nine).
+  char b[4];
+  CHECK(badgeText(0, b, sizeof(b)) == 0 && b[0] == 0);
+  CHECK(badgeText(1, b, sizeof(b)) == 1 && strcmp(b, "1") == 0);
+  CHECK(badgeText(7, b, sizeof(b)) == 1 && strcmp(b, "7") == 0);
+  CHECK(badgeText(9, b, sizeof(b)) == 1 && strcmp(b, "9") == 0);
+  CHECK(badgeText(10, b, sizeof(b)) == 2 && strcmp(b, "9+") == 0);
+  CHECK(badgeText(99, b, sizeof(b)) == 2 && strcmp(b, "9+") == 0);
+  CHECK(badgeText(1, nullptr, 4) == 0);
+  CHECK(badgeText(1, b, 1) == 0);
+
+  // The pixel face: 5x7, only the five low bits used, every digit and the plus present, and both
+  // glyphs of "9+" fit inside the pill's rounded ends.
+  CHECK(kBadgeGlyphW == 5 && kBadgeGlyphH == 7);
+  CHECK(badgeTextWidth(1) == 5);
+  CHECK(badgeTextWidth(2) == 5 + kBadgeGlyphGap + 5);
+  CHECK(badgeTextWidth(2) <= kBadgePillW - 8);
+  for (int i = 0; i < kBadgeFaceCount; ++i) {
+    CHECK(badgeGlyphRows(kBadgeFace[i].ch) == kBadgeFace[i].rows);
+    for (int r = 0; r < kBadgeGlyphH; ++r) CHECK((kBadgeFace[i].rows[r] & 0xE0) == 0);
+  }
+  for (char ch = '1'; ch <= '9'; ++ch) CHECK(badgeGlyphRows(ch) != nullptr);
+  CHECK(badgeGlyphRows('+') != nullptr);
+  CHECK(badgeGlyphRows('0') == nullptr);   // zero is never drawn: an empty badge disappears
+}
+
 int main() {
   testWrap();
   testUtf8();
@@ -533,6 +708,9 @@ int main() {
   testMessages();
   testUnreadElsewhere();
   testRingShift();
+  testSelectorDrag();
+  testComposeBudget();
+  testBadge();
 
   if (g_fail) {
     printf("%d chat check(s) FAILED\n", g_fail);

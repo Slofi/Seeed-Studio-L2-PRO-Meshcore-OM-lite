@@ -24,13 +24,20 @@
 #include "channels.h"
 #include "contact_store.h"
 #include "mc_board.h"
+#include "mesh_text.h"
 #include "target.h"
 #include "timekeeper.h"
 
 namespace om {
 namespace {
 
-char s_lastText[96];
+// The ring and every copy in this file are sized from MeshCore's own limits (mesh_text.h). The two
+// static_asserts tie them to the upstream constants, so a MeshCore upgrade that widens MAX_TEXT_LEN or
+// the contact name stops the build here instead of silently truncating a message again (EST-334).
+static_assert(kMeshTextMax == MAX_TEXT_LEN, "mesh_text.h must follow BaseChatMesh.h MAX_TEXT_LEN");
+static_assert(kMeshNameMax == sizeof(ContactInfo::name), "mesh_text.h must follow ContactInfo::name");
+
+char s_lastText[kMeshTextCap];
 int s_lastChannel = -1;
 bool s_ready = false;
 
@@ -56,8 +63,8 @@ struct Msg {
   int8_t snr4;     // SNR x 4 (MeshCore's unit), 0 = unknown
   uint32_t ts;     // uptime seconds when it was stored (monotonic: a GPS sync cannot disturb ages)
   uint32_t seq;    // stable message id across ring shifts, see meshMsgSeq()
-  char name[20];
-  char text[96];
+  char name[kMeshNameCap];
+  char text[kMeshTextCap];
 };
 constexpr int kMsgRing = 32;
 Msg s_msgs[kMsgRing];
@@ -264,9 +271,10 @@ public:
     {
       static int lastCh = -1;
       static uint32_t lastTs = 0;
-      static char lastText[64];
+      static char lastText[kMeshTextCap];
       const uint32_t now = millis() / 1000;
-      if (s_lastChannel == lastCh && (now - lastTs) <= 2 && strncmp(lastText, text ? text : "", 63) == 0) {
+      if (s_lastChannel == lastCh && (now - lastTs) <= 2 &&
+          strncmp(lastText, text ? text : "", kMeshTextMax) == 0) {
         Serial.println("[mc] duplicate dispatch, ignored");
         return;
       }
@@ -285,6 +293,8 @@ public:
     s_msgs[slot].snr4 = pkt ? (int8_t)lroundf(pkt->getSNR() * 4.0f) : 0;
     const char* body = text ? text : "";
     const char* sep = strstr(body, ": ");
+    // "<name>: <text>" is one MAX_TEXT_LEN string on the air, so the name can be as long as
+    // ContactInfo::name allows; anything longer than that separator is not a name.
     if (sep && (size_t)(sep - body) < sizeof(s_msgs[slot].name)) {
       const size_t n = (size_t)(sep - body);
       memcpy(s_msgs[slot].name, body, n);
@@ -570,6 +580,13 @@ bool meshLinkSend(int channelIdx, const char* text) {
   Serial.printf("[mc] send ch%d ready=%d ctx=%d mesh=%d\n", channelIdx, (int)s_ready,
                 s_ctx != nullptr, s_ctx && s_ctx->mesh != nullptr);
   if (!s_ready || !s_ctx || !s_ctx->mesh || !text || !*text) return false;
+  // MeshCore's sendGroupMessage() would quietly cut the text to fit MAX_TEXT_LEN. Refuse instead: the
+  // composer already counts these bytes, so a cut here would only hide a counting bug (EST-334).
+  if ((int)strlen(text) + kMeshOwnPrefix > kMeshTextMax) {
+    Serial.printf("[mc] send: %u bytes + %d prefix > %d, refused\n", (unsigned)strlen(text),
+                  kMeshOwnPrefix, kMeshTextMax);
+    return false;
+  }
   ChannelDetails cd;
   if (!s_ctx->mesh->getChannel(channelIdx, cd)) {
     Serial.println("[mc] send: no such channel");
@@ -577,7 +594,7 @@ bool meshLinkSend(int channelIdx, const char* text) {
   }
   Serial.printf("[mc] send: hash %02x secret %02x textlen %d\n", cd.channel.hash[0],
                 cd.channel.secret[0], (int)strlen(text));
-  const bool ok = s_ctx->mesh->sendGroupMessage(meshNow(), cd.channel, "OM Lite", text,
+  const bool ok = s_ctx->mesh->sendGroupMessage(meshNow(), cd.channel, kMeshOwnName, text,
                                                 (int)strlen(text));
   Serial.printf("[mc] sendGroupMessage -> %d\n", (int)ok);
   if (ok) {
@@ -589,7 +606,7 @@ bool meshLinkSend(int channelIdx, const char* text) {
     s_msgs[slot].ts = millis() / 1000;
     s_msgs[slot].hops = -1;   // we know it is local; the air has not told us anything yet
     s_msgs[slot].snr4 = 0;
-    snprintf(s_msgs[slot].name, sizeof(s_msgs[slot].name), "OM Lite");
+    snprintf(s_msgs[slot].name, sizeof(s_msgs[slot].name), "%s", kMeshOwnName);
     snprintf(s_msgs[slot].text, sizeof(s_msgs[slot].text), "%s", text);
     if (s_msgCount < kMsgRing) ++s_msgCount;
     ++s_msgSeq;

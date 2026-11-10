@@ -43,6 +43,11 @@ struct RowModel {
 void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m);
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread);
 
+// The unread badge: one widget for every count that sits on red. `box` comes from countBadgeRect()
+// (13 px circle for one digit, 19x13 pill for "9+"); `ring` is the surface colour behind it, drawn
+// as a 1 px separator. The digits are the pixel face of ui/badge_font.h, never a smooth font.
+void drawCountBadge(lgfx::LovyanGFX* d, const Rect& box, int count, uint16_t ring);
+
 // One list row (type dot, name in sans, optional note, signal bars, age in mono, bottom line).
 void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RowModel& row);
 

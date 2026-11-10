@@ -544,3 +544,138 @@
 
 ## 2026-11-10 09:00 (Claude): EST-333 checked
 - Built in the sandbox (exit 0, RAM 78,676 B, flash 854,993 B), host tests exit 0, wake path read (panel wake, 120 ms, redraw, backlight, touch gate). Not flashed alone: goes to the device with EST-334 (one interruption for Filip). Unverified claim in the entry above: that the L76K keeps its almanac "in its own flash" across the boot reset pulse; the boot log after the flash and the time to a fix will tell.
+
+## 2026-11-10 08:50 (DS, EST-334, chat: selector drag, 160-byte messages, composer limit, no keyboard button, sharp badge)
+
+- **What this ticket is**: the five things Filip found in the new chat on the device at ~08:40: the
+  channel/DM selector scrolls the wrong way, a long bot reply is cut after 94 bytes, the composer has
+  no idea how many bytes it may send, the keyboard button in the compose line is redundant, and the
+  unread badge on the Chat tab is fuzzy.
+
+- **1. The selector follows the finger.** The list's scroll subtracts from the row's y
+  (`selRowTop = list.y + off - scroll`), so a finger that moves UP has to make the scroll BIGGER; the
+  old drag did `g_selScroll0 - dy` and ran the list away from the fingertip (the message band below
+  has the opposite sign convention, which is why it was right and this was not). The arithmetic now
+  lives in `om::ui::selDragScroll(base, dyUp, maxScroll)` (`ui/chat_layout.cpp`), the one function the
+  loop's drag branch calls, with the same 10 px of stretch past either end (`kSelGive`, now in
+  theme.h) the message band has, snapped back on release. A second sample of one gesture is still
+  measured from the press, not from the last sample.
+
+- **2. Long messages are no longer cut.**
+  - `src/mesh_text.h` (new, plain C++) holds MeshCore's own limits in one place: `kMeshTextMax` =
+    `MAX_TEXT_LEN` (160 bytes, helpers/BaseChatMesh.h, 10 * CIPHER_BLOCK_SIZE), `kMeshTextCap` = +1,
+    `kMeshNameMax` = `sizeof(ContactInfo::name)` (32, terminator already inside), and our send name
+    `kMeshOwnName` / `kMeshOwnPrefix` ("OM Lite" + ": " = 9 bytes). `mesh_link.cpp` static_asserts
+    both numbers against the real upstream constants, so a MeshCore upgrade that changes either stops
+    the build instead of silently cutting text again.
+  - `mesh_link.cpp`: `Msg.name[20] -> 32`, `Msg.text[96] -> 161`, `s_lastText[96] -> 161`, the
+    duplicate-dispatch guard's `lastText[64] -> 161` (strncmp over MAX_TEXT_LEN, not 63). The
+    "<name>: <text>" split now accepts a name up to the full `ContactInfo::name` and keeps the whole
+    text after it.
+  - `ui/chat_model.h`: the selector's per-chat copies are sized the same way, `name[28] -> 36`
+    (name + "DM: "), `lastFrom[20] -> 32`, `lastText[60] -> 161`, so the preview line gets the whole
+    message and is only shortened by `drawTextEllipsis`, which cuts on a code point boundary and ends
+    with "...". `main.cpp`: `g_kbText[96] -> 161`, `g_replyName[20] -> 32`, the send wire buffer
+    161 + 32 + 4.
+  - `ui/screen_chat.cpp`: the selector preview line `line[96] -> 195` ("from: text" at both limits),
+    one wrapped line `buf[128] -> 161`, the reply bar `bar[48] -> 35` ("RE " + a full name).
+  - **The message Filip quoted** ("[OM Bot Ljubljana] Last Seen: ... Heard Recently: 4") is 134
+    bytes on the air with its 20-byte "`[OM Bot Ljubljana]: `" prefix, 114 bytes of text: it fits
+    MAX_TEXT_LEN whole and now lands whole in the 161-byte ring. The old 96-byte `text[]` cut it
+    after 76 text bytes, which is the "M" of "MC".
+  - **PSRAM: no need and not better.** The ring grows from 32 x 116 B to 32 x 194 B, 6.2 KB in all;
+    the whole ticket costs +4.2 KB of static RAM, and the node is at 25.3 % of 320 KB. Static keeps
+    the receive path off the heap (no fragmentation on the loop task, no malloc under a packet), and
+    PSRAM reads are slower on every wrap, draw and lookup for no gain at this size. If a later ticket
+    wants a longer history, the ring is the first candidate for PSRAM.
+  - **Audit of the radio -> screen path for other fixed-size buffers** (ticket asks for the list):
+    - `lib/meshcore` `onGroupDataRecv`: `data[len] = 0`, upstream's packet buffer, untouched; the
+      text is at most MAX_TEXT_LEN by construction.
+    - `mesh_link.cpp`: `s_lastText` (161), duplicate `lastText` (161), `Msg.name` (32),
+      `Msg.text` (161), all sized above. `meshContactList` -> `MeshContact.name[32]` is the upstream
+      contact-name cap, no cut.
+    - `main.cpp`: `g_kbText` (161), `g_replyName` (32), the send wire buffer (197). `refreshChats`
+      copies into the ChatEntry fields (36 / 32 / 161). Channel names are not message text:
+      `channels.h McChannel.name[24]` and the name editor's `g_editBuf[20]` still cut a channel name
+      at 23 / 19 bytes (MeshCore allows 32); left alone here because it is the channel store, not the
+      chat, and named for a later ticket.
+    - `ui/screen_chat.cpp`: selector preview line (195), one wrapped line (161), reply bar (35),
+      INFO's `line[64]` holds "12m ago" only (the FROM and CHANNEL values are drawn straight from the
+      view through `drawTextEllipsis`, no text copy exists there).
+    - `ui/text_wrap.cpp`: `kMaxWrapLines` = 24. A 160-byte message at the L2 width (306 px, ~51 mono
+      chars) wraps to at most 5 lines, so the cap cannot cut; every line starts and ends on a code
+      point boundary.
+    - `ui/widgets.cpp`: `drawTextEllipsis`'s `buf[80]` stops at 76 bytes, which at 6 px per mono
+      glyph is 456 px, wider than the 320 px screen, so it cannot bind today (and its cut is code
+      point safe and ends with "..."). `drawRun`'s `chunk[112]` chunks a draw call, it does not cut.
+    - `board.cpp` `s_nmea[128]` is a GPS sentence, not chat.
+
+- **3. The composer counts bytes.** `src/ui/compose_text.h` (new, plain C++) is the budget shared by
+  the device and the host test: `composeAllowance(replying, name)` = MAX_TEXT_LEN - our 9-byte
+  "<name>: " prefix - "@Name " for a reply (151 without a reply, 151 - name - 2 with one),
+  `composeRemaining`, `composeAppend` (refuses a whole key or code point that would not fit),
+  `composeBackspace` (removes a whole code point, so an emoji does not leave broken bytes) and
+  `composeCopy` (COPY: whole text, or cut on a code point boundary plus "..."). `chatKey` uses them,
+  `chatSend` refuses and logs an over-long draft instead of letting MeshCore's `sendGroupMessage`
+  cut it, and `meshLinkSend` itself refuses a text whose prefix would pass MAX_TEXT_LEN. Near the
+  limit the draft line shows the remaining bytes in mono dim at its right, from 20 left
+  (`kComposeWarn`), and that room is taken out of the text width before the tail is measured, so the
+  tail never runs under the counter. The counter is drawn on both the compose field and the sheet's
+  draft line.
+
+- **4. The keyboard button is gone** (Filip: "remove the keyboard icon, tapping the message line
+  already brings it up"). The `kbdBtn` rectangle, its drawing, its hit test (`ChatHit::KbdBtn`), the
+  `drawKbIcon` vector, `kKbdBtnW` and `kComposeGap` are all removed; the draft field is the whole
+  compose row (`compose.w - 2 * kComposePadX`) and a tap anywhere on it opens the sheet.
+
+- **5. A sharp badge.** One widget, `ui::drawCountBadge` (`ui/widgets.cpp`), for every count that sits
+  on red: a 13 px circle drawn with LovyanGFX's anti-aliased `fillSmoothCircle` (radius 6) for one
+  digit, a 19x13 pill with `fillSmoothRoundRect` for "9+", a 1 px ring in the bar colour drawn first
+  so the shape separates from the tab icon under it, and the digits from a new pixel-exact 5x7 face
+  with no anti-aliasing at all (`ui/badge_font.h`: white on the solid red, one bit per pixel, which
+  is what reads sharp at this size; the smooth SansTab face's coverage is what bled white into the
+  red and read pink). "9+" is now drawn for anything above nine (the old code drew a bare "9"), and
+  the same `badgeText()` rule feeds the gold counts in the header and the selector, so they cannot
+  disagree. Geometry is in `theme.h` (`kBadgeD`, `kBadgePillW`, `kBadgeRing`, `kBadgeTop` =
+  kTabTopLine + 1, `kBadgeCxOfs` = kTabIcon / 2) and handed out by `countBadgeRect()` in layout.h:
+  the badge starts 1 px under the selected tab's 2 px gold line (it used to sit ON it) and its last
+  row is 1 px above the SansTab label's line box. The 1:1 + 8x contact sheet is
+  `docs/shots/badge-preview.png`, rendered by the new `tools/mkbadge.py`, which parses the digit table
+  and the theme numbers from the sources so the preview cannot drift from the device (only the AA rim
+  is approximated: 16x supersampled with the same radii).
+
+- **Build** (`pio run -e om_lite_l2`, the command from REBUILD.md): exit 0, SUCCESS, 12.1 s.
+  RAM 82,924 B of 327,680 (25.3 %), flash 856,825 B of 6,553,600 (13.1 %). Previous run 78,676 B /
+  854,993 B, so this ticket added **+4,248 B RAM and +1,832 B flash** (the wider ring and copies,
+  the compose budget, the badge widget and its pixel face, the preview tool).
+- **Tests**: `test/host/run.sh` exit 0. New in `test_chat.cpp`: the selector drag through the same
+  `selDragScroll` the device calls (a fingertip up by 12/37 px moves the row up by exactly that,
+  measured on `selRowTop`; the sign that was wrong; a second sample of one gesture; the stretch and
+  its clamp at both ends and on release; a list that cannot scroll); the composer budget (160 =
+  MAX_TEXT_LEN, the 9-byte own prefix, 151 without a reply, -name-2 with one, a full draft then a
+  refused key, the counter's 20-byte threshold, a 4-byte emoji that fits exactly / refused as a unit
+  when 1 byte is left, backspace over a whole code point, COPY cut on a code point boundary with
+  "..."); the badge (13 px circle / 19x13 pill, same centre, clear of the gold line and of the label,
+  inside the tab, right of the tab's centre; 1..9 and "9+" for 10 and 99, 0 draws nothing; the face's
+  5x7 rows stay inside five bits and both "9+" glyphs fit the pill); and the compose row is now the
+  field alone (`field.w == compose.w - 2 * kComposePadX`, all the way to both pads). The rest of the
+  suite (layout, contacts, time, touch gate, age/status, 9 screenshot tests) still passes.
+- **Could not check** (no device in the sandbox): the drag under a real finger (the sign is proven,
+  the feel is not); the 160-byte message on the panel: the wrap, the bubble heights and whether a
+  5-line message is comfortable in the 139 px band; the emoji reply from the real bot; the counter at
+  20/3/0 bytes on the mono 10 px face and at the right of the sheet's draft line; the compose line
+  with no button (and that a tap on the empty right end of the field opens the sheet); the badge's
+  antialiased rim and the pixel digits at 13 px on the real panel, and whether 1 px of clearance to
+  the gold line and to the label reads as clear; the 8x preview's AA rim is an approximation of
+  LovyanGFX's analytic blend.
+- **Next step**: Claude flashes and screenshots: the Chat tab with a count (expect the sharp circle,
+  "9+" when the count passes nine) and the badge clear of the gold line; the selector, dragged up
+  with the finger (the list must move up with it) and to the end (snap back); the long bot reply
+  whole, including the emoji placeholders; the compose line with no keyboard button and the
+  remaining-bytes counter from 20 left (type 140 characters, then keep typing past 151 to see it
+  stop at 0).
+
+## 2026-11-10 08:53 (Claude): EST-333 + EST-334 on the device
+- Built in the sandbox (exit 0, RAM 82,924 B, flash 856,825 B), host tests exit 0, OTA ok (857,184 B). Badge preview checked first (`docs/shots/badge-preview.png`): crisp.
+- Boot log, GPS, indoors: `$PCAS04,7*1E` sent, no `$PCAS` acknowledgement seen (the module kept talking, RMC void, ZDA 2026 from its own clock). `view=13(g10 l0 b3 a0) used=0 snr=0`. The GSV lines carry elevation and azimuth but an EMPTY C/N0 field for every satellite (`04,05,091,,`): these 13 are satellites the module EXPECTS from its almanac, not satellites it HEARS. So the status bar's `GPS 0/13` (screenshot `docs/shots/2026-11-10-0853-gps-predicted.png`) reads as "13 heard" while nothing is received. Must count only satellites with a C/N0 value.
+- Also seen: the status bar's left group runs into the right one (`2B 2 nodes` with no gap). The node name in sent messages is the constant "OM Lite" (`kMeshOwnName`); it follows the real node name once the core moves to upstream's companion prefs.

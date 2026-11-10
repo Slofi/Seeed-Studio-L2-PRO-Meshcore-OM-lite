@@ -6,11 +6,17 @@
 
 #include <stdint.h>
 
+#include "mesh_text.h"
+
 namespace om {
 namespace ui {
 
 // MeshCore's ring in mesh_link.cpp keeps 32 messages; the view never has more than that.
 constexpr int kMaxChatMsgs = 32;
+
+// A chat's name: a channel's name is a MeshCore ChannelDetails::name (32 bytes with the terminator),
+// a direct message is "DM: " plus the partner's name.
+constexpr int kChatNameCap = kMeshNameCap + (int)sizeof("DM: ") - 1;
 
 struct ChatMsgView {
   uint32_t seq = 0;         // mesh_link's monotonic message id; stable when the ring shifts
@@ -27,14 +33,14 @@ struct ChatMsgView {
 // (no DM is invented while the DM store is empty). Copies, not pointers into mesh_link's ring, so a
 // new packet cannot change the list under the finger.
 struct ChatEntry {
-  char name[28] = "";        // the channel's name, or "DM: <partner>" for a direct message
+  char name[kChatNameCap] = "";        // the channel's name, or "DM: <partner>" for a direct message
   uint16_t unread = 0;
   bool dm = false;
   bool muted = false;
   bool hasLast = false;
-  char lastFrom[20] = "";    // the last message's sender
-  char lastText[60] = "";    // the start of its text ("[OM Bot] PONG ...")
-  uint32_t lastTs = 0;       // uptime seconds when it was stored
+  char lastFrom[kMeshNameCap] = "";    // the last message's sender, MeshCore's own name limit
+  char lastText[kMeshTextCap] = "";    // its whole text; the preview line ellipsises at draw time
+  uint32_t lastTs = 0;                 // uptime seconds when it was stored
 };
 
 // Unread messages waiting in the chats other than the open one: the header's gold dot shows this, so

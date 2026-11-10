@@ -110,6 +110,16 @@ struct Layout {
   }
 };
 
+// The unread badge's box on a tab: a 13 px circle for one digit, the 19 px pill for two, its centre
+// at the top-right corner of the tab icon and its top 1 px under the selected tab's gold line
+// (theme.h holds the numbers). Drawing and the preview tool use this same rectangle.
+constexpr Rect countBadgeRect(const Rect& tab, bool wide) {
+  const int16_t w = wide ? kBadgePillW : kBadgeD;
+  const int16_t cx = (int16_t)(tab.x + tab.w / 2 + kBadgeCxOfs);
+  const int16_t cy = (int16_t)(tab.y + kBadgeTop + kBadgeD / 2);
+  return Rect{(int16_t)(cx - w / 2), (int16_t)(cy - kBadgeD / 2), w, kBadgeD};
+}
+
 constexpr Layout layoutFor(int w, int h) {
   Layout L;
   L.width = (int16_t)w;

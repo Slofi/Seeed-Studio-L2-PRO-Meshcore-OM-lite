@@ -114,13 +114,11 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
     g.msgs = Rect{L.content.x, g.head.bottom(), L.content.w,
                   (int16_t)(g.compose.y - g.head.bottom())};
 
-    // Two pieces now: the draft field, and the keyboard button. The field takes the width the Send
-    // button used to occupy (Filip, 2026-11-10: "the keyboard already contains the send button").
+    // The draft field is the whole compose row: the Send button moved into the keyboard (Filip,
+    // 2026-11-10) and the keyboard button is gone too (tapping the field opens the sheet).
     const int16_t rowY = (int16_t)(g.compose.y + 1 + (kComposeH - 1 - kFieldH) / 2);
-    const int innerL = g.compose.x + kComposePadX;
-    const int innerR = g.compose.right() - kComposePadX;
-    g.kbdBtn = Rect{(int16_t)(innerR - kKbdBtnW), rowY, kKbdBtnW, kFieldH};
-    g.field = Rect{(int16_t)innerL, rowY, (int16_t)(g.kbdBtn.x - kComposeGap - innerL), kFieldH};
+    g.field = Rect{(int16_t)(g.compose.x + kComposePadX), rowY,
+                   (int16_t)(g.compose.w - 2 * kComposePadX), kFieldH};
   }
 
   // The selector drops down over the message area: the header's bottom edge to the compose line (or
@@ -214,6 +212,16 @@ int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py
     if (py >= top && py < top + kSelRowH) return i;
   }
   return -1;
+}
+
+// The list follows the finger. A larger scroll moves the rows UP (selRowTop subtracts it), so a finger
+// that went UP by dyUp (screen y decreased) has to INCREASE the scroll by dyUp. This is the sign that
+// was wrong: the old drag did `base - dy` and the list ran away from the finger (EST-334).
+int selDragScroll(int base, int dyUp, int maxScroll) {
+  int next = base + dyUp;
+  if (next < -kSelGive) next = -kSelGive;
+  if (next > maxScroll + kSelGive) next = maxScroll + kSelGive;
+  return next;
 }
 
 int msgContentHeight(const int16_t* heights, int n) {

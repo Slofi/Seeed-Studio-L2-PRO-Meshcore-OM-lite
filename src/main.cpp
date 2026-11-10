@@ -2863,10 +2863,21 @@ static void showTab(int tab) {
     g_rptrDetail = true;
   }
   Serial.printf("[tab] %s\n", om::ui::tabLabel((om::ui::Tab)g_tab));
+  // EST-353: a tab switch replaces the whole screen, so its one push is made with the display off
+  // (board.h says why) and timed. The count is the evidence for the ticket's question: a switch
+  // must be exactly ONE frame push, and a second one (a screen that draws twice) is named here
+  // instead of hiding in the log.
+  const uint16_t pushesBefore = om::omFramePushCount();
+  om::omFrameScreenChange();
   if (tab == 0) drawHome();
   else if (tab == 1) drawChat();
   else if (tab == 2) drawMapTab();
   else drawRptrTab();
+  const int pushes = (int)(uint16_t)(om::omFramePushCount() - pushesBefore);
+  if (pushes != 1) {
+    Serial.printf("[ui] tab %s: %d frame pushes, not 1\n",
+                  om::ui::tabLabel((om::ui::Tab)g_tab), pushes);
+  }
 }
 
 // A short message on top of the current frame, with its own deadline. The toast never answers a

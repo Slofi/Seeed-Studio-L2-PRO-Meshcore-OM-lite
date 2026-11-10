@@ -231,9 +231,19 @@ constexpr uint16_t kProbeGold = 0xED89;   // #e8b04f in RGB565, the theme colour
 bool s_frameNeedsSwap = false;            // set from the boot probe
 omFrameOverlay s_frameOverlay = nullptr;  // the toast, drawn last before every push (EST-344)
 
+// EST-353: the screen-change push. Armed by the caller, consumed by the next outer push, which is
+// made with the display off and prints its own duration.
+bool s_screenChange = false;
+uint16_t s_pushCount = 0;
+uint32_t s_pushUs = 0;
+
 }  // namespace
 
 void omFrameSetOverlay(omFrameOverlay fn) { s_frameOverlay = fn; }
+
+void omFrameScreenChange() { s_screenChange = true; }
+uint16_t omFramePushCount() { return s_pushCount; }
+uint32_t omFrameLastPushUs() { return s_pushUs; }
 
 lgfx::LovyanGFX* om_display() {
   if (s_frameDepth > 0 && s_frame.getBuffer() != nullptr) return &s_frame;
@@ -317,17 +327,32 @@ void omFrameEnd() {
   // This is the one point every redraw path passes through, so a later frame cannot erase it
   // (EST-344). It runs only on the outer frame, after a complete screen.
   if (s_frameOverlay != nullptr) s_frameOverlay(&s_frame, (uint32_t)millis());
-  // One pushImage is capped by the 16-bit SPI transfer (~64 KB, ~100 rows at 320 px): push in
-  // 16-row slices, exactly as the map canvas does.
   const uint16_t* px = (const uint16_t*)s_frame.getBuffer();
+  // EST-353: a whole-screen change is pushed with the display off, then the display is turned on
+  // again on a complete frame. See board.h for why the diagonal appears and why a faster push
+  // cannot remove it.
+  const bool screenChange = s_screenChange;
+  s_screenChange = false;
+  if (screenChange) panelDisplay(false);
   // The panel is configured with setSwapBytes(true) (it wants swapped bytes on the wire). If the
   // sprite stored swapped words too, the panel's second swap turns gold green: compensate only when
   // the boot probe says the two orders differ.
   if (s_frameNeedsSwap) s_display.setSwapBytes(false);
-  for (int yy = 0; yy < 240; yy += 16) {
-    s_display.pushImage(0, yy, 320, 16, px + (size_t)yy * 320);
+  // EST-353: slices of 48 rows. 320 x 48 x 2 = 30,720 B, the largest slice that stays under the
+  // SPI peripheral's 0x3FFFF-bit (32,767 B) DMA cap, and 240 = 5 x 48 exactly: five transfers
+  // instead of the fifteen 16-row ones, so the push (and the blank) is as short as the bus allows.
+  // 153,600 B of pixels at 4 bits per clock and 75 MHz is 4.10 ms of wire time (see board.cpp's
+  // cfg.freq_write); the log line says what the bus really does.
+  const uint32_t startUs = micros();
+  for (int yy = 0; yy < 240; yy += 48) {
+    s_display.pushImage(0, yy, 320, 48, px + (size_t)yy * 320);
   }
+  const uint32_t pushUs = micros() - startUs;
   if (s_frameNeedsSwap) s_display.setSwapBytes(true);
+  if (screenChange) panelDisplay(true);
+  s_pushUs = pushUs;
+  ++s_pushCount;
+  if (screenChange) Serial.printf("[ui] frame push %lu us\n", (unsigned long)pushUs);
 }
 
 bool omTouch(uint16_t& x, uint16_t& y) {

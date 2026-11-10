@@ -75,6 +75,16 @@ MapScaleLabelLayout mapScaleLabelLayout(const Rect& bar, int midW, int rightW, i
 // over the bottom of the map like the mock's .callout.
 MapChrome mapChromeFor(const Layout& L, int zoom, double lat, bool selected);
 
+// EST-353: the tile attribution's one dim line. It is drawn AFTER the scale and lives on the bottom
+// RIGHT of the map area, right-aligned to the key column, so the scale's labels (bottom left) and
+// the attribution can never touch again. `width` is the font's, measured by the caller; the screen
+// draws it with drawTextEllipsis inside the returned box. If the bottom row cannot hold both (a
+// narrower screen), the line moves to the row above the scale's rail instead of overlapping it.
+constexpr int16_t kMapCreditH = 10;
+constexpr int16_t kMapCreditGap = 6;   // air between the scale's rail and the credit line
+constexpr const char* kMapCreditText = "Esri, HERE, Garmin, OSM";
+Rect mapCreditRect(const MapChrome& c, int16_t width);
+
 enum class MapHitKind : uint8_t { None = 0, ZoomIn, ZoomOut, Lock, Marker, Map, Callout };
 
 struct MapHit {

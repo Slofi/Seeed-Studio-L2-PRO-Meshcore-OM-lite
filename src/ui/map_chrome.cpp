@@ -106,6 +106,24 @@ MapChrome mapChromeFor(const Layout& L, int zoom, double lat, bool selected) {
   return c;
 }
 
+Rect mapCreditRect(const MapChrome& c, int16_t width) {
+  Rect r;
+  if (width <= 0) return r;   // nothing to draw, nothing to place
+  // Right-aligned to the key column (the zoom keys own the last 24 px of the bottom right), on the
+  // same line as the scale's two labels: their centre is c.scale.bottom() - 1.
+  const int16_t right = (int16_t)(c.zoomOut.x - kMapMargin);
+  const int16_t cy = (int16_t)(c.scale.bottom() - 1);
+  int16_t x = (int16_t)(right - width);
+  if (x < c.view.x) x = c.view.x;
+  r = Rect{x, (int16_t)(cy - kMapCreditH / 2), width, kMapCreditH};
+  // Never over the scale: when the bottom row has no room for both (a narrower screen, a very wide
+  // face), the credit moves up one line instead of printing on the labels.
+  if (r.overlaps(c.scale) || (int)r.x < (int)c.scale.right() + kMapCreditGap) {
+    r.y = (int16_t)(c.scale.y - kMapCreditH - 1);
+  }
+  return r;
+}
+
 MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, int y) {
   MapHit hit;
   if (c.status.contains(x, y)) return hit;   // the bar's own keys are handled before this

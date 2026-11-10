@@ -212,6 +212,64 @@ static void testScaleLabels() {
   CHECK(!mapScaleLabelLayout(bar, 0, rightW, 6).showMid);
 }
 
+static void testMapCredit() {
+  // EST-353: the tile attribution moved off the scale's line pair. Same mono advance (6 px) the map
+  // draws with. The scale's labels are centred at scale.bottom() - 1 (drawTextLeft's middle datum),
+  // so their boxes are 10 px tall like the credit's.
+  const Layout& L = l2();
+  const int creditW = 6 * (int)strlen(kMapCreditText);
+  CHECK(creditW == 138);   // "Esri, HERE, Garmin, OSM", 23 glyphs
+
+  for (int zoom = 9; zoom <= 18; ++zoom) {
+    const MapChrome c = mapChromeFor(L, zoom, 46.05, false);
+    char mid[12], right[12];
+    mapScaleLabels(mapScaleDistance(zoom, 46.05, nullptr), mid, sizeof(mid), right, sizeof(right));
+    const int midW = 6 * (int)strlen(mid);
+    const int rightW = 6 * (int)strlen(right);
+    const MapScaleLabelLayout sl = mapScaleLabelLayout(c.scale, midW, rightW, 6);
+    const int16_t cy = (int16_t)(c.scale.bottom() - 1);
+    const Rect midBox = sl.showMid ? Rect{sl.midX, (int16_t)(cy - 5), (int16_t)midW, 10} : Rect{};
+    const Rect rightBox{sl.rightX, (int16_t)(cy - 5), (int16_t)rightW, 10};
+    const Rect cr = mapCreditRect(c, (int16_t)creditW);
+
+    // On the bottom line, right-aligned to the key column, and clear of the scale by a measured gap.
+    CHECK(!cr.empty());
+    CHECK(cr.right() == c.zoomOut.x - kMapMargin);
+    CHECK(cr.y + cr.h / 2 == cy);
+    CHECK((int)cr.x >= (int)c.scale.right() + kMapCreditGap);
+    CHECK(!cr.overlaps(c.scale));
+    CHECK(!cr.overlaps(rightBox));
+    if (sl.showMid) CHECK(!cr.overlaps(midBox));
+    // Inside the map area and clear of every key and the chip (nothing to tab over).
+    CHECK(cr.x >= c.view.x && cr.right() <= c.view.right());
+    CHECK(cr.y >= c.status.bottom());
+    CHECK(!cr.overlaps(c.zoomIn) && !cr.overlaps(c.zoomOut) && !cr.overlaps(c.lock));
+    CHECK(!cr.overlaps(c.chip));
+  }
+
+  // The numbers quoted in PROGRESS.md at z13: credit 146..284, the scale ends at 81.
+  {
+    const MapChrome c = mapChromeFor(L, 13, 46.05, false);
+    const Rect cr = mapCreditRect(c, (int16_t)creditW);
+    CHECK(cr.x == 146);
+    CHECK(cr.right() == 284);
+    CHECK(c.scale.right() == 81);
+    CHECK((int)cr.x - (int)c.scale.right() == 65);
+  }
+
+  // A screen too narrow for both on one line: the credit moves up, it never prints on a label.
+  {
+    const MapChrome c = mapChromeFor(L, 13, 46.05, false);
+    const Rect cr = mapCreditRect(c, 300);
+    CHECK(!cr.overlaps(c.scale));
+    CHECK(cr.x == c.view.x);                       // clamped to the left edge
+    CHECK(cr.bottom() <= c.scale.y);               // above the scale's rail
+    CHECK(cr.y >= c.status.bottom());
+  }
+  // Nothing to draw: no rectangle.
+  CHECK(mapCreditRect(mapChromeFor(L, 13, 46.05, false), 0).empty());
+}
+
 static void testRptrMeta() {
   char buf[64];
   RptrRowFacts f;
@@ -397,6 +455,7 @@ int main() {
   testRptr();
   testRgb565RoundTrip();
   testScaleLabels();
+  testMapCredit();
   testRptrMeta();
   testKeyboardFilters();
   testKeyboardSheet();
@@ -404,6 +463,6 @@ int main() {
     printf("est351: %d failure(s)\n", g_fail);
     return 1;
   }
-  printf("est351: map chrome, RPTR layout, RGB565 round trip and the shared keyboard sheet ok\n");
+  printf("est351: map chrome, credit placement, RPTR layout, RGB565 round trip and the shared keyboard sheet ok\n");
   return 0;
 }

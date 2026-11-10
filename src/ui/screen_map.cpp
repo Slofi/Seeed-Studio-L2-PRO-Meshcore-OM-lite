@@ -68,7 +68,7 @@ void mapScreenDraw(const MapView& v) {
   }
 
   d->fillScreen(kMapBg);
-  om::mapRender();   // the tiles and the attribution, unchanged from EST-3xx; no chrome any more
+  om::mapRender();   // the tiles only: the attribution, the chrome and the labels are drawn here
 
   if (!om::mapReady()) {
     drawEmptyState(d, Rect{0, 0, l2().width, (int16_t)l2().tabbar.y}, "Map pack not open.",
@@ -76,6 +76,20 @@ void mapScreenDraw(const MapView& v) {
   }
 
   const MapChrome c = mapScreenChrome(v);
+
+  // EST-353: the tile attribution is the map's licence line, not part of the canvas: one dim line on
+  // the bottom RIGHT, right-aligned to the key column and measured, so the scale's two labels
+  // (bottom left) can never run into it again. drawTextEllipsis keeps it inside the rectangle the
+  // same arithmetic returned, and its own background keeps it readable over a bright tile.
+  if (om::mapReady()) {
+    const int creditW =
+        measureText(d, FontRole::MonoMeta, kMapCreditText, (int)strlen(kMapCreditText));
+    const Rect cr = mapCreditRect(c, (int16_t)creditW);
+    if (!cr.empty()) {
+      drawTextEllipsis(d, FontRole::MonoMeta, kMapCredit, kMapBg, cr.x, cr.y + cr.h / 2, cr.w,
+                       kMapCreditText);
+    }
+  }
 
   // Node markers over the tiles, our own position last so it is never hidden by a contact.
   for (int i = 0; i < v.markerCount; ++i) {

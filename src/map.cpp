@@ -33,7 +33,6 @@ constexpr int kZMax = 18;   // data to z17; 18 == z17 magnified 2x
 using ui::kBad;
 using ui::kInk;
 using ui::kMapBg;
-using ui::kMapCredit;
 const char* kIdxPath = "/maps/slo/tiles.idx";
 const char* kPackPath = "/maps/slo/tiles.pack";
 
@@ -469,12 +468,8 @@ void mapRender() {
     omPushRgb565(d, 0, yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
   }
 
-  d->setTextDatum(lgfx::textdatum_t::top_left);
-  d->setTextSize(1);
-  // Attribution is a licence requirement; one-argument setTextColor = transparent background.
-  d->setTextColor(kMapCredit);
-  d->setTextSize(1);
-  d->drawString("Esri, HERE, Garmin, OSM", 4, kViewH - 13);
+  // The tile attribution is NOT drawn here: it is the map's licence line and ui/screen_map.cpp
+  // places it (EST-353), measured and right-aligned on the bottom right, away from the scale.
 
   // The on-screen state line is gone (EST-351): the chip in ui/screen_map.cpp says the zoom, and
   // the serial still says whether any tile was drawn.

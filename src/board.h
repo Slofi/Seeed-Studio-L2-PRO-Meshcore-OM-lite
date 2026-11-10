@@ -138,6 +138,26 @@ void omFrameEnd();
 // The callback must only draw; it runs with the frame open.
 using omFrameOverlay = void (*)(lgfx::LovyanGFX* d, uint32_t nowMs);
 void omFrameSetOverlay(omFrameOverlay fn);
+
+// --- EST-353: a screen change is the one frame that is pushed into a display that is off ---
+// Every push goes into the panel's RAM while the panel scans that same RAM out. The NV3031B scans in
+// its native PORTRAIT memory order (MADCTL MV is set for our landscape rotation), i.e. down our
+// frame's columns, while the push streams down the frame's rows: the two pointers cross along a
+// diagonal, and everything scanned before the write arrives keeps the OLD pixels for that frame.
+// A faster push cannot remove that line, it only changes its slope, and the panel wires no TE line
+// (the L2 facts in board.h and the panel config have no TE pin, and the bus has no MISO), so the
+// frame phase cannot be read. The one moment the panel is certainly not scanning is DISPOFF. So a
+// caller that replaces the WHOLE screen arms this: the next push is made with the display off and
+// the display is turned on again on a frame that is complete (the same rule the wake path uses,
+// EST-336). An ordinary redraw (a toast, a pan, a scroll) does not arm it: its content is the same
+// image except for the part that moved, so the same crossing is invisible, and blanking every push
+// would make the panel flash continuously.
+//
+// It also makes the push measurable: the armed push prints one line, `[ui] frame push N us`, and
+// omFramePushCount() lets the caller prove that a screen change really was ONE push.
+void omFrameScreenChange();
+uint16_t omFramePushCount();
+uint32_t omFrameLastPushUs();
 // Touch always reads the real panel, never the frame buffer.
 bool omTouch(uint16_t& x, uint16_t& y);
 

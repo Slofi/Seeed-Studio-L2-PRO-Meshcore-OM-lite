@@ -2093,3 +2093,114 @@ Built in the sandbox with the REBUILD.md command, **exit 0**: RAM 170,416 B of 3
 - Built in the sandbox (exit 0, RAM 170,416 B, flash 1,708,345 B), tests exit 0, reviewed binary flashed (1,708,704 B). Boot: `colour push probe gold ed89 -> stored 89ed -> back ed89 OK`.
 - **Map colours fixed** (`docs/shots/2026-11-10-1559-map-fixed.png`): proper topo colours. New small overlap: the scale labels ("500m", "1km") run into the map attribution text ("E, Garmin, OSM") at the bottom left.
 - Node-name editor is the chat keyboard with a 7/31 counter and OK (`docs/shots/2026-11-10-1559-name-editor.png`); left without saving, name unchanged.
+
+## 2026-11-10 16:10 (DS): EST-353, the diagonal on leaving the map, and the attribution
+
+Built in the sandbox with the REBUILD.md command, **exit 0**: RAM 170,424 B of 327,680 (52.0%),
+flash 1,708,785 B of 6,553,600 (26.1%), `firmware.bin` 1,709,152 B. `test/host/run.sh` **exit 0**
+(all suites, including the new credit-placement test).
+
+**1. Why the diagonal is there, and why "push faster" cannot remove it.** The push was the only
+full-frame push on every tab (checked below), so the question was the push itself, not the screens.
+- **The mechanism is the rotation, not the duration.** `board.cpp` configures the NV3031B with
+  `panel_width 240 x panel_height 320` and `offset_rotation 1`; LovyanGFX's `update_madctl()` for
+  rotation 1 sends `MADCTL = MY | MV` (read from `Panel_NV3031B.cpp` in libdeps). `MV` exchanges the
+  two axes, so our frame is written into the panel's memory **rotated**: consecutive pixels of one
+  landscape row advance along the panel's native Y (down a column), while the panel's gate scan
+  still runs along native X (across the columns). The write pointer and the scan pointer therefore
+  cross at an angle, and every pixel the scan has already passed keeps the OLD value for that
+  frame: the boundary between old and new is the diagonal, from the lower middle edge to the upper
+  right corner, exactly as Filip described. A faster push only changes the slope of that line; it
+  cannot remove it. (This is the same artefact EST-336 fixed on wake by pushing with the display
+  off.)
+- **The computed floor:** 320 x 240 x 2 = 153,600 B at 4 bits per clock (`pin_io0..io3`) and
+  `freq_write = 75 MHz` = 153,600 x 8 / 4 / 75e6 = **4.10 ms** of pure wire time, against one panel
+  frame at ~60 Hz = 16.7 ms. So the bus is not the limit; even at 4 ms the line is there.
+- **The slope is a measurement too.** With the scan stepping one native row per 16.7/320 = 52 us and
+  a screen row pushed in P/240, the boundary's slope is 0.75 x 16.7 ms / P. Filip's line (lower
+  middle to the upper right corner) has a slope of ~1.5, so the old push took about **8.3 ms**: it
+  fits the 4.10 ms wire floor plus five window setups and the PSRAM-sourced DMA, and it is why the
+  tear was a whole-screen diagonal rather than a thin band.
+- **TE is not available:** the L2's display is QSPI with SCLK/IO0..IO3/CS only (`board.h`), the
+  panel config has no `pin_te`, and the bus has `pin_miso = -1`, so the panel's frame phase can
+  neither be read nor waited for. A "start at the top of a frame" push is therefore a guess.
+- **SD/JPEG is not in the push.** `map.cpp`'s `cacheGet()` seeks, reads and `JPEGDEC.decode()`s
+  synchronously inside `mapRender()`; the tile work is finished before `omFrameEnd()` starts. What
+  the decode costs is switch *latency*, not push duration.
+- **No deferred tile work to cancel.** `mapRender()` composes the canvas and returns; there is no
+  queue, no worker and no "pending tile" flag, so leaving the tab cannot leave work behind that
+  later paints. (The 8-tile PSRAM cache is read-only after the render.)
+
+**2. The fix: the whole-screen push is made with the display off.** `board.cpp` arms it:
+`omFrameScreenChange()` makes the NEXT outer push `DISPOFF` (0x28) -> push -> `DISPON` (0x29 +
+dummy), so the panel turns on to a frame that is already complete. That is the wake path's own rule
+(EST-336), now at the one place every screen change passes through: `showTab()` arms it for all
+four tabs. Ordinary redraws (toast, pan, scroll, a key) do NOT arm it: their pixels are the same
+image except for the part that moved, so the same crossing is invisible there, and blanking every
+push would make the panel flash continuously. Settings pages are not armed either (same single push,
+dark content); say the word and they get the same flag.
+- `DISPON` is a plain 0x29: LovyanGFX's `setPowerSave(false)` does **not** re-run the init table
+  (only `setSleep(false)` does SWRESET), so MADCTL/rotation/inversion survive the blank.
+- **The push is also shorter:** 5 slices of 48 rows instead of 15 of 16. 320 x 48 x 2 = 30,720 B
+  stays under the SPI peripheral's `SPI_MS_DATA_BITLEN` cap of 0x3FFFF bits = 32,767 B per DMA
+  transfer (a 64-row slice would be 40,960 B and split into two transfers with a 1 ms wait between
+  them, `Bus_SPI::writeBytes`), and 240 = 5 x 48 exactly. Each slice is one contiguous DMA (the
+  sprite is pushed raw, `no_convert`), so the blank is as short as the bus allows.
+- **Measured, once per switch:** `omFrameEnd()` times the five pushes and prints
+  `[ui] frame push N us`; `showTab()` counts the pushes and prints
+  `[ui] tab <name>: N frame pushes, not 1` if a screen ever draws twice. Expected on the glass:
+  ~4.1-6 ms (wire floor 4.10 ms); anything near 16 ms+ would mean the PSRAM-sourced DMA is slow and
+  the next step is a small internal-RAM bounce buffer, not a bigger blank.
+
+**3. The attribution has its own place.** It is no longer drawn by `mapRender()` (the canvas is
+tiles only): `ui/map_chrome` has `mapCreditRect()` and `screen_map.cpp` draws the one dim line with
+`drawTextEllipsis`, measured with the same MonoMeta face, right-aligned to the key column on the
+bottom row. At z13: credit **x 146..284**, the scale's rail ends at **81** (`500m` at 6, `1km`
+ending at 81), so a **65 px** gap; the zoom keys own 290..314, so the line stops short of them. If a
+narrower screen cannot hold both on that row, the credit moves up one line instead of printing on
+the labels. Host test (`test_est351.cpp`, `testMapCredit`) proves, for z9..z18 at 46.05 N: no overlap
+with either scale label, the rail, the three keys or the chip; right edge = `zoomOut.x - 6`;
+`y + h/2` on the scale's label line; the z13 numbers above; and the fallback row. The credit is
+only drawn when the pack is open.
+
+**Exact `tools/cmd.py` steps for Claude** (one reader on the port; `OM_PORT=/dev/ttyACM0`;
+`tools/shot.py docs/shots/<name>.png` after each step):
+1. Flash `firmware.bin` (1,709,152 B). Boot must still print
+   `[om] colour push probe gold ed89 -> stored 89ed -> back ed89 OK` and the `[map] tile pixel probe
+   ... OK` line. `tools/cmd.py status` -> note `loop_stack_size` and `loop_stack_free`.
+2. **Map, then leave it (the tear):** `tap 200 227` (Map tab) -> shot `2026-11-10-est353-map`; the
+   serial prints `[tab] Map` then `[ui] frame push NNNN us` (note N). Then `tap 40 227` (Nodes) ->
+   sim: the serial prints `[tab] Nodes` + its own `[ui] frame push ... us`; **watch the glass for the
+   diagonal**: there must be none, and no line `[ui] tab ...: N frame pushes, not 1`. Shot
+   `...-est353-nodes`.
+3. **Every other tab switch:** `tap 120 227` (Chat) -> `tap 280 227` (RPTR) -> `tap 200 227` (Map) ->
+   `tap 120 227` (Chat) -> `tap 40 227` (Nodes) -> `tap 200 227` (Map) -> `tap 280 227` (RPTR). Each
+   switch must print exactly one `[ui] frame push N us`, and the value should be the same within a
+   few hundred us whichever screen is left (the push does not depend on the screen). Note the worst
+   one; it must be well under 16,700 us.
+4. **Attribution vs scale:** on the Map shot, the bottom row must read `500m` and `1km` at the left
+   (ending x ~81) and `Esri, HERE, Garmin, OSM` right-aligned ending at x 284, with a clear gap; no
+   glyph of one on the other. `tap 302 169` (`+`) -> shot `...-est353-map-zoom`: at every zoom the
+   two must stay apart (the credit does not move; the labels re-measure).
+5. **The panel comes back correct after a blank:** after the tab switches, the clock and the status
+   icons must still be right, not shifted left by one pixel, inverted or rotated: that would mean
+   `DISPON` reset something (it must not; it is a bare 0x29).
+6. **Loop stack:** `tools/cmd.py status` after the steps; `loop_stack_size=16384` unchanged and
+   `loop_stack_free` at the EST-350 level (no new allocation, only 8 B of statics).
+
+**Could not check** (no device, no card in the sandbox): whether the blank is perceptible (or, worse,
+whether DISPOFF on this panel shows *white* because `cfg.invert = true`; the wake path never showed
+it because the backlight was 0), the measured `N us`, the slope-free result on the glass, and the
+credit's look over a bright tile. The host test proves the rectangles and the arithmetic, not the
+panel.
+
+**If the blank is visible**, the next option is the push in native scan order: 320 `pushImage(x, 0,
+1, 240, column)` transfers of 480 B, which writes one native row per column and matches the scan
+axis (4.1 ms of wire time plus 320 window setups, and it needs the MY direction confirmed on the
+glass). That was not chosen blind: its failure mode is another line, while DISPOFF's is a short
+blank.
+
+## 2026-11-10 16:25 (Claude): EST-353 on the device
+- Built in the sandbox (exit 0, RAM 170,424 B, flash 1,708,785 B), tests exit 0, reviewed binary flashed (1,709,152 B).
+- Tab switches by USB (Map, Nodes, Map, Chat): `[ui] frame push` 11,376..11,470 us each, i.e. the display is dark for about 11 ms per screen change (DISPOFF -> push -> DISPON). Whether the diagonal is gone and the blink is invisible can only be judged on the glass: Filip.
+- Map bottom (`docs/shots/2026-11-10-1625-map-labels.png`): scale "500m / 1km" and the attribution "Esri, HERE, Garmin, OSM" now sit apart.

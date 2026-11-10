@@ -465,7 +465,7 @@ void mapRender() {
     }
   }
 
-  // EST-351: the zoom / lock keys, the markers and the scale are ui/screen_map.cpp's chrome,
+  // EST-351: the zoom / lock keys, the markers and the traces are ui/screen_map.cpp's chrome,
   // drawn over this canvas inside the same frame. The canvas holds tiles and nothing else.
 
   // One pushImage is capped by the 16-bit SPI transfer length (~64 KB, ~100 rows at 320 px).
@@ -477,7 +477,7 @@ void mapRender() {
   }
 
   // The tile attribution is NOT drawn here: it is the map's licence line and ui/screen_map.cpp
-  // places it (EST-353), measured and right-aligned on the bottom right, away from the scale.
+  // draws it straight on the map (EST-368), outlined, on the bottom left.
 
   // The on-screen state line is gone (EST-351): the chip in ui/screen_map.cpp says the zoom, and
   // the serial still says whether any tile was drawn.
@@ -487,6 +487,18 @@ void mapRender() {
   }
   Serial.printf("[map] z%d%s %.5f,%.5f -> %d tiles\n", s_z, mag ? " (2x)" : "", s_cLat, s_cLon, drawn);
   om::radio::addPart(om::radio::Part::MapDecode, micros() - renderStartUs);
+}
+
+// EST-368: one animation frame's worth of tiles. The canvas was composited by the last mapRender();
+// this only pushes it again, so a moving trace dot never costs a JPEG decode or an SD read. Safe on
+// a screen that was never rendered (mapScreenDraw always renders before an animation starts).
+void mapRepush() {
+  auto* d = om_display();
+  if (!s_ready || d == nullptr || s_canvas == nullptr) return;
+  for (int yy = 0; yy < kViewH; yy += 16) {
+    const int h = (yy + 16 <= kViewH) ? 16 : (kViewH - yy);
+    omPushRgb565(d, 0, yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
+  }
 }
 
 }  // namespace om

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Map screen: the new layer's chrome over map.cpp's tiles. Everything is drawn into the off-screen
 // frame, once, then pushed by omFrameEnd(); the toast rides on top as always.
+//
+// EST-368: no distance scale; the attribution is written straight on the map with a 1 px outline;
+// the Traces key toggles OM's animated routes, drawn over the tiles at the map's own frame rate.
 #include "ui/screen_map.h"
 
 #include <Arduino.h>
+#include <math.h>
 
 #include "board.h"
 #include "map.h"
@@ -50,13 +54,101 @@ void drawMarker(lgfx::LovyanGFX* d, const MapMarker& m) {
   }
 }
 
-}  // namespace
-
-MapChrome mapScreenChrome(const MapView& v) {
-  return mapChromeFor(l2(), v.zoom, 0.0, v.callout);
+// EST-368: text straight on the tiles. LovyanGFX fills a character cell only when the background
+// colour differs from the ink, so setTextColor(fg) alone is a transparent draw; the outline is the
+// same string at the four 1 px neighbours in a near-black, which is what keeps a small dim line
+// legible on a bright topo tile without a box behind it.
+void drawTextOnMap(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, const Rect& box, const char* s) {
+  if (d == nullptr || s == nullptr || s[0] == 0 || box.w <= 0) return;
+  setRole(d, role);
+  d->setTextDatum(lgfx::textdatum_t::middle_left);
+  const int x = box.x;
+  const int cy = box.y + box.h / 2;
+  d->setTextColor(kMapCreditEdge);
+  d->drawString(s, x - 1, cy);
+  d->drawString(s, x + 1, cy);
+  d->drawString(s, x, cy - 1);
+  d->drawString(s, x, cy + 1);
+  d->setTextColor(ink);
+  d->drawString(s, x, cy);
 }
 
-void mapScreenDraw(const MapView& v) {
+// A colour laid over whatever the frame already holds (the tiles) by a 0..255 alpha. omFramePixel
+// returns the colour as drawn, so this is the tile colour under the pixel, not an assumption.
+uint16_t mixOverFrame(int x, int y, uint16_t fg, uint8_t a) {
+  if (a == 0) return omFramePixel(x, y);
+  if (a == 255) return fg;
+  const uint16_t bg = omFramePixel(x, y);
+  const uint32_t fr = (fg >> 11) & 0x1F, fg6 = (fg >> 5) & 0x3F, fb = fg & 0x1F;
+  const uint32_t br = (bg >> 11) & 0x1F, bg6 = (bg >> 5) & 0x3F, bb = bg & 0x1F;
+  const uint32_t inv = 255U - a;
+  const uint32_t r = (fr * a + br * inv + 127U) / 255U;
+  const uint32_t g = (fg6 * a + bg6 * inv + 127U) / 255U;
+  const uint32_t b = (fb * a + bb * inv + 127U) / 255U;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// One blended line from a to b, pixel by pixel. The colour is mixed with the tile under each pixel,
+// so the line reads on a bright map as well as on a dark one.
+void blendLine(lgfx::LovyanGFX* d, int x0, int y0, int x1, int y1, uint16_t col, uint8_t alpha) {
+  const int dx = x1 - x0;
+  const int dy = y1 - y0;
+  const int n = (abs(dx) > abs(dy) ? abs(dx) : abs(dy));
+  if (n <= 0) {
+    d->drawPixel((int16_t)x0, (int16_t)y0, mixOverFrame(x0, y0, col, alpha));
+    return;
+  }
+  for (int i = 0; i <= n; ++i) {
+    const int x = x0 + (dx * i) / n;
+    const int y = y0 + (dy * i) / n;
+    d->drawPixel((int16_t)x, (int16_t)y, mixOverFrame(x, y, col, alpha));
+  }
+}
+
+// The whole route, faint and dashed: 2 px on, 4 px off, as the mock's .tr stroke-dasharray.
+void drawTraceRoute(lgfx::LovyanGFX* d, const TraceFrame& f) {
+  for (int i = 0; i + 1 < f.routeCount; ++i) {
+    const int x0 = f.route[i].x, y0 = f.route[i].y;
+    const int x1 = f.route[i + 1].x, y1 = f.route[i + 1].y;
+    const int dx = x1 - x0, dy = y1 - y0;
+    const int n = (abs(dx) > abs(dy) ? abs(dx) : abs(dy));
+    if (n <= 0) continue;
+    for (int k = 0; k <= n; ++k) {
+      if ((k % 6) >= 2) continue;   // 2 on, 4 off
+      const int x = x0 + (dx * k) / n;
+      const int y = y0 + (dy * k) / n;
+      d->drawPixel((int16_t)x, (int16_t)y, mixOverFrame(x, y, kTraceLine, 86));   // about 34 %
+    }
+  }
+}
+
+// The dot and its tail, above the markers: the dot has a violet ring so it reads on any tile.
+void drawTraceMoving(lgfx::LovyanGFX* d, const TraceFrame& f) {
+  for (int i = 0; i + 1 < f.tailCount; ++i) {
+    blendLine(d, f.tail[i].x, f.tail[i].y, f.tail[i + 1].x, f.tail[i + 1].y, kTraceTail,
+              f.tailAlpha);
+  }
+  if (f.hasDot) {
+    d->fillCircle(f.dot.x, f.dot.y, 3, mixOverFrame(f.dot.x, f.dot.y, kTraceDot, f.dotAlpha));
+    d->drawCircle(f.dot.x, f.dot.y, 4, mixOverFrame(f.dot.x, f.dot.y, kTraceLine, 200));
+  }
+}
+
+void drawTrace(lgfx::LovyanGFX* d, const TraceFrame& f, bool movingOnly) {
+  if (!f.live) return;
+  if (!movingOnly) drawTraceRoute(d, f);
+  if (f.direct) {
+    if (f.ringAlpha > 0 && f.ringR > 0) {
+      const uint16_t col = mixOverFrame(f.ringX + f.ringR, f.ringY, kTraceRing, f.ringAlpha);
+      d->drawCircle(f.ringX, f.ringY, f.ringR, col);
+      if (f.ringR > 5) d->drawCircle(f.ringX, f.ringY, f.ringR - 1, col);
+    }
+  } else {
+    drawTraceMoving(d, f);
+  }
+}
+
+void drawMapFrame(const MapView& v, bool freshTiles) {
   if (!omFrameBegin()) {
     omFrameEnd();
     return;
@@ -68,7 +160,11 @@ void mapScreenDraw(const MapView& v) {
   }
 
   d->fillScreen(kMapBg);
-  om::mapRender();   // the tiles only: the attribution, the chrome and the labels are drawn here
+  if (freshTiles) {
+    om::mapRender();   // the tiles only: this file draws the attribution, chrome and traces
+  } else {
+    om::mapRepush();   // EST-368: an animation frame, the canvas already composited
+  }
 
   if (!om::mapReady()) {
     drawEmptyState(d, Rect{0, 0, l2().width, (int16_t)l2().tabbar.y}, "Map pack not open.",
@@ -77,19 +173,26 @@ void mapScreenDraw(const MapView& v) {
 
   const MapChrome c = mapScreenChrome(v);
 
-  // EST-353: the tile attribution is the map's licence line, not part of the canvas: one dim line on
-  // the bottom RIGHT, right-aligned to the key column and measured, so the scale's two labels
-  // (bottom left) can never run into it again. drawTextEllipsis keeps it inside the rectangle the
-  // same arithmetic returned, and its own background keeps it readable over a bright tile.
+  // EST-368 (Filip ~21:35): the tile attribution, drawn straight on the map in a small dim face
+  // with a 1 px dark outline. No plate behind it, on the bottom left where the scale used to be.
   if (om::mapReady()) {
     const int creditW =
         measureText(d, FontRole::MonoMeta, kMapCreditText, (int)strlen(kMapCreditText));
     const Rect cr = mapCreditRect(c, (int16_t)creditW);
     if (!cr.empty()) {
-      drawTextEllipsis(d, FontRole::MonoMeta, kMapCredit, kMapBg, cr.x, cr.y + cr.h / 2, cr.w,
-                       kMapCreditText);
+      if (creditW <= cr.w) {
+        drawTextOnMap(d, FontRole::MonoMeta, kMapCredit, cr, kMapCreditText);
+      } else {
+        // A box too narrow for the whole line: the ellipsis form, on the panel colour, so the cut
+        // is visible instead of running under the keys.
+        drawTextEllipsis(d, FontRole::MonoMeta, kMapCredit, kMapBg, cr.x, cr.y + cr.h / 2, cr.w,
+                         kMapCreditText);
+      }
     }
   }
+
+  // The route belongs under the markers; the moving dot goes on top of them (below).
+  if (!v.trace.direct) drawTrace(d, v.trace, false);
 
   // Node markers over the tiles, our own position last so it is never hidden by a contact.
   for (int i = 0; i < v.markerCount; ++i) {
@@ -112,6 +215,10 @@ void mapScreenDraw(const MapView& v) {
     drawTextLeft(d, FontRole::MonoMeta, m.selected ? kAccInk : kInk, kMapBg, lx, ly, m.name);
   }
 
+  // The moving dot, its tail and the direct-arrival ring ride above markers and labels.
+  if (v.trace.direct) drawTrace(d, v.trace, false);
+  else drawTrace(d, v.trace, true);
+
   // The info chip (mock .mapinfo): what this map is and at which zoom.
   char chip[24];
   snprintf(chip, sizeof(chip), "offline \xC2\xB7 z%d", v.zoom);
@@ -120,35 +227,22 @@ void mapScreenDraw(const MapView& v) {
   drawTextLeft(d, FontRole::MonoMeta, kDim, kPanel, c.chip.x + kMapChipPadX,
                c.chip.y + c.chip.h / 2, chip);
 
-  // Zoom and lock keys, bottom right, as in the mock.
+  // Zoom, follow and the Traces toggle (EST-368), bottom right, as in the mock.
   keyBox(d, c.zoomIn, kPanel, kLine);
   keyBox(d, c.zoomOut, kPanel, kLine);
   keyBox(d, c.lock, v.locked ? kSelBg2 : kPanel, v.locked ? kAcc : kLine);
+  keyBox(d, c.traces, v.tracesOn ? kSelBg2 : kPanel, v.tracesOn ? kAcc : kLine);
   setRole(d, FontRole::SansTitle);
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(kInk, kPanel);
   d->drawString("+", c.zoomIn.x + c.zoomIn.w / 2, c.zoomIn.y + c.zoomIn.h / 2);
   d->drawString("-", c.zoomOut.x + c.zoomOut.w / 2, c.zoomOut.y + c.zoomOut.h / 2);
   drawLockIcon(d, c.lock, v.locked);
-
-  // The scale line, bottom left: a rail, three caps, the half and the full distance.
-  d->drawFastHLine(c.scale.x, c.scale.bottom() - 7, c.scalePx, kInk);
-  for (int i = 0; i < 3; ++i) {
-    const int x = c.scale.x + (c.scalePx * i) / 2;
-    d->drawFastVLine(x, c.scale.bottom() - 10, 4, kInk);
-  }
-  const int midW = measureText(d, FontRole::MonoMeta, c.scaleMid, (int)strlen(c.scaleMid));
-  const int rightW = measureText(d, FontRole::MonoMeta, c.scaleRight, (int)strlen(c.scaleRight));
-  // EST-352: one measured space between the two labels. If the rail cannot hold both, the half
-  // label is dropped and the end label (right-aligned to the rail) stays readable.
-  const int spaceW = measureText(d, FontRole::MonoMeta, " ", 1);
-  const MapScaleLabelLayout sl =
-      mapScaleLabelLayout(c.scale, midW, rightW, spaceW > 0 ? spaceW : 1);
-  if (sl.showMid) {
-    drawTextLeft(d, FontRole::MonoMeta, kInk, kMapBg, sl.midX, c.scale.bottom() - 1, c.scaleMid);
-  }
-  drawTextLeft(d, FontRole::MonoMeta, kInk, kMapBg, sl.rightX, c.scale.bottom() - 1,
-               c.scaleRight);
+  // The Traces icon (tools/mkicons.py): a route with its hop dots, gold while traces are on.
+  const int iconX = c.traces.x + (c.traces.w - (int)kIconTrace.w) / 2;
+  const int iconY = c.traces.y + (c.traces.h - (int)kIconTrace.h) / 2;
+  drawIcon(d, kIconTrace, iconX, iconY, v.tracesOn ? kAcc : kInk,
+           v.tracesOn ? kSelBg2 : kPanel);
 
   // The tapped marker's panel (mock .callout): dark gold, gold edge, the name then one mono line.
   if (v.callout && !c.callout.empty()) {
@@ -165,6 +259,15 @@ void mapScreenDraw(const MapView& v) {
   om::useAppFont(d);
   omFrameEnd();
 }
+
+}  // namespace
+
+MapChrome mapScreenChrome(const MapView& v) {
+  return mapChromeFor(l2(), v.callout);
+}
+
+void mapScreenDraw(const MapView& v) { drawMapFrame(v, true); }
+void mapScreenAnimate(const MapView& v) { drawMapFrame(v, false); }
 
 }  // namespace ui
 }  // namespace om

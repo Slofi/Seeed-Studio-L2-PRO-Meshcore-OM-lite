@@ -1684,6 +1684,21 @@ bool meshDmLatest(int* threadOut, char* name, size_t nameCap, char* text, size_t
   return true;
 }
 
+bool meshDmNewest(int thread, MeshDm* out) {
+  if (s_dmRing == nullptr || out == nullptr || thread < 0) return false;
+  // Newest first through the ring's live sequence window (at most one ring of steps), so the copy is
+  // the newest message of THIS thread and the walk can never run away.
+  const uint32_t newest = s_dmRing->newestSeq();
+  for (int i = 0; i < ui::kDmRing && newest > (uint32_t)i; ++i) {
+    const DmMsg* m = s_dmRing->find(newest - (uint32_t)i);
+    if (m == nullptr) continue;
+    if ((int)m->thread != thread) continue;
+    *out = *m;
+    return true;
+  }
+  return false;
+}
+
 bool meshDmOpenByName(const char* name, int* threadOut) {
   if (threadOut) *threadOut = -1;
   if (name == nullptr || name[0] == 0) return false;

@@ -62,6 +62,7 @@ spacing. Check the size cost of fonts in flash and say it.
    (REPLY / INFO / COPY), channels, map from SD, settings, sound settings, USB OTA.
 6. WadaMesh is GPL-3.0: read it for what it does, write our own code, copy nothing. OverMesh is ours.
 7. No em dashes in any text on the screen: commas, colons, full stops.
+9. THE REPO IS PUBLIC (github.com/Slofi/Seeed-Studio-L2-PRO-Meshcore-OM-lite, Claude 2026-11-10): no exact positions (lat/lon of any node; round to 1 decimal or write "<position>"), no passwords, keys or PINs, and no other people's message texts or names from real chats in PROGRESS.md, logs, tests or screenshots. Use invented names and texts in tests ("Alice", "hello"). Claude checks screenshots before committing them.
 8. Times, not ages (Filip, 2026-11-10: "time instead of 'heard ago' is always preferred, it gives better info"): wherever the app says when something happened, it shows the clock time (HH:MM today, weekday + time this week, date older). The age is only a fallback when the clock was not real at that moment.
 
 ## MeshCore core: upgradeable (Filip, 2026-11-10: "we still need to be able to update the MC core version")

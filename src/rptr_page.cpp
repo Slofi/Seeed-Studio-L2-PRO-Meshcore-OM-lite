@@ -169,6 +169,11 @@ void Draft::reset(const Facts& f, const RegionList& regions, const char* homeNam
   copyText(name, sizeof(name), f.name);
   latE6 = f.latE6;
   lonE6 = f.lonE6;
+  sharePos = f.posPolicyKnown ? (f.posPolicy != 0) : true;
+  shareBase = sharePos;
+  policyKnown = f.posPolicyKnown;
+  v.posPolicy = f.posPolicy;
+  v.posPolicyKnown = f.posPolicyKnown;
   for (int i = 0; i < kMaxRegions; ++i) {
     flood[i] = i < regions.count ? regions.rows[i].allow : false;
     floodChanged[i] = false;
@@ -185,6 +190,103 @@ void Draft::reset(const Facts& f, const RegionList& regions, const char* homeNam
   if (defScope != nullptr) {
     defaultNone = defScope[0] == 0;
     copyText(defaultScope, sizeof(defaultScope), defScope);
+  }
+  // EST-368: remember what the page was seeded with. Everything below is a copy of the values above,
+  // never an independent default: a field that still equals its baseline is CLEAN, and only a clean
+  // field may be updated by a late read-back answer.
+  base = v;
+  copyText(nameBase, sizeof(nameBase), name);
+  latBase = latE6;
+  lonBase = lonE6;
+  for (int i = 0; i < kMaxRegions; ++i) floodBase[i] = flood[i];
+  copyText(homeBase, sizeof(homeBase), home);
+  defaultNoneBase = defaultNone;
+  copyText(defaultScopeBase, sizeof(defaultScopeBase), defaultScope);
+}
+
+// EST-368 (Filip ~22:30): the first pick on a settings page used to vanish. The page asks for the
+// repeater's current values when it opens, and every answer used to reset the WHOLE draft
+// (rptrSyncDraft), so a value the finger had just chosen was thrown away by the next answer; the
+// second pick stuck because by then the read-backs had finished. Now an answer updates only the
+// fields whose draft is still clean.
+void Draft::syncClean(const Facts& f, const RegionList& regions, const char* homeName,
+                      const char* defScope) {
+  auto takeU32 = [](uint32_t& dst, uint32_t& b, uint32_t got) {
+    if (dst != b) return;   // touched: never overwritten by an answer
+    dst = got;
+    b = got;
+  };
+  auto takeU8 = [](uint8_t& dst, uint8_t& b, uint8_t got) {
+    if (dst != b) return;
+    dst = got;
+    b = got;
+  };
+  auto takeBool = [](bool& dst, bool& b, bool got) {
+    if (dst != b) return;
+    dst = got;
+    b = got;
+  };
+  takeU32(v.radio.freq_khz, base.radio.freq_khz, f.radio.freq_khz);
+  takeU32(v.radio.bw_hz, base.radio.bw_hz, f.radio.bw_hz);
+  takeU8(v.radio.sf, base.radio.sf, f.radio.sf);
+  takeU8(v.radio.cr, base.radio.cr, f.radio.cr);
+  if (v.radio.tx == base.radio.tx) {
+    v.radio.tx = f.tx;
+    base.radio.tx = f.tx;
+  }
+  takeBool(v.repeat, base.repeat, f.repeat);
+  takeU8(v.advertLocal, base.advertLocal, f.advertLocal);
+  takeU8(v.advertFlood, base.advertFlood, f.advertFlood);
+  takeU8(v.floodMax, base.floodMax, f.floodMax);
+  if (v.loop == base.loop) {
+    v.loop = f.loop;
+    base.loop = f.loop;
+  }
+  takeU8(v.pathHash, base.pathHash, f.pathHash);
+  if (strcmp(name, nameBase) == 0) {
+    copyText(name, sizeof(name), f.name);
+    copyText(nameBase, sizeof(nameBase), f.name);
+  }
+  if (latE6 == latBase) {
+    latE6 = f.latE6;
+    latBase = f.latE6;
+  }
+  if (lonE6 == lonBase) {
+    lonE6 = f.lonE6;
+    lonBase = f.lonE6;
+  }
+  if (f.posPolicyKnown) {
+    // A clean switch follows the policy the repeater reports; a switch the finger moved is kept.
+    const bool factShare = f.posPolicy != 0;
+    const bool wasShare = base.posPolicyKnown ? (base.posPolicy != 0) : sharePos;
+    if (sharePos == wasShare) {
+      sharePos = factShare;
+      shareBase = factShare;   // a clean switch follows the answer, baseline and all
+    }
+    base.posPolicy = f.posPolicy;
+    base.posPolicyKnown = true;
+    v.posPolicy = f.posPolicy;
+    v.posPolicyKnown = true;
+    policyKnown = true;
+  }
+  for (int i = 0; i < regions.count && i < kMaxRegions; ++i) {
+    if (floodChanged[i] || flood[i] != floodBase[i]) continue;
+    flood[i] = regions.rows[i].allow;
+    floodBase[i] = regions.rows[i].allow;
+  }
+  const char* wasHome = homeName == nullptr ? "*" : homeName;
+  if (!homeChanged && strcmp(home, homeBase) == 0) {
+    copyText(home, sizeof(home), wasHome);
+    copyText(homeBase, sizeof(homeBase), wasHome);
+  }
+  if (!defaultChanged) {
+    const char* wasDef = defScope != nullptr ? defScope : "";
+    if (defaultNone == defaultNoneBase && strcmp(defaultScope, defaultScopeBase) == 0) {
+      defaultNone = wasDef[0] == 0;
+      copyText(defaultScope, sizeof(defaultScope), wasDef);
+      defaultNoneBase = defaultNone;
+      copyText(defaultScopeBase, sizeof(defaultScopeBase), defaultScope);
+    }
   }
 }
 
@@ -220,9 +322,13 @@ DirtyFields draftChanges(const Facts& f, const Draft& d, const RegionList& regio
   out.defScope = d.defaultChanged ||
                  (d.defaultNone ? wasDef[0] != 0 : strcmp(d.defaultScope, wasDef) != 0);
   out.addRegion = d.hasAdd && d.addName[0] != 0;
+  // EST-368: the Position page's switch is a draft of its own; it differs from what the page seeded
+  // (reset() puts the repeater's policy there), so Apply appears the moment it is flipped.
+  out.sharePos = d.sharePos != d.shareBase;
   out.any = out.name || out.lat || out.lon || out.freq || out.bw || out.sf || out.cr || out.tx ||
             out.repeat || out.advertLocal || out.advertFlood || out.floodMax || out.loop ||
-            out.pathHash || out.floodRegion || out.home || out.defScope || out.addRegion;
+            out.pathHash || out.floodRegion || out.home || out.defScope || out.addRegion ||
+            out.sharePos;
   return out;
 }
 
@@ -499,9 +605,22 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       out->rows[out->count - 1].changed = dirty.lat;
       addRow(out, "Longitude", lon, Act::Edit, false, 1);
       out->rows[out->count - 1].changed = dirty.lon;
-      copyText(out->banner, sizeof(out->banner),
-               "Move the map under the crosshair, or type the coordinates.");
-      out->hasApply = in.draft != nullptr && (dirty.lat || dirty.lon);
+      // EST-368 (Filip): a repeater can stop sharing its position. Off is the repeater's own
+      // `gps advert none` where its firmware has it, else lat/lon 0, and one advert so the other
+      // nodes learn it at once. The page says plainly that others drop the point only when they hear
+      // that advert, and that a node which stored it may keep showing the old one until then.
+      addRow(out, "Share position", d && d->sharePos ? "on" : "off", Act::Toggle);
+      out->rows[out->count - 1].on = d ? d->sharePos : true;
+      out->rows[out->count - 1].changed = dirty.sharePos;
+      // The sentence the ticket asks for is split where the layout can hold it: the banner is one
+      // ellipsized line, so the first half is the banner and the second is a note row that wraps to
+      // the page's width. Both are plain: nobody has to read the code to know when the point goes.
+      if (out->banner[0] == 0) {
+        copyText(out->banner, sizeof(out->banner),
+                 "Off: others drop it when they hear the next advert.");
+      }
+      addRow(out, "Note", "A node that stored the old point may keep showing it.", Act::None);
+      out->hasApply = in.draft != nullptr && (dirty.lat || dirty.lon || dirty.sharePos);
       return out->count;
     }
 
@@ -786,6 +905,23 @@ int applyPlan(Page page, const Draft& d, const RegionList& regions, ApplyPlan* o
     case Page::Name:
       return pushLine(out, line, cliName(line, sizeof(line), d.name));
     case Page::Position:
+      // EST-368: Off first turns the advert's position off (the repeater's own policy where the
+      // firmware has it, else lat/lon 0 which MeshCore reads as "no position"), then ONE flood advert
+      // so the other nodes drop the old point without waiting for the next scheduled one.
+      if (!d.sharePos) {
+        if (d.policyKnown) {
+          pushLine(out, line, cliGpsAdvert(line, sizeof(line), false));   // "gps advert none"
+        } else {
+          pushLine(out, line, cliLat(line, sizeof(line), 0));              // 0 = no position
+          pushLine(out, line, cliLon(line, sizeof(line), 0));
+        }
+        snprintf(line, sizeof(line), "%s", kCliAdvertFlood);   // "advert"
+        pushLine(out, line, (int)strlen(line));
+        return out->count;
+      }
+      if (d.policyKnown) {
+        pushLine(out, line, cliGpsAdvert(line, sizeof(line), true));      // "gps advert prefs"
+      }
       pushLine(out, line, cliLat(line, sizeof(line), d.latE6));
       pushLine(out, line, cliLon(line, sizeof(line), d.lonE6));
       return out->count;
@@ -871,7 +1007,13 @@ int readBackLines(Page page, char out[kReadBackMax][24]) {
   switch (page) {
     case Page::Repeater: lines[n++] = "clock"; break;
     case Page::Name: lines[n++] = "get name"; break;
-    case Page::Position: lines[n++] = "get lat"; lines[n++] = "get lon"; break;
+    case Page::Position:
+      lines[n++] = "get lat";
+      lines[n++] = "get lon";
+      // EST-368: does this firmware know the advert location policy? An "unknown command" leaves the
+      // fact unset and Apply falls back to lat/lon 0.
+      lines[n++] = "gps advert";
+      break;
     case Page::Radio: lines[n++] = "get radio"; break;
     case Page::Tx: lines[n++] = "get tx"; break;
     case Page::Repeat: lines[n++] = "get repeat"; break;

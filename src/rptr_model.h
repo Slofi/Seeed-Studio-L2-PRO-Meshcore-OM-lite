@@ -503,6 +503,12 @@ struct AdminValues {
   bool repeat = true;
   bool powerSave = false;
   bool sharePosition = true;   // "gps advert prefs"
+  // EST-368: the advert location policy as the repeater answered it (`gps advert`: 0 none,
+  // 1 share, 2 prefs). `posPolicyKnown` false means this firmware has no such command, so the
+  // Position page's Off falls back to lat/lon 0. Kept in the seed too, so a clean switch can follow
+  // a late answer without touching a switch the finger already moved.
+  uint8_t posPolicy = 2;
+  bool posPolicyKnown = false;
   void reset();
 };
 void advertLocalStep(AdminValues* v, int dir);
@@ -615,6 +621,13 @@ constexpr int32_t kCoordLonLimitE6 = 180000000;
 bool coordReplyParse(const char* text, int32_t* e6, CoordAxis axis = CoordAxis::Any);
 bool switchReplyParse(const char* text, bool* on);          // "on"/"off"
 bool loopReplyParse(const char* text, LoopDetect* out);
+// EST-368: CommonCLI's `gps advert` answer, "> none" / "> prefs" / "> share" (ADVERT_LOC_* values
+// 0 / 2 / 1). The repeater's own `gps advert none` is what turns its advert position off where the
+// firmware has the command; a repeater that answers "unknown command" is handled by the caller.
+constexpr uint8_t kAdvertLocNone = 0;
+constexpr uint8_t kAdvertLocShare = 1;
+constexpr uint8_t kAdvertLocPrefs = 2;
+bool gpsAdvertParse(const char* text, uint8_t* policy);
 
 // --------------------------------------------------------------------------- the coordinate pair
 // EST-364: Argus showed "14.501452, 0.00000" after login, i.e. its LONGITUDE in the latitude field.

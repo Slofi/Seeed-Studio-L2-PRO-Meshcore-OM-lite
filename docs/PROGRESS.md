@@ -3850,3 +3850,180 @@ device prints its own `[hist] open ... in X ms (N windows, B bytes)`). No SSH ho
 ## 2026-11-10 22:45 (Claude): EST-367 on the device
 - Built in the sandbox (exit 0, RAM 155,608 B, flash 2,790,817 B), tests exit 0, reviewed binary flashed (2,791,184 B).
 - `chats` after boot: 6 chats, `mismatches=0` (card counts: #slovenija 28, Don't Panic 23, #test 10, #slovenia 3, DM 2). Opened #slovenija through the dropdown (taps): `shown=28 card=28 newest_card=20:45 newest_shown=20:45 open_ms=16.049 windows=1`; the screen shows the 20:41-20:45 messages with emoji (`docs/shots/2026-11-10-2242-slovenija.png`). Neighbours discovery and the card border: Filip / next Argus run.
+
+## 2026-11-10 23:06 (DeepSeek): EST-368, the Map tab, the message pop-up and two RPTR fixes
+
+The ticket (Filip ~21:35, ~22:25, ~22:30): credits without a plate, no scale, OM's Traces, the unread
+badge on the Map, a pop-up that shows the message, a first pick that vanishes, and a way to stop a
+repeater sharing its position. The origin of the traces is OverMesh (`static/js/app.js`, MC RX traces)
+and the mock (`ui-mock/index.html`, "OM's animated Traces").
+
+### 1. The tile attribution has no box any more
+- `ui/screen_map.cpp` draws `Esri, HERE, Garmin, OSM` straight on the tiles: `drawTextOnMap()` writes
+  the string in kMapCredit (dim) at the four 1 px neighbours in kMapCreditEdge and then the text
+  itself, so it is legible on a bright topo tile and on a dark one without a plate behind it.
+  LovyanGFX fills a character cell only when the background differs from the ink, so
+  `setTextColor(ink)` alone is a transparent draw (no secret API, one line in the comment).
+- Where: bottom LEFT, the space the scale used to own. `mapCreditRect()` returns 6..144 x 199..209 at
+  320 px (138 px wide, one 6 px margin in from the edge and above the tab bar). The old
+  `kMapCreditGap`/scale-overlap arithmetic is gone.
+
+### 2. The scale is gone
+- `mapMetresPerPixel`, the 1-2-5 ladder, `mapScaleLabels` and `MapScaleLabelLayout` are deleted from
+  `ui/map_chrome.*`, along with `kMapScaleH` / `kMapScaleMaxW` and the rail/caps/labels drawing.
+  `mapChromeFor()` lost its zoom/latitude parameters (nothing else used them); test_est351's scale
+  cases were replaced (see below). Filip's words: "remove the distance markers, they are quite
+  useless".
+
+### 3. Traces (OM's animation, one route at a time)
+- New `ui/map_trace.h/.cpp`, plain C++ and host-tested:
+  - `traceMatchHop()` maps a path hash to the contact whose public key starts with it; 1B, 2B and 3B
+    all work (the record carries three key bytes; only the packet's own hash size is compared).
+  - `traceBuildRoute()` = sender (when its contact has a position) + hops that matched a POSITIONED
+    repeater, in order + us (the GPS fix, else the last position we knew). Unknown hops and known
+    repeaters without a position are skipped; duplicate consecutive points are dropped.
+  - 420 ms PER HOP (`duration = hops x 420`, at least 420), a 35 % tail, 900 ms fade on arrival, and
+    a direct ring from 3 to 26 px over 1400 ms.
+  - `TraceQueue` replays one route at a time; a newer route from the same sender replaces the older
+    pending one (three messages from one node cannot draw three tails on one corridor).
+- The shell (`main.cpp`): `traceSeedFromRing()` on opening the Map = the newest message per sender
+  (4 at most) plus the newest received DM, oldest first; `traceWatchArrivals()` animates a channel
+  message or a received DM the moment its serial changes while the Map is open; a 0-hop arrival is a
+  ring at our position (the ticket), not a line, and a route with fewer than two known points is a
+  ring at its last known point.
+- The frame: `om::mapRepush()` (new in `map.cpp`) pushes the canvas the last `mapRender()` composited,
+  so an animation frame costs a push + the chrome, never a JPEG decode or an SD read.
+  `mapScreenAnimate()` is the animation path, `mapScreenDraw()` the full one.
+- Rate: at most one animation frame per 33 ms (~30 fps), only while a route is live. Nothing is
+  redrawn when idle. The touch is read once per loop pass (20 ms delay), so an animating Map adds at
+  most one frame's time to a tap's latency.
+- Cost per frame is measured and printed when a replay drains:
+  `[map] traces 42 frames in 1410 ms, avg 21000 us, worst 28000 us, in flight 0`. The same time is
+  already split into MapDecode / Draw / FramePush by `radio`'s loop histogram.
+- The toggle: a fourth key on top of the zoom/locate column (`MapHitKind::Traces`), the new
+  `kIconTrace` from `tools/mkicons.py` (a route with hop dots), gold when on. Default ON, saved in
+  NVS `traces` and read at boot.
+- NOT DONE (the ticket's optional part): tapping the Map tab again to open the MSGS rail and freeze a
+  route hop by hop. Everything above is the live/replay behaviour; the rail is not in this build.
+
+### 4. The unread badge on the Map tab
+- Verified, no code change needed: `buildMapView()` fills `v.tabs = currentTabBar(om::ui::Tab::Map)`
+  and `screen_map.cpp` draws the bar with `drawTabBar(d, l2(), v.tabs)`, i.e. the ONE widget that
+  carries the badge on the Chat icon. `test_tab_bar_calls.py` (source-level: every screen passes a
+  view model, all four tabs come from `currentTabBar`) passes, and test_est368 asserts the model for
+  the Map tab (`tabBarModel(Tab::Map, 7, true)`). EST-365's fix already covered this screen; the
+  report was from before it landed.
+
+### 5. The message pop-up shows the message
+- `ui/notify.h`: a message notice is now two fields, `Notice{title, body}`; title = "TehiLL RAK · #slovenija",
+  "Mention · ..." or "DM · ERA-3"; body = the whole text (200 B cap, cut on a UTF-8 boundary).
+  `NoticeQueue` (the one pending slot) keeps the body too, so the burst rule still ends with ONE
+  newest pop-up, now readable.
+- `ui/toast.h`: `ToastState` gained `body` and `showNotice()`; `show()` is still the one-line form for
+  pings, refusals and the fault mark. The 5 s deadline and the consumed-tap dismissal are untouched.
+- `ui/notice_panel.h/.cpp`: the layout arithmetic, host-tested. The message wraps with the chat's own
+  wrapper (`text_wrap.cpp`, so emoji and UTF-8 behave exactly as in the message list) over at most 4
+  rows on the L2; the ellipsis appears only when the text really continues, and the last drawn line
+  is shortened on a whole unit until it + "..." fit. The panel is 304 px wide, 7 px padded, 14 px
+  title + 14 px per body row: 42 / 56 / 70 / 84 px tall for 1..4 rows. Its bottom is the tab bar's
+  top minus 8 px and its top never goes under the status bar; on a shorter screen it loses BODY rows
+  before the title.
+- `widgets.cpp` draws it: title in mono dim, body lines in SansBody, each line through the same
+  UTF-8/emoji path the chat uses.
+
+### 6. RPTR: the first pick no longer vanishes
+- Cause (the ticket guessed it): every CLI answer whose page was open called `rptrSyncDraft()`, which
+  resets the WHOLE draft from the read-backs. A settings page asks for its values when it opens, so
+  the finger's first pick was thrown away by the next answer; by the second pick the answers had
+  finished, which is why the second one stuck.
+- Fix: `Draft` now remembers what `reset()` seeded (`base`, `nameBase`, `latBase`, ...), and
+  `Draft::syncClean()` copies a read-back into a field ONLY when that field still equals its seed. A
+  touched field is never overwritten. `main.cpp` calls it from the answer path; the whole reset stays
+  where it belongs (opening a page, Back, and a successful Apply).
+- Host test: pick 30 while the opening answer says 60 -> the draft stays 30, `buildScreen()` shows
+  Apply and the row's dot; a field the finger did not touch does take the answer; a radio stepper
+  survives a late `get radio`; a failed Apply still keeps the whole draft (EST-366 rule).
+
+### 7. RPTR: Share position
+- The Position page has a "Share position" switch (Apply as usual). Off sends, in this order:
+  - `gps advert none` when the repeater answered `gps advert` (CommonCLI v1.18.0 really has it:
+    `ADVERT_LOC_NONE` / `SHARE` / `PREFS`, and `buildAdvertData()` leaves the position out for NONE),
+  - otherwise `set lat 0.00000` + `set lon 0.00000` (MeshCore reads 0/0 as "no position"; our own map
+    already skips a contact with `has_pos == false`, which is exactly lat and lon both 0),
+  - then ONE `advert` (flood), so the other nodes learn it at once.
+  On sends `gps advert prefs` where the command exists, then the coordinates.
+- The read-back `gps advert` joined the Position page's opening reads (3 lines, still inside
+  `kReadBackMax` 4), so `policyKnown` is the repeater's own answer, never an assumption. An
+  "unknown command" answer is refused by `replyFitsCmd()` and the fallback is the lat/lon 0 path.
+- The page says it plainly: the banner is "Off: others drop it when they hear the next advert." and a
+  Note row (not tappable) says "A node that stored the old point may keep showing it." The banner is
+  one ellipsized line in the layout, which is why the sentence is split in two.
+
+### Build and tests
+- `pio run -e om_lite_l2` exit 0: **RAM 156,752 B** (47.8% of 327,680; EST-367 was 155,608, so
+  +1,144 B: the trace queue/frame state, the Notice buffers and the draft baselines), **flash
+  2,799,933 B** (42.7% of 6,553,600; +9,116 B: the trace model, the pop-up layout, the icons and the
+  RPTR changes), `firmware.bin` **2,800,304 B**.
+- `sh test/host/run.sh` exit 0. New `test/host/test_est368.cpp` (linked with map_trace.cpp,
+  notice_panel.cpp, text_wrap.cpp, rptr_model.cpp, rptr_page.cpp, timekeeper.cpp):
+  - hop mapping: 2B hash -> the right repeater, 1B and 3B both resolve, a 3B hash that only shares two
+    bytes is unknown, an unknown hash is -1, a 1-byte record cannot answer a 2-byte hash;
+  - the route: sender + 2 hops + us = 4 points with the exact coordinates; an unknown middle hop is
+    skipped (3 points, hops still 3); a hop whose node has no position is skipped (us only); a 0-hop
+    path is `direct`; no us position ends the route at the last repeater; a sender sitting on the
+    first hop is one point, not a zero-length segment;
+  - geometry: 200 px route, point at 0.5 is the vertex, at 0.75 is half way up the second segment, a
+    slice carries the vertex, a degenerate route is not a divide by zero;
+  - animation: 2 hops = 840 ms, dot at the start at t=0, at the middle vertex at 420, tail starts at
+    30 px (35 % of 200 behind the head), arrival holds the last tail then fades over 900 ms, 3 hops =
+    1260 ms even with one unknown; the ring grows and fades over 1400 ms;
+  - queue: the first route plays, the second does not appear until the first has faded, the direct one
+    waits its turn, the same sender's newer route replaces the pending one, an undrawable route is
+    refused; no two frames of two routes ever overlap;
+  - pop-up: one row for a short text, 4 rows max and "..." on a whole unit for a long one, every line
+    of a š/č/ž + emoji text is a whole UTF-8 sequence inside the width, a 120 px-tall screen loses
+    body rows (3) and still ends above the tab bar, the title/body builders keep the message and never
+    split a sequence;
+  - RPTR: the late-answer cases above, the Position page's rows/Apply/note, `gps advert none` +
+    `advert`, the lat/lon 0 fallback, `gps advert prefs` + coordinates when back on, the parser and
+    `replyFitsCmd("gps advert", ...)`, and the Map badge's model.
+- `test_est351.cpp` updated where the ticket changed the rule: the scale tests are gone, the chrome
+  test now checks the Traces key on top of the column, and the credit test checks the bottom-left
+  outlined box (6..144, 199..209). EST-366's notification tests still pass with the new queue.
+
+### Could not check (no device and no radio in the sandbox)
+- The glass: the outlined credit on a bright vs a dark tile, the Traces key, a real dot travelling a
+  real path, the direct ring, the 4-row pop-up with a real message, the Share position page, and the
+  badge on the Map (the code path is proven, the pixels are not).
+- The radio: what Argus and Trnovo II answer to `gps advert` (v1.18.0's CommonCLI has it; a repeater
+  on older firmware answers "unknown command" and takes the lat/lon 0 path). No advert was sent.
+- The measured animation frame cost on the device (the host cannot measure the panel push); the
+  device prints it per replay, so the first run gives the number.
+
+### Next step for Claude (one reader on the USB port)
+1. Flash `firmware.bin` (2,800,304 B). Boot log should still show the map tile probe OK.
+2. `tools/cmd.py tap 200 227` (Map tab, third of the four 80 px tabs). `tools/shot.py`: no scale at
+   the bottom left, the dim "Esri, HERE, Garmin, OSM" there with a 1 px dark edge and NO plate, the
+   Traces key at the top of the right column (centre 302,113), the unread badge still on the Chat
+   icon if anything is unread. The key is gold because traces default on.
+3. `tools/cmd.py tap 302 113` turns Traces off (the key goes plain, log `[map] traces off`), tap again
+   to turn it on (`[map] traces on`). Reboot once: it must come back on (or stay off if it was left
+   off), i.e. the NVS `traces` key.
+4. Make one received message: `tools/cmd.py dm ERA-3 ping` (this refreshes the path), then have ERA-3
+   (or any node) send a DM or a #test line to OM-Lite. `shot.py` at ~0.4 s, ~1.0 s and ~2.0 s: the
+   dashed route, the dot with its short tail, then the fade; a direct (0-hop) arrival is only the ring
+   at our own position. The serial prints `[map] trace <sender> N hop(s), M known point(s), K
+   resolved` and, when the replay drains, the per-frame cost line. If avg is above ~33 ms, the frame
+   cap is not being met and that number is the finding.
+5. RPTR: log in, open Default scope (or Advertising), tap the FIRST option once. Wait 5 s without
+   touching anything: the pick must stay and Apply must appear (the 22:30 bug). `shot.py`.
+6. RPTR Position: the switch reads on; tap it off, Apply. The console must show `gps advert none`
+   followed by `advert` (or `set lat 0.00000` / `set lon 0.00000` / `advert` on a firmware without
+   the command). `shot.py` for the banner + Note row. After the advert, `tools/cmd.py nodes` from
+   another radio (or ours once the advert lands) must show that repeater without a position, and it
+   must not be drawn on our Map.
+
+## 2026-11-10 23:15 (Claude): EST-368 on the device
+- Built in the sandbox (exit 0, RAM 156,752 B, flash 2,799,933 B), tests exit 0, reviewed binary flashed (2,800,304 B). `chats`: 6 chats, 0 mismatches.
+- Map (`docs/shots/2026-11-10-2313-map-popup.png`): credits drawn on the map with an outline, no plate; no scale; the Traces button (gold, on) above locate / + / -; the unread badge "10" on the tab bar; a repeater marker with its label. A DM ping to ERA-3 brought the bot's answer as a two-line pop-up over the map ("DM . ERA-3 (SI)" + the text with its emoji). No trace was drawn for it: our GPS had no fix indoors and ERA-3 shares no position, so the route had fewer than two known points (by design). The animation itself needs a message whose path runs through repeaters with known positions: to watch on real traffic (Filip).
+- From now on (REBUILD.md rule 9): the repo is public; no positions, secrets or other people's messages in docs, logs, tests or screenshots.

@@ -100,6 +100,11 @@ struct Facts {
   uint8_t pathHash = 1;
   uint32_t clock = 0;
   bool hasClock = false;
+  // EST-368: the repeater's advert location policy from `gps advert` (CommonCLI v1.18.0):
+  // 0 = none, 1 = share (its own live position), 2 = prefs (its stored lat/lon). `posPolicyKnown`
+  // false means the firmware never answered, so the page falls back to lat/lon 0 for Off.
+  uint8_t posPolicy = 2;
+  bool posPolicyKnown = false;
 
   bool nameKnown = false;
   bool posKnown = false;
@@ -123,6 +128,11 @@ struct Draft {
   char name[32] = "";
   int32_t latE6 = 0;
   int32_t lonE6 = 0;
+  // EST-368: the Position page's "Share position" switch. Off sends `gps advert none` where the
+  // repeater has the command, else lat/lon 0, then one `advert`.
+  bool sharePos = true;
+  bool shareBase = true;         // what reset() seeded: differs only when the finger flipped it
+  bool policyKnown = false;      // the repeater answered `gps advert` this session
 
   bool flood[kMaxRegions] = {};        // "Repeats floods here" per region row
   bool floodChanged[kMaxRegions] = {}; // only a changed row is sent by Apply
@@ -137,8 +147,26 @@ struct Draft {
   bool defaultNone = true;          // true = "none" (<null>)
   char defaultScope[32] = "";
 
+  // EST-368: what the draft was seeded with. A field still equal to this was NOT touched by the
+  // finger, so a read-back answer may update it; a field the user moved differs from it and is never
+  // overwritten by an answer. This is what stops the first pick on a settings page from vanishing
+  // when the page's own opening read-backs land a moment later.
+  AdminValues base;
+  char nameBase[32] = "";
+  int32_t latBase = 0;
+  int32_t lonBase = 0;
+  bool floodBase[kMaxRegions] = {};
+  char homeBase[32] = "";
+  bool defaultNoneBase = true;
+  char defaultScopeBase[32] = "";
+
   void reset(const Facts& f, const RegionList& regions, const char* homeName,
              const char* defScope);
+  // EST-368: one read-back answer. Every field that is still clean (equal to what reset() seeded)
+  // takes the repeater's new value and its baseline; every touched field is left exactly as the
+  // finger left it.
+  void syncClean(const Facts& f, const RegionList& regions, const char* homeName,
+                 const char* defScope);
 };
 
 // ------------------------------------------------------------------------------------ draft vs facts
@@ -165,6 +193,7 @@ struct DirtyFields {
   bool home = false;
   bool defScope = false;
   bool addRegion = false;
+  bool sharePos = false;      // EST-368: the Position page's "Share position" switch
 };
 // `regions`/`home`/`defScope` are the repeater's read-backs (home "*" = anywhere, "" = none).
 DirtyFields draftChanges(const Facts& f, const Draft& d, const RegionList& regions,

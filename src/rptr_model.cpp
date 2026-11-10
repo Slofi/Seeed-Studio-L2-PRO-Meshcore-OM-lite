@@ -1430,6 +1430,19 @@ bool loopReplyParse(const char* text, LoopDetect* out) {
   return false;
 }
 
+// EST-368: CommonCLI's `gps advert` read-back (v1.18.0, helpers/CommonCLI.cpp): "> none", "> prefs"
+// or "> share". Anything else (an error, "unknown command") is false, so the page knows the repeater
+// has no such setting and falls back to lat/lon 0.
+bool gpsAdvertParse(const char* text, uint8_t* policy) {
+  if (policy == nullptr) return false;
+  char v[12];
+  replyValue(text, v, sizeof(v));
+  if (strcmp(v, "none") == 0) { *policy = kAdvertLocNone; return true; }
+  if (strcmp(v, "share") == 0) { *policy = kAdvertLocShare; return true; }
+  if (strcmp(v, "prefs") == 0) { *policy = kAdvertLocPrefs; return true; }
+  return false;
+}
+
 // ------------------------------------------------------------------------------- reply/command fit
 bool replyFitsCmd(const char* cmd, const char* text) {
   // A CLI answer carries no command name, so the link names it by the order it sent the commands, and
@@ -1467,6 +1480,12 @@ bool replyFitsCmd(const char* cmd, const char* text) {
       strcmp(cmd, "get advert.interval") == 0 || strcmp(cmd, "get flood.advert.interval") == 0 ||
       strcmp(cmd, "get path.hash.mode") == 0) {
     return intReplyParse(text, &number);
+  }
+  // EST-368: the advert location policy's own shape ("> none" / "> prefs" / "> share"). A repeater
+  // without the command answers "unknown command", which is NOT an answer to this read-back.
+  if (strcmp(cmd, "gps advert") == 0) {
+    uint8_t policy = 0;
+    return gpsAdvertParse(text, &policy);
   }
   // The remaining read-backs are text of their own shape: a name is one bare line, the region list is
   // one short name per line, and `neighbors` is "prefix:secs:snr" lines (or "-none-").

@@ -59,7 +59,16 @@ constexpr uint16_t kReplyInk  = rgb565(0xbcd8f0);
 constexpr uint16_t kTagInk    = rgb565(0x9ad7ff);
 constexpr uint16_t kMapBg     = rgb565(0x191816);  // mock .mapwrap
 constexpr uint16_t kMapSide   = rgb565(0x11100e);  // mock .map-side
-constexpr uint16_t kMapCredit = rgb565(0x727a86);  // tile attribution, readable on a dark map
+constexpr uint16_t kMapCredit = rgb565(0x9aa3b0);  // tile attribution, drawn straight on the tiles
+// EST-368: the attribution has no plate behind it, so a 1 px dark outline carries it over a bright
+// tile the way a text shadow does. Never a black box (Filip, ~21:35).
+constexpr uint16_t kMapCreditEdge = rgb565(0x0b0a09);
+// EST-368: OM's Traces (OverMesh .trace CSS): a faint dashed route, a moving dot with a short
+// fading tail, and an expanding ring for a direct arrival.
+constexpr uint16_t kTraceLine = rgb565(0x8b5cf6);   // the route, drawn at low opacity
+constexpr uint16_t kTraceTail = rgb565(0x9b72f8);   // the tail behind the dot
+constexpr uint16_t kTraceDot  = rgb565(0xd8ccff);   // the dot itself, near white violet
+constexpr uint16_t kTraceRing = rgb565(0x8b5cf6);   // the direct arrival's expanding ring
 constexpr uint16_t kWarnBg    = rgb565(0x2a1e10);
 constexpr uint16_t kWarnLine  = rgb565(0x5c4320);
 constexpr uint16_t kWarnInk   = rgb565(0xffd08a);

@@ -50,7 +50,8 @@ BIN29="$(mktemp /tmp/om-lite-est364.XXXXXX)"
 BIN30="$(mktemp /tmp/om-lite-est365.XXXXXX)"
 BIN31="$(mktemp /tmp/om-lite-est366.XXXXXX)"
 BIN32="$(mktemp /tmp/om-lite-est367.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32"' EXIT
+BIN33="$(mktemp /tmp/om-lite-est368.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -261,3 +262,14 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est367.cpp \
   ../../src/rptr_model.cpp ../../src/ui/rptr_layout.cpp ../../src/usb_cmd_logic.cpp \
   ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN32"
 "$BIN32"
+
+# EST-368: the Map tab's Traces. The hop mapping from path hashes (1B/2B/3B, unknown hops, a node
+# without a position, the sender and us endpoints), the route builder, the screen geometry, the
+# animation model (420 ms per hop, 35 % tail, 900 ms fade, the direct ring) and the one-at-a-time
+# queue; the message pop-up's wrap (UTF-8, emoji, at most four rows, an ellipsis only when cut) and
+# its height limit above the tab bar; the RPTR read-back that never overwrites a dirty draft; and the
+# Position page's "Share position" (gps advert none / lat,lon 0, then one advert).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est368.cpp \
+  ../../src/ui/map_trace.cpp ../../src/ui/notice_panel.cpp ../../src/ui/text_wrap.cpp \
+  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/timekeeper.cpp -o "$BIN33"
+"$BIN33"

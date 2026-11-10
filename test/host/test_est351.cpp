@@ -1,7 +1,8 @@
-// EST-351 host test: the map chrome's scale arithmetic, key rectangles and hit test; the RPTR list
-// and page rectangles. EST-352 adds: the scale's two end-anchored labels, the RPTR row's labelled
-// second line, the native RGB565 byte-order round trip and the shared keyboard sheet's per-field
-// filters, limits and geometry. Plain g++, no Arduino.
+// EST-351 host test: the map chrome's key rectangles and hit test, the outlined tile attribution and
+// the RPTR page rectangles. EST-352 keeps: the RPTR row's labelled second line, the native RGB565
+// byte-order round trip and the shared keyboard sheet's per-field filters, limits and geometry.
+// EST-368 removed the distance scale and its two end-anchored labels; the Traces key joined the
+// column and the attribution moved to the bottom left, without a plate. Plain g++, no Arduino.
 #include <math.h>
 
 #ifndef M_PI
@@ -26,41 +27,9 @@ static int g_fail = 0;
     }                                                                      \
   } while (0)
 
-static void testMapScale() {
-  const double m0 = mapMetresPerPixel(13, 0.0);
-  const double m1 = mapMetresPerPixel(14, 0.0);
-  CHECK(m1 > 0.0);
-  CHECK(fabs(m0 / m1 - 2.0) < 1e-9);   // one zoom step halves the ground size
-  const double mEq = mapMetresPerPixel(13, 0.0);
-  const double mLat = mapMetresPerPixel(13, 46.0);
-  CHECK(mLat < mEq);                   // a degree is shorter at our latitude
-  CHECK(fabs(mLat / mEq - cos(46.0 * M_PI / 180.0)) < 1e-9);
-
-  // At z13 near Ljubljana a 1-2-5 bar fits the mock's short scale; its label pair is half/full.
-  int16_t px = 0;
-  const int32_t d = mapScaleDistance(13, 46.05, &px);
-  CHECK(d > 0);
-  CHECK(px > 20 && px <= kMapScaleMaxW);
-  bool nice = false;
-  const int32_t ladder[] = {10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000};
-  for (int32_t v : ladder) if (v == d) nice = true;
-  CHECK(nice);
-
-  char mid[12], right[12];
-  mapScaleLabels(1000, mid, sizeof(mid), right, sizeof(right));
-  CHECK(strcmp(mid, "500m") == 0);
-  CHECK(strcmp(right, "1km") == 0);
-  mapScaleLabels(500, mid, sizeof(mid), right, sizeof(right));
-  CHECK(strcmp(mid, "250m") == 0);
-  CHECK(strcmp(right, "500m") == 0);
-  mapScaleLabels(2000, mid, sizeof(mid), right, sizeof(right));
-  CHECK(strcmp(mid, "1km") == 0);
-  CHECK(strcmp(right, "2km") == 0);
-}
-
 static void testMapChrome() {
   const Layout& L = l2();
-  const MapChrome c = mapChromeFor(L, 13, 46.05, false);
+  const MapChrome c = mapChromeFor(L, false);
   CHECK(c.view.x == 0 && c.view.y == 0 && c.view.w == 320 && c.view.h == L.tabbar.y);
   CHECK(c.view.bottom() == L.tabbar.y);
   CHECK(c.chip.y >= L.status.bottom());          // the chip never hides under the status bar
@@ -68,26 +37,25 @@ static void testMapChrome() {
   CHECK(c.zoomIn.right() == c.view.right() - kMapMargin);
   CHECK(c.zoomOut.right() == c.zoomIn.right());
   CHECK(c.lock.right() == c.zoomIn.right());
+  CHECK(c.traces.right() == c.zoomIn.right());
   CHECK(c.zoomOut.bottom() == c.view.bottom() - kMapMargin);
   CHECK(c.zoomOut.y == c.zoomIn.bottom() + kMapKeyGap);
   CHECK(c.zoomIn.y == c.lock.bottom() + kMapKeyGap);
+  CHECK(c.lock.y == c.traces.bottom() + kMapKeyGap);   // EST-368: Traces is the top key
   CHECK(!c.zoomIn.overlaps(c.zoomOut));
   CHECK(!c.lock.overlaps(c.zoomIn));
-  CHECK(c.scale.x == kMapMargin);
-  CHECK(c.scale.bottom() == c.view.bottom() - kMapMargin);
-  CHECK(c.scale.right() <= c.view.right());
-  CHECK(c.callout.empty());                       // nothing selected: no panel
+  CHECK(!c.traces.overlaps(c.lock));
+  CHECK(c.traces.y >= c.chip.bottom());                // the column stays below the chip
+  CHECK(c.callout.empty());                            // nothing selected: no panel
 
-  const MapChrome s = mapChromeFor(L, 13, 46.05, true);
+  const MapChrome s = mapChromeFor(L, true);
   CHECK(!s.callout.empty());
   CHECK(s.callout.bottom() == c.view.bottom() - 8);
   CHECK(s.callout.x == 8 && s.callout.right() == 312);
-  CHECK(s.scalePx == c.scalePx);
-  CHECK(strcmp(s.scaleMid, c.scaleMid) == 0);
 }
 
 static void testMapHit() {
-  const MapChrome c = mapChromeFor(l2(), 13, 46.05, true);
+  const MapChrome c = mapChromeFor(l2(), true);
 
   CHECK(mapHitAt(c, nullptr, 0, c.zoomIn.x + c.zoomIn.w / 2, c.zoomIn.y + c.zoomIn.h / 2).kind ==
         MapHitKind::ZoomIn);
@@ -95,6 +63,8 @@ static void testMapHit() {
                  c.zoomOut.y + c.zoomOut.h / 2).kind == MapHitKind::ZoomOut);
   CHECK(mapHitAt(c, nullptr, 0, c.lock.x + c.lock.w / 2, c.lock.y + c.lock.h / 2).kind ==
         MapHitKind::Lock);
+  CHECK(mapHitAt(c, nullptr, 0, c.traces.x + c.traces.w / 2,
+                 c.traces.y + c.traces.h / 2).kind == MapHitKind::Traces);
   CHECK(mapHitAt(c, nullptr, 0, c.callout.x + 4, c.callout.y + 4).kind == MapHitKind::Callout);
   CHECK(mapHitAt(c, nullptr, 0, 160, 90).kind == MapHitKind::Map);
   CHECK(mapHitAt(c, nullptr, 0, 0, 0).kind == MapHitKind::None);   // the status bar's pixels
@@ -194,90 +164,48 @@ static void testRgb565RoundTrip() {
   CHECK(identity);
 }
 
-static void testScaleLabels() {
-  // z13 near Ljubljana: the bar is 75 px; "500m" + one space + "1km" fit at the two ends.
-  int16_t px = 0;
-  const int32_t metres = mapScaleDistance(13, 46.05, &px);
-  char mid[12], right[12];
-  mapScaleLabels(metres, mid, sizeof(mid), right, sizeof(right));
-  const int midW = 6 * (int)strlen(mid);     // mono advance, the same face the map draws with
-  const int rightW = 6 * (int)strlen(right);
-  const Rect bar{6, (int16_t)(l2().tabbar.y - 6 - kMapScaleH), px, kMapScaleH};
-  const MapScaleLabelLayout l = mapScaleLabelLayout(bar, midW, rightW, 6);
-  CHECK(l.showMid);
-  CHECK(l.midX == bar.x);                                  // the half label at the left end
-  CHECK(l.rightX == bar.right() - rightW);                 // the end label at the right end
-  CHECK((int)l.midX + midW + 6 <= (int)l.rightX);          // at least one measured space
-  CHECK(l.rightX + rightW <= bar.right());                 // the end label never runs past the rail
-
-  // A rail too short for both: only the end label.
-  const Rect shortBar{6, bar.y, (int16_t)(midW + 6 + rightW - 1), kMapScaleH};
-  CHECK(!mapScaleLabelLayout(shortBar, midW, rightW, 6).showMid);
-  // Exactly enough room: both, with the one space touching.
-  const Rect exact{6, bar.y, (int16_t)(midW + 6 + rightW), kMapScaleH};
-  const MapScaleLabelLayout e = mapScaleLabelLayout(exact, midW, rightW, 6);
-  CHECK(e.showMid);
-  CHECK((int)e.midX + midW + 6 == (int)e.rightX);
-  // No half label (an empty string): nothing to show.
-  CHECK(!mapScaleLabelLayout(bar, 0, rightW, 6).showMid);
-}
-
 static void testMapCredit() {
-  // EST-353: the tile attribution moved off the scale's line pair. Same mono advance (6 px) the map
-  // draws with. The scale's labels are centred at scale.bottom() - 1 (drawTextLeft's middle datum),
-  // so their boxes are 10 px tall like the credit's.
-  const Layout& L = l2();
+  // EST-368: the attribution is drawn straight on the tiles with a 1 px outline, no plate. It sits on
+  // the bottom LEFT (where the removed scale was), clamped inside the map area and clear of the key
+  // column. The mono advance the map draws with is 6 px.
   const int creditW = 6 * (int)strlen(kMapCreditText);
   CHECK(creditW == 138);   // "Esri, HERE, Garmin, OSM", 23 glyphs
 
   for (int zoom = 9; zoom <= 18; ++zoom) {
-    const MapChrome c = mapChromeFor(L, zoom, 46.05, false);
-    char mid[12], right[12];
-    mapScaleLabels(mapScaleDistance(zoom, 46.05, nullptr), mid, sizeof(mid), right, sizeof(right));
-    const int midW = 6 * (int)strlen(mid);
-    const int rightW = 6 * (int)strlen(right);
-    const MapScaleLabelLayout sl = mapScaleLabelLayout(c.scale, midW, rightW, 6);
-    const int16_t cy = (int16_t)(c.scale.bottom() - 1);
-    const Rect midBox = sl.showMid ? Rect{sl.midX, (int16_t)(cy - 5), (int16_t)midW, 10} : Rect{};
-    const Rect rightBox{sl.rightX, (int16_t)(cy - 5), (int16_t)rightW, 10};
+    const MapChrome c = mapChromeFor(l2(), false);
     const Rect cr = mapCreditRect(c, (int16_t)creditW);
-
-    // On the bottom line, right-aligned to the key column, and clear of the scale by a measured gap.
     CHECK(!cr.empty());
-    CHECK(cr.right() == c.zoomOut.x - kMapMargin);
-    CHECK(cr.y + cr.h / 2 == cy);
-    CHECK((int)cr.x >= (int)c.scale.right() + kMapCreditGap);
-    CHECK(!cr.overlaps(c.scale));
-    CHECK(!cr.overlaps(rightBox));
-    if (sl.showMid) CHECK(!cr.overlaps(midBox));
-    // Inside the map area and clear of every key and the chip (nothing to tab over).
-    CHECK(cr.x >= c.view.x && cr.right() <= c.view.right());
+    // Bottom left, one margin in from the edge.
+    CHECK(cr.x == c.view.x + kMapMargin);
+    CHECK(cr.bottom() == c.view.bottom() - kMapMargin);
+    CHECK(cr.w == creditW);
+    // Inside the map area and off every key and the chip.
+    CHECK(cr.right() <= c.view.right());
     CHECK(cr.y >= c.status.bottom());
-    CHECK(!cr.overlaps(c.zoomIn) && !cr.overlaps(c.zoomOut) && !cr.overlaps(c.lock));
+    CHECK(!cr.overlaps(c.zoomIn) && !cr.overlaps(c.zoomOut) && !cr.overlaps(c.lock) &&
+          !cr.overlaps(c.traces));
     CHECK(!cr.overlaps(c.chip));
   }
 
-  // The numbers quoted in PROGRESS.md at z13: credit 146..284, the scale ends at 81.
+  // The numbers quoted in PROGRESS.md at 320 px: the box starts at 6 and is 138 wide.
   {
-    const MapChrome c = mapChromeFor(L, 13, 46.05, false);
+    const MapChrome c = mapChromeFor(l2(), false);
     const Rect cr = mapCreditRect(c, (int16_t)creditW);
-    CHECK(cr.x == 146);
-    CHECK(cr.right() == 284);
-    CHECK(c.scale.right() == 81);
-    CHECK((int)cr.x - (int)c.scale.right() == 65);
+    CHECK(cr.x == 6);
+    CHECK(cr.right() == 144);
+    CHECK(cr.bottom() == 209);   // 215 (the tab bar's top) - 6
+    CHECK(cr.y == 199);
   }
 
-  // A screen too narrow for both on one line: the credit moves up, it never prints on a label.
+  // A box too narrow for the key column: the rectangle is clamped, never drawn under a key.
   {
-    const MapChrome c = mapChromeFor(L, 13, 46.05, false);
-    const Rect cr = mapCreditRect(c, 300);
-    CHECK(!cr.overlaps(c.scale));
-    CHECK(cr.x == c.view.x);                       // clamped to the left edge
-    CHECK(cr.bottom() <= c.scale.y);               // above the scale's rail
-    CHECK(cr.y >= c.status.bottom());
+    const MapChrome c = mapChromeFor(l2(), false);
+    const Rect cr = mapCreditRect(c, 400);
+    CHECK(cr.right() <= c.zoomOut.x - kMapMargin);
+    CHECK(cr.x >= c.view.x);
   }
   // Nothing to draw: no rectangle.
-  CHECK(mapCreditRect(mapChromeFor(L, 13, 46.05, false), 0).empty());
+  CHECK(mapCreditRect(mapChromeFor(l2(), false), 0).empty());
 }
 
 static void testKeyboardFilters() {
@@ -414,12 +342,10 @@ static void testKeyboardSheet() {
 }
 
 int main() {
-  testMapScale();
   testMapChrome();
   testMapHit();
   testRptr();
   testRgb565RoundTrip();
-  testScaleLabels();
   testMapCredit();
   testKeyboardFilters();
   testKeyboardSheet();
@@ -427,6 +353,6 @@ int main() {
     printf("est351: %d failure(s)\n", g_fail);
     return 1;
   }
-  printf("est351: map chrome, credit placement, RPTR layout, RGB565 round trip and the shared keyboard sheet ok\n");
+  printf("est351: map chrome (no scale), outlined credit placement, RPTR layout, RGB565 round trip and the shared keyboard sheet ok\n");
   return 0;
 }

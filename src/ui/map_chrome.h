@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Map chrome (EST-351): the scale bar's arithmetic, the rectangles of the zoom / lock keys, the
-// info chip and the tapped-marker callout, and the hit test that uses those same rectangles.
+// Map chrome (EST-351, reworked EST-368): the rectangles of the zoom / locate / traces keys, the
+// info chip, the tile attribution and the tapped-marker callout, and the hit test that uses those
+// same rectangles. The distance scale is gone (Filip, EST-368: "remove the distance markers, they
+// are quite useless").
 // Plain C++ (no LovyanGFX, no Arduino) so test/host can prove it with the system g++.
 //
 // The tiles are still map.cpp's job. This header only knows the 320x214 map area above the tab bar.
@@ -22,8 +24,6 @@ constexpr int16_t kMapKey = 24;          // a finger-sized key, the mock's 19 px
 constexpr int16_t kMapKeyGap = 4;
 constexpr int16_t kMapMargin = 6;
 constexpr int16_t kMapCalloutH = 40;
-constexpr int16_t kMapScaleH = 15;
-constexpr int16_t kMapScaleMaxW = 92;
 constexpr int16_t kMapMarkerR = 4;
 constexpr int16_t kMapMarkerHitR = 11;
 
@@ -44,48 +44,33 @@ struct MapChrome {
   Rect zoomIn;
   Rect zoomOut;
   Rect lock;
-  Rect scale;      // the rail's box, bottom left
+  Rect traces;     // EST-368: the Traces toggle, the top key of the right column
   Rect callout;    // the tapped marker's panel; empty when nothing is selected
-  int16_t scalePx = 0;
-  char scaleMid[12] = "";
-  char scaleRight[12] = "";
 };
 
-// Web-Mercator metres per pixel at a latitude. One number, used by the scale bar and by tests.
-double mapMetresPerPixel(int zoom, double lat);
+// All rectangles from the screen size. `selected` adds the callout; it sits over the bottom of the
+// map like the mock's .callout. The keys stack upward from the bottom right: zoom out, zoom in,
+// follow, Traces.
+MapChrome mapChromeFor(const Layout& L, bool selected);
 
-// The largest 1-2-5 "nice" distance whose bar fits kMapScaleMaxW, and the bar's width. The labels
-// are the half and the full distance, as the mock's 500m / 1km pair.
-int32_t mapScaleDistance(int zoom, double lat, int16_t* pxOut);
-void mapScaleLabels(int32_t metres, char* mid, size_t midCap, char* right, size_t rightCap);
-
-// EST-352: where the scale's two labels go. The bar's two ends carry them (the half distance left,
-// the full distance right), with at least `gap` measured pixels between. When the bar is too short
-// for both, only the end label is shown: two labels on top of each other read as one wrong number.
-// The widths are the font's, measured by the caller; plain arithmetic here so host tests can prove
-// the fit without a display.
-struct MapScaleLabelLayout {
-  bool showMid = false;
-  int16_t midX = 0;     // left edge of the half-distance label
-  int16_t rightX = 0;   // left edge of the end label (right-aligned to the bar)
-};
-MapScaleLabelLayout mapScaleLabelLayout(const Rect& bar, int midW, int rightW, int gap);
-
-// All rectangles from the screen size and the zoom/latitude. `selected` adds the callout; it sits
-// over the bottom of the map like the mock's .callout.
-MapChrome mapChromeFor(const Layout& L, int zoom, double lat, bool selected);
-
-// EST-353: the tile attribution's one dim line. It is drawn AFTER the scale and lives on the bottom
-// RIGHT of the map area, right-aligned to the key column, so the scale's labels (bottom left) and
-// the attribution can never touch again. `width` is the font's, measured by the caller; the screen
-// draws it with drawTextEllipsis inside the returned box. If the bottom row cannot hold both (a
-// narrower screen), the line moves to the row above the scale's rail instead of overlapping it.
+// EST-368 (Filip ~21:35): the tile attribution is drawn straight on the map with no plate behind it,
+// a small dim mono line with a 1 px dark outline on the bottom LEFT, where the removed scale used to
+// sit, so it stays legible on light and dark tiles without a black box. `width` is the font's,
+// measured by the caller; the screen draws it inside the returned box.
 constexpr int16_t kMapCreditH = 10;
-constexpr int16_t kMapCreditGap = 6;   // air between the scale's rail and the credit line
 constexpr const char* kMapCreditText = "Esri, HERE, Garmin, OSM";
 Rect mapCreditRect(const MapChrome& c, int16_t width);
 
-enum class MapHitKind : uint8_t { None = 0, ZoomIn, ZoomOut, Lock, Marker, Map, Callout };
+enum class MapHitKind : uint8_t {
+  None = 0,
+  ZoomIn,
+  ZoomOut,
+  Lock,
+  Traces,    // EST-368: the Traces toggle
+  Marker,
+  Map,
+  Callout
+};
 
 struct MapHit {
   MapHitKind kind = MapHitKind::None;
@@ -93,7 +78,7 @@ struct MapHit {
 };
 
 // The key or marker under a point. A marker wins over the map; the callout's own box is not a map
-// tap. `count` markers in `markers`.
+// tap; the traces key is a key like the zoom ones. `count` markers in `markers`.
 MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, int y);
 
 }  // namespace ui

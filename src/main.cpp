@@ -509,6 +509,183 @@ static om::ui::TabBarModel currentTabBar(om::ui::Tab active) {
 static bool g_mapLock = false;          // follow our own position
 static char g_mapSelName[32] = "";      // the marker whose callout is open ("" = none)
 static char g_mapNodeStamp[24] = "";    // its "last heard" text, built once per draw
+// EST-368: the Map's one 32-row copy of the contact table, shared by buildMapView()'s markers and
+// traceHopTable()'s path-hash lookup (one 3 KB copy, not two, on the loop task's static RAM).
+static om::MeshContact g_mapContacts[32];
+
+// --- EST-368: OM's Traces on the Map -------------------------------------------------------------
+// The model (hop mapping, route, 420 ms geometry, the one-at-a-time queue) is ui/map_trace.h. This
+// is the shell's part: our contact table, our own position, the frame pump and its cost.
+static bool g_mapTraces = true;             // the Traces key: default on, saved in NVS "traces"
+static om::ui::TraceQueue g_traceQueue;     // one route at a time
+static om::ui::TraceFrame g_traceFrame;     // what the frame being drawn shows
+static uint32_t g_traceNextFrameMs = 0;     // the animation's own frame clock
+static uint32_t g_traceSeqStartMs = 0;      // when the current replay started (cost line)
+static uint32_t g_traceFrames = 0;          // animation frames drawn in this replay
+static uint32_t g_traceFrameUs = 0;         // their total
+static uint32_t g_traceWorstUs = 0;         // the slowest one
+static int32_t g_traceSelfLatE6 = 0;        // our fix, else the last position we knew
+static int32_t g_traceSelfLonE6 = 0;
+static bool g_traceSelfKnown = false;
+
+static constexpr uint32_t kTraceFrameMs = 33;   // ~30 fps while a trace runs; nothing when idle
+
+static void traceRememberSelf() {
+  if (!g_gps.valid) return;
+  g_traceSelfLatE6 = (int32_t)lround(g_gps.lat * 1e6);
+  g_traceSelfLonE6 = (int32_t)lround(g_gps.lon * 1e6);
+  g_traceSelfKnown = true;
+}
+
+static uint8_t traceKeyForName(const char* name) {
+  // One byte is enough: it only separates senders for the "newest per sender wins" rule.
+  uint32_t h = 2166136261u;
+  for (const char* p = (name ? name : ""); *p; ++p) h = (h ^ (uint8_t)*p) * 16777619u;
+  return (uint8_t)h;
+}
+
+static void traceMapReset() {
+  g_traceQueue.reset();
+  g_traceFrame = om::ui::TraceFrame();
+  g_traceNextFrameMs = 0;
+  g_traceFrames = 0;
+  g_traceFrameUs = 0;
+  g_traceWorstUs = 0;
+  g_traceSeqStartMs = 0;
+}
+
+#if defined(OM_ENABLE_MESH)
+// The repeaters we know with a public key, in the same 32-row view the map's markers use. A hop hash
+// is the first 1..3 bytes of the key, so the table carries three and the model compares only the
+// packet's own hash size.
+static int traceHopTable(om::ui::TracePathHop* table, int cap) {
+  om::MeshContact* list = g_mapContacts;
+  const int n = om::meshContactList(list, 32);
+  int k = 0;
+  for (int i = 0; i < n && k < cap; ++i) {
+    if (list[i].type != 2 || !list[i].has_key) continue;
+    om::ui::TracePathHop& h = table[k++];
+    h.key[0] = list[i].pub_key[0];
+    h.key[1] = list[i].pub_key[1];
+    h.key[2] = list[i].pub_key[2];
+    h.keyLen = 3;
+    h.hasPos = list[i].has_pos;
+    h.latE6 = list[i].lat_e6;
+    h.lonE6 = list[i].lon_e6;
+  }
+  return k;
+}
+
+// Build one message's route and hand it to the replay queue. The endpoints: the sender when its
+// contact has a position, us at the end (the GPS fix, else the last position we knew).
+static bool traceEnqueue(const char* sender, const uint8_t* path, uint8_t hashSize,
+                         uint8_t hops, uint8_t key) {
+  om::ui::TracePathHop table[32];
+  const int tn = traceHopTable(table, 32);
+  om::MeshContact sc{};
+  const bool senderKnown = (sender != nullptr && sender[0] != 0) &&
+                           om::meshContactByName(sender, &sc) && sc.has_pos;
+  om::ui::TraceRoute route;
+  om::ui::traceBuildRoute(path, hashSize, hops, table, tn, senderKnown, sc.lat_e6, sc.lon_e6,
+                          g_traceSelfKnown, g_traceSelfLatE6, g_traceSelfLonE6, &route);
+  if (route.count == 0) return false;
+
+  om::ui::TracePt pts[om::ui::kTraceMaxPoints];
+  int n = 0;
+  const bool direct = route.hops == 0;
+  if (direct) {
+    // EST-368 (the ticket): a 0-hop arrival pulses a ring at OUR position, not a line. Without one
+    // there is nothing to pulse, and the arrival stays silent on the glass.
+    if (!g_traceSelfKnown) return false;
+    int x = 0, y = 0;
+    if (!om::mapProject((double)g_traceSelfLatE6 / 1e6, (double)g_traceSelfLonE6 / 1e6, x, y)) {
+      return false;
+    }
+    pts[0].x = (int16_t)x;
+    pts[0].y = (int16_t)y;
+    n = 1;
+  } else {
+    for (int i = 0; i < route.count; ++i) {
+      int x = 0, y = 0;
+      if (!om::mapProject((double)route.latE6[i] / 1e6, (double)route.lonE6[i] / 1e6, x, y)) {
+        return false;
+      }
+      pts[n].x = (int16_t)x;
+      pts[n].y = (int16_t)y;
+      ++n;
+    }
+  }
+  const bool ringOnly = direct || n < 2;
+  if (ringOnly) {
+    // Fewer than two known points: the line is not drawn, only the ring. It pulses at the one point
+    // the route does know (normally our own radio at its end).
+    if (n >= 2) pts[0] = pts[n - 1];
+    n = 1;
+    const bool ok = g_traceQueue.push(pts, 1, true, route.hops, key);
+    if (ok) {
+      Serial.printf("[map] trace %s %u hop(s), ring only\n", sender ? sender : "?",
+                    (unsigned)route.hops);
+    }
+    return ok;
+  }
+  const bool ok = g_traceQueue.push(pts, n, false, route.hops, key);
+  if (ok) {
+    Serial.printf("[map] trace %s %u hop(s), %d known point(s), %d resolved\n", sender ? sender : "?",
+                  (unsigned)route.hops, n, route.resolved);
+  }
+  return ok;
+}
+
+static void traceEnqueueRingMessage(int idx) {
+  uint8_t hashSize = 1, count = 0;
+  const uint8_t* path = om::meshMsgPath(idx, &hashSize, &count);
+  const char* who = om::meshMsgName(idx);
+  traceEnqueue(who, path, hashSize, count, traceKeyForName(who));
+}
+
+// The Map's first replay: the newest message per sender, up to kTraceSeedMax, oldest first so the
+// queue plays them in the order they arrived.
+static void traceSeedFromRing() {
+  traceRememberSelf();
+  int picked = 0;
+  int idx[om::ui::kTraceSeedMax];
+  char seen[om::ui::kTraceSeedMax][32];
+  for (int i = om::meshMsgCount() - 1; i >= 0 && picked < om::ui::kTraceSeedMax; --i) {
+    if (om::meshMsgMine(i)) continue;
+    const char* who = om::meshMsgName(i);
+    bool dup = false;
+    for (int k = 0; k < picked; ++k) {
+      if (strcmp(seen[k], who) == 0) dup = true;
+    }
+    if (dup) continue;
+    snprintf(seen[picked], sizeof(seen[picked]), "%s", who);
+    idx[picked++] = i;
+  }
+  for (int k = picked - 1; k >= 0; --k) traceEnqueueRingMessage(idx[k]);
+
+  // One DM: the newest received message across the thread table, so a DM's hop also animates.
+  int bestThread = -1;
+  uint32_t bestSeq = 0;
+  om::MeshDm best{};
+  for (int t = 0; t < om::meshDmCount(); ++t) {
+    om::MeshDm m{};
+    if (!om::meshDmNewest(t, &m) || m.mine) continue;
+    if (m.seq < bestSeq) continue;
+    bestSeq = m.seq;
+    bestThread = t;
+    best = m;
+  }
+  if (bestThread >= 0) {
+    traceEnqueue(best.name, best.pathCount > 0 ? best.path : nullptr, best.pathHashSize,
+                 best.pathCount, traceKeyForName(best.name));
+  }
+  if (g_traceQueue.pending() > 0) g_traceSeqStartMs = millis();
+}
+#else
+// The mesh-off build has no messages to trace; the key and the model are still compiled (host tests
+// and the Map screen use them) but nothing is ever replayed.
+static void traceSeedFromRing() {}
+#endif  // OM_ENABLE_MESH
 
 static const char* contactTypeName(uint8_t type) {
   return type == 2 ? "repeater" : (type == 3 ? "room" : (type == 4 ? "sensor" : "client"));
@@ -522,6 +699,9 @@ static void buildMapView(om::ui::MapView& v) {
   v.locked = g_mapLock;
   v.hasFix = g_gps.valid;
   v.markerCount = 0;
+  // EST-368: the Traces key's highlight and the one live animation frame.
+  v.tracesOn = g_mapTraces;
+  v.trace = g_traceFrame;
 
   // Our own position: the white dot with the gold halo.
   if (g_gps.valid) {
@@ -538,7 +718,7 @@ static void buildMapView(om::ui::MapView& v) {
   }
 
 #if defined(OM_ENABLE_MESH)
-  static om::MeshContact list[32];
+  om::MeshContact* list = g_mapContacts;
   const int n = om::meshContactList(list, 32);
   const uint32_t nowWall = om::timeKeeper().now();
   const uint32_t nowUp = millis() / 1000;
@@ -575,9 +755,119 @@ static void buildMapView(om::ui::MapView& v) {
 static void drawMapTab() {
   // Follow mode: a locked map recentres on our fix before the tiles are composed.
   if (g_mapLock && g_gps.valid) om::mapSetView(g_gps.lat, g_gps.lon, om::mapZoom());
+  traceRememberSelf();
   om::ui::MapView v;
   buildMapView(v);
   om::ui::mapScreenDraw(v);
+}
+
+// EST-368: one ANIMATION frame. The tiles are the canvas map.cpp already composited (mapRepush),
+// so the moving dot costs a frame push and the chrome, never a JPEG decode. The pump below calls
+// this at most once per kTraceFrameMs and only while a trace is live: an idle Map is not redrawn.
+static void drawMapTraceFrame() {
+  if (g_mapLock && g_gps.valid) om::mapSetView(g_gps.lat, g_gps.lon, om::mapZoom());
+  om::ui::MapView v;
+  buildMapView(v);
+  om::ui::mapScreenAnimate(v);
+}
+
+#if defined(OM_ENABLE_MESH)
+// The arrival watcher: a channel message or a received DM that lands while the Map is open animates
+// at once. Only the newest packet of a pass is traced (a burst is one route, not five).
+static void traceWatchArrivals() {
+  static uint32_t seenMsg = 0;
+  static uint32_t seenDm = 0;
+  const uint32_t msg = om::meshMsgSerial();
+  const uint32_t dm = om::meshDmRecvSerial();
+  if (seenMsg == 0) seenMsg = msg;
+  if (seenDm == 0) seenDm = dm;
+  if (msg != seenMsg) {
+    seenMsg = msg;
+    const int last = om::meshMsgCount() - 1;
+    if (last >= 0 && !om::meshMsgMine(last)) {
+      traceEnqueueRingMessage(last);
+      if (g_traceSeqStartMs == 0) g_traceSeqStartMs = millis();
+    }
+  }
+  if (dm != seenDm) {
+    seenDm = dm;
+    int thread = -1;
+    char from[32] = "";
+    char text[om::kMeshTextCap] = "";
+    if (om::meshDmLatest(&thread, from, sizeof(from), text, sizeof(text))) {
+      om::MeshDm m{};
+      if (om::meshDmNewest(thread, &m)) {
+        traceEnqueue(m.name, m.pathCount > 0 ? m.path : nullptr, m.pathHashSize, m.pathCount,
+                     traceKeyForName(m.name));
+      } else {
+        traceEnqueue(from, nullptr, 1, 0, traceKeyForName(from));
+      }
+      if (g_traceSeqStartMs == 0) g_traceSeqStartMs = millis();
+    }
+  }
+}
+#endif
+
+// The measured cost of the replay that just drained: the ticket's "measure the cost per frame". The
+// same time is inside `radio`'s loop histogram (MapDecode, Draw, FramePush); this line is per replay.
+static void traceCostLine() {
+  if (g_traceFrames == 0) {
+    g_traceSeqStartMs = 0;
+    return;
+  }
+  const uint32_t span = millis() - g_traceSeqStartMs;
+  Serial.printf("[map] traces %lu frames in %lu ms, avg %lu us, worst %lu us, in flight %d\n",
+                (unsigned long)g_traceFrames, (unsigned long)span,
+                (unsigned long)(g_traceFrameUs / g_traceFrames), (unsigned long)g_traceWorstUs,
+                g_traceQueue.pending());
+  g_traceFrames = 0;
+  g_traceFrameUs = 0;
+  g_traceWorstUs = 0;
+  g_traceSeqStartMs = 0;
+}
+
+// One pump per loop pass. It does nothing at all when the Map is not on screen or nothing is
+// animating (no constant redraw when idle); while a route runs it draws at most one frame per
+// kTraceFrameMs, and it reports the measured cost of the replay on the serial when the queue drains,
+// which is what `radio`'s loop histogram also sees (MapDecode/Draw/FramePush).
+static void tracePump(bool uiDrawOk) {
+  if (g_tab != 2 || g_settings) {
+    // Off the Map: drop any route and stop redrawing. The screen change that is leaving draws the
+    // next tab itself; drawing the Map here would paint the wrong screen into it.
+    if (g_traceQueue.busy() || g_traceFrame.live) traceMapReset();
+    return;
+  }
+  if (!g_mapTraces) return;
+#if defined(OM_ENABLE_MESH)
+  traceWatchArrivals();
+#endif
+  if (!g_traceQueue.busy()) {
+    if (g_traceFrame.live) {
+      // The route ended while no frame could be drawn (the panel was off): one clean frame now.
+      g_traceFrame = om::ui::TraceFrame();
+      if (uiDrawOk) drawMapTraceFrame();
+    }
+    traceCostLine();
+    return;
+  }
+  const uint32_t now = millis();
+  if (g_traceNextFrameMs != 0 && (int32_t)(now - g_traceNextFrameMs) < 0) return;
+  g_traceNextFrameMs = now + kTraceFrameMs;
+  if (g_traceSeqStartMs == 0) g_traceSeqStartMs = now;
+  if (!g_traceQueue.tick(now, &g_traceFrame)) {
+    // The last route just finished: one clean frame without the dot, then no more redraws.
+    g_traceFrame = om::ui::TraceFrame();
+    if (uiDrawOk) drawMapTraceFrame();
+    traceCostLine();
+    return;
+  }
+  if (!uiDrawOk) return;
+  const uint32_t t0 = micros();
+  drawMapTraceFrame();
+  const uint32_t took = micros() - t0;
+  ++g_traceFrames;
+  g_traceFrameUs += took;
+  if (took > g_traceWorstUs) g_traceWorstUs = took;
 }
 
 static void drawHome();
@@ -1707,6 +1997,23 @@ static void notify(om::ui::NoticeKind kind, const char* text, bool chatOpen) {
   showToast(text);
 }
 
+// EST-368: a MESSAGE notice. The title says who and where, the body is the message, and the pop-up
+// draws it wrapped over up to four rows (ui/notice_panel.h) instead of one cut line. Everything
+// else, the DND rule, the open-chat rule, the one pending slot and the 5 s deadline, is the same.
+static void notifyNotice(om::ui::NoticeKind kind, const om::ui::Notice& n, bool chatOpen) {
+  if (n.title[0] == 0) return;
+  if (!g_noticeScreenOn) return;
+  if (!om::ui::noticeWanted(kind, g_dnd, chatOpen)) return;
+  if (om::ui::toastState().visible(millis())) {
+    g_noticeQueue.pushNotice(n);
+    // A real redraw so a queued notice is not silently held by a frame that is already dirty.
+    return;
+  }
+  if (om::ui::toastState().showNotice(n.title, n.body, millis(), om::ui::kToastMs)) {
+    redrawCurrentScreen();
+  }
+}
+
 static bool g_rptrList = true;                       // the list is showing (else one page)
 static om::rptr::Page g_rptrPage = om::rptr::Page::List;
 static int g_rptrScroll = 0;
@@ -1842,6 +2149,14 @@ static void rptrQueue(const char* line, uint8_t kind) {
 static void rptrSyncDraft() {
   g_rptrDraft.reset(g_rptrFacts, g_rptrRegions, g_rptrHomeKnown ? g_rptrHome : "*",
                     g_rptrDefaultKnown ? g_rptrDefault : nullptr);
+}
+
+// EST-368 (Filip ~22:30): a read-back answer updates only the fields whose draft is still clean.
+// The whole-draft reset above is for opening a page, going Back, and a successful Apply; using it
+// for every answer is what made the first pick on a settings page vanish.
+static void rptrSyncClean() {
+  g_rptrDraft.syncClean(g_rptrFacts, g_rptrRegions, g_rptrHomeKnown ? g_rptrHome : "*",
+                        g_rptrDefaultKnown ? g_rptrDefault : nullptr);
 }
 
 static void rptrClearSession() {
@@ -2174,7 +2489,8 @@ static void rptrSendConsole() {
 // Which page a read-back belongs to: a reply only resets the draft of the page the finger is on.
 static om::rptr::Page rptrReadPage(const char* cmd) {
   if (strcmp(cmd, "get name") == 0) return om::rptr::Page::Name;
-  if (strcmp(cmd, "get lat") == 0 || strcmp(cmd, "get lon") == 0) return om::rptr::Page::Position;
+  if (strcmp(cmd, "get lat") == 0 || strcmp(cmd, "get lon") == 0 ||
+      strcmp(cmd, "gps advert") == 0) return om::rptr::Page::Position;
   if (strcmp(cmd, "get radio") == 0) return om::rptr::Page::Radio;
   if (strcmp(cmd, "get tx") == 0) return om::rptr::Page::Tx;
   if (strcmp(cmd, "get repeat") == 0) return om::rptr::Page::Repeat;
@@ -2328,6 +2644,14 @@ static void rptrTakeReply(const om::RptrReply& rep) {
       g_rptrFacts.pathHash = (uint8_t)number;
       g_rptrFacts.pathHashKnown = true;
     }
+  } else if (strcmp(cmd, "gps advert") == 0) {
+    // EST-368: the repeater's advert location policy. An "unknown command" answer never reaches here
+    // (replyFitsCmd refuses it), so the fact stays unknown and Apply falls back to lat/lon 0.
+    uint8_t policy = 0;
+    if (om::rptr::gpsAdvertParse(rep.text, &policy)) {
+      g_rptrFacts.posPolicy = policy;
+      g_rptrFacts.posPolicyKnown = true;
+    }
   } else if (strcmp(cmd, om::rptr::kCliRegionList) == 0) {
     om::rptr::regionsParse(rep.text, &g_rptrRegions);
     if (!g_rptrRegions.valid) {
@@ -2404,6 +2728,10 @@ static void rptrTakeReply(const om::RptrReply& rep) {
     // EST-366 (rule 4): after a FAILED apply the draft is the user's unsaved intent, not what the
     // repeater answered. The read-backs still update Facts, but they must not overwrite the draft
     // (which would hide Apply and throw the error's context away). A success re-syncs as before.
+    //
+    // EST-368: an answer never resets the WHOLE draft any more, it updates only the fields that are
+    // still clean (rptrSyncClean). The page's opening read-backs land while the finger is already on
+    // a stepper or a switch, and the first pick used to be wiped by the next answer.
     const bool failedHere = g_rptrApplyErr && g_rptrPage == g_rptrApplyPage;
     if (!failedHere &&
         (g_rptrPage == om::rptr::Page::Repeater || g_rptrPage == from ||
@@ -2411,7 +2739,7 @@ static void rptrTakeReply(const om::RptrReply& rep) {
           (g_rptrPage == om::rptr::Page::HomePicker ||
            g_rptrPage == om::rptr::Page::DefaultPicker ||
            g_rptrPage == om::rptr::Page::AddRegion)))) {
-      rptrSyncDraft();
+      rptrSyncClean();
     }
   }
 }
@@ -2943,6 +3271,12 @@ static void rptrPageRowTapped(const om::rptr::UiRow& row, bool key, int dir) {
     case om::rptr::Act::Toggle:
       if (g_rptrPage == om::rptr::Page::Repeat) {
         g_rptrDraft.v.repeat = !g_rptrDraft.v.repeat;
+      } else if (g_rptrPage == om::rptr::Page::Position) {
+        // EST-368: "Share position". Off means the repeater's advert carries no position: its own
+        // `gps advert none` where the firmware has it, otherwise lat/lon 0 (MeshCore's "none"), plus
+        // one advert so the other nodes learn it at once (rptr_page.cpp's applyPlan).
+        g_rptrDraft.sharePos = !g_rptrDraft.sharePos;
+        Serial.printf("[rptr] share position %s\n", g_rptrDraft.sharePos ? "on" : "off");
       } else if (g_rptrPage == om::rptr::Page::More) {
         if (row.index == 10) {
           int v = (int)g_rptrDraft.v.loop + 1;
@@ -4808,6 +5142,8 @@ void setup() {
   // EST-359: the touch click is optional and OFF for a fresh device.
   g_touchSnd = g_prefs.getBool("tsnd", false);
   g_welcome = g_prefs.getBool("welc", true);
+  // EST-368: the Map's Traces toggle is remembered; default ON (Filip's ticket).
+  g_mapTraces = g_prefs.getBool("traces", true);
   // Persist the migrated ids once, so the next boot reads ids directly.
   if (g_sndPrefsVersion < 2) {
     g_sndPrefsVersion = 2;
@@ -5019,6 +5355,12 @@ static void showTab(int tab) {
   g_replyName[0] = 0;
   g_selector = false;   // the dropdown belongs to the chat we are leaving
   g_mapSelName[0] = 0;
+  if (tab == 2) {
+    // EST-368: entering the Map starts a clean replay: the routes of the newest message per sender,
+    // run one at a time. Nothing is replayed when the Traces toggle is off.
+    traceMapReset();
+    if (g_mapTraces) traceSeedFromRing();
+  }
   if (tab == 3 && g_rptrList && !om::rptrScan().listening) {
     // EST-362: opening the tab scans by itself. The header's Scan is the rescan (and the only
     // control on the list besides the rows).
@@ -5241,6 +5583,17 @@ static void handleTap(int x, int y, bool longPress) {
         g_mapLock = !g_mapLock;
         if (g_mapLock && g_gps.valid) om::mapSetView(g_gps.lat, g_gps.lon, om::mapZoom());
         Serial.printf("[map] follow %s\n", g_mapLock ? "on" : "off");
+        drawMapTab();
+        return;
+      }
+      case om::ui::MapHitKind::Traces: {
+        // EST-368: the toggle, highlighted while on, saved (default on). Turning it off ends the
+        // current route and clears the dot; turning it on replays the newest message per sender.
+        g_mapTraces = !g_mapTraces;
+        g_prefs.putBool("traces", g_mapTraces);
+        traceMapReset();
+        if (g_mapTraces) traceSeedFromRing();
+        Serial.printf("[map] traces %s\n", g_mapTraces ? "on" : "off");
         drawMapTab();
         return;
       }
@@ -5525,9 +5878,13 @@ void loop() {
   // screen (expired, or dismissed by the consumed tap), that one takes the screen. This is also what
   // makes the tap's dismissal enough: no second tap is needed when nothing is pending.
   if (!om::ui::toastState().visible(millis()) && g_noticeQueue.hasPending) {
-    char next[om::ui::kNoticeCap];
-    if (g_noticeQueue.take(next, sizeof(next))) {
-      if (screenOn) showToast(next);
+    // EST-368: a queued MESSAGE keeps its body, so the pop-up that follows is readable too.
+    om::ui::Notice next;
+    if (g_noticeQueue.takeNotice(&next)) {
+      if (screenOn &&
+          om::ui::toastState().showNotice(next.title, next.body, millis(), om::ui::kToastMs)) {
+        redrawCurrentScreen();
+      }
     }
   }
   // The floor is a one-way lower bound; persistence every 10 minutes is enough once a sync has set it.
@@ -5744,9 +6101,10 @@ void loop() {
       char from[32] = "";
       char body[om::kMeshTextCap] = "";
       if (om::meshDmLatest(&thread, from, sizeof(from), body, sizeof(body))) {
-        char text[om::ui::kNoticeCap];
-        om::ui::noticeDmText(text, sizeof(text), from, body);
-        notify(om::ui::NoticeKind::Dm, text, chatOpenForThread(thread));
+        // EST-368: the whole message travels with the notice, so the pop-up can show it wrapped.
+        om::ui::Notice n;
+        om::ui::noticeDmNotice(&n, from, body);
+        notifyNotice(om::ui::NoticeKind::Dm, n, chatOpenForThread(thread));
       }
     }
   }
@@ -5777,12 +6135,13 @@ void loop() {
       const int last = om::meshMsgCount() - 1;
       if (last >= 0) {
         const int ch = om::meshMsgChannel(last);
-        char text[om::ui::kNoticeCap];
-        om::ui::noticeChannelText(text, sizeof(text), om::meshMsgName(last),
-                                  (ch >= 0 && ch < om::mcChannelCount()) ? om::mcChannelName(ch) : "?",
-                                  om::meshMsgText(last), isMention);
-        notify(isMention ? om::ui::NoticeKind::Mention : om::ui::NoticeKind::Channel, text,
-               chatOpenForChannel(ch));
+        // EST-368: title (sender · chat) plus the whole text, so the pop-up shows the message.
+        om::ui::Notice n;
+        om::ui::noticeChannelNotice(&n, om::meshMsgName(last),
+                                    (ch >= 0 && ch < om::mcChannelCount()) ? om::mcChannelName(ch) : "?",
+                                    om::meshMsgText(last), isMention);
+        notifyNotice(isMention ? om::ui::NoticeKind::Mention : om::ui::NoticeKind::Channel, n,
+                     chatOpenForChannel(ch));
       }
     }
   }
@@ -5868,6 +6227,10 @@ void loop() {
       if (uiDrawOk) drawChat();   // EST-355: never into a light a change is taking down or up
     }
   }   // a host upload takes over the serial port and reboots when done
+
+  // EST-368: the Map's trace pump. Idle when the Map is not on screen or nothing animates; while a
+  // route runs it draws at most one frame per kTraceFrameMs, from the canvas map.cpp already has.
+  tracePump(uiDrawOk);
 
   // EST-355: a screen change owns the touch too. Nothing is read while it runs (the frame it is
   // pushing is not the one the finger is looking at), and a finger that is already down when it ends

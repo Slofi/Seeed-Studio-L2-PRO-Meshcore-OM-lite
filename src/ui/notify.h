@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ui/notice_panel.h"
+
 namespace om {
 namespace ui {
 
@@ -28,9 +30,66 @@ enum class NoticeKind : uint8_t {
   Rptr,          // an RPTR result (Applied, a refusal, no answer)
 };
 
-// The toast is ONE line in a 304 px panel: 48 bytes (about 46 characters plus "...") fits it and
-// leaves the ellipsis visible. The toast's own buffer is 64, so this is the tighter of the two.
+// The one-line toast is ONE line in a 304 px panel: 48 bytes (about 46 characters plus "...") fits
+// it and leaves the ellipsis visible. The toast's own buffer is 64, so this is the tighter of the
+// two.
 constexpr int kNoticeCap = 48;
+
+// EST-368 (Filip ~22:25): a MESSAGE notice is two fields. `title` is the mono dim first line (who
+// and where: "TehiLL RAK · #slovenija"), `body` is the message itself, wrapped by the pop-up's own
+// layout (ui/notice_panel.h) over up to four rows. One-line notices keep using the old text forms.
+constexpr int kNoticeTitleCap = 64;
+
+struct Notice {
+  char title[kNoticeTitleCap] = "";
+  char body[kNoticeBodyCap] = "";
+};
+
+// Copy `src` into `out` at a whole UTF-8 boundary; never splits a sequence. Returns the bytes
+// written. A body longer than the panel can show is cut here, and the panel then ends the visible
+// text with "...", so the cut is always on a character and always inside the panel.
+inline int noticeBodyCopy(char* out, size_t cap, const char* src) {
+  if (out == nullptr || cap == 0) return 0;
+  out[0] = 0;
+  if (src == nullptr) return 0;
+  size_t n = strlen(src);
+  if (n >= cap) {
+    n = cap - 1;
+    while (n > 0 && ((unsigned char)src[n] & 0xC0) == 0x80) --n;
+  }
+  memcpy(out, src, n);
+  out[n] = 0;
+  return (int)n;
+}
+
+// The channel/DM message forms: title only, body as it arrived. The old one-line text builders
+// below stay for everything that is not a message (ping, RPTR result, the fault mark).
+inline int noticeChannelNotice(Notice* n, const char* sender, const char* chat, const char* text,
+                               bool mention) {
+  if (n == nullptr) return 0;
+  n->title[0] = 0;
+  n->body[0] = 0;
+  const char* who = (sender != nullptr && sender[0]) ? sender : "?";
+  const char* where = (chat != nullptr && chat[0]) ? chat : "?";
+  if (mention) {
+    snprintf(n->title, sizeof(n->title), "Mention \xC2\xB7 %s \xC2\xB7 %s", who, where);
+  } else {
+    snprintf(n->title, sizeof(n->title), "%s \xC2\xB7 %s", who, where);
+  }
+  noticeBodyCopy(n->body, sizeof(n->body), text);
+  return (int)strlen(n->title);
+}
+
+inline int noticeDmNotice(Notice* n, const char* sender, const char* text) {
+  if (n == nullptr) return 0;
+  n->title[0] = 0;
+  n->body[0] = 0;
+  const char* who = (sender != nullptr && sender[0]) ? sender : "?";
+  snprintf(n->title, sizeof(n->title), "DM \xC2\xB7 %s", who);
+  noticeBodyCopy(n->body, sizeof(n->body), text);
+  return (int)strlen(n->title);
+}
+
 
 // DND silences every pop-up except the two urgent ones (the same exemption the sounds use).
 inline bool noticeAllowed(NoticeKind kind, bool dnd) {
@@ -158,24 +217,54 @@ inline int noticeBatteryText(char* out, size_t cap, int percent) {
 // The burst queue: ONE pending slot. A push always replaces what was waiting, so ten messages in a
 // burst end with the tenth on screen after the current toast, never a queue of ten.
 struct NoticeQueue {
-  char pending[kNoticeCap] = "";
+  char pending[kNoticeTitleCap] = "";
+  // EST-368: a queued message keeps its whole text, so the pop-up that appears after the current
+  // one is still readable, not a cut line.
+  char pendingBody[kNoticeBodyCap] = "";
   bool hasPending = false;
 
+  // A bounded copy (never a truncated format warning, never a byte past the caller's buffer).
+  static void boundedCopy(char* out, size_t cap, const char* src) {
+    if (out == nullptr || cap == 0) return;
+    size_t n = (src == nullptr) ? 0 : strlen(src);
+    if (n > cap - 1) n = cap - 1;
+    if (n > 0) memcpy(out, src, n);
+    out[n] = 0;
+  }
   bool push(const char* text) {
     if (text == nullptr || text[0] == 0) return false;
-    snprintf(pending, sizeof(pending), "%s", text);
+    boundedCopy(pending, sizeof(pending), text);
+    pendingBody[0] = 0;
+    hasPending = true;
+    return true;
+  }
+  bool pushNotice(const Notice& n) {
+    if (n.title[0] == 0) return false;
+    boundedCopy(pending, sizeof(pending), n.title);
+    boundedCopy(pendingBody, sizeof(pendingBody), n.body);
     hasPending = true;
     return true;
   }
   bool take(char* out, size_t cap) {
     if (!hasPending || out == nullptr || cap == 0) return false;
-    snprintf(out, cap, "%s", pending);
+    boundedCopy(out, cap, pending);
     pending[0] = 0;
+    pendingBody[0] = 0;
+    hasPending = false;
+    return true;
+  }
+  bool takeNotice(Notice* n) {
+    if (!hasPending || n == nullptr) return false;
+    boundedCopy(n->title, sizeof(n->title), pending);
+    boundedCopy(n->body, sizeof(n->body), pendingBody);
+    pending[0] = 0;
+    pendingBody[0] = 0;
     hasPending = false;
     return true;
   }
   void clear() {
     pending[0] = 0;
+    pendingBody[0] = 0;
     hasPending = false;
   }
 };

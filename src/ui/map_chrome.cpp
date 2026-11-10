@@ -1,84 +1,14 @@
 // SPDX-License-Identifier: MIT
-// Map chrome arithmetic: the scale, the key rectangles and the one hit test. No LovyanGFX.
+// Map chrome arithmetic: the key rectangles, the attribution's box and the one hit test. No
+// LovyanGFX. EST-368 removed the distance scale and its 1-2-5 ladder.
 #include "ui/map_chrome.h"
 
-#include <math.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 #include <string.h>
 
 namespace om {
 namespace ui {
 
-double mapMetresPerPixel(int zoom, double lat) {
-  // Web-Mercator at the equator, shrunk by cos(latitude). Clamp the latitude to the usable band:
-  // beyond 85 degrees the projection explodes and the scale is meaningless.
-  if (zoom < 0) zoom = 0;
-  if (zoom > 22) zoom = 22;
-  if (lat > 85.0) lat = 85.0;
-  if (lat < -85.0) lat = -85.0;
-  return 156543.03392 * cos(lat * M_PI / 180.0) / (double)(1UL << zoom);
-}
-
-int32_t mapScaleDistance(int zoom, double lat, int16_t* pxOut) {
-  const double mpp = mapMetresPerPixel(zoom, lat);
-  // The 1-2-5 ladder. Take the largest distance that still fits the mock's short bar; never go
-  // below 10 m (a bar narrower than a few px stops reading as a scale).
-  static const int32_t kNice[] = {10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000,
-                                  20000, 50000, 100000, 200000, 500000, 1000000};
-  int32_t best = kNice[0];
-  if (pxOut) *pxOut = 0;
-  for (size_t i = 0; i < sizeof(kNice) / sizeof(kNice[0]); ++i) {
-    const double px = (double)kNice[i] / mpp;
-    if (px <= (double)kMapScaleMaxW) {
-      best = kNice[i];
-      if (pxOut) *pxOut = (int16_t)lround(px);
-    }
-  }
-  return best;
-}
-
-void mapScaleLabels(int32_t metres, char* mid, size_t midCap, char* right, size_t rightCap) {
-  if (mid && midCap) mid[0] = 0;
-  if (right && rightCap) right[0] = 0;
-  auto fmt = [](char* out, size_t cap, int32_t m) {
-    if (!out || cap == 0) return;
-    char tmp[24];
-    if (m >= 1000) {
-      if (m % 1000 == 0) snprintf(tmp, sizeof(tmp), "%ldkm", (long)(m / 1000));
-      else snprintf(tmp, sizeof(tmp), "%.1fkm", (double)m / 1000.0);
-    } else {
-      snprintf(tmp, sizeof(tmp), "%ldm", (long)m);
-    }
-    size_t n = strlen(tmp);
-    if (n >= cap) n = cap - 1;
-    memcpy(out, tmp, n);
-    out[n] = 0;
-  };
-  fmt(mid, midCap, metres / 2);
-  fmt(right, rightCap, metres);
-}
-
-MapScaleLabelLayout mapScaleLabelLayout(const Rect& bar, int midW, int rightW, int gap) {
-  MapScaleLabelLayout out;
-  if (midW < 0) midW = 0;
-  if (rightW < 0) rightW = 0;
-  if (gap < 0) gap = 0;
-  // The end label is the one that must always be readable: it is right-aligned to the bar's right
-  // end and clamped to the bar's left when it is wider than the rail.
-  int16_t rightX = (int16_t)(bar.right() - rightW);
-  if (rightX < bar.x) rightX = bar.x;
-  out.rightX = rightX;
-  out.midX = bar.x;
-  // One space of air between the two labels, measured by the caller with the same font. If the half
-  // label and that space cannot fit before the end label, the half label is dropped.
-  out.showMid = midW > 0 && (int)bar.x + midW + gap <= (int)rightX;
-  return out;
-}
-
-MapChrome mapChromeFor(const Layout& L, int zoom, double lat, bool selected) {
+MapChrome mapChromeFor(const Layout& L, bool selected) {
   MapChrome c;
   const int16_t w = L.width;
   const int16_t h = (int16_t)(L.tabbar.y);   // the map runs above the tab bar
@@ -88,17 +18,14 @@ MapChrome mapChromeFor(const Layout& L, int zoom, double lat, bool selected) {
   const int16_t right = (int16_t)(w - kMapMargin);
   c.chip = Rect{(int16_t)(right - 92), (int16_t)(L.status.bottom() + 6), 92, kMapChipH};
 
-  // The mock's stack: lock, +, - from the bottom right corner up.
+  // The mock's stack, now four keys from the bottom right corner up: zoom out, zoom in, follow,
+  // and the Traces toggle on top (EST-368).
   const int16_t bx = (int16_t)(right - kMapKey);
   const int16_t by = (int16_t)(h - kMapMargin - kMapKey);
   c.zoomOut = Rect{bx, by, kMapKey, kMapKey};
   c.zoomIn = Rect{bx, (int16_t)(by - kMapKey - kMapKeyGap), kMapKey, kMapKey};
   c.lock = Rect{bx, (int16_t)(c.zoomIn.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
-
-  const int32_t metres = mapScaleDistance(zoom, lat, &c.scalePx);
-  c.scale = Rect{kMapMargin, (int16_t)(h - kMapMargin - kMapScaleH), c.scalePx,
-                 kMapScaleH};
-  mapScaleLabels(metres, c.scaleMid, sizeof(c.scaleMid), c.scaleRight, sizeof(c.scaleRight));
+  c.traces = Rect{bx, (int16_t)(c.lock.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
 
   if (selected) {
     c.callout = Rect{8, (int16_t)(h - 8 - kMapCalloutH), (int16_t)(w - 16), kMapCalloutH};
@@ -109,18 +36,16 @@ MapChrome mapChromeFor(const Layout& L, int zoom, double lat, bool selected) {
 Rect mapCreditRect(const MapChrome& c, int16_t width) {
   Rect r;
   if (width <= 0) return r;   // nothing to draw, nothing to place
-  // Right-aligned to the key column (the zoom keys own the last 24 px of the bottom right), on the
-  // same line as the scale's two labels: their centre is c.scale.bottom() - 1.
-  const int16_t right = (int16_t)(c.zoomOut.x - kMapMargin);
-  const int16_t cy = (int16_t)(c.scale.bottom() - 1);
-  int16_t x = (int16_t)(right - width);
-  if (x < c.view.x) x = c.view.x;
+  // EST-368: on the bottom LEFT, where the removed scale used to be, clamped to the map area. The
+  // text is drawn straight on the tiles with a 1 px dark outline, so no plate has to reserve room.
+  const int16_t cy = (int16_t)(c.view.h - kMapMargin - kMapCreditH / 2);
+  int16_t x = (int16_t)(c.view.x + kMapMargin);
   r = Rect{x, (int16_t)(cy - kMapCreditH / 2), width, kMapCreditH};
-  // Never over the scale: when the bottom row has no room for both (a narrower screen, a very wide
-  // face), the credit moves up one line instead of printing on the labels.
-  if (r.overlaps(c.scale) || (int)r.x < (int)c.scale.right() + kMapCreditGap) {
-    r.y = (int16_t)(c.scale.y - kMapCreditH - 1);
-  }
+  // A very wide face (a narrower screen) must not run into the key column: the box ends at the
+  // keys' left edge, the same rule that keeps every other piece of chrome off them.
+  const int16_t limit = (int16_t)(c.zoomOut.x - kMapMargin);
+  if (r.right() > limit) r.w = (int16_t)(limit - r.x);
+  if (r.w < 0) r.w = 0;
   return r;
 }
 
@@ -148,6 +73,7 @@ MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, 
   if (c.zoomIn.contains(x, y)) { hit.kind = MapHitKind::ZoomIn; return hit; }
   if (c.zoomOut.contains(x, y)) { hit.kind = MapHitKind::ZoomOut; return hit; }
   if (c.lock.contains(x, y)) { hit.kind = MapHitKind::Lock; return hit; }
+  if (c.traces.contains(x, y)) { hit.kind = MapHitKind::Traces; return hit; }
   if (!c.callout.empty() && c.callout.contains(x, y)) { hit.kind = MapHitKind::Callout; return hit; }
   if (c.view.contains(x, y)) { hit.kind = MapHitKind::Map; return hit; }
   return hit;

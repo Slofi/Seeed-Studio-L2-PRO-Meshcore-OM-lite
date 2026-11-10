@@ -399,10 +399,47 @@ void drawToast(lgfx::LovyanGFX* d, const Layout& L, const char* text) {
 // The frame overlay (EST-344): the toast state lives in ui/toast.h; this only decides whether the
 // current time is inside the toast and draws it. Every framed redraw reaches it through
 // omFrameEnd(), which is what keeps it on the screen for its whole life instead of one frame.
+//
+// EST-368: a message notice carries its text, so it is drawn as a panel that grows with the text
+// (the title in mono dim, then the message wrapped by the chat's own wrapper) instead of the single
+// centred line. The one-line forms are unchanged.
+namespace {
+
+int measureNoticeBody(void* ctx, const char* text, int len) {
+  return measureText((lgfx::LovyanGFX*)ctx, FontRole::SansBody, text, len);
+}
+
+void drawNoticePanel(lgfx::LovyanGFX* d, const Layout& L, const ToastState& t) {
+  if (t.body[0] == 0) {
+    drawToast(d, L, t.text);
+    return;
+  }
+  const NoticeLayout lo =
+      noticeLayout(t.body, measureNoticeBody, d, L.width, L.tabbar.y, L.status.bottom());
+  d->fillRoundRect(lo.boxX, lo.boxY, lo.boxW, lo.boxH, kRadius, kPanel2);
+  d->drawRoundRect(lo.boxX, lo.boxY, lo.boxW, lo.boxH, kRadius, kLine);
+  drawTextEllipsis(d, FontRole::MonoMeta, kDim, kPanel2, lo.boxX + kNoticePad, lo.titleCy,
+                   lo.boxW - 2 * kNoticePad, t.text);
+  char buf[kNoticeBodyCap + 8];
+  for (int i = 0; i < lo.lineCount; ++i) {
+    int len = (i == lo.lineCount - 1) ? lo.lastLen : lo.lines[i].len;
+    if (len < 0) len = 0;
+    if (lo.lines[i].start + len > (int)sizeof(buf) - 4) len = (int)sizeof(buf) - 4 - lo.lines[i].start;
+    if (len < 0) len = 0;
+    if (len > 0) memcpy(buf, t.body + lo.lines[i].start, (size_t)len);
+    buf[len] = 0;
+    if (i == lo.lineCount - 1 && lo.truncated) memcpy(buf + len, "...", 4);
+    drawTextLeft(d, FontRole::SansBody, kInk, kPanel2, lo.boxX + kNoticePad,
+                 lo.firstLineCy + i * kNoticeLineH, buf);
+  }
+}
+
+}  // namespace
+
 void drawToastOverlay(lgfx::LovyanGFX* d, uint32_t nowMs) {
   const ToastState& t = toastState();
   if (!t.visible(nowMs)) return;
-  drawToast(d, l2(), t.text);
+  drawNoticePanel(d, l2(), t);
 }
 
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m) {

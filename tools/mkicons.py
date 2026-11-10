@@ -32,6 +32,9 @@ ICONS = [
     ("Bluetooth", "bluetooth", 13),
     ("Dnd", "dnd", 11),
     ("Fault", "fault", 11),
+    # EST-368: the Map's Traces toggle: a route seen from above, a line through three hops with the
+    # moving packet as a dot at the end. 13 px, the same box as the gear and the lock.
+    ("Trace", "trace", 13),
 ]
 
 
@@ -137,6 +140,25 @@ def fault_mask(size=11):
     d.rectangle((cx - stroke / 2, N * 0.32, cx + stroke / 2, N * 0.58), fill=0)
     dot_r = max(1, int(round(N * 0.075)))
     d.ellipse((cx - dot_r, N * 0.735 - dot_r, cx + dot_r, N * 0.735 + dot_r), fill=0)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def trace_mask(size=13):
+    """EST-368: Traces. A route seen from above: one polyline through two relay points, drawn as a
+    thin line with a filled dot at every hop and a bigger dot for the moving packet at the end, so at
+    13 px it reads as a path, not as a scribble."""
+    S = SUPERSAMPLE
+    N = size * S
+    img = Image.new("L", (N, N), 0)
+    d = ImageDraw.Draw(img)
+    pts = [(N * 0.10, N * 0.80), (N * 0.42, N * 0.52), (N * 0.66, N * 0.66), (N * 0.90, N * 0.20)]
+    d.line(pts, fill=255, width=max(1, int(round(S * 1.15))), joint="curve")
+    hop_r = N * 0.085
+    for (x, y) in pts[1:-1]:
+        d.ellipse((x - hop_r, y - hop_r, x + hop_r, y + hop_r), fill=255)
+    end_r = N * 0.13
+    ex, ey = pts[-1]
+    d.ellipse((ex - end_r, ey - end_r, ex + end_r, ey + end_r), fill=255)
     return img.resize((size, size), Image.LANCZOS)
 
 
@@ -281,6 +303,8 @@ def main():
             mask = dnd_mask(size)
         elif kind == "fault":
             mask = fault_mask(size)
+        elif kind == "trace":
+            mask = trace_mask(size)
         else:
             raise SystemExit("unknown icon kind %s" % kind)
         mask, peak = clean(mask)

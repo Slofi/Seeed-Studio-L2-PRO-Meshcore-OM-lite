@@ -18,6 +18,10 @@ uint32_t mapIndexBytes();
 
 void mapSetView(double lat, double lon, int z);   // recentre/zoom
 void mapRender();                                 // draw the 320x200 map area
+// EST-368: push the tile canvas that is already composited, with no decode, no SD read and no
+// recomposite. The Map's animation frames use this so a moving trace dot costs a frame push, not a
+// tile render. Does nothing until mapRender() has run once.
+void mapRepush();
 void mapPan(int dx, int dy);                      // move the view by screen pixels
 void mapZoomBy(int delta);                        // clamp inside the pack's range
 int mapZoom();

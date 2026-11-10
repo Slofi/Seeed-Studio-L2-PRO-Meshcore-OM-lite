@@ -99,4 +99,6 @@ Built with Claude and DeepSeek. Development notes are in [`docs/PROGRESS.md`](do
 
 ## Licence
 
-Not chosen yet. Third-party parts keep their own licences.
+OM Lite is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0), see [`LICENSE`](LICENSE).
+
+Third-party parts keep their own licences: MeshCore (MIT) in `lib/meshcore` and `lib/meshcore_companion`, Noto Color Emoji (SIL OFL 1.1), the DejaVu fonts (Bitstream Vera licence), LovyanGFX (FreeBSD), RadioLib (MIT) and JPEGDEC (Apache-2.0).

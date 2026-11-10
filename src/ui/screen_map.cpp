@@ -8,6 +8,9 @@
 // EST-372 (Filip ~23:55 and ~00:00): the centre marker is a thin 9 px cross, the traces are a bolder
 // fuchsia-violet at 2 px with a 5 px dot and a dark outline, the right-hand keys are tabs flush with
 // the screen edge, and the "offline · z13" chip is a plain zN line above them.
+// EST-373 (Filip 2026-11-11 ~00:38): the cross is 7 px in ONE dark ink with no outline, the tabs are
+// 25 px (their widest icon plus 4 px each side), and the arrow beside the zN line hides the column
+// down to a 4 px sliver and brings it back.
 #include "ui/screen_map.h"
 
 #include <Arduino.h>
@@ -29,15 +32,23 @@ void edgeTabBox(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line)
   d->drawRoundRect(r.x, r.y, (int16_t)(r.w + kRadius), r.h, kRadius, line);
 }
 
+// EST-373: hidden, the same tab is only the 4 px (kMapTabSliverW) that still fits at the screen
+// edge. It is drawn square: it is the middle of a tab, not a rounded left end, so a 4 px sliver does
+// not turn into a 4 px smear of the corner radius. One line on its left edge says "a tab is here".
+void edgeTabSliver(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line) {
+  d->fillRect(r.x, r.y, r.w, r.h, fill);
+  d->drawFastVLine(r.x, r.y, r.h, line);
+}
+
 void drawLockIcon(lgfx::LovyanGFX* d, const Rect& r, bool on) {
   const int cx = r.x + r.w / 2;
   const int cy = r.y + r.h / 2;
   const uint16_t fg = on ? kAcc : kInk;
-  d->drawCircle(cx, cy, 5, fg);
-  d->drawFastHLine(cx - 8, cy, 5, fg);
-  d->drawFastHLine(cx + 4, cy, 5, fg);
-  d->drawFastVLine(cx, cy - 8, 5, fg);
-  d->drawFastVLine(cx, cy + 4, 5, fg);
+  d->drawCircle(cx, cy, kMapLockR, fg);
+  d->drawFastHLine(cx - kMapLockArmOut, cy, kMapLockArmLen, fg);
+  d->drawFastHLine(cx + kMapLockArmOut - kMapLockArmLen + 1, cy, kMapLockArmLen, fg);
+  d->drawFastVLine(cx, cy - kMapLockArmOut, kMapLockArmLen, fg);
+  d->drawFastVLine(cx, cy + kMapLockArmOut - kMapLockArmLen + 1, kMapLockArmLen, fg);
   d->fillCircle(cx, cy, 1, fg);
 }
 
@@ -73,20 +84,31 @@ void drawPlainTextOnMap(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, const R
   d->drawString(s, box.x, box.y + box.h / 2);
 }
 
-// EST-372: the centre cross, above the tiles (and the route) but below the markers and the tabs.
-// Two 1 px kInk lines, 9 px long; a 1 px kMapBg outline under them keeps the white line visible on
-// a bright topo tile as well as on a dark one. It is not a crosshair: the Position picker keeps its
-// own crosshair and never calls this screen.
+// EST-373 (Filip: "just a cross, small, thin, no outlines"): the centre cross, above the tiles (and
+// the route) but below the markers and the tabs. TWO 1 px dark lines, 7 px long (arm 3), one ink
+// (kMapCrossInk) and nothing behind them. It is not a crosshair: the Position picker keeps its own
+// crosshair and never calls this screen.
 void drawCentreCross(lgfx::LovyanGFX* d, const MapChrome& c) {
   const Rect r = mapCentreCrossRect(c);
   const int cx = r.x + r.w / 2;
   const int cy = r.y + r.h / 2;
   const int arm = kMapCentreCrossArm;
   const int span = 2 * arm + 1;
-  d->fillRect((int16_t)(cx - arm), (int16_t)(cy - 1), (int16_t)span, 3, kMapBg);  // dark outline
-  d->fillRect((int16_t)(cx - 1), (int16_t)(cy - arm), 3, (int16_t)span, kMapBg);
-  d->fillRect((int16_t)(cx - arm), (int16_t)cy, (int16_t)span, 1, kInk);           // the cross
-  d->fillRect((int16_t)cx, (int16_t)(cy - arm), 1, (int16_t)span, kInk);
+  d->fillRect((int16_t)(cx - arm), (int16_t)cy, (int16_t)span, 1, kMapCrossInk);
+  d->fillRect((int16_t)cx, (int16_t)(cy - arm), 1, (int16_t)span, kMapCrossInk);
+}
+
+// EST-373: the hide/show arrow next to the zoom label, a small filled triangle in the label's ink.
+// Right (">") while the tabs are out, left ("<") while they are hidden. The columns narrow from the
+// base to the point: 7, 5, 3, 1, 1 px, so the glyph's box is 5 x 7 and its widest column is 7 px.
+void drawArrow(lgfx::LovyanGFX* d, const Rect& r, bool left, uint16_t ink) {
+  const int cy = r.y + r.h / 2;
+  for (int i = 0; i < r.w; ++i) {
+    int hgt = r.h - 2 * i;
+    if (hgt < 1) hgt = 1;
+    const int x = left ? (r.x + r.w - 1 - i) : (r.x + i);
+    d->fillRect((int16_t)x, (int16_t)(cy - hgt / 2), 1, (int16_t)hgt, ink);
+  }
 }
 
 // A colour laid over whatever the frame already holds (the tiles) by a 0..255 alpha. omFramePixel
@@ -264,38 +286,54 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   if (v.trace.direct) drawTrace(d, v.trace, false);
   else drawTrace(d, v.trace, true);
 
-  // EST-372: the zoom is plain small text, right-aligned with the tabs' right edge, just above the
-  // top tab. No plate, no border, no "offline": the map is always offline.
+  // EST-372: the zoom is plain small text just above the top tab. EST-373: it keeps its line and
+  // stays visible in both states, next to the hide/show arrow; both are drawn in the one dim ink,
+  // inside the one 28 x 22 tap box, so the finger never has to find the 5 x 7 glyph. No plate, no
+  // border, no "offline": the map is always offline.
   char zoom[8];
   snprintf(zoom, sizeof(zoom), "z%d", v.zoom);
   setRole(d, FontRole::MonoMeta);
   d->setTextDatum(lgfx::textdatum_t::middle_right);
   d->setTextColor(kDim);
   d->drawString(zoom, c.zoomLabel.right(), c.zoomLabel.y + c.zoomLabel.h / 2);
+  drawArrow(d, c.zoomArrow, c.tabsHidden, kDim);
 
-  // EST-372: the right-hand tabs, flush with the screen edge, rounded on the left only. Zoom,
-  // follow, Traces (EST-368) and Names (EST-370), bottom up.
-  edgeTabBox(d, c.zoomIn, kPanel, kLine);
-  edgeTabBox(d, c.zoomOut, kPanel, kLine);
-  edgeTabBox(d, c.lock, v.locked ? kSelBg2 : kPanel, v.locked ? kAcc : kLine);
-  edgeTabBox(d, c.traces, v.tracesOn ? kSelBg2 : kPanel, v.tracesOn ? kAcc : kLine);
-  edgeTabBox(d, c.names, v.namesOn ? kSelBg2 : kPanel, v.namesOn ? kAcc : kLine);
-  setRole(d, FontRole::SansTitle);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kInk, kPanel);
-  d->drawString("+", c.zoomIn.x + c.zoomIn.w / 2, c.zoomIn.y + c.zoomIn.h / 2);
-  d->drawString("-", c.zoomOut.x + c.zoomOut.w / 2, c.zoomOut.y + c.zoomOut.h / 2);
-  drawLockIcon(d, c.lock, v.locked);
-  // The Traces icon (tools/mkicons.py): a route with its hop dots, gold while traces are on.
-  const int iconX = c.traces.x + (c.traces.w - (int)kIconTrace.w) / 2;
-  const int iconY = c.traces.y + (c.traces.h - (int)kIconTrace.h) / 2;
-  drawIcon(d, kIconTrace, iconX, iconY, v.tracesOn ? kAcc : kInk,
-           v.tracesOn ? kSelBg2 : kPanel);
-  // The Names icon (tools/mkicons.py): a label tag, gold while names are on.
-  const int namesX = c.names.x + (c.names.w - (int)kIconNames.w) / 2;
-  const int namesY = c.names.y + (c.names.h - (int)kIconNames.h) / 2;
-  drawIcon(d, kIconNames, namesX, namesY, v.namesOn ? kAcc : kInk,
-           v.namesOn ? kSelBg2 : kPanel);
+  // EST-373: the five tabs, drawn from the SAME list the hit test reads (mapTabRects), so a tab's
+  // tap zone and its rectangle cannot drift apart. Shown: flush with the screen edge, rounded on the
+  // left only. Hidden: the 4 px sliver at that edge, and no icon.
+  MapTab tabs[kMapTabCount];
+  mapTabRects(c, tabs);
+  for (int i = 0; i < kMapTabCount; ++i) {
+    bool on = false;
+    switch (tabs[i].kind) {
+      case MapHitKind::Lock: on = v.locked; break;
+      case MapHitKind::Traces: on = v.tracesOn; break;
+      case MapHitKind::Names: on = v.namesOn; break;
+      default: break;
+    }
+    const uint16_t fill = on ? kSelBg2 : kPanel;
+    const uint16_t edge = on ? kAcc : kLine;
+    if (c.tabsHidden) edgeTabSliver(d, tabs[i].rect, fill, edge);
+    else edgeTabBox(d, tabs[i].rect, fill, edge);
+  }
+  if (!c.tabsHidden) {
+    setRole(d, FontRole::SansTitle);
+    d->setTextDatum(lgfx::textdatum_t::middle_center);
+    d->setTextColor(kInk, kPanel);
+    d->drawString("+", c.zoomIn.x + c.zoomIn.w / 2, c.zoomIn.y + c.zoomIn.h / 2);
+    d->drawString("-", c.zoomOut.x + c.zoomOut.w / 2, c.zoomOut.y + c.zoomOut.h / 2);
+    drawLockIcon(d, c.lock, v.locked);
+    // The Traces icon (tools/mkicons.py): a route with its hop dots, gold while traces are on.
+    const int iconX = c.traces.x + (c.traces.w - (int)kIconTrace.w) / 2;
+    const int iconY = c.traces.y + (c.traces.h - (int)kIconTrace.h) / 2;
+    drawIcon(d, kIconTrace, iconX, iconY, v.tracesOn ? kAcc : kInk,
+             v.tracesOn ? kSelBg2 : kPanel);
+    // The Names icon (tools/mkicons.py): a label tag, gold while names are on.
+    const int namesX = c.names.x + (c.names.w - (int)kIconNames.w) / 2;
+    const int namesY = c.names.y + (c.names.h - (int)kIconNames.h) / 2;
+    drawIcon(d, kIconNames, namesX, namesY, v.namesOn ? kAcc : kInk,
+             v.namesOn ? kSelBg2 : kPanel);
+  }
 
   // The tapped marker's panel (mock .callout): dark gold, gold edge, the name then one mono line.
   if (v.callout && !c.callout.empty()) {
@@ -316,7 +354,7 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
 }  // namespace
 
 MapChrome mapScreenChrome(const MapView& v) {
-  return mapChromeFor(l2(), v.callout);
+  return mapChromeFor(l2(), v.callout, v.tabsHidden);
 }
 
 void mapScreenDraw(const MapView& v) { drawMapFrame(v, true); }

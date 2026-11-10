@@ -22,12 +22,14 @@ struct Host {
 };
 
 void begin(const Host& host);
-// EST-370/371: the saved Traces and Names switches, loaded through the shell's Preferences.
+// EST-370/371: the saved Traces and Names switches, loaded through the shell's Preferences. EST-373
+// adds the hidden tab column, saved in the same store.
 void beginLayers(bool (*read)(void*, const char*, bool, bool&),
                  bool (*write)(void*, const char*, bool), void* ctx);
 void loadLayers();
 bool tracesOn();
 bool namesOn();
+bool tabsHidden();
 
 // Tab entry: show the last composed canvas at once, then refresh its tiles only if the view changed.
 void enter();

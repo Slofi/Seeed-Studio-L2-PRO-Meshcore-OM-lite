@@ -33,9 +33,12 @@ static void testMapChrome() {
   const MapChrome c = mapChromeFor(L, false);
   CHECK(c.view.x == 0 && c.view.y == 0 && c.view.w == 320 && c.view.h == L.tabbar.y);
   CHECK(c.view.bottom() == L.tabbar.y);
-  // EST-372: the zoom is plain text in the same right column, above the top tab.
+  // EST-372: the zoom is plain text in the same right column, above the top tab. EST-373: the
+  // hide/show arrow sits to its right, so the label ends one arrow and one gap short of the edge.
   CHECK(c.zoomLabel.y >= L.status.bottom());
-  CHECK(c.zoomLabel.right() == c.view.right());
+  CHECK(c.zoomLabel.right() + kMapArrowGap + kMapArrowW == c.view.right());
+  CHECK(c.zoomArrow.right() == c.view.right());
+  CHECK(c.zoomArrow.x == c.zoomLabel.right() + kMapArrowGap);
   CHECK(c.zoomLabel.bottom() < c.names.y);
   CHECK(c.zoomLabel.h == kMapZoomLabelH);
   // EST-372: every tab's right edge IS the screen edge; no margin, no gap.
@@ -54,9 +57,11 @@ static void testMapChrome() {
   CHECK(!c.traces.overlaps(c.lock));
   CHECK(!c.names.overlaps(c.traces));
   CHECK(c.names.y >= c.zoomLabel.bottom());
-  // The tabs are 44 wide and, with the z13 line, 34 tall (40 x 5 = 200 does not fit the 189 px band).
-  CHECK(c.names.w == kMapTabW && c.names.w == 44);
-  CHECK(c.names.h == 34);
+  // EST-373: the tabs are 25 wide (the widest icon plus 4 px each side) and 32 tall, because the
+  // arrow's 22 px target above the top tab has to fit in the 189 px band.
+  CHECK(c.names.w == kMapTabW && c.names.w == 25);
+  CHECK(c.names.w == kMapTabIconW + 2 * kMapTabIconPad);
+  CHECK(c.names.h == 32);
   CHECK(c.names.h > 24 && c.names.w > 24);   // still bigger than the old 24x24 key
   CHECK(c.callout.empty());                   // nothing selected: no panel
 
@@ -82,8 +87,14 @@ static void testMapHit() {
   // EST-372: the last pixel column is the tab; one pixel left of it is map.
   CHECK(mapHitAt(c, nullptr, 0, c.view.right() - 1, c.names.y + 1).kind == MapHitKind::Names);
   CHECK(mapHitAt(c, nullptr, 0, c.names.x - 1, c.names.y + 1).kind == MapHitKind::Map);
-  // The z13 label is not a key: a tap on it is a map tap.
-  CHECK(mapHitAt(c, nullptr, 0, c.zoomLabel.x + 2, c.zoomLabel.y + 2).kind == MapHitKind::Map);
+  // EST-373: the z13 label line IS a key now: the whole 28 x 22 label strip hides/shows the tabs.
+  CHECK(mapHitAt(c, nullptr, 0, c.zoomLabel.x + 2, c.zoomLabel.y + 2).kind ==
+        MapHitKind::TabsToggle);
+  CHECK(mapHitAt(c, nullptr, 0, c.zoomArrow.x + 2, c.zoomArrow.y + 2).kind ==
+        MapHitKind::TabsToggle);
+  CHECK(mapHitAt(c, nullptr, 0, c.zoomTap.x, c.zoomTap.y).kind == MapHitKind::TabsToggle);
+  CHECK(mapHitAt(c, nullptr, 0, c.zoomTap.x - 1, c.zoomTap.y).kind == MapHitKind::Map);
+  CHECK(!c.zoomTap.overlaps(c.names));   // the target never sits on the top tab
   CHECK(mapHitAt(c, nullptr, 0, c.callout.x + 4, c.callout.y + 4).kind == MapHitKind::Callout);
   CHECK(mapHitAt(c, nullptr, 0, 160, 90).kind == MapHitKind::Map);
   CHECK(mapHitAt(c, nullptr, 0, 0, 0).kind == MapHitKind::None);   // the status bar's pixels

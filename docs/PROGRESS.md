@@ -4463,3 +4463,116 @@ so the next boot log can name 0x34 (item 4 below).
 - Bolder traces are seen only in the preview (`docs/shots/2026-11-11-0026-trace-preview.png`); no real trace arrived during the check, so they are unproven on live traffic.
 - Charge probe (read-only), boot log: `0x34 reg00=0x01 reg01=0x01`, `0x34 reg03=0x00` (an AXP2101 answers 0x4A there, so 0x34 is something else), `0x22 in=0x00 cfg=0x24`, `0x14 reg00=0x1E`. No register is identified as a charge status yet, so there is no bolt. Next step: read the same lines once on USB power and once on battery and compare.
 - Correction (Claude, 2026-11-11 00:37): the "00:30" stamp on the EST-371 entry above was an estimate, not the clock. That entry was written around 00:16, when `b396da2` was committed.
+
+## 2026-11-11 00:51 (DeepSeek): EST-373 thin dark cross, 25 px tabs, hide-tabs arrow
+
+Three map tweaks from Filip (~00:38) on top of EST-372. Nothing else on the map changed: the traces,
+the callout, the attribution, the status and tab bars and the tile path are untouched.
+
+### 1. The centre cross is a bare cross in one dark ink
+- `ui/theme.h`: a new `kMapCrossInk = #202020`. `ui/map_chrome.h`: `kMapCentreCrossArm` 4 -> 3, so the
+  box is 7x7 (157..163 x 104..110) still centred on (160,107).
+- `ui/screen_map.cpp`: the two `fillRect` calls that laid a 3 px `kMapBg` plate under each line are
+  gone. Only the two 1 px lines remain, one ink, no outline.
+- Measured on the real z13 tile image (sRGB WCAG): **14.16:1** on the `#f0f0e0` ground (34.6 % of the
+  image), **12.34:1** on `#e0e0e0`, **10.56:1** on the `#d0d0d0` road grey, **3.10:1** on the darkest
+  1 % (`#6c6c6a`). The old white `kInk` line was **1.02:1** there, i.e. visible only because of the
+  plate that is now gone.
+- The price of one ink: on a dark tile the cross would vanish (**1.09:1** on `#181818`, the same on the
+  `#191816` canvas). This tile pack has no dark tiles, so the choice is safe for the installed card;
+  the number is in the theme comment and in `test_est373.cpp` so nobody has to rediscover it.
+- Still not drawn in the Position picker: it calls `mapRender()` only and keeps its own crosshair.
+
+### 2. The tabs are 25 px wide, and the tap rect IS the drawn rect
+- `ui/map_chrome.h`: `kMapTabIconPad = 4`; the widest thing drawn on the column is the Follow lock
+  (5 px radius circle plus a 5 px arm reaching 8 px from the centre = **17 px**), so
+  `kMapTabW = 17 + 4 + 4 = **25**`. The ticket expected "about 28"; 25 is what the measured widest
+  icon gives. The lock's numbers (`kMapLockR`, `kMapLockArmLen`, `kMapLockArmOut`) moved here and
+  `screen_map.cpp` draws the icon from them, so the width and the icon cannot drift apart.
+  The Traces and Names masks are 13x13 and the `+` / `-` glyphs measure 12 / 5 px of ink in SansTitle
+  (read from the VLW glyph records of `font_sans14.cpp`), all narrower than the lock.
+- The column now starts at **x 295** (was 276 with 44 px), still flush at 320, and the map gains
+  19 px. Heights: **32 px**, not 34. That is not a slip: see item 3, the arrow's 22 px target does not
+  fit in the 15 px that were above a 34 px top tab. 32 px is still 8 px taller and wider than the old
+  24x24 key.
+- New in `ui/map_chrome.h/.cpp`: `MapTab` + `mapTabRects()` - ONE list of the five (kind, Rect) pairs.
+  `screen_map.cpp` draws that list and `mapHitAt()` reads that same list, so "the tap zone is the drawn
+  rectangle" is a property of the code, not a promise. The 320x240 numbers: Names (295..320,
+  51..83), Traces (84..116), follow (117..149), `+` (150..182), `-` (183..215), 1 px apart.
+- The old wide tap zone is gone: a tap at x 294 (or at the old 276 edge) is now a map tap. The zooms,
+  the follow lock, Traces and Names keep their own 25 x 32 rects, all four corners tested.
+
+### 3. The hide/show arrow beside the zoom label
+- Layout (`ui/map_chrome.cpp`): one `zoomTap` rect, **28 x 22** px at the top right (x 292..320,
+  y 26..48), from the status bar's bottom to 3 px above the top tab. Inside it the label
+  `zoomLabel` (21 px wide, right-aligned at 313) and the 5x7 `zoomArrow` (x 315..320, y 30..37, same
+  centre line as the label). The label is at the same place in both states and is drawn in both.
+- **The 22 px target does not fit above a 34 px top tab** (the band there is 15 px). Rather than let
+  the target overlap the top tab (forbidden) or hang into the status bar's own keys, the five tabs
+  give 2 px each: 34 -> 32, and the target is exactly the label band. That is the one place this
+  ticket changes a number the ticket said to keep, and it is why.
+- Glyph drawn with primitives (`drawArrow`): a filled triangle whose columns are 7, 5, 3, 1, 1 px, so
+  its box is 5x7. Points right (`>`) while the tabs are out, left (`<`) while hidden, in `kDim`, the
+  same ink as the `z13` label (Claude's own note said that dim ink is faint on the light topo ground;
+  this ticket does not change it).
+- Hidden: every tab is its **4 px** sliver at the same right edge, same y, same height, same fill
+  (gold on a tab that is on), drawn square with a 1 px line on its left edge (`edgeTabSliver`), no
+  icon. Instant switch, one `draw()` through the existing frame path, so no tear and no new path.
+- **Choice on the slivers: a tap on one brings the tabs back** (the ticket offered "nothing" or
+  "show"). A drag that starts on a sliver still pans the map, exactly as a drag over the whole map
+  already did; taps in the freed area left of x 316 are plain map taps.
+- Saved like Names: new `MapLayerPrefs` key `tabsHidden` (default **false**, i.e. shown), one write per
+  tap, read once at boot. `main.cpp`'s boot line is now
+  `[map] layers traces=.. names=.. hidden=..`. A tap logs `[map] tabs hidden` / `[map] tabs shown`
+  (the state is read back after the toggle, not taken from the write's return).
+
+### Build and tests
+- `pio run -e om_lite_l2` **exit 0**: RAM **156,800 B** (47.9 %, unchanged), flash **2,804,373 B**
+  (42.8 %; EST-372 was 2,803,937, so **+436 B**), `firmware.bin` **2,804,736 B** (+432 B).
+- `sh test/host/run.sh` **exit 0**. New `test/host/test_est373.cpp` (in `run.sh` as BIN35) checks:
+  every tab's rect equals its tap zone (four corners + centre answer that tab), `x + w == 320` for
+  every tab in both states, 25 = 17 + 2x4, the five heights equal and 32, the arrow's 28x22 target
+  inside the band and never overlapping the top tab, the label and the glyph boxes identical in both
+  states, the slivers at 316..320 with taps that bring the tabs back, the freed area as map taps, a
+  marker still winning over a sliver, the 7x7 cross with the contrast floors above, and the
+  `tabsHidden` store (default, one-key write, reload, `set`, a failed write, no reader).
+  `test_est351.cpp` and `test_est370.cpp` updated to the new numbers (25 x 32, x 295, y 51..83, 7x7
+  cross, the label line is now a key).
+- **Preview** for Claude before flashing: `docs/shots/2026-11-11-map-tabs-preview.png`. It is
+  **641x267 = two 1:1 320x240 frames side by side** (left: tabs out; right: tabs hidden) plus a 12 px
+  title strip and a 15 px footer. One 320x240 file cannot show both states at 1:1, and a downscaled
+  one would hide exactly the pixels under review (the 1 px cross, the 5x7 arrow, the 4 px sliver).
+  Both panels are drawn from the REAL rectangles and colours: a small host program builds
+  `ui/map_chrome.cpp` + `theme.h` and prints every rect and the RGB565 values, and the renderer draws
+  those; the two icon masks are parsed from `ui/icons.cpp`, the lock and the `+`/`-` from the same
+  constants the firmware uses. The tile background is a crop of
+  `map-preview-ljubljana-z13-2026-11-09.png`; there are no node positions and no names. The gold
+  dotted box marks the 28x22 tap target (annotation, not drawn by the firmware). The fonts are DejaVu
+  stand-ins at the device's 6 px mono advance, not the VLW faces. The renderer itself lives outside
+  the repo (scratch), like the EST-372 one; say if it should move into `tools/`.
+
+### Could not check (no device, no serial, no glass)
+- The glass: whether `#202020` at 1 px reads on the real topo tiles as well as the measurement says,
+  whether a 25 px tab still feels big enough for a fingertip (the ticket's "about 28" would have been
+  3 px wider per side), the 5x7 arrow's size, and the 4 px sliver being visible enough at the edge.
+- Touch on the arrow target: the test proves the rects; only a finger on the panel proves the feel.
+- Nothing was flashed, committed, pushed or deployed from this sandbox.
+
+### Next step for Claude
+1. Review the diff and the preview, then flash `firmware.bin` (2,804,736 B). The boot log should say
+   `[map] layers traces=1 names=1 hidden=0` on a first boot after the update.
+2. On the Map: the cross should be a bare dark cross with no plate; five 25 px tabs, gold on Traces and
+   Names; `z13` and a small `>` at the top right.
+3. Tap the label line (anywhere in x 292..320, y 26..48): the tabs shrink to 4 px slivers, the arrow
+   flips to `<`, the map is drawn to the edge, and `[map] tabs hidden` appears. Tap again (or tap a
+   sliver): they come back and the log says `[map] tabs shown`.
+4. Tap each tab centre: Names (307,67), Traces (307,100), follow (307,133), `+` (307,166), `-`
+   (307,199). Tap x 294 on the same rows: that must now be a map tap, not a tab.
+5. Leave the map with the tabs hidden, go to another tab and back: they must still be hidden (the
+   setting is saved). Power cycle if convenient: `hidden=1` in the boot line.
+
+## 2026-11-11 00:56 (Claude): EST-373 on the device
+- Built in the sandbox (exit 0, RAM 156,800 B, flash 2,804,373 B), tests exit 0, the reviewed binary flashed over USB OTA (2,804,736 B). Boot: `[map] layers traces=1 names=0 hidden=0` (Names off is Filip's saved choice), `mesh: up`, `chats` 6 chats, 0 mismatches.
+- On the glass (USB taps + screenshots): plain dark 7x7 cross; five 25 px tabs flush right; a tap on the arrow at (306,37) hides them to 4 px slivers, a second tap brings them back. Left as shown.
+- NOT in this build: the four EST-373 comments (the whole bottom bar hiding too, the 22 px chip with an unread dot, a full-height canvas so the cross does not move, the grey + / - left behind while hidden). DS worked from the ticket text only. They go into the next ticket.
+- This was the last flash of 2026-11-11 night; the device is switched off.

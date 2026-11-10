@@ -2,7 +2,8 @@
 // cross's position (the same point the tile renderer projects the view centre onto, and the picker's
 // crosshair uses), and the saved names/traces switches (defaults, toggle, persistence, a failed
 // write and a missing key). EST-372 adds the edge-tab geometry, the plain z13 line, the centre
-// cross's 9x9 box and the trace colour's measured contrast. Plain g++, no Arduino.
+// cross's box and the trace colour's measured contrast; EST-373 narrows the tab to 25 px and the
+// cross to 7x7 (test_est373.cpp owns the hidden column and the new ink). Plain g++, no Arduino.
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,9 +28,9 @@ static void testNamesKey() {
   const MapChrome c = mapChromeFor(L, false);
   CHECK(c.names.right() == c.zoomIn.right());
   CHECK(c.names.x == c.zoomOut.x);
-  // EST-372: 44 px wide, 34 px tall, up to the screen edge.
-  CHECK(c.names.w == kMapTabW && c.names.w == 44);
-  CHECK(c.names.h == 34);
+  // EST-373: 25 px wide (the widest icon, 17, plus 4 px each side), 32 px tall, up to the edge.
+  CHECK(c.names.w == kMapTabW && c.names.w == 25);
+  CHECK(c.names.h == 32);
   CHECK(c.names.y == c.traces.y - c.traces.h - kMapTabGap);   // the top tab of the column
   CHECK(c.names.y >= c.zoomLabel.bottom());                   // never under the z13 line
   CHECK(!c.names.overlaps(c.traces));
@@ -38,11 +39,11 @@ static void testNamesKey() {
   CHECK(!c.names.overlaps(c.zoomOut));
   CHECK(!c.names.overlaps(c.zoomLabel));
 
-  // The 320x240 geometry quoted in PROGRESS.md: right edge 320, x 276, y 41..75.
-  CHECK(c.names.x == 276);
+  // The 320x240 geometry quoted in PROGRESS.md: right edge 320, x 295, y 51..83.
+  CHECK(c.names.x == 295);
   CHECK(c.names.right() == 320);
-  CHECK(c.names.y == 41);
-  CHECK(c.names.bottom() == 75);
+  CHECK(c.names.y == 51);
+  CHECK(c.names.bottom() == 83);
 
   // The one hit test: the centre of the tab is the Names tab, every pixel of it is.
   const int cx = c.names.x + c.names.w / 2;
@@ -84,9 +85,10 @@ static void testCentre() {
   CHECK(p.x == c.view.x + c.view.w / 2);
   CHECK(p.y == c.view.y + c.view.h / 2);
 
-  // EST-372: two 1 px lines, 9 px long, so the box is 9x9 and centred on the same point.
+  // EST-373: two 1 px lines, 7 px long (arm 3), so the box is 7x7 and centred on the same point.
   const Rect d = mapCentreCrossRect(c);
-  CHECK(d.w == 9 && d.h == 9);
+  CHECK(d.w == 7 && d.h == 7);
+  CHECK(kMapCentreCrossArm == 3);
   CHECK(d.w == 2 * kMapCentreCrossArm + 1);
   CHECK(d.x + d.w / 2 == p.x);
   CHECK(d.y + d.h / 2 == p.y);

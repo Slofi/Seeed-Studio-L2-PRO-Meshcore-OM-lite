@@ -37,6 +37,9 @@ struct MapView {
   bool tracesOn = false;
   // EST-370: the Names toggle. Off hides every marker label and leaves the markers themselves.
   bool namesOn = false;
+  // EST-373: the hide/show arrow beside the zN label. On, the five tabs are 4 px slivers at the
+  // screen edge and the map gets the freed area; the state comes from the saved layer store.
+  bool tabsHidden = false;
   TraceFrame trace;
 };
 

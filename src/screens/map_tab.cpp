@@ -236,9 +236,10 @@ void build(ui::MapView& v) {
   v.hasFix = fix().valid;
   v.markerCount = 0;
   // EST-368: the Traces key's highlight and the one live animation frame. EST-370: the Names key's
-  // highlight; both come from the one saved-switch store.
+  // highlight; both come from the one saved-switch store. EST-373: and the hidden tab column.
   v.tracesOn = s_layers.traces();
   v.namesOn = s_layers.names();
+  v.tabsHidden = s_layers.tabsHidden();
   v.trace = s_traceFrame;
 
   // Our own position: the white dot with the gold halo.
@@ -365,6 +366,7 @@ void beginLayers(bool (*read)(void*, const char*, bool, bool&),
 void loadLayers() { s_layers.load(); }
 bool tracesOn() { return s_layers.traces(); }
 bool namesOn() { return s_layers.names(); }
+bool tabsHidden() { return s_layers.tabsHidden(); }
 
 void clearSelection() { s_selName[0] = 0; }
 void select(const char* name) {
@@ -505,6 +507,16 @@ bool tap(int x, int y) {
       // EST-370: hide or show every marker label; the markers stay. Saved (default on).
       const bool on = s_layers.toggleNames();
       Serial.printf("[map] names %s\n", on ? "on" : "off");
+      draw();
+      return true;
+    }
+    case ui::MapHitKind::TabsToggle: {
+      // EST-373: the arrow beside the zN label hides the five tabs down to a 4 px sliver and brings
+      // them back; a tap on a sliver does the same (the only tab pixels left). Saved with the other
+      // two switches, so reopening the map keeps the column as it was left. No animation: one frame.
+      s_layers.toggleTabsHidden();     // the return is the write's, so read the state back below
+      const bool hidden = s_layers.tabsHidden();
+      Serial.printf("[map] tabs %s\n", hidden ? "hidden" : "shown");
       draw();
       return true;
     }

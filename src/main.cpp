@@ -4646,12 +4646,13 @@ void setup() {
   // EST-371: the sound events own their keys, defaults and the EST-359 -> EST-361 migration.
   om::sounds::begin(&g_prefs);
   if (om::sounds::load()) Serial.println("[snd] choices migrated to shared-library ids");
-  // EST-368 / EST-370: the Map's two layer switches are remembered (both default ON). The store
-  // owns the keys ("traces", "names") and reads each once, here, after Preferences is open.
+  // EST-368 / EST-370 / EST-373: the Map's three layer switches are remembered (Traces and Names
+  // default ON, the hidden tab column default OFF). The store owns the keys ("traces", "names",
+  // "tabsHidden") and reads each once, here, after Preferences is open.
   om::map_tab::beginLayers(mapLayerPrefRead, mapLayerPrefWrite, nullptr);
   om::map_tab::loadLayers();
-  Serial.printf("[map] layers traces=%d names=%d\n", om::map_tab::tracesOn() ? 1 : 0,
-                om::map_tab::namesOn() ? 1 : 0);
+  Serial.printf("[map] layers traces=%d names=%d hidden=%d\n", om::map_tab::tracesOn() ? 1 : 0,
+                om::map_tab::namesOn() ? 1 : 0, om::map_tab::tabsHidden() ? 1 : 0);
   loadEmojiRecent();
   // EST-347: the one brightness setting, in NVS as "bright". The fade starts from it.
   g_setBrightness = g_prefs.getUChar("bright", om::kScreenBrightness);

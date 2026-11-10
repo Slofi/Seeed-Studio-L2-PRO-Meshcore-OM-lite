@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 // EST-370: the Map's layer switches (Traces and Names), the one place that knows their NVS keys and
-// their defaults, and the save/load rule. Plain C++ (no Arduino): the shell injects the real
-// Preferences read/write, test/host injects RAM, so the saved setting is proven without a device.
+// their defaults, and the save/load rule. EST-373 adds the third: the hide/show arrow beside the zoom
+// label, remembered with the other two so reopening the map keeps the column as it was left. Plain
+// C++ (no Arduino): the shell injects the real Preferences read/write, test/host injects RAM, so the
+// saved setting is proven without a device.
 //
-// Both default ON. A missing key takes the default WITHOUT writing it; a toggle changes the value
-// and writes it in the same call, so the highlight on the key always matches the tap.
+// Both switches default ON and the hidden column defaults OFF. A missing key takes the default
+// WITHOUT writing it; a toggle changes the value and writes it in the same call, so the highlight on
+// the key always matches the tap.
 #pragma once
 
 #include <stdint.h>
@@ -12,10 +15,12 @@
 namespace om {
 namespace ui {
 
-constexpr const char* kMapPrefTraces = "traces";   // EST-368
-constexpr const char* kMapPrefNames = "names";     // EST-370
+constexpr const char* kMapPrefTraces = "traces";          // EST-368
+constexpr const char* kMapPrefNames = "names";            // EST-370
+constexpr const char* kMapPrefTabsHidden = "tabsHidden";  // EST-373: the column is 4 px slivers
 constexpr bool kMapTracesDefault = true;
 constexpr bool kMapNamesDefault = true;
+constexpr bool kMapTabsHiddenDefault = false;             // a first boot shows the tabs
 
 class MapLayerPrefs {
  public:
@@ -29,14 +34,16 @@ class MapLayerPrefs {
     ctx_ = ctx;
   }
 
-  // Boot: both keys once. A missing key or no reader is the default, not an error.
+  // Boot: every key once. A missing key or no reader is the default, not an error.
   void load() {
     traces_ = readOr(kMapPrefTraces, kMapTracesDefault);
     names_ = readOr(kMapPrefNames, kMapNamesDefault);
+    tabsHidden_ = readOr(kMapPrefTabsHidden, kMapTabsHiddenDefault);
   }
 
   bool traces() const { return traces_; }
   bool names() const { return names_; }
+  bool tabsHidden() const { return tabsHidden_; }
 
   // A key tap. The in-memory value flips even when the write fails (the screen must follow the
   // finger); the return value is the write's.
@@ -48,6 +55,10 @@ class MapLayerPrefs {
     names_ = !names_;
     return store(kMapPrefNames, names_);
   }
+  bool toggleTabsHidden() {
+    tabsHidden_ = !tabsHidden_;
+    return store(kMapPrefTabsHidden, tabsHidden_);
+  }
 
   // A value set without a flip (boot migration, a USB command later).
   bool setTraces(bool v) {
@@ -57,6 +68,10 @@ class MapLayerPrefs {
   bool setNames(bool v) {
     names_ = v;
     return store(kMapPrefNames, v);
+  }
+  bool setTabsHidden(bool v) {
+    tabsHidden_ = v;
+    return store(kMapPrefTabsHidden, v);
   }
 
  private:
@@ -74,6 +89,7 @@ class MapLayerPrefs {
   void* ctx_ = nullptr;
   bool traces_ = kMapTracesDefault;
   bool names_ = kMapNamesDefault;
+  bool tabsHidden_ = kMapTabsHiddenDefault;
 };
 
 }  // namespace ui

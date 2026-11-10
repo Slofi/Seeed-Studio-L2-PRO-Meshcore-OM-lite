@@ -52,7 +52,8 @@ BIN31="$(mktemp /tmp/om-lite-est366.XXXXXX)"
 BIN32="$(mktemp /tmp/om-lite-est367.XXXXXX)"
 BIN33="$(mktemp /tmp/om-lite-est368.XXXXXX)"
 BIN34="$(mktemp /tmp/om-lite-est370.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34"' EXIT
+BIN35="$(mktemp /tmp/om-lite-est373.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -277,12 +278,21 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est368.cpp \
   ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/timekeeper.cpp -o "$BIN33"
 "$BIN33"
 
-# EST-370 + EST-372: the Map's Names tab, the centre cross, the trace palette and the two saved
-# switches. The tab is the top of the right column (44x34, right edge 320, tap, no overlap with the
-# z13 line or the credit box, a marker still wins), the cross is 9x9 at (160,107), the same point
-# map.cpp projects the view centre onto and the Position picker's crosshair uses, the trace colour
-# and widths are fixed in theme.h with a measured contrast floor, and the names/traces store proves
-# its defaults, one-key writes, reloads, a failed write and a missing key.
+# EST-370 + EST-372 + EST-373: the Map's Names tab, the centre cross, the trace palette and the saved
+# switches. The tab is the top of the right column (EST-373: 25x32, right edge 320, tap, no overlap
+# with the z13 line or the credit box, a marker still wins), the cross is 7x7 at (160,107), the same
+# point map.cpp projects the view centre onto and the Position picker's crosshair uses, the trace
+# colour and widths are fixed in theme.h with a measured contrast floor, and the names/traces store
+# proves its defaults, one-key writes, reloads, a failed write and a missing key.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est370.cpp \
   ../../src/ui/map_chrome.cpp -o "$BIN34"
 "$BIN34"
+
+# EST-373: the three map tweaks. The tabs are 25 px (widest icon + 4 px each side) and every tab's tap
+# rectangle IS the rectangle the screen draws (one list, mapTabRects: all four corners, x + w == 320);
+# the hide/show arrow's 28 x 22 target sits above the top tab, hides the column down to 4 px slivers,
+# never moves or hides the zN label, and is saved in the layer store; the centre cross is 7 px in one
+# dark ink with measured contrast floors on the real z13 tile colours.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est373.cpp \
+  ../../src/ui/map_chrome.cpp -o "$BIN35"
+"$BIN35"

@@ -62,8 +62,13 @@ constexpr uint16_t kMapSide   = rgb565(0x11100e);  // mock .map-side
 constexpr uint16_t kMapCredit = rgb565(0x9aa3b0);  // tile attribution, plain dim text on the tiles
 // EST-370 (Filip ~23:40): the attribution is PLAIN text now, no outline and no plate ("no outline on
 // the credits!"). Its box is still mapCreditRect(); the screen draws it transparently.
-// EST-372: the Map's centre mark uses kInk for its two 1 px lines and kMapBg for the 1 px outline
-// under them, so the cross reads on a bright topo tile and on a dark one.
+// EST-373 (Filip 2026-11-11 ~00:38: "just a cross, small, thin, no outlines"): the Map's centre mark
+// is TWO thin dark lines and nothing else. With the 1 px kMapBg outline gone, the old white kInk is
+// invisible on the light topo tiles (1.02:1 on #f0f0e0), so the cross gets one dark ink of its own.
+// Measured on the real z13 tile image: 14.16:1 on the #f0f0e0 ground, 12.34:1 on #e0e0e0, 10.56:1 on
+// the #d0d0d0 road grey, 3.10:1 on its darkest 1 % (#6c6c6a). A dark TILE would swallow it (1.09:1 on
+// #181818): that is what one ink and no outline costs, and this tile pack has no dark tiles.
+constexpr uint16_t kMapCrossInk = rgb565(0x202020);
 // EST-368: OM's Traces (OverMesh .trace CSS): a dashed route, a moving dot with a short fading
 // tail, and an expanding ring for a direct arrival.
 // EST-372 (Filip ~23:55: "make it a little bit more visible, also maybe change the trace colour to

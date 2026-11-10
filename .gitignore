@@ -1,0 +1,5 @@
+# PlatformIO build output lives in ~/.cache/pio-om-lite (see platformio.ini), never here.
+.pio/
+.vscode/
+*.bin
+*.elf

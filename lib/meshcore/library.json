@@ -1,0 +1,21 @@
+{
+  "name": "meshcore",
+  "version": "1.16.0",
+  "description": "MeshCore core (MIT), firmware mains and platform/CLI/sensor helpers excluded",
+  "build": {
+    "srcFilter": [
+      "+<*.cpp>",
+      "+<helpers/*.cpp>",
+      "+<helpers/radiolib/*.cpp>",
+      "-<armstubs.cpp>",
+      "-<helpers/ESP32Board.cpp>",
+      "-<helpers/NRF52Board.cpp>",
+      "-<helpers/AutoDiscoverRTCClock.cpp>",
+      "-<helpers/CommonRadioPrefs.cpp>",
+      "-<helpers/CommonCLI.cpp>",
+      "-<helpers/SensorManager.cpp>",
+      "-<helpers/EnvironmentSensorManager.cpp>",
+      "-<helpers/RTC_*.cpp>"
+    ]
+  }
+}

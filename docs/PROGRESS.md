@@ -3018,5 +3018,5 @@ whether `region put` with a long parent line fits the CLI frame.
 
 ## 2026-11-10 19:58 (Claude): EST-360 on the device
 - Built in the sandbox (exit 0, RAM 148,368 B, flash 2,752,545 B), tests exit 0, reviewed binary flashed (2,752,912 B).
-- `rptr scan`: Argus answered (Trnovo II did not this time). `rptr regions "Argus mobile RPTR"` (anonymous, no login): `clock=1715779092 (real) regions="*, si, lj"`. **Argus's clock reads 2024-05-15 11:58 UTC**: it is the MeshCore 2024 restart clock, so "Sync clock" is needed there. Small defect: the reply was labelled "(real)" although a 2024 stamp is below the 2025-01-01 cut-off; use the same kMinSaneEpoch rule.
+- `rptr scan`: Argus answered (Trnovo II did not this time). `rptr regions "Argus mobile RPTR"` (anonymous, no login): `clock=1715779092 (real) regions="*, si, lj"`. **Argus's clock reads 2024-05-15 13:18 UTC**: it is the MeshCore 2024 restart clock, so "Sync clock" is needed there. Small defect: the reply was labelled "(real)" although a 2024 stamp is below the 2025-01-01 cut-off; use the same kMinSaneEpoch rule.
 - The status card in volts, login and clock sync need Filip's repeater password: Filip.

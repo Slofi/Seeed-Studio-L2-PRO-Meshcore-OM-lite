@@ -14,7 +14,7 @@ struct NodeItem {
   NodeType type = NodeType::Unknown;
   int16_t rssi = kNoRssi;
   char note[16] = "";   // "direct", "path 4B", ...
-  char age[8] = "";     // "now", "2m", "3h", ...
+  char age[16] = "";    // "14:02", "Mon 14:02", "10.11. 14:02", or an age when the clock was not real
 };
 
 struct NodesView {

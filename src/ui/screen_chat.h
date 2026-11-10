@@ -35,6 +35,8 @@ struct ChatView {
   int msgCount = 0;
   int scroll = 0;           // px scrolled up from the newest message (0 = at the bottom)
   uint32_t nowSec = 0;      // monotonic uptime; chat ages survive a clock sync
+  uint32_t nowWall = 0;     // the system clock now (real only when nowReal)
+  bool nowReal = false;     // a real source has set the clock since boot
   bool osk = false;
   bool shift = false;
   bool nums = false;

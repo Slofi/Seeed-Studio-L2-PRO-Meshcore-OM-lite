@@ -24,6 +24,8 @@ struct ChatMsgView {
   const char* text = "";
   const char* chanName = "";
   uint32_t ts = 0;          // uptime seconds when it was stored (monotonic: clock-jump proof)
+  uint32_t wall = 0;        // system-clock seconds at the same moment (0 = unknown)
+  bool wallReal = false;    // the clock was a real source at that moment
   int8_t hops = -1;         // packet hops, -1 = local echo / unknown
   int8_t snrq = 0;          // SNR x 4 (MeshCore's unit), 0 = unknown
   bool mine = false;
@@ -47,6 +49,8 @@ struct ChatEntry {
   char lastFrom[kMeshNameCap] = "";    // the last message's sender, MeshCore's own name limit
   char lastText[kMeshTextCap] = "";    // its whole text; the preview line ellipsises at draw time
   uint32_t lastTs = 0;                 // uptime seconds when it was stored
+  uint32_t lastWall = 0;               // system-clock seconds at the same moment
+  bool lastWallReal = false;           // the clock was real at that moment
 };
 
 // Unread messages waiting in the chats other than the open one: the header's gold dot shows this, so

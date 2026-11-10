@@ -225,6 +225,21 @@ bool formatClock(uint32_t epochUtc, char* out, size_t cap) {
   return true;
 }
 
+bool localCivil(uint32_t epochUtc, int& year, int& month, int& day, int& hour, int& minute,
+                int* weekday) {
+  ensureLjubljanaTz();
+  const time_t t = (time_t)epochUtc;
+  struct tm tmv;
+  if (localtime_r(&t, &tmv) == nullptr) return false;
+  year = tmv.tm_year + 1900;
+  month = tmv.tm_mon + 1;
+  day = tmv.tm_mday;
+  hour = tmv.tm_hour;
+  minute = tmv.tm_min;
+  if (weekday) *weekday = tmv.tm_wday;
+  return true;
+}
+
 uint32_t bootEpoch(uint32_t savedFloorUtc, uint32_t buildEpochUtc) {
   const uint32_t saved = saneEpoch(savedFloorUtc) ? savedFloorUtc : 0;
   const uint32_t build = saneEpoch(buildEpochUtc) ? buildEpochUtc : 0;

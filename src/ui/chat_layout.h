@@ -38,7 +38,8 @@ struct ChatLayout {
   Rect sheet;
   Rect replyBar;    // empty when the draft is not answering a message
   Rect draft;
-  Rect keys[4][10];
+  Rect keys[4][10];       // the DRAWN key rectangles (the mock's 4 px side pad stays visible)
+  Rect keyHit[4][10];     // the touch rectangles: outer keys reach the screen edges, bottom row the floor
   uint8_t keyCount[4] = {0, 0, 0, 0};
   bool selector = false;   // the chat dropdown is open
   Rect selPanel;           // the dropdown: the message band, header bottom to compose top
@@ -46,7 +47,24 @@ struct ChatLayout {
   Rect selManage;          // the pinned last row: "Manage channels"
 };
 
+// A key under a point. keyAt() uses keyHit, never the drawn rectangles.
+struct KeyHit {
+  int row = -1;
+  int col = -1;
+};
+
 ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector);
+
+// The key under (x, y), or {-1,-1}. The caller has already clamped into the screen.
+KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y);
+
+// A touch inside the keyboard sheet never closes it (only the fingers on a key, the draft or a
+// message above do something). Only a touch ABOVE the sheet closes it. Plain arithmetic so host tests
+// can prove the rule without LovyanGFX.
+inline bool chatSheetClosesAt(const ChatLayout& g, int x, int y) {
+  (void)x;
+  return g.osk && y < g.sheet.y;
+}
 
 // --- the chat selector arithmetic ---------------------------------------------------------------
 // The list holds a "Channels" label, one row per channel, a "Direct messages" label and either one

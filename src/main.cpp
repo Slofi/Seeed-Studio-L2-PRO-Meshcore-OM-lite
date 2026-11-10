@@ -16,6 +16,7 @@
 #include "map.h"
 #include "mesh_link.h"
 #include "channels.h"
+#include "fade.h"
 #include "ota.h"
 #include "radio.h"
 #include "radio_fault.h"
@@ -120,11 +121,15 @@ static bool g_sdOk = false;
 static uint16_t g_packMb = 0;
 static uint16_t g_battMv = 0;
 static om::GpsState g_gps;
-// This firmware's build time (UTC). A stored contact timestamp older than this cannot be real, and
-// the Nodes list says "--" for it instead of an invented age (see ui/age.h).
+// This firmware's build time (UTC), used only as the floor's seed in timeKeeper().begin(). It is NOT
+// a timestamp cut-off any more: that moves at every flash and turned every node into "--" (EST-333).
+// The formatter and the last-hour count use the fixed kMinSaneEpoch (2025-01-01 UTC, ui/age.h).
 static uint32_t g_buildEpoch = 0;
 // The wake button woke the screen: touches are gated for 300 ms and a held finger never counts.
 static om::TouchGate g_touchGate;
+// Backlight ramp (EST-338). boardSetBrightness() steps in one go; this is the non-blocking ramp
+// loop() ticks, one I2C write per tick. The level is reset to kScreenBrightness after boardBegin().
+static om::FadeRamp g_fade;
 
 // Nodes tab state. The rows are copied out of mesh_link's contact table, never sample data.
 static om::ui::NodeItem g_nodes[64];
@@ -535,12 +540,14 @@ static void refreshNodes() {
   // Static, not stack: 64 x ContactInfo-sized copies would eat ~3 KB of the loop task's stack.
   static om::MeshContact list[64];
   const int n = om::meshContactList(list, 64);
-  const uint32_t now = om::meshNow();
+  const uint32_t nowWall = om::timeKeeper().now();
+  const uint32_t nowUp = millis() / 1000;
+  const bool nowReal = om::timeKeeper().realSinceBoot();
   g_nodeCount = n;
   // "M in the last hour" is only honest once a real source has set the clock since boot; before
   // that every timestamp is a floor and the header drops the clause (ui/nodes_header.h).
   g_nodeLastHour = 0;
-  g_nodeLastHourKnown = om::timeKeeper().realSinceBoot();
+  g_nodeLastHourKnown = nowReal;
   for (int i = 0; i < n; ++i) {
     om::ui::NodeItem& it = g_nodes[i];
     snprintf(it.name, sizeof(it.name), "%s", list[i].name);
@@ -556,12 +563,16 @@ static void refreshNodes() {
     if (list[i].path_len == 0) snprintf(it.note, sizeof(it.note), "direct");
     else if (list[i].path_len == 0xFF) snprintf(it.note, sizeof(it.note), "path --");
     else snprintf(it.note, sizeof(it.note), "path %uB", (unsigned)list[i].path_len);
-    om::ui::ageText(it.age, sizeof(it.age), list[i].lastmod, now, g_buildEpoch);
-    // The same "is this stamp real" rule ageText uses: not in the future, not from before the build,
-    // and inside the hour.
-    if (g_nodeLastHourKnown && list[i].lastmod != 0 && list[i].lastmod <= now &&
-        (g_buildEpoch == 0 || list[i].lastmod >= g_buildEpoch) &&
-        now - list[i].lastmod <= 3600UL) {
+    om::ui::Stamp when;
+    when.wall = list[i].lastmod;
+    when.uptime = list[i].lastmodUp;
+    when.wallReal = list[i].lastmodReal;
+    om::ui::stampText(it.age, sizeof(it.age), when, nowWall, nowUp, nowReal,
+                      om::ui::StampForm::DayTime);
+    // The same fixed 2025-01-01 cut-off the formatter uses: not in the future, not the old 2024
+    // clock, and inside the hour.
+    if (g_nodeLastHourKnown && list[i].lastmod != 0 && list[i].lastmod <= nowWall &&
+        om::ui::stampIsReal(list[i].lastmod) && nowWall - list[i].lastmod <= 3600UL) {
       ++g_nodeLastHour;
     }
   }
@@ -662,6 +673,8 @@ static void refreshChats() {
     om::ui::ChatEntry& c = g_chats[chan];
     c.hasLast = true;
     c.lastTs = om::meshMsgTs(i);
+    c.lastWall = om::meshMsgWallTs(i);
+    c.lastWallReal = om::meshMsgWallReal(i);
     snprintf(c.lastFrom, sizeof(c.lastFrom), "%s", om::meshMsgName(i));
     snprintf(c.lastText, sizeof(c.lastText), "%s", om::meshMsgText(i));
   }
@@ -696,6 +709,8 @@ static void refreshChatMessages() {
     m.text = om::meshMsgText(i);
     m.chanName = om::mcChannelName(chan);
     m.ts = om::meshMsgTs(i);
+    m.wall = om::meshMsgWallTs(i);
+    m.wallReal = om::meshMsgWallReal(i);
     m.hops = (int8_t)om::meshMsgHops(i);
     m.snrq = (int8_t)om::meshMsgSnrQ(i);
     m.mine = om::meshMsgMine(i);
@@ -723,6 +738,8 @@ static void buildChatView(om::ui::ChatView& v) {
   v.msgCount = g_chatMsgCount;
   v.scroll = g_chatScroll;
   v.nowSec = millis() / 1000;
+  v.nowWall = om::timeKeeper().now();
+  v.nowReal = om::timeKeeper().realSinceBoot();
   v.osk = g_compose;
   v.shift = g_kbShift;
   v.nums = g_kbNums;
@@ -1194,6 +1211,7 @@ void setup() {
   Serial.printf("build: %s %s\n", __DATE__, __TIME__);
 
   g_boardOk = om::boardBegin();
+  g_fade.reset(om::kScreenBrightness);   // boardBegin lit the panel already
   Serial.printf("[om] board: %s\n", g_boardOk ? "ok" : "FAILED");
   om::useAppFont(om::om_display());   // the app font is the default everywhere
   om::omFrameInit();
@@ -1810,6 +1828,7 @@ static void redrawCurrentScreen() {
 void loop() {
   static uint32_t lastBeat = 0;
   static bool screenOn = true;
+  static bool sleepPending = false;   // the backlight is fading out; the panel is still awake
   static bool wakePrev = false;
   static uint32_t lastTap = 0;
   // Gesture state lives here, not down in the touch section, because switching the screen off must
@@ -1826,20 +1845,21 @@ void loop() {
   if (om::wakePressed(pressed)) {
     if (pressed && !wakePrev) {
       if (screenOn) {
-        // Sleep: light off first, then the panel. Any gesture in flight is dropped, so the finger
-        // that was on the glass cannot turn into a tap when it lifts in the dark.
+        // Sleep: fade the backlight out over 150 ms, THEN put the panel to sleep. Any gesture in
+        // flight is dropped, so the finger that was on the glass cannot turn into a tap in the dark.
         screenOn = false;
         g_down = false;
         g_drag = false;
         g_acted = false;
-        om::screenPower(false);
-        Serial.printf("[wake] screen off\n");
+        sleepPending = true;
+        g_fade.start(millis(), g_fade.level(), 0, 150, false);
+        Serial.printf("[wake] screen off (fade 150 ms from %d)\n", g_fade.level());
       } else {
         // Wake, in the order that leaves no diagonal on the glass (Filip, EST-336): the panel out of
         // sleep, DISPOFF at once (LovyanGFX's wakeup() ends with DISPON, see board.h), its sleep-out
         // time, the whole current frame pushed into the panel's RAM while the display is still off,
-        // then DISPON, one full frame period, and only then the backlight. A finger already down (or
-        // one that lands during the gate) is swallowed by g_touchGate.
+        // then DISPON, one full frame period, and only then the backlight ramps up. A finger already
+        // down (or one that lands during the gate) is swallowed by g_touchGate.
         screenOn = true;
         uint16_t tx = 0, ty = 0;
         const bool downAtWake = om::omTouch(tx, ty);
@@ -1847,20 +1867,49 @@ void loop() {
         g_drag = false;
         g_acted = false;
         const uint32_t wakeMs = millis();
-        om::panelPower(true);
-        om::panelDisplay(false);
-        delay(om::kPanelWakeOutMs);
-        redrawCurrentScreen();
-        om::panelDisplay(true);
-        delay(om::kPanelFramePeriodMs);
-        om::boardSetBrightness(om::kScreenBrightness);
-        g_touchGate.onWake(wakeMs, downAtWake);
-        Serial.printf("[wake] screen on (%s at wake), %lums masked\n",
-                      downAtWake ? "finger held" : "no finger",
-                      (unsigned long)om::TouchGate::kGateMs);
+        if (sleepPending) {
+          // Pressed again while the fade-out was still running: the panel never slept, so reverse
+          // the ramp from the current level instead of waking (and flashing) the panel.
+          sleepPending = false;
+          g_fade.start(wakeMs, g_fade.level(), om::kScreenBrightness, 200, true);
+          g_touchGate.onWake(wakeMs, downAtWake);
+          Serial.printf("[wake] screen on (fade reversed at %d), %lums masked\n", g_fade.level(),
+                        (unsigned long)om::TouchGate::kGateMs);
+        } else {
+          om::boardSetBrightness(0);   // stays dark through the panel's sleep-out and the frame push
+          om::panelPower(true);
+          om::panelDisplay(false);
+          delay(om::kPanelWakeOutMs);
+          redrawCurrentScreen();
+          om::panelDisplay(true);
+          delay(om::kPanelFramePeriodMs);
+          // The gate starts when the light starts, so it covers the whole 200 ms fade (EST-338).
+          const uint32_t litMs = millis();
+          g_fade.start(litMs, 0, om::kScreenBrightness, 200, true);
+          g_touchGate.onWake(litMs, downAtWake);
+          Serial.printf("[wake] screen on (%s at wake), %lums masked\n",
+                        downAtWake ? "finger held" : "no finger",
+                        (unsigned long)om::TouchGate::kGateMs);
+        }
       }
     }
     wakePrev = pressed;
+  }
+
+  // The non-blocking backlight ramp: at most one level (one I2C write) per loop pass. When the fade
+  // out has reached 0, the panel is put to sleep; the reverse case above already cleared the flag.
+  const int fadeLevel = g_fade.tick(millis());
+  if (fadeLevel >= 0) {
+    om::boardSetBrightness((uint8_t)fadeLevel);
+    if (!g_fade.active()) {
+      Serial.printf("[wake] fade done at %d (%d steps)\n", g_fade.level(), g_fade.steps());
+    }
+  }
+  if (sleepPending && !g_fade.active()) {
+    sleepPending = false;
+    om::panelDisplay(false);
+    om::panelPower(false);
+    Serial.println("[wake] panel asleep");
   }
 
   static uint32_t lastBatt = 0;
@@ -2134,5 +2183,7 @@ void loop() {
       }
     }
   }
-  delay(20);
+  // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels in the 200 ms
+  // fade; otherwise keep the old 20 ms loop (mesh, touch, draw).
+  delay(g_fade.active() ? 1 : 20);
 }

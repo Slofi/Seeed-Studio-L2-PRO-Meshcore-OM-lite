@@ -24,6 +24,8 @@ int meshMsgChannel(int idx);
 const char* meshMsgName(int idx);
 bool meshMsgMine(int idx);
 uint32_t meshMsgTs(int idx);   // uptime seconds when it was stored (monotonic, clock-jump proof)
+uint32_t meshMsgWallTs(int idx);  // system-clock seconds at the same moment (0 = unknown)
+bool meshMsgWallReal(int idx);    // the clock was a real source at that moment
 int meshMsgHops(int idx);      // path hops the packet carried, -1 = local echo / unknown
 int meshMsgSnrQ(int idx);      // SNR x 4 as int8 (MeshCore's own unit), 0 = unknown
 // The packet's path as it arrived (the repeaters it came over), valid while the message is in the
@@ -65,6 +67,8 @@ struct MeshContact {
   uint8_t type;
   uint8_t path_len;
   uint32_t lastmod;      // MeshCore RTC seconds when it was last heard
+  uint32_t lastmodUp;    // uptime seconds at that moment (0 = loaded from flash, unknown)
+  bool lastmodReal;      // the clock was a real source when lastmod was written
   bool has_pos;
   int32_t lat_e6;
   int32_t lon_e6;

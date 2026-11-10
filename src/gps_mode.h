@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: MIT
-// The L76K constellation-mode command ($PCAS04,7 = GPS + BeiDou + GLONASS) as a plain state machine.
+// The L76K diagnostic: does our TX path reach the module at all, and which constellation modes does
+// this module accept? (EST-338, after `$PCAS04,7` was still not taken in EST-337.)
 //
-// Why it is not sent in gpsBegin(): the module's reset line is released in boardBegin(), and the
-// command used to go out 250 ms later, while the L76K was still starting. The boot log showed binary
-// bytes before the first NMEA line and the heartbeat kept saying expected=12(g9 l0 b3), i.e. the
-// module ignored it. So the command is sent only after the first sentence with a valid checksum has
-// arrived: at that point the module is up and listening. Then we watch for a GLONASS talker for
-// kWaitMs; if none appears the command is sent again, up to kMaxTries, and then we say so.
+// One boot answers it in this order, after the module has proved it is up (the first checksum-valid
+// NMEA sentence):
 //
-// The module's flash is never written ($PCAS00): the mode is set at every boot, so a module that was
-// factory-reset still ends up in the right mode.
+//   1. TX PATH. Send a harmless command with a visible effect: `$PCAS03` turns GSV output OFF for
+//      5 s, then ON again. If the GSV lines stop and come back, the write path (GPIO17) works; if
+//      they never stop, the module is not receiving our bytes. The caller logs
+//      `[gps] tx path: ok` or `[gps] tx path: no effect`. L76K PCAS03 takes the per-sentence output
+//      period in the order GGA,GLL,GSA,GSV,RMC,VTG,ZDA,ANT (0 = off, 1 = every fix); the probe
+//      changes only the GSV field.
+//   2. MODE 7 (GPS + BeiDou + GLONASS). Watch 15 s for a GLONASS talker.
+//   3. If mode 7 did not take, MODE 5 (GPS + GLONASS). Watch 15 s for a GLONASS talker.
+//   4. Restore MODE 3 (GPS + BeiDou, the module's factory mode) unless mode 7 worked.
 //
-// A reboot of the module resets the machine: either an explicit onModuleReboot() (gpsBegin) or a
-// silence of kRebootGapMs between valid sentences while the module had been talking. The next valid
-// sentence then sends the command again.
+// The module's flash is never written ($PCAS00 is never sent), so this survives a factory reset.
+// A module reboot (explicit onModuleReboot(), or a >5 s silence between valid sentences) starts the
+// sequence over.
 //
-// Plain C++ (no Arduino, no LovyanGFX) so test/host compiles it with the system g++.
+// Plain C++ (no Arduino, no LovyanGFX), so test/host compiles it with the system g++.
 #pragma once
 
 #include <stddef.h>
@@ -25,12 +29,44 @@
 
 namespace om {
 
-enum class GpsModeAction : uint8_t {
+// One action for the caller: write one of the commands.
+enum class GpsDiagAction : uint8_t {
   None = 0,
-  Send,      // write "$PCAS04,7" now (tries() is the attempt number, 1..3)
-  Seen,      // a GLONASS talker appeared: the mode is on
-  GaveUp,    // three tries, no GLONASS inside the window
+  TxProbeOff,   // $PCAS03 with GSV output off
+  TxProbeOn,    // $PCAS03 with GSV output on
+  Mode7,        // $PCAS04,7 (GPS + BeiDou + GLONASS)
+  Mode5,        // $PCAS04,5 (GPS + GLONASS)
+  Mode3,        // $PCAS04,3 (GPS + BeiDou, factory mode)
 };
+
+// What just happened, for the caller's log line. One step carries one event and one action.
+enum class GpsDiagEvent : uint8_t {
+  None = 0,
+  TxPathOk,
+  TxPathNoEffect,
+  Mode7Taken,
+  Mode7NotTaken,
+  Mode5Taken,
+  Mode5NotTaken,
+};
+
+enum class GpsTxPath : uint8_t { Unknown = 0, Ok, NoEffect };
+enum class GpsModeResult : uint8_t { NotTried = 0, Taken, NotTaken };
+
+struct GpsDiagStep {
+  GpsDiagAction action = GpsDiagAction::None;
+  GpsDiagEvent event = GpsDiagEvent::None;
+
+  bool operator==(const GpsDiagStep& o) const {
+    return action == o.action && event == o.event;
+  }
+};
+
+// True for any GSV sentence (GPGSV, GLGSV, BDGSV, GNGSV): the TX probe watches these lines stop and
+// return. The checksum is the caller's job; only complete, valid lines reach the machine.
+inline bool gpsLineHasGsv(const char* line) {
+  return line != nullptr && line[0] == '$' && strlen(line) >= 6 && strncmp(line + 3, "GSV", 3) == 0;
+}
 
 // True when `line` is a GLONASS talker, or a combined sentence that carries GLONASS satellites:
 //   * $GLGSV / $GLGSA: the module reports GLONASS directly;
@@ -98,69 +134,149 @@ inline bool gpsLineHasGlonass(const char* line) {
 
 class GpsModeSetter {
  public:
-  static constexpr uint32_t kWaitMs = 15000;      // how long to watch after each try
-  static constexpr int kMaxTries = 3;
+  static constexpr uint32_t kProbeOffMs = 5000;   // GSV is off this long, then turned back on
+  static constexpr uint32_t kProbeOnMs = 5000;    // and expected back inside this window
+  // The module sends its NMEA lines in one burst each second. The OFF command can land in the middle
+  // of a burst, so GSV lines in the first 500 ms are still from the old setting and do not count.
+  static constexpr uint32_t kProbeSettleMs = 500;
+  static constexpr uint32_t kModeWaitMs = 15000;  // GLONASS watch after mode 7 / mode 5
   static constexpr uint32_t kRebootGapMs = 5000;  // valid sentences never pause this long in normal use
 
-  // A complete NMEA line whose checksum is valid. Handles both the GLONASS observation and, when
-  // the module has just come up, the first Send. Call once per valid line.
-  GpsModeAction onValidSentence(const char* line, uint32_t nowMs) {
+  // One complete NMEA line whose checksum is valid. Call once per line.
+  GpsDiagStep onValidSentence(const char* line, uint32_t nowMs) {
     if (talked_ && (uint32_t)(nowMs - lastSentenceMs_) >= kRebootGapMs) onModuleReboot();
     talked_ = true;
     lastSentenceMs_ = nowMs;
 
-    if (gpsLineHasGlonass(line)) {
-      if (state_ == State::Seen) return GpsModeAction::None;
-      state_ = State::Seen;
-      return GpsModeAction::Seen;
+    switch (state_) {
+      case State::WaitModule:
+        // The module is up and listening: start the TX-path probe.
+        state_ = State::ProbeOff;
+        phaseMs_ = nowMs;
+        gsvDuringOff_ = 0;
+        gsvDuringOn_ = 0;
+        return step(GpsDiagAction::TxProbeOff, GpsDiagEvent::None);
+
+      case State::ProbeOff:
+        // Ignore the tail of the burst the command landed in.
+        if (gpsLineHasGsv(line) && (uint32_t)(nowMs - phaseMs_) >= kProbeSettleMs) ++gsvDuringOff_;
+        return {};
+
+      case State::ProbeOn:
+        if (gpsLineHasGsv(line)) {
+          if (gsvDuringOff_ == 0) {
+            // GSV disappeared during the OFF window and is back: the bytes reached the module.
+            txPath_ = GpsTxPath::Ok;
+            state_ = State::WaitMode7;
+            phaseMs_ = nowMs;
+            return step(GpsDiagAction::Mode7, GpsDiagEvent::TxPathOk);
+          }
+          ++gsvDuringOn_;
+        }
+        return {};
+
+      case State::WaitMode7:
+        if (gpsLineHasGlonass(line)) {
+          mode7_ = GpsModeResult::Taken;
+          state_ = State::Done;
+          return step(GpsDiagAction::None, GpsDiagEvent::Mode7Taken);
+        }
+        return {};
+
+      case State::WaitMode5:
+        if (gpsLineHasGlonass(line)) {
+          mode5_ = GpsModeResult::Taken;
+          state_ = State::Done;
+          // Mode 5 proved the module can do GLONASS but is not the mode we keep.
+          return step(GpsDiagAction::Mode3, GpsDiagEvent::Mode5Taken);
+        }
+        return {};
+
+      case State::Done:
+      default:
+        return {};
     }
-    if (state_ == State::WaitModule) {
-      startTry(nowMs);
-      return GpsModeAction::Send;
-    }
-    return GpsModeAction::None;
   }
 
-  // Call regularly (every poll); returns Send when the 15 s window expired, GaveUp after the third.
-  GpsModeAction tick(uint32_t nowMs) {
-    if (state_ != State::WaitGlonass) return GpsModeAction::None;
-    if ((uint32_t)(nowMs - lastTryMs_) < kWaitMs) return GpsModeAction::None;
-    if (tries_ < kMaxTries) {
-      startTry(nowMs);
-      return GpsModeAction::Send;
+  // Call regularly (every gpsPoll). Runs the windows and the fallbacks.
+  GpsDiagStep tick(uint32_t nowMs) {
+    switch (state_) {
+      case State::ProbeOff:
+        if ((uint32_t)(nowMs - phaseMs_) < kProbeOffMs) return {};
+        // 5 s of OFF are over. Turn GSV back on and wait for the first one.
+        gsvDuringOn_ = 0;
+        state_ = State::ProbeOn;
+        phaseMs_ = nowMs;
+        return step(GpsDiagAction::TxProbeOn, GpsDiagEvent::None);
+
+      case State::ProbeOn:
+        if ((uint32_t)(nowMs - phaseMs_) < kProbeOnMs) return {};
+        // GSV never came back (or never stopped): the write had no visible effect.
+        txPath_ = GpsTxPath::NoEffect;
+        state_ = State::WaitMode7;
+        phaseMs_ = nowMs;
+        return step(GpsDiagAction::Mode7, GpsDiagEvent::TxPathNoEffect);
+
+      case State::WaitMode7:
+        if ((uint32_t)(nowMs - phaseMs_) < kModeWaitMs) return {};
+        mode7_ = GpsModeResult::NotTaken;
+        state_ = State::WaitMode5;
+        phaseMs_ = nowMs;
+        return step(GpsDiagAction::Mode5, GpsDiagEvent::Mode7NotTaken);
+
+      case State::WaitMode5:
+        if ((uint32_t)(nowMs - phaseMs_) < kModeWaitMs) return {};
+        mode5_ = GpsModeResult::NotTaken;
+        state_ = State::Done;
+        return step(GpsDiagAction::Mode3, GpsDiagEvent::Mode5NotTaken);
+
+      case State::WaitModule:
+      case State::Done:
+      default:
+        return {};
     }
-    state_ = State::GaveUp;
-    return GpsModeAction::GaveUp;
   }
 
-  // The module rebooted (or gpsBegin re-opened the UART): wait for it to talk, then send again.
+  // The module rebooted (or gpsBegin re-opened the UART): wait for it to talk, then run again.
   void onModuleReboot() {
     state_ = State::WaitModule;
-    tries_ = 0;
-    lastTryMs_ = 0;
-    talked_ = false;
+    phaseMs_ = 0;
     lastSentenceMs_ = 0;
+    talked_ = false;
+    gsvDuringOff_ = 0;
+    gsvDuringOn_ = 0;
+    txPath_ = GpsTxPath::Unknown;
+    mode7_ = GpsModeResult::NotTried;
+    mode5_ = GpsModeResult::NotTried;
   }
 
-  int tries() const { return tries_; }
-  bool seen() const { return state_ == State::Seen; }
-  bool gaveUp() const { return state_ == State::GaveUp; }
   bool waitingForModule() const { return state_ == State::WaitModule; }
+  bool done() const { return state_ == State::Done; }
+  GpsTxPath txPath() const { return txPath_; }
+  GpsModeResult mode7() const { return mode7_; }
+  GpsModeResult mode5() const { return mode5_; }
+  int gsvDuringOff() const { return gsvDuringOff_; }
+  int gsvDuringOn() const { return gsvDuringOn_; }
 
  private:
-  enum class State : uint8_t { WaitModule, WaitGlonass, Seen, GaveUp };
+  enum class State : uint8_t { WaitModule, ProbeOff, ProbeOn, WaitMode7, WaitMode5, Done };
 
-  void startTry(uint32_t nowMs) {
-    ++tries_;
-    lastTryMs_ = nowMs;
-    state_ = State::WaitGlonass;
+  static GpsDiagStep step(GpsDiagAction action, GpsDiagEvent event) {
+    GpsDiagStep s;
+    s.action = action;
+    s.event = event;
+    return s;
   }
 
   State state_ = State::WaitModule;
-  int tries_ = 0;
-  uint32_t lastTryMs_ = 0;
+  uint32_t phaseMs_ = 0;
   uint32_t lastSentenceMs_ = 0;
   bool talked_ = false;
+  int gsvDuringOff_ = 0;
+  int gsvDuringOn_ = 0;
+  GpsTxPath txPath_ = GpsTxPath::Unknown;
+  GpsModeResult mode7_ = GpsModeResult::NotTried;
+  GpsModeResult mode5_ = GpsModeResult::NotTried;
 };
 
 }  // namespace om

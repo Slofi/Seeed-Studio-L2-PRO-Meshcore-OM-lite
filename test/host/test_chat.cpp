@@ -876,6 +876,72 @@ static void testMessageSheet() {
   CHECK(formatMessagePath(out, sizeof(out), longPath, 3, 22, fakeResolve, nullptr) == 0);
 }
 
+// The keyboard's bottom edge (EST-338). The drawn keys keep the mock's 4 px side pad, but the TOUCH
+// rectangles reach the screen edges and the bottom row reaches the floor. A touch in the 2 px gap
+// between keys is inside the sheet and does nothing; only a touch above the sheet closes it.
+static void testKeyboardEdges() {
+  const Layout& L = l2();
+  const ChatLayout g = chatLayoutFor(L, true, false, false, false);
+  KeyDef defs[10];
+  const int n = keyRow(false, 3, defs);
+  CHECK(n == 5);
+  CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "123") == 0);
+  CHECK(defs[2].kind == KeyKind::Space);
+  CHECK(defs[4].kind == KeyKind::Send);
+  CHECK(g.keyCount[3] == 5);
+
+  // The DRAWN rectangles did not move: the 4 px side pad and the 4 px pad under the last row stay.
+  CHECK(g.keys[3][0].x == kOskPad);
+  CHECK(g.keys[3][0].bottom() == (int16_t)(L.height - kOskPad));
+  CHECK(g.keys[3][4].right() == (int16_t)(L.width - kOskPad));
+
+  // The TOUCH rectangles reach the floor and the side edges on every row.
+  for (int r = 0; r < 4; ++r) {
+    CHECK(g.keyCount[r] > 0);
+    CHECK(g.keyHit[r][0].x == 0);
+    CHECK(g.keyHit[r][g.keyCount[r] - 1].right() == L.width);
+  }
+  for (int c = 0; c < g.keyCount[3]; ++c) CHECK(g.keyHit[3][c].bottom() == L.height);
+
+  // y = 239 (the last pixel row) still hits Send, space and 123.
+  const int xSend = g.keyHit[3][4].x + g.keyHit[3][4].w / 2;
+  const int xSpace = g.keyHit[3][2].x + g.keyHit[3][2].w / 2;
+  const int x123 = g.keyHit[3][0].x + g.keyHit[3][0].w / 2;
+  KeyHit h = keyAt(g, false, xSend, 239);
+  CHECK(h.row == 3 && h.col == 4);
+  h = keyAt(g, false, xSpace, 239);
+  CHECK(h.row == 3 && h.col == 2);
+  h = keyAt(g, false, x123, 239);
+  CHECK(h.row == 3 && h.col == 0);
+
+  // A raw y on or past the bottom edge is clamped into the screen before the hit test.
+  int cx = xSend, cy = 240;
+  clampTouchToScreen(cx, cy, L.width, L.height);
+  CHECK(cy == L.height - 1);
+  h = keyAt(g, false, cx, cy);
+  CHECK(h.row == 3 && h.col == 4);
+  cx = xSpace;
+  cy = 999;
+  clampTouchToScreen(cx, cy, L.width, L.height);
+  CHECK(cy == L.height - 1);
+  h = keyAt(g, false, cx, cy);
+  CHECK(h.row == 3 && h.col == 2);
+
+  // A 2 px gap between two keys is inside the sheet but hits no key: it does nothing (no close).
+  const int gapX = g.keyHit[3][0].right();
+  CHECK(keyAt(g, false, gapX, 230).row < 0);
+  CHECK(!chatSheetClosesAt(g, gapX, 230));
+  // A gap between two rows: also nothing.
+  const int gapY = g.keys[2][0].bottom();
+  CHECK(keyAt(g, false, xSpace, gapY).row < 0);
+  CHECK(!chatSheetClosesAt(g, xSpace, gapY));
+
+  // Only a touch ABOVE the sheet closes it.
+  CHECK(chatSheetClosesAt(g, 100, g.sheet.y - 1));
+  CHECK(!chatSheetClosesAt(g, 100, g.sheet.y));
+  CHECK(!chatSheetClosesAt(g, 100, L.height - 1));
+}
+
 int main() {
   testWrap();
   testUtf8();
@@ -888,6 +954,7 @@ int main() {
   testComposeBudget();
   testBadge();
   testMessageSheet();
+  testKeyboardEdges();
 
   if (g_fail) {
     printf("%d chat check(s) FAILED\n", g_fail);

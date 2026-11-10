@@ -173,6 +173,9 @@ constexpr int16_t kMsgPadY     = 5;
 constexpr int16_t kMsgGap      = 4;
 constexpr int16_t kMsgLineH    = 14;
 constexpr int16_t kMsgHdrGap   = 4;    // time -> name -> text gaps on the first line
+// The chat line's time column is always five mono glyphs (HH:MM) wide, so the name and the text start
+// at the same x whether the clock shows "14:02" or the age fallback "5m" (EST-338).
+constexpr int16_t kMsgStampW   = 5 * 6;
 
 // Compose line: .compose padding 4px 6px, a .field of mono 8.5 px with 3px 5px padding and 1 px border.
 // 27 px keeps the field at 20 px and the line 3 px inside the edges. No Send button (Filip,

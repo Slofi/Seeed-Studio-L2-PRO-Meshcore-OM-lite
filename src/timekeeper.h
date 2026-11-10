@@ -101,6 +101,12 @@ bool parseBuildTimestamp(const char* date, const char* time, uint32_t& epochUtc)
 // 24-hour. The first call installs TZ for the process; later calls are cheap.
 bool formatClock(uint32_t epochUtc, char* out, size_t cap);
 
+// The local civil fields of an epoch (the same Europe/Ljubljana TZ as formatClock). weekday is
+// 0 = Sunday. The one timestamp formatter (ui/age.h) and the status bar must agree on which day a
+// stamp belongs to, so both go through this.
+bool localCivil(uint32_t epochUtc, int& year, int& month, int& day, int& hour, int& minute,
+                int* weekday = nullptr);
+
 // Local civil date -> UTC epoch with the same TZ rules (used for the build floor only).
 bool localEpochFromCivil(int year, int month, int day, int hour, int minute, int second,
                          uint32_t& epochUtc);

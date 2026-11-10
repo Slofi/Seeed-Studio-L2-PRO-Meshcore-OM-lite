@@ -147,11 +147,44 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
       for (int i = 0; i < n; ++i) units[i] = defs[i].units;
       const Rect row{kOskPad, (int16_t)y, innerW, kOskKeyH};
       g.keyCount[r] = (uint8_t)rowKeyRects(row, units, n, kOskKeyGap, g.keys[r]);
+      // Hit rectangles: the drawn keys stay where the mock puts them (4 px side pad), but a finger in
+      // that pad on the outermost key, or on the last pixel rows under the bottom row, belongs to the
+      // key. Only the 2 px gaps BETWEEN keys still do nothing (EST-338).
+      for (int c = 0; c < n; ++c) g.keyHit[r][c] = g.keys[r][c];
+      if (n > 0) {
+        if (n == 1) {
+          g.keyHit[r][0] = Rect{0, g.keys[r][0].y, L.width, g.keys[r][0].h};
+        } else {
+          g.keyHit[r][0].x = 0;
+          g.keyHit[r][0].w = (int16_t)g.keys[r][0].right();
+          g.keyHit[r][n - 1].w = (int16_t)(L.width - g.keys[r][n - 1].x);
+        }
+        if (r == 3) {
+          for (int c = 0; c < n; ++c) {
+            g.keyHit[r][c].h = (int16_t)(L.height - g.keyHit[r][c].y);
+          }
+        }
+      }
       y += kOskKeyH + kOskKeyGap;
     }
   }
 
   return g;
+}
+
+KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y) {
+  KeyHit hit;
+  for (int r = 0; r < 4; ++r) {
+    KeyDef defs[10];
+    const int n = keyRow(nums, r, defs);
+    for (int c = 0; c < n && c < g.keyCount[r]; ++c) {
+      if (!g.keyHit[r][c].contains(x, y)) continue;
+      hit.row = r;
+      hit.col = c;
+      return hit;
+    }
+  }
+  return hit;
 }
 
 int selContentHeight(int channelCount, int dmCount) {

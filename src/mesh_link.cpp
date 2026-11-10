@@ -73,6 +73,8 @@ struct Msg {
   uint8_t pathCount;      // repeaters the packet came over
   uint8_t repeats;        // own message: times we heard our packet repeated by others
   uint32_t ts;     // uptime seconds when it was stored (monotonic: a GPS sync cannot disturb ages)
+  uint32_t wall;   // system-clock seconds at that moment (0 = unknown)
+  uint8_t wallReal;   // the clock was a real source then; the age fallback needs this
   uint32_t seq;    // stable message id across ring shifts, see meshMsgSeq()
   char name[kMeshNameCap];
   char text[kMeshTextCap];
@@ -83,6 +85,51 @@ Msg s_msgs[kMsgRing];
 uint32_t s_msgSeq = 0;   // messages ever stored; the next slot is s_msgSeq % kMsgRing
 int s_msgCount = 0;      // readable messages, capped at kMsgRing
 uint8_t s_unread[8] = {0};
+
+// Per-contact stamp bookkeeping. MeshCore's ContactInfo has lastmod but no room for "was the clock
+// real when that was written", and no uptime. This small side table is filled from
+// onDiscoveredContact (lastmod is already set there, checked in BaseChatMesh.cpp) and read by
+// fillContact(). A contact restored from flash has no entry: its lastmod is judged by the fixed
+// 2025-01-01 cut-off in ui/age.h, exactly like the old 2024 clock.
+struct ContactStamp {
+  uint8_t key[PUB_KEY_SIZE];
+  uint32_t wall;
+  uint32_t uptime;
+  bool real;
+  uint32_t used;
+};
+constexpr int kContactStamps = 40;
+ContactStamp s_contactStamps[kContactStamps] = {};
+uint32_t s_contactStampClock = 0;
+
+ContactStamp* findContactStamp(const uint8_t* key) {
+  if (key == nullptr) return nullptr;
+  for (int i = 0; i < kContactStamps; ++i) {
+    if (s_contactStamps[i].used != 0 && memcmp(s_contactStamps[i].key, key, PUB_KEY_SIZE) == 0) {
+      return &s_contactStamps[i];
+    }
+  }
+  return nullptr;
+}
+
+void markContactStamp(const ContactInfo& ci) {
+  ContactStamp* slot = findContactStamp(ci.id.pub_key);
+  if (slot == nullptr) {
+    for (int i = 0; i < kContactStamps; ++i) {
+      if (s_contactStamps[i].used == 0) {
+        slot = &s_contactStamps[i];
+        break;
+      }
+      if (slot == nullptr || s_contactStamps[i].used < slot->used) slot = &s_contactStamps[i];
+    }
+  }
+  if (slot == nullptr) return;
+  memcpy(slot->key, ci.id.pub_key, PUB_KEY_SIZE);
+  slot->wall = ci.lastmod;
+  slot->uptime = millis() / 1000;
+  slot->real = timeKeeper().realSinceBoot();
+  slot->used = ++s_contactStampClock;
+}
 
 // MeshTables with one extra job: counting the times our OWN packet is heard again, repeated by
 // someone else. This uses only MeshCore's public virtual interface (markSeen/wasSeen), no library
@@ -318,7 +365,8 @@ public:
   // Any advert that lands in the table, and every learned return path, marks it for a (rate
   // limited) save. New contacts, name/type/position updates and path updates all come through
   // onDiscoveredContact; onContactPathUpdated covers a path learned from a later packet.
-  void onDiscoveredContact(ContactInfo&, bool, uint8_t, const uint8_t*) override {
+  void onDiscoveredContact(ContactInfo& contact, bool, uint8_t, const uint8_t*) override {
+    markContactStamp(contact);   // lastmod is set just before this call (BaseChatMesh.cpp)
     s_contactSaver.markDirty(millis());
   }
   ContactInfo* processAck(const uint8_t*) override { return nullptr; }
@@ -375,6 +423,8 @@ public:
     s_msgs[slot].ch = (uint8_t)(s_lastChannel < 0 ? 0 : s_lastChannel);
     s_msgs[slot].mine = 0;
     s_msgs[slot].ts = millis() / 1000;
+    s_msgs[slot].wall = timeKeeper().now();
+    s_msgs[slot].wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
     // What the air gave us: hops travelled and SNR at the last hop (Dispatcher sets _snr on RX).
     s_msgs[slot].hops = pkt ? (int8_t)pkt->getPathHashCount() : -1;
     s_msgs[slot].snr4 = pkt ? (int8_t)lroundf(pkt->getSNR() * 4.0f) : 0;
@@ -689,6 +739,16 @@ uint32_t meshMsgTs(int idx) {
   return s_msgs[slotFor(idx)].ts;
 }
 
+uint32_t meshMsgWallTs(int idx) {
+  if (idx < 0 || idx >= s_msgCount) return 0;
+  return s_msgs[slotFor(idx)].wall;
+}
+
+bool meshMsgWallReal(int idx) {
+  if (idx < 0 || idx >= s_msgCount) return false;
+  return s_msgs[slotFor(idx)].wallReal != 0;
+}
+
 uint32_t meshMsgSeq(int idx) {
   if (idx < 0 || idx >= s_msgCount) return 0;
   return s_msgs[slotFor(idx)].seq;
@@ -758,6 +818,17 @@ void fillContact(const ContactInfo& ci, MeshContact& mc) {
   mc.type = ci.type;
   mc.path_len = ci.out_path_len;
   mc.lastmod = ci.lastmod;
+  const ContactStamp* mark = findContactStamp(ci.id.pub_key);
+  if (mark != nullptr) {
+    mc.lastmodUp = mark->uptime;
+    mc.lastmodReal = mark->real;
+  } else {
+    // Restored from flash: no uptime and no "was it real" bit survived. The fixed 2025-01-01 cut-off
+    // is the fallback: a stamp inside the sane range is treated as real (the EST-338 rule), a 2024
+    // stamp from the old VolatileRTCClock is not and prints "--".
+    mc.lastmodUp = 0;
+    mc.lastmodReal = saneEpoch(ci.lastmod);
+  }
   mc.has_pos = (ci.gps_lat != 0 || ci.gps_lon != 0);
   mc.lat_e6 = ci.gps_lat;
   mc.lon_e6 = ci.gps_lon;
@@ -867,6 +938,8 @@ bool meshLinkSend(int channelIdx, const char* text) {
     s_msgs[slot].ch = (uint8_t)channelIdx;
     s_msgs[slot].mine = 1;
     s_msgs[slot].ts = millis() / 1000;
+    s_msgs[slot].wall = timeKeeper().now();
+    s_msgs[slot].wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
     s_msgs[slot].hops = -1;   // we know it is local; the air has not told us anything yet
     s_msgs[slot].snr4 = 0;
     s_msgs[slot].pathHashSize = 0;

@@ -9,6 +9,7 @@
 #include "../fonts.h"   // om::useAppFont: leave the 12 px default for the old screens
 #include "board.h"
 #include "mesh_link.h"   // meshPathHopName: naming the repeaters a packet came over
+#include "ui/age.h"       // the one timestamp formatter
 #include "ui/badge_font.h"
 #include "ui/compose_text.h"
 #include "ui/fonts.h"
@@ -29,13 +30,22 @@ int measureRange(void* ctx, const char* text, int len) {
   return measureText(c->d, c->role, text, len);
 }
 
-// Message ages use the monotonic uptime stamps, not the wall clock: a GPS sync can jump the system
-// time forward mid-session, and an age must not go negative or leap by months because of it.
-void ageText(char* out, size_t cap, uint32_t nowSec, uint32_t ts) {
-  const uint32_t age = (nowSec >= ts) ? (nowSec - ts) : 0;
-  if (age < 60) snprintf(out, cap, "%us", (unsigned)age);
-  else if (age < 3600) snprintf(out, cap, "%um", (unsigned)(age / 60));
-  else snprintf(out, cap, "%uh", (unsigned)(age / 3600));
+// The one formatter (ui/age.cpp) takes both clocks and the realness flag. The chat line and the
+// selector use the narrow Clock form (five glyphs, kMsgStampW); the sheet header uses DayTime.
+void messageStamp(char* out, size_t cap, const ChatView& v, const ChatMsgView& m, StampForm form) {
+  Stamp s;
+  s.wall = m.wall;
+  s.uptime = m.ts;
+  s.wallReal = m.wallReal;
+  stampText(out, cap, s, v.nowWall, v.nowSec, v.nowReal, form);
+}
+
+void entryStamp(char* out, size_t cap, const ChatView& v, const ChatEntry& e) {
+  Stamp s;
+  s.wall = e.lastWall;
+  s.uptime = e.lastTs;
+  s.wallReal = e.lastWallReal;
+  stampText(out, cap, s, v.nowWall, v.nowSec, v.nowReal, StampForm::Clock);
 }
 
 // An unread count as the screens show it: one digit, or "9+" above nine (ui/badge_font.h holds the
@@ -90,9 +100,10 @@ void drawChevron(lgfx::LovyanGFX* d, int x, int cy, uint16_t col, bool up, bool 
 // Wraps one message and reports the width the first line loses to the time and the name.
 int wrapMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, const Rect& band,
                 WrapLine* lines, int maxLines, int* prefixOut) {
-  char time[8];
-  ageText(time, sizeof(time), v.nowSec, m.ts);
-  const int timeW = textWidth(d, FontRole::MonoMeta, time);
+  char time[16];
+  messageStamp(time, sizeof(time), v, m, StampForm::Clock);
+  // Fixed five-glyph column: the name and the text do not move when the stamp is an age fallback.
+  const int timeW = kMsgStampW;
   const int nameW = textWidth(d, FontRole::MonoMeta, m.name);
   const int prefix = kMsgPadX + timeW + kMsgHdrGap + nameW + kMsgHdrGap;
   const int firstW = band.w - prefix - kMsgPadX;
@@ -141,9 +152,9 @@ void drawSelRow(lgfx::LovyanGFX* d, const ChatView& v, const ChatEntry& e, int e
   const int nameX = dotX + kSelDot + kSelDotGap;
 
   int right = row.right() - kSelPadX;
-  char age[8];
+  char age[16];
   if (e.hasLast) {
-    ageText(age, sizeof(age), v.nowSec, e.lastTs);
+    entryStamp(age, sizeof(age), v, e);
     drawTextRight(d, FontRole::MonoMeta, kDimmer, on ? kSelBg : kPanel, right, cy1, age);
     right -= textWidth(d, FontRole::MonoMeta, age) + kSelGap;
   }
@@ -246,9 +257,9 @@ void drawMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, co
   WrapLine lines[kMaxWrapLines];
   int prefix = 0;
   const int nl = wrapMessage(d, v, m, band, lines, kMaxWrapLines, &prefix);
-  char time[8];
-  ageText(time, sizeof(time), v.nowSec, m.ts);
-  const int timeW = textWidth(d, FontRole::MonoMeta, time);
+  char time[16];
+  messageStamp(time, sizeof(time), v, m, StampForm::Clock);
+  const int timeW = kMsgStampW;
   const int padX = band.x + kMsgPadX;
   const int cy = top + kMsgLineH / 2;
 
@@ -424,8 +435,8 @@ int buildSheetRows(const ChatView& v, const char* pathText, SheetRow* out) {
 void drawSheetHead(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m,
                    const MessageSheetLayout& g) {
   const int cy1 = g.head.y + kSheetLine1Cy;
-  char age[8];
-  ageText(age, sizeof(age), v.nowSec, m.ts);
+  char age[24];
+  messageStamp(age, sizeof(age), v, m, StampForm::DayTime);
   const int ageW = textWidth(d, FontRole::MonoMeta, age);
   drawTextEllipsis(d, FontRole::SansBody, kInk, kSheet, g.head.x, cy1,
                    g.head.w - ageW - kSheetGap, m.name);
@@ -566,16 +577,18 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
       r.hit = ChatHit::Field;
       return r;
     }
-    for (int row = 0; row < 4; ++row) {
+    // keyAt() uses keyHit: the outer keys reach the screen edges and the bottom row reaches the
+    // floor, so a firm tap low on Send (or on 123/space) is still that key, not "outside" (EST-338).
+    const KeyHit key = keyAt(g, v.nums, x, y);
+    if (key.row >= 0) {
       KeyDef defs[10];
-      const int n = keyRow(v.nums, row, defs);
-      for (int c = 0; c < n && c < g.keyCount[row]; ++c) {
-        if (!g.keys[row][c].contains(x, y)) continue;
+      const int n = keyRow(v.nums, key.row, defs);
+      if (key.col < n) {
         r.hit = ChatHit::Key;
-        r.keyRow = row;
-        r.keyCol = c;
-        r.keyKind = defs[c].kind;
-        r.keyCh = defs[c].label[0];
+        r.keyRow = key.row;
+        r.keyCol = key.col;
+        r.keyKind = defs[key.col].kind;
+        r.keyCh = defs[key.col].label[0];
         return r;
       }
     }
@@ -592,8 +605,9 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
         return r;
       }
     }
-    // The tab bar is hidden while the sheet is open, so everything else is "outside" and closes it.
-    r.hit = ChatHit::Outside;
+    // Inside the sheet but not on a key/draft (a 2 px gap, the header line): do nothing at all. Only
+    // a touch ABOVE the sheet closes it (EST-338). The tab bar is hidden while the sheet is open.
+    if (chatSheetClosesAt(g, x, y)) r.hit = ChatHit::Outside;
     return r;
   }
 

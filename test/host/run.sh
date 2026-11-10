@@ -18,7 +18,8 @@ BIN7="$(mktemp /tmp/om-lite-gps.XXXXXX)"
 BIN8="$(mktemp /tmp/om-lite-bar.XXXXXX)"
 BIN9="$(mktemp /tmp/om-lite-gpsmode.XXXXXX)"
 BIN10="$(mktemp /tmp/om-lite-fault.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10"' EXIT
+BIN11="$(mktemp /tmp/om-lite-fade.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_contact_store.cpp -o "$BIN2"
@@ -36,19 +37,24 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_timekeeper.cpp \
 # Wake touch gate: a finger held through the wake is ignored, a new press after 300 ms counts.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_touch_gate.cpp \
   ../../src/touch_gate.cpp -o "$BIN5"
-# "Last heard" text (a stamp older than the build says "--") and the GPS cell's one number.
+# The one timestamp formatter (today / this week / older, the fixed 2025-01-01 cut-off, the age
+# fallback when the clock was not real) and the GPS cell's one number. It links the real timekeeper
+# for the Ljubljana local fields.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_age.cpp \
-  ../../src/ui/age.cpp -o "$BIN6"
+  ../../src/ui/age.cpp ../../src/timekeeper.cpp -o "$BIN6"
 # GSV: expected vs heard (an empty C/N0 field is not a reception), per constellation, the new-cycle
 # reset, the 60 s best-C/N0 window and the most heard at once since boot.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps.cpp -o "$BIN7"
 # The new top bar (EST-337): time left, gear/battery/GPS/optional icons right-aligned with one gap,
 # the measured worst-case fit, the fault mark's rect, and the Nodes header text.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_status_bar.cpp -o "$BIN8"
-# The L76K mode-7 machine: send only after the module talks, 15 s watch, 3 tries, give up, reboot.
+# The L76K one-boot diagnostic: $PCAS03 GSV off/on TX-path probe, mode 7, mode 5, mode 3 restored.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps_mode.cpp -o "$BIN9"
 # The radio-fault mark's state: each reason, a good TX clears, a radio re-init clears, silence never.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_radio_fault.cpp -o "$BIN10"
+# The backlight ramp: start, end, monotonic, many distinct 8-bit levels, a wake reverses a fade-out.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_fade.cpp \
+  ../../src/fade.cpp -o "$BIN11"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -57,3 +63,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_radio_fault.cpp -o "$
 "$BIN8"
 "$BIN9"
 "$BIN10"
+"$BIN11"

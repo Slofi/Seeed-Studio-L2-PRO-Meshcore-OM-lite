@@ -36,6 +36,21 @@ struct Rect {
   }
 };
 
+// Touch controllers may report a coordinate on or past the panel edge (the GT911 at the very bottom
+// has been seen to report 239 or more after rotation). Clamp into the screen before any hit test, so
+// a finger on the last pixel row is still a finger on the bottom key, not "outside".
+constexpr void clampTouchToScreen(int& x, int& y, int width, int height) {
+  if (width <= 0 || height <= 0) {
+    x = 0;
+    y = 0;
+    return;
+  }
+  if (x < 0) x = 0;
+  else if (x >= width) x = width - 1;
+  if (y < 0) y = 0;
+  else if (y >= height) y = height - 1;
+}
+
 enum class Tab : uint8_t { Nodes = 0, Chat, Map, Rptr, Count };
 constexpr int kTabCount = 4;
 

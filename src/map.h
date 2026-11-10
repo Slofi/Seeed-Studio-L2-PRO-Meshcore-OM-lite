@@ -22,6 +22,11 @@ void mapRender();                                 // draw the 320x200 map area
 // recomposite. The Map's animation frames use this so a moving trace dot costs a frame push, not a
 // tile render. Does nothing until mapRender() has run once.
 void mapRepush();
+// EST-371: the Map's fast open. True once a canvas has been composited and can be repushed without
+// decoding tiles; mapViewStale() is true when a pan/zoom/recentre since then means those tiles no
+// longer show the current view (the shell then refreshes them after the cached frame is visible).
+bool mapCanvasReady();
+bool mapViewStale();
 void mapPan(int dx, int dy);                      // move the view by screen pixels
 void mapZoomBy(int delta);                        // clamp inside the pack's range
 int mapZoom();

@@ -4248,3 +4248,101 @@ check of what the zoom already did.
 
 ## 2026-11-10 23:50 (Claude): EST-370 on the device
 - Built in the sandbox (exit 0, RAM 156,768 B, flash 2,800,001 B), tests exit 0, reviewed binary flashed (2,800,368 B), `chats` 0 mismatches. Map (`docs/shots/2026-11-10-2343-map-names-dot.png`): credits plain dim text, the Names key (on) above Traces, a small centre dot; zoom keeps the centre (DS read the code: + / - change only the level around the unchanged centre).
+
+## 2026-11-10 (DeepSeek): EST-371 map opens from its last frame, main.cpp split (partial)
+
+The ticket had two parts: move each screen's state, drawing glue and tap handling out of main.cpp,
+and make the Map tab open at once instead of decoding its tiles inside the screen change. The second
+part is done and measured as far as the sandbox allows. The first is done for four modules and stops
+at a clean build; the rest is listed below.
+
+### 1. Modules moved out of main.cpp (what changed)
+
+main.cpp went from 7,526 to 6,172 lines. setup(), loop() and the dispatch between tabs stay there,
+plus the state that more than one screen needs. Every moved file compiles in the same build and no
+host test changed its expected behaviour (two tests now scan the new locations, see below).
+
+- `src/screens/map_tab.{h,cpp}` (542 lines): the Map tab's state (follow lock, selected marker, the
+  Traces queue and its animation clock, the two saved layer switches), the MapView builder, the trace
+  engine and the Map chrome tap handling. Its four shell services (status bar, tab bar model, GPS
+  fix, toast) come in through a small `Host` set once in setup().
+- `src/screens/toasts.{h,cpp}` (82 lines): the one toast and the burst queue. ui/toast.h still owns
+  the deadline and the consumed-tap dismissal, ui/notify.h still owns the DND/open-chat decisions.
+- `src/screens/sound_events.{h,cpp}` (176 lines): the per-event library choice, master, volume, DND,
+  touch click and welcome switch, the NVS keys and the EST-359 to EST-361 migration.
+- `src/usb_commands.cpp` (845 lines): every USB test command. The shell's buffers are read through
+  `src/app_shell.h` (read-only accessors), so a command can print what the screens show but cannot
+  write them. `SET_LOOP_TASK_STACK_SIZE` stayed in main.cpp.
+- main.cpp was reduced by moving, not rewriting: the functions themselves kept their comments and
+  their logic. The only new indirection is the Host/callback wiring above.
+
+### 2. Still in main.cpp (what is left)
+
+Nodes (list state, sheet, Info, the new-node dot), Chat (list, view, keyboard sheet, message sheet,
+send), RPTR (session, list, pages, picker, console), Settings (pages, editors, sound picker), the
+keyboard and accent hold, the generic sheets, and the gesture/scroll dispatch in loop(). These are
+the larger, more cross-linked sections; splitting them safely is the next ticket, not a 30-minute
+edit.
+
+### 3. Map opens from its last composed frame (EST-371)
+
+- `map.cpp` now remembers the epoch of the view it composited. `mapSetView()`, `mapPan()` and
+  `mapZoomBy()` bump `s_viewEpoch` only when the view really changes; `mapRender()` stores the epoch
+  it rendered. New calls `mapCanvasReady()` and `mapViewStale()` expose that.
+- The tile canvas is the already existing PSRAM composite: 320 x 214 x 2 = 133.8 KB (the full frame
+  is 153.6 KB / 150 KiB). Nothing has to be allocated for this change.
+- On entering the Map tab, `map_tab::enter()` arms the fast open. `map_tab::draw()` then calls
+  `mapScreenAnimate()`, which repushes the canvas with no SD read and no JPEG decode, and redraws all
+  the chrome (status, tab bar, markers, labels, chip, keys, callout, trace). Only a changed view
+  queues a tile refresh, and `map_tab::pump()` runs that refresh on the next loop pass, after the
+  cached frame is already visible. An unchanged view never decodes a tile again, including a marker
+  select or the once-a-minute clock repaint.
+- New log lines: `[map] open: cached canvas N us, view unchanged` (or `tile refresh queued`) and
+  `[map] refresh: tiles after cached open N ms`. The existing `[ui] change: composed in N ms` line
+  now shows the open frame's compose time.
+
+Measured before (device log, Claude 2026-11-10 17:35): `Nodes -> Map` composed in 101 ms inside the
+dark, with out 40 ms, push 11.376 ms, settle 17 ms and in 60 ms, about 229 ms from tap to light back.
+Measured after: not possible in this sandbox (no serial device, `ls /dev/ttyACM*` sees none), so the
+after number has to come from the flash and the two new log lines. The change removes the tile
+decode and the SD reads from that path; what remains is the canvas repush plus the chrome.
+
+### 4. Build and tests
+
+- `pio run -e om_lite_l2` exit 0: RAM 156,800 B (47.9% of 327,680; EST-370 was 156,768), flash
+  2,803,305 B (42.8% of 6,553,600), firmware.bin 2,803,664 B. The growth is the Host/callback glue
+  and the accessor calls; the moved code is the same code.
+- `sh test/host/run.sh` exit 0. Two tests follow the move: `test_tab_bar_calls.py` now checks the Map
+  view's model in `screens/map_tab.cpp` and its Host wiring in main.cpp; `test_build_flags.py` reads
+  the `loop_stack_free`/`loop_stack_size` status line from `src/usb_commands.cpp`. Every other test
+  is unchanged and passes.
+
+### Could not check (no device, no serial, no glass)
+
+- The after open time and the feel of the Map switch. The log lines above are the evidence.
+- That the cached frame looks right on the glass, especially the status time and a callout opened
+  before leaving the tab (the chrome is redrawn over the cached tiles, so it should be current).
+- The first Map entry still renders every tile (there is no canvas yet); only the second and later
+  entries take the fast path.
+- The sound picker's stored values across a reboot after the move (the host proves the sound logic,
+  NVS itself is the device's).
+
+### Next step for Claude (one reader on the USB port)
+
+1. Flash `firmware.bin` (2,803,664 B). Boot log must still show `[prefs] sound=...` with the same
+   values and `[map] layers traces=1 names=1`.
+2. Open Map, go to Nodes, open Map again. Second entry must print
+   `[map] open: cached canvas N us, view unchanged` and the `[ui] change: composed in N ms` line
+   must be much smaller than the 101 ms baseline. Write the two numbers in this file.
+3. Nodes sheet > Show on map: the Map must appear from the cached frame and then print
+   `[map] refresh: tiles after cached open N ms` one pass later, with the new location's tiles.
+4. Tap a marker, the Traces and Names keys, + / -, follow: each still does what EST-368/370 describe.
+   A zoom or a pan still decodes (the view changed), a marker select no longer does.
+5. Quick regression: Chat send and receive, Settings rows, a sound preview, `tools/cmd.py chats`
+   (0 mismatches) and `status` (loop stack line present).
+6. Next ticket: split Nodes, Chat, RPTR and Settings out of main.cpp in the same style; the Map's
+   Host pattern is the template.
+
+## 2026-11-11 00:30 (Claude): EST-371 on the device
+- Built in the sandbox (exit 0, RAM 156,800 B, flash 2,803,305 B), tests exit 0, reviewed binary flashed (2,803,664 B); `chats` 0 mismatches. main.cpp 7,526 -> 6,172 lines (partial split: map tab, toasts, sound events, USB commands moved out).
+- Map open: first entry composed in 105 ms; the second entry `[map] open: cached canvas 19790 us, view unchanged`, composed in 23 ms. The dip sequence (out ~42 ms, push ~11.5 ms, settle ~18 ms, in ~61 ms) unchanged.

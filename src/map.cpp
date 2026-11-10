@@ -87,6 +87,11 @@ int s_cacheNext = 0;
 // View: centre in world pixels at s_z (Web-Mercator, top-left origin).
 double s_cLat = 46.0569, s_cLon = 14.5058;
 int s_z = 13;
+// EST-371: the canvas is kept between frames, so a Map re-open with the same view can repush it
+// instead of decoding every tile again. Any change to the view bumps s_viewEpoch; mapRender() marks
+// the canvas with the epoch it rendered, and mapViewStale() says whether the canvas still matches.
+uint32_t s_viewEpoch = 1;
+uint32_t s_renderedEpoch = 0;   // 0 = no canvas has been composited yet
 double s_cpx = 0.0, s_cpy = 0.0;
 
 bool s_marker = false;
@@ -349,10 +354,12 @@ bool mapBegin() {
 void mapSetView(double lat, double lon, int z) {
   if (z < kZMin) z = kZMin;
   if (z > kZMax) z = kZMax;
+  const bool changed = (s_z != z || s_cLat != lat || s_cLon != lon);
   s_cLat = lat;
   s_cLon = lon;
   s_z = z;
   centreFromLatLon();
+  if (changed) ++s_viewEpoch;   // EST-371: the canvas no longer matches the view
 }
 
 void mapZoomBy(int delta) {
@@ -362,6 +369,7 @@ void mapZoomBy(int delta) {
   if (z == s_z) return;
   s_z = z;
   centreFromLatLon();   // keep the same geographic centre across zooms
+  ++s_viewEpoch;        // EST-371
 }
 
 void mapPan(int dx, int dy) {
@@ -369,7 +377,14 @@ void mapPan(int dx, int dy) {
   s_cpy += dy;
   s_cLon = xfToLon(s_cpx / kTile, s_z);
   s_cLat = yfToLat(s_cpy / kTile, s_z);
+  if (dx != 0 || dy != 0) ++s_viewEpoch;   // EST-371
 }
+
+// EST-371: the Map's fast open. A canvas that was composited at least once can be pushed again
+// without touching the card or a JPEG; mapViewStale() tells the caller whether the tiles still show
+// the current view (a pan, a zoom, a follow recentre or "Show on map" makes it stale).
+bool mapCanvasReady() { return s_ready && s_canvas != nullptr && s_renderedEpoch != 0; }
+bool mapViewStale() { return !mapCanvasReady() || s_renderedEpoch != s_viewEpoch; }
 
 void mapScreenToLatLon(int x, int y, double& lat, double& lon) {
   const bool mag = (s_z == 18);
@@ -489,6 +504,7 @@ void mapRender() {
                   ty0, ty1);
   }
   Serial.printf("[map] z%d%s %.5f,%.5f -> %d tiles\n", s_z, mag ? " (2x)" : "", s_cLat, s_cLon, drawn);
+  s_renderedEpoch = s_viewEpoch;   // EST-371: this canvas now matches the current view
   om::radio::addPart(om::radio::Part::MapDecode, micros() - renderStartUs);
 }
 

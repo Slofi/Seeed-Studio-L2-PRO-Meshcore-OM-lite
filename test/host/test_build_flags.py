@@ -23,6 +23,8 @@ MYMESH = ROOT / "lib" / "meshcore_companion" / "MyMesh.h"
 BASECHAT = ROOT / "lib" / "meshcore" / "helpers" / "BaseChatMesh.h"
 MESHLINK = ROOT / "src" / "mesh_link.cpp"
 MAIN = ROOT / "src" / "main.cpp"
+# EST-371: the USB status command moved to its own module; the stack macro stays in main.
+USB = ROOT / "src" / "usb_commands.cpp"
 
 EXPECTED = 100
 
@@ -105,7 +107,8 @@ def main() -> int:
         if main_text.count("SET_LOOP_TASK_STACK_SIZE(16384)") != 1:
             print("build flags: src/main.cpp must call SET_LOOP_TASK_STACK_SIZE(16384) exactly once")
             failures += 1
-        if "loop_stack_free=" not in main_text or "loop_stack_size=" not in main_text:
+        usb_text = USB.read_text() if USB.exists() else ""
+        if "loop_stack_free=" not in usb_text or "loop_stack_size=" not in usb_text:
             print("build flags: status lost loop_stack_free / loop_stack_size")
             failures += 1
         if any("SET_LOOP_TASK_STACK_SIZE" in f for f in build_flags):

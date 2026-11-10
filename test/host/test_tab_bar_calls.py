@@ -40,10 +40,17 @@ if "static om::ui::TabBarModel currentTabBar(om::ui::Tab active)" not in main:
     problems.append("main.cpp: the one currentTabBar() helper is missing")
 if "om::ui::tabBarModel(active, unreadTotal(), g_newNodeDot)" not in main:
     problems.append("main.cpp: currentTabBar does not use unreadTotal()/g_newNodeDot")
-for tab in ("Nodes", "Chat", "Map", "Rptr"):
+for tab in ("Nodes", "Chat", "Rptr"):
     want = f"tabs = currentTabBar(om::ui::Tab::{tab});"
     if want not in main:
         problems.append(f"main.cpp: no {want}")
+# EST-371: the Map tab's state and drawing glue moved to screens/map_tab.cpp. It gets the one model
+# through the Host's tabBar callback, which setup() wires to appTabBar() -> currentTabBar().
+map_tab = strip_comments((SRC / "screens" / "map_tab.cpp").read_text(encoding="utf-8"))
+if "v.tabs = tabBar(ui::Tab::Map);" not in map_tab:
+    problems.append("screens/map_tab.cpp: the Map view does not take its tab model from the Host")
+if "mapHost.tabBar = appTabBar;" not in main or "static om::ui::TabBarModel appTabBar(" not in main:
+    problems.append("main.cpp: the Map module's tabBar host is not wired to the one helper")
 
 # 3. Each tab screen actually draws the bar (a screen that stops drawing it would pass 1 and 2).
 for name in ("screen_nodes.cpp", "screen_chat.cpp", "screen_map.cpp", "screen_rptr.cpp"):

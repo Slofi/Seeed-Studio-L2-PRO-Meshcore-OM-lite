@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-// EST-359: the synth and the one event -> sound table. See sound_synth.h for why.
+// EST-361: the synth and the one shared sound library. See sound_synth.h for the model.
 //
 // A phrase is a few notes; a note is a frequency, a start, a length and a voice. A voice is 2-3 sine
 // partials (the bell's are inharmonic, the marimba's fourth-partial ratio, the chime's octaves), one
 // ADSR envelope with a 3..8 ms soft attack and an exponential decay, and one gentle one-pole
 // low-pass over the whole phrase. Nothing here allocates, and the same code is compiled into the
-// firmware and into tools/mksounds.cpp, so the WAV Claude listens to is the waveform the device
+// firmware and into tools/mksounds.cpp, so the WAV Filip listens to is the waveform the device
 // streams.
 #include "sound_synth.h"
 
@@ -20,6 +20,7 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr int kTailFadeMs = 3;        // final ramp to exactly zero (no click at the end)
 constexpr float kLowpassHz = 6500.0f; // gentle: the top partials are still there, the edge is gone
 constexpr float kAliasMaxHz = 7200.0f;  // skip a partial above this (Nyquist is 8 kHz)
+constexpr int kMaxNotes = 8;          // the longest phrase is six notes (low battery)
 
 enum class Voice : uint8_t { Bell = 0, Marimba, Pluck, Chime, Soft, Count };
 
@@ -55,22 +56,84 @@ struct Note {
 };
 
 struct Recipe {
-  uint16_t ms;     // total phrase length, including the release and tail
+  uint16_t ms;         // total phrase length, including the release and tail
+  uint16_t targetPeak; // 0 = only clamp down to kPeakTarget; >0 = normalize to this peak
   uint8_t count;
-  Note notes[4];
+  Note notes[kMaxNotes];
 };
 
-struct Variant {
+// The library ids. The array kLibrary below must stay in exactly this order: an id is stored in NVS
+// and appending new sounds at the end is what keeps every existing choice stable.
+enum SoundId : uint8_t {
+  kBootBellTk = 0,
+  kBootBellPair,
+  kBootChimeUp,
+  kBootSoftRise,
+  kBootMarimbaUp,
+  kBootChimeArp,
+  kMsgSoftHi,
+  kMsgMarimbaHi,
+  kMsgBellHi,
+  kMsgSoftHighFifth,
+  kMsgMarimbaHighFifth,
+  kMsgBellHighFifth,
+  kDmSoftWarm,
+  kDmSoftDeep,
+  kDmSoftBasso,
+  kDmSoftLowFifth,
+  kDmSoftLowThird,
+  kDmSoftDark,
+  kMenChimeBright,
+  kMenBellHigh,
+  kMenChimeGlass,
+  kMenChimeTop,
+  kMenBellVeryHigh,
+  kMenGlassTrio,
+  kSentTick,
+  kSentBlip,
+  kSentTock,
+  kSentTickTock,
+  kSentTickTick,
+  kSentBlipTock,
+  kErrLow,
+  kErrWarn,
+  kErrTriple,
+  kErrDeep,
+  kErrDouble,
+  kErrBellDescend,
+  kNewSoftLo,
+  kNewMarimbaLo,
+  kNewBellLo,
+  kNewSoftLowFifth,
+  kNewMarimbaLowFifth,
+  kNewBellLowFifth,
+  kBattLow,
+  kBattSigh,
+  kBattBell,
+  kBattDeep,
+  kBattAlarm,
+  kBattPulse,
+  kTapTick,
+  kTapTock,
+  kTapClick,
+  kTapTik,
+  kTapSnap,
+  kTapDouble,
+};
+constexpr int kSoundTotal = (int)kTapDouble + 1;
+
+struct LibrarySound {
   const char* name;
+  Family family;
+  Event home;
   Recipe recipe;
 };
 
 struct EventDef {
   const char* key;
   const char* label;
-  const Variant* variants;
-  uint8_t count;
-  uint8_t def;
+  const char* tag;
+  uint8_t def;        // a library id
   bool dndExempt;
 };
 
@@ -78,120 +141,136 @@ constexpr Note N(uint16_t atMs, uint16_t durMs, uint16_t hz, Voice voice, uint8_
   return Note{atMs, durMs, hz, voice, level};
 }
 
-constexpr Variant V(const char* name, uint16_t ms, Note a) {
-  Variant v{};
-  v.name = name;
-  v.recipe.ms = ms;
-  v.recipe.count = 1;
-  v.recipe.notes[0] = a;
-  return v;
+// R(...) is the recipe maker; the variadic form keeps each library row readable.
+template <typename... Notes>
+constexpr Recipe R(uint16_t ms, Notes... notes) {
+  Recipe r{};
+  r.ms = ms;
+  r.targetPeak = 0;
+  r.count = (uint8_t)sizeof...(notes);
+  const Note list[] = {notes...};
+  for (int i = 0; i < (int)r.count; ++i) r.notes[i] = list[i];
+  return r;
 }
 
-constexpr Variant V(const char* name, uint16_t ms, Note a, Note b) {
-  Variant v{};
-  v.name = name;
-  v.recipe.ms = ms;
-  v.recipe.count = 2;
-  v.recipe.notes[0] = a;
-  v.recipe.notes[1] = b;
-  return v;
+constexpr Recipe peak(Recipe r, uint16_t target) {
+  r.targetPeak = target;
+  return r;
 }
 
-constexpr Variant V(const char* name, uint16_t ms, Note a, Note b, Note c) {
-  Variant v{};
-  v.name = name;
-  v.recipe.ms = ms;
-  v.recipe.count = 3;
-  v.recipe.notes[0] = a;
-  v.recipe.notes[1] = b;
-  v.recipe.notes[2] = c;
-  return v;
-}
+// The shared library, grouped by family in the picker but stored by id. Every note sequence is
+// unique (the host test proves it), so no two choices can sound the same.
+//
+// Boot keeps Filip's original TK-TK (D7, a short gap, F7) and adds five clearly different motifs.
+// Message is the new-node family a fourth (or fifth) UP; new node is the same family a fourth (or
+// fifth) DOWN, so the two never blur. Low battery is the long, loud descending figure twice.
+constexpr LibrarySound kLibrary[kSoundTotal] = {
+    // --- boot home ---------------------------------------------------------------------------
+    {"Bell TK-TK", Family::Bells, Event::Boot, R(205, N(0, 60, 2349, Voice::Bell, 200), N(115, 70, 2794, Voice::Bell, 210))},
+    {"Bell Pair", Family::Bells, Event::Boot, R(260, N(0, 120, 784, Voice::Bell, 210), N(80, 150, 1047, Voice::Bell, 220))},
+    {"Chime Up", Family::Chimes, Event::Boot, R(240, N(0, 110, 1047, Voice::Chime, 210), N(90, 140, 1319, Voice::Chime, 220))},
+    {"Soft Rise", Family::Soft, Event::Boot, R(220, N(0, 90, 440, Voice::Soft, 220), N(70, 120, 554, Voice::Soft, 225))},
+    {"Marimba Up", Family::Marimba, Event::Boot, R(210, N(0, 100, 880, Voice::Marimba, 220), N(70, 120, 1319, Voice::Marimba, 220))},
+    {"Chime Arp", Family::Chimes, Event::Boot, R(260, N(0, 70, 523, Voice::Chime, 210), N(70, 70, 784, Voice::Chime, 215), N(140, 100, 1047, Voice::Chime, 220))},
 
-// Boot keeps the "TK-TK" character Filip asked for on 2026-11-10: D7 (2349 Hz), a gap, F7 (2794 Hz).
-// The three variants are the same two notes in three voices, so the picker changes the timbre, not
-// the phrase. The second note sits 55 ms after the first ends; that gap is the "tk-tk".
-const Variant kBootVariants[] = {
-    V("Bell TK-TK", 205, N(0, 60, 2349, Voice::Bell, 190), N(115, 70, 2794, Voice::Bell, 200)),
-    V("Chime TK-TK", 195, N(0, 55, 2349, Voice::Chime, 190), N(110, 65, 2794, Voice::Chime, 200)),
-    V("Soft TK-TK", 205, N(0, 60, 2349, Voice::Soft, 210), N(115, 70, 2794, Voice::Soft, 220)),
+    // --- message home: the new-node family, a fourth up --------------------------------------
+    {"Soft Hi", Family::Soft, Event::Message, R(250, N(0, 100, 880, Voice::Soft, 220), N(90, 130, 698, Voice::Soft, 225))},
+    {"Marimba Hi", Family::Marimba, Event::Message, R(230, N(0, 90, 1047, Voice::Marimba, 220), N(80, 120, 784, Voice::Marimba, 220))},
+    {"Bell Hi", Family::Bells, Event::Message, R(230, N(0, 90, 1397, Voice::Bell, 210), N(80, 120, 1047, Voice::Bell, 220))},
+    {"Soft High Fifth", Family::Soft, Event::Message, R(250, N(0, 100, 988, Voice::Soft, 220), N(90, 130, 784, Voice::Soft, 225))},
+    {"Marimba High Fifth", Family::Marimba, Event::Message, R(230, N(0, 90, 1176, Voice::Marimba, 220), N(80, 120, 880, Voice::Marimba, 220))},
+    {"Bell High Fifth", Family::Bells, Event::Message, R(240, N(0, 90, 1568, Voice::Bell, 210), N(80, 130, 1176, Voice::Bell, 220))},
+
+    // --- DM home: low and soft ---------------------------------------------------------------
+    {"Soft Warm", Family::Soft, Event::Dm, R(300, N(0, 140, 349, Voice::Pluck, 210), N(100, 160, 440, Voice::Pluck, 210))},
+    {"Soft Deep", Family::Soft, Event::Dm, R(300, N(0, 150, 294, Voice::Soft, 230), N(110, 170, 349, Voice::Soft, 220))},
+    {"Soft Basso", Family::Soft, Event::Dm, R(340, N(0, 160, 196, Voice::Pluck, 220), N(120, 180, 294, Voice::Pluck, 220))},
+    {"Soft Low Fifth", Family::Soft, Event::Dm, R(330, N(0, 150, 262, Voice::Soft, 225), N(100, 170, 392, Voice::Soft, 220))},
+    {"Soft Low Third", Family::Soft, Event::Dm, R(300, N(0, 140, 220, Voice::Soft, 225), N(100, 160, 262, Voice::Soft, 220))},
+    {"Soft Dark", Family::Soft, Event::Dm, R(360, N(0, 170, 165, Voice::Soft, 230), N(120, 180, 220, Voice::Soft, 220))},
+
+    // --- mention home: bright, above a message -----------------------------------------------
+    {"Chime Bright", Family::Chimes, Event::Mention, R(220, N(0, 80, 1319, Voice::Chime, 220), N(70, 110, 1760, Voice::Chime, 220))},
+    {"Bell High", Family::Bells, Event::Mention, R(240, N(0, 90, 1568, Voice::Bell, 210), N(80, 120, 2093, Voice::Bell, 210))},
+    {"Chime Glass", Family::Chimes, Event::Mention, R(200, N(0, 70, 1760, Voice::Chime, 220), N(65, 100, 2637, Voice::Chime, 210))},
+    {"Chime Top", Family::Chimes, Event::Mention, R(220, N(0, 80, 2093, Voice::Chime, 215), N(70, 110, 2637, Voice::Chime, 210))},
+    {"Bell Very High", Family::Bells, Event::Mention, R(240, N(0, 90, 2093, Voice::Bell, 205), N(80, 120, 2794, Voice::Bell, 210))},
+    {"Glass Trio", Family::Chimes, Event::Mention, R(280, N(0, 65, 1568, Voice::Chime, 215), N(65, 65, 2093, Voice::Chime, 215), N(130, 110, 2637, Voice::Chime, 210))},
+
+    // --- sent home: quiet, very short acknowledgements ---------------------------------------
+    {"Tick", Family::Ticks, Event::Sent, R(80, N(0, 45, 1319, Voice::Marimba, 95))},
+    {"Blip", Family::Ticks, Event::Sent, R(90, N(0, 50, 1568, Voice::Soft, 90))},
+    {"Tock", Family::Ticks, Event::Sent, R(95, N(0, 55, 1047, Voice::Pluck, 90))},
+    {"Tick Tock", Family::Ticks, Event::Sent, R(120, N(0, 45, 1319, Voice::Marimba, 95), N(50, 55, 1047, Voice::Marimba, 95))},
+    {"Tick Tick", Family::Ticks, Event::Sent, R(90, N(0, 35, 1319, Voice::Soft, 90), N(45, 35, 1319, Voice::Soft, 90))},
+    {"Blip Tock", Family::Ticks, Event::Sent, R(110, N(0, 40, 1568, Voice::Soft, 90), N(50, 50, 1047, Voice::Pluck, 90))},
+
+    // --- error home: falling, low, slow (one of the two DND-exempt events) -------------------
+    {"Error Low", Family::Alerts, Event::Error, R(300, N(0, 120, 440, Voice::Pluck, 220), N(105, 160, 349, Voice::Pluck, 230))},
+    {"Error Warn", Family::Alerts, Event::Error, R(310, N(0, 100, 330, Voice::Soft, 240), N(110, 170, 262, Voice::Soft, 240))},
+    {"Alert Triple", Family::Alerts, Event::Error, R(300, N(0, 70, 587, Voice::Pluck, 230), N(70, 70, 523, Voice::Pluck, 230), N(140, 130, 440, Voice::Pluck, 235))},
+    {"Error Deep", Family::Alerts, Event::Error, R(320, N(0, 110, 262, Voice::Soft, 240), N(100, 180, 196, Voice::Soft, 240))},
+    {"Alert Double", Family::Alerts, Event::Error, R(220, N(0, 60, 880, Voice::Pluck, 225), N(90, 60, 880, Voice::Pluck, 225))},
+    {"Bell Descend", Family::Bells, Event::Error, R(320, N(0, 110, 392, Voice::Bell, 220), N(100, 160, 294, Voice::Bell, 230))},
+
+    // --- new node home: the same family as message, a fourth down ---------------------------
+    {"Soft Lo", Family::Soft, Event::NewNode, R(250, N(0, 100, 494, Voice::Soft, 210), N(90, 130, 392, Voice::Soft, 210))},
+    {"Marimba Lo", Family::Marimba, Event::NewNode, R(230, N(0, 90, 587, Voice::Marimba, 210), N(80, 120, 440, Voice::Marimba, 210))},
+    {"Bell Lo", Family::Bells, Event::NewNode, R(230, N(0, 90, 784, Voice::Bell, 200), N(80, 120, 587, Voice::Bell, 210))},
+    {"Soft Node Low Fifth", Family::Soft, Event::NewNode, R(250, N(0, 100, 415, Voice::Soft, 210), N(90, 130, 330, Voice::Soft, 210))},
+    {"Marimba Low Fifth", Family::Marimba, Event::NewNode, R(230, N(0, 90, 523, Voice::Marimba, 210), N(80, 120, 392, Voice::Marimba, 210))},
+    {"Bell Low Fifth", Family::Bells, Event::NewNode, R(240, N(0, 90, 698, Voice::Bell, 200), N(80, 130, 523, Voice::Bell, 210))},
+
+    // --- low battery home: 1.25..1.4 s, three descending notes played twice, at the cap ------
+    {"Battery Low", Family::Alerts, Event::LowBattery, peak(R(1350, N(0, 300, 440, Voice::Soft, 250), N(250, 300, 349, Voice::Soft, 250), N(500, 350, 262, Voice::Soft, 250), N(700, 300, 440, Voice::Soft, 250), N(950, 300, 349, Voice::Soft, 250), N(1200, 150, 262, Voice::Soft, 250)), 27000)},
+    {"Battery Sigh", Family::Alerts, Event::LowBattery, peak(R(1300, N(0, 300, 349, Voice::Soft, 250), N(250, 300, 294, Voice::Soft, 250), N(500, 300, 220, Voice::Soft, 250), N(700, 300, 349, Voice::Soft, 250), N(950, 300, 294, Voice::Soft, 250), N(1200, 100, 220, Voice::Soft, 250)), 27000)},
+    {"Battery Bell", Family::Alerts, Event::LowBattery, peak(R(1400, N(0, 320, 392, Voice::Bell, 250), N(270, 320, 330, Voice::Bell, 250), N(540, 380, 262, Voice::Bell, 250), N(750, 320, 392, Voice::Bell, 250), N(1020, 320, 330, Voice::Bell, 250), N(1290, 110, 262, Voice::Bell, 250)), 27000)},
+    {"Battery Deep", Family::Alerts, Event::LowBattery, peak(R(1250, N(0, 280, 294, Voice::Soft, 250), N(230, 280, 262, Voice::Soft, 250), N(460, 330, 196, Voice::Soft, 250), N(650, 280, 294, Voice::Soft, 250), N(880, 280, 262, Voice::Soft, 250), N(1110, 140, 196, Voice::Soft, 250)), 27000)},
+    {"Battery Alarm", Family::Alerts, Event::LowBattery, peak(R(1300, N(0, 280, 523, Voice::Pluck, 250), N(230, 280, 440, Voice::Pluck, 250), N(460, 330, 349, Voice::Pluck, 250), N(650, 280, 523, Voice::Pluck, 250), N(880, 280, 440, Voice::Pluck, 250), N(1110, 190, 349, Voice::Pluck, 250)), 27000)},
+    {"Battery Pulse", Family::Alerts, Event::LowBattery, peak(R(1350, N(0, 300, 440, Voice::Pluck, 250), N(260, 300, 392, Voice::Pluck, 250), N(520, 330, 330, Voice::Pluck, 250), N(720, 300, 440, Voice::Pluck, 250), N(980, 300, 392, Voice::Pluck, 250), N(1240, 110, 330, Voice::Pluck, 250)), 27000)},
+
+    // --- touch home: the optional tap clicks ------------------------------------------------
+    {"Tap Tick", Family::Ticks, Event::Touch, R(55, N(0, 30, 1500, Voice::Soft, 85))},
+    {"Tap Tock", Family::Ticks, Event::Touch, R(60, N(0, 35, 900, Voice::Soft, 90))},
+    {"Tap Click", Family::Ticks, Event::Touch, R(35, N(0, 18, 2200, Voice::Soft, 80))},
+    {"Tap Tik", Family::Ticks, Event::Touch, R(50, N(0, 30, 1000, Voice::Soft, 85))},
+    {"Tap Snap", Family::Ticks, Event::Touch, R(45, N(0, 20, 1800, Voice::Soft, 80))},
+    {"Tap Double", Family::Ticks, Event::Touch, R(80, N(0, 22, 900, Voice::Soft, 90), N(38, 22, 900, Voice::Soft, 90))},
 };
-
-const Variant kMessageVariants[] = {
-    V("Chime", 240, N(0, 110, 1047, Voice::Chime, 210), N(90, 140, 1319, Voice::Chime, 220)),
-    V("Bell", 260, N(0, 120, 784, Voice::Bell, 210), N(80, 150, 1047, Voice::Bell, 220)),
-    V("Marimba", 210, N(0, 100, 880, Voice::Marimba, 220), N(70, 120, 1319, Voice::Marimba, 220)),
-};
-
-// DM is deliberately lower and softer than a channel message: warmer, less "alert".
-const Variant kDmVariants[] = {
-    V("Warm", 300, N(0, 140, 349, Voice::Pluck, 210), N(100, 160, 440, Voice::Pluck, 210)),
-    V("Soft", 300, N(0, 150, 294, Voice::Soft, 230), N(110, 170, 349, Voice::Soft, 220)),
-    V("Basso", 340, N(0, 160, 196, Voice::Pluck, 220), N(120, 180, 294, Voice::Pluck, 220)),
-};
-
-// Mention is brighter and always two notes, so it stands out from a message in a busy room.
-const Variant kMentionVariants[] = {
-    V("Bright", 220, N(0, 80, 1319, Voice::Chime, 220), N(70, 110, 1760, Voice::Chime, 220)),
-    V("Bell", 240, N(0, 90, 1568, Voice::Bell, 210), N(80, 120, 2093, Voice::Bell, 210)),
-    V("Glass", 200, N(0, 70, 1760, Voice::Chime, 220), N(65, 100, 2637, Voice::Chime, 210)),
-};
-
-// Sent is a quiet, very short acknowledgement: it must not compete with an incoming sound.
-const Variant kSentVariants[] = {
-    V("Tick", 80, N(0, 45, 1319, Voice::Marimba, 95)),
-    V("Blip", 90, N(0, 50, 1568, Voice::Soft, 90)),
-    V("Tock", 95, N(0, 55, 1047, Voice::Pluck, 90)),
-};
-
-// Error falls, low and slow. It is one of the two sounds that DND lets through.
-const Variant kErrorVariants[] = {
-    V("Low", 300, N(0, 120, 440, Voice::Pluck, 220), N(105, 160, 349, Voice::Pluck, 230)),
-    V("Warn", 310, N(0, 100, 330, Voice::Soft, 240), N(110, 170, 262, Voice::Soft, 240)),
-    V("Bell", 320, N(0, 110, 392, Voice::Bell, 220), N(100, 160, 294, Voice::Bell, 230)),
-};
-
-// New node stays soft: an advert is information, not an alarm.
-const Variant kNewNodeVariants[] = {
-    V("Soft", 250, N(0, 100, 659, Voice::Soft, 210), N(90, 130, 523, Voice::Soft, 210)),
-    V("Marimba", 230, N(0, 90, 784, Voice::Marimba, 210), N(80, 120, 587, Voice::Marimba, 210)),
-    V("Bell", 220, N(0, 80, 1047, Voice::Bell, 200), N(70, 120, 784, Voice::Bell, 210)),
-};
-
-// Low battery is a low two-note sigh; the other DND-exempt sound.
-const Variant kLowBatteryVariants[] = {
-    V("Low", 380, N(0, 160, 220, Voice::Soft, 240), N(140, 200, 175, Voice::Soft, 240)),
-    V("Alert", 380, N(0, 90, 330, Voice::Soft, 230), N(100, 90, 262, Voice::Soft, 230),
-      N(200, 150, 220, Voice::Soft, 240)),
-    V("Bell", 360, N(0, 140, 294, Voice::Bell, 220), N(130, 180, 220, Voice::Bell, 230)),
-};
-
-// The optional touch click: 15..35 ms, quiet. Off by default in the settings.
-const Variant kTouchVariants[] = {
-    V("Tick", 35, N(0, 18, 1500, Voice::Soft, 85)),
-    V("Tock", 40, N(0, 24, 900, Voice::Soft, 90)),
-    V("Click", 30, N(0, 15, 2200, Voice::Soft, 80)),
-};
-
-#define OM_SOUND_COUNT(a) (uint8_t)(sizeof(a) / sizeof((a)[0]))
 
 const EventDef kEvents[kEventCount] = {
-    {"boot", "Boot", kBootVariants, OM_SOUND_COUNT(kBootVariants), 0, false},
-    {"message", "Message", kMessageVariants, OM_SOUND_COUNT(kMessageVariants), 0, false},
-    {"dm", "Direct message", kDmVariants, OM_SOUND_COUNT(kDmVariants), 0, false},
-    {"mention", "Mention", kMentionVariants, OM_SOUND_COUNT(kMentionVariants), 0, false},
-    {"sent", "Sent", kSentVariants, OM_SOUND_COUNT(kSentVariants), 0, false},
-    {"error", "Error", kErrorVariants, OM_SOUND_COUNT(kErrorVariants), 0, true},
-    {"newnode", "New node", kNewNodeVariants, OM_SOUND_COUNT(kNewNodeVariants), 0, false},
-    {"battery", "Low battery", kLowBatteryVariants, OM_SOUND_COUNT(kLowBatteryVariants), 0, true},
-    {"touch", "Touch click", kTouchVariants, OM_SOUND_COUNT(kTouchVariants), 0, false},
+    {"boot", "Boot", "BOOT", kBootBellTk, false},
+    {"message", "Message", "MSG", kMsgSoftHi, false},
+    {"dm", "Direct message", "DM", kDmSoftWarm, false},
+    {"mention", "Mention", "MENT", kMenChimeBright, false},
+    {"sent", "Sent", "SENT", kSentTick, false},
+    {"error", "Error", "ERR", kErrLow, true},
+    {"newnode", "New node", "NODE", kNewSoftLo, false},
+    {"battery", "Low battery", "BATT", kBattLow, true},
+    {"touch", "Touch click", "TAP", kTapTick, false},
 };
 
-#undef OM_SOUND_COUNT
+// EST-359 stored 0..2 per event (3 or 17 = Off). Map each old index to the closest new sound. Boot's
+// three old variants only differed in timbre, so all three land on the original TK-TK.
+constexpr uint8_t kLegacy[kEventCount][3] = {
+    {kBootBellTk, kBootBellTk, kBootBellTk},
+    {kBootChimeUp, kBootBellPair, kBootMarimbaUp},
+    {kDmSoftWarm, kDmSoftDeep, kDmSoftBasso},
+    {kMenChimeBright, kMenBellHigh, kMenChimeGlass},
+    {kSentTick, kSentBlip, kSentTock},
+    {kErrLow, kErrWarn, kErrBellDescend},
+    {kNewSoftLo, kNewMarimbaLo, kNewBellLo},
+    {kBattLow, kBattSigh, kBattBell},
+    {kTapTick, kTapTock, kTapClick},
+};
 
 const EventDef& defFor(Event ev) {
   const int i = (int)ev;
   return (i >= 0 && i < kEventCount) ? kEvents[i] : kEvents[0];
+}
+
+const LibrarySound& soundFor(uint8_t id) {
+  return kLibrary[id < kSoundTotal ? id : 0];
 }
 
 int samplesForMs(int ms) {
@@ -268,42 +347,110 @@ int renderPass(const Recipe& r, int16_t* out, float scale, RenderInfo* info) {
   return total;
 }
 
+// The loudest the waveform can be at any moment: the sum of the notes that are sounding then, each
+// at its full level and every partial added in phase. Unlike a sum over the whole phrase this does
+// not make a long phrase quiet (important for the battery warning), and it is still an upper bound
+// the actual partials never reach.
+float levelBound(const Recipe& r) {
+  float bound = 0.0f;
+  for (int t = 0; t < (int)r.ms; ++t) {
+    float sum = 0.0f;
+    for (int k = 0; k < (int)r.count; ++k) {
+      const Note& n = r.notes[k];
+      if (t < (int)n.atMs || t >= (int)n.atMs + (int)n.durMs) continue;
+      const VoiceDef& v = kVoices[(int)n.voice];
+      float amps = 0.0f;
+      for (int p = 0; p < (int)v.parts; ++p) amps += v.amp[p];
+      sum += ((float)n.level / 255.0f) * v.gain * amps;
+    }
+    if (sum > bound) bound = sum;
+  }
+  return bound;
+}
+
+// Scale an already rendered buffer to a new peak. Used to bring the battery warning up to its own
+// target; the peak is measured again because rounding moves it by a LSB.
+int rescaleTo(int16_t* out, int n, int peak, int target) {
+  if (out == nullptr || n <= 0 || peak <= 0 || target <= 0 || target == peak) return peak;
+  const float factor = (float)target / (float)peak;
+  int measured = 0;
+  for (int i = 0; i < n; ++i) {
+    int s = (int)lroundf((float)out[i] * factor);
+    if (s > 32767) s = 32767;
+    if (s < -32768) s = -32768;
+    out[i] = (int16_t)s;
+    const int mag = s < 0 ? -s : s;
+    if (mag > measured) measured = mag;
+  }
+  return measured;
+}
+
 }  // namespace
 
-int render(Event ev, uint8_t variant, int16_t* out, int cap, RenderInfo* info) {
-  if (out == nullptr || cap <= 0) return 0;
-  if (!validVariant(ev, variant)) return 0;
-  const Variant& var = defFor(ev).variants[variant];
-  const int total = samplesForMs((int)var.recipe.ms);
+int soundCount() { return kSoundTotal; }
+
+bool validSound(uint8_t id) { return id < kSoundTotal; }
+
+const char* soundName(uint8_t id) { return validSound(id) ? soundFor(id).name : nullptr; }
+
+Family soundFamily(uint8_t id) { return validSound(id) ? soundFor(id).family : Family::Count; }
+
+const char* familyName(Family family) {
+  switch (family) {
+    case Family::Bells: return "Bells";
+    case Family::Chimes: return "Chimes";
+    case Family::Marimba: return "Marimba";
+    case Family::Soft: return "Soft";
+    case Family::Alerts: return "Alerts";
+    case Family::Ticks: return "Ticks";
+    default: return "";
+  }
+}
+
+Event soundHomeEvent(uint8_t id) { return validSound(id) ? soundFor(id).home : Event::Count; }
+
+int soundMs(uint8_t id) { return validSound(id) ? (int)soundFor(id).recipe.ms : 0; }
+
+int soundNoteCount(uint8_t id) {
+  return validSound(id) ? (int)soundFor(id).recipe.count : 0;
+}
+
+bool soundNote(uint8_t id, int index, NoteInfo* out) {
+  if (!validSound(id) || out == nullptr || index < 0) return false;
+  const Recipe& r = soundFor(id).recipe;
+  if (index >= (int)r.count) return false;
+  out->atMs = r.notes[index].atMs;
+  out->durMs = r.notes[index].durMs;
+  out->hz = r.notes[index].hz;
+  return true;
+}
+
+int renderSound(uint8_t id, int16_t* out, int cap, RenderInfo* info) {
+  if (out == nullptr || cap <= 0 || !validSound(id)) return 0;
+  const Recipe& r = soundFor(id).recipe;
+  const int total = samplesForMs((int)r.ms);
   if (total <= 0 || total > kMaxSamples || total > cap) return 0;
 
-  // A cheap upper bound on the phrase's peak: every note at its full level, every partial added in
-  // phase (the parts are never all in phase, so the real peak is lower). Scaling by the bound means
-  // one pass can never overflow 16 bits, whatever a future recipe adds. The measured peak then only
-  // ever scales the buffer DOWN to kPeakTarget, never up, so a quiet sound stays quiet.
-  float bound = 0.0f;
-  for (int k = 0; k < (int)var.recipe.count; ++k) {
-    const Note& n = var.recipe.notes[k];
-    const VoiceDef& v = kVoices[(int)n.voice];
-    float amps = 0.0f;
-    for (int p = 0; p < (int)v.parts; ++p) amps += v.amp[p];
-    bound += ((float)n.level / 255.0f) * v.gain * amps;
-  }
-  float scale = bound > 1.0f ? (0.90f / bound) : 0.90f;
-  const int n = renderPass(var.recipe, out, scale, info);
+  // An upper bound on the phrase's peak, per instant (see levelBound). Scaling by it means one pass
+  // can never overflow 16 bits, whatever a future recipe adds.
+  const float bound = levelBound(r);
+  const float scale = bound > 1.0f ? (0.90f / bound) : 0.90f;
+
+  RenderInfo local{};
+  RenderInfo* measured = info != nullptr ? info : &local;
+  const int n = renderPass(r, out, scale, measured);
   if (n <= 0) return 0;
-  if (info != nullptr && info->peak > kPeakTarget) {
-    const float down = (float)kPeakTarget / (float)info->peak;
-    int peak = 0;
-    for (int i = 0; i < n; ++i) {
-      int s = (int)lroundf((float)out[i] * down);
-      if (s > 32767) s = 32767;
-      if (s < -32768) s = -32768;
-      out[i] = (int16_t)s;
-      const int mag = s < 0 ? -s : s;
-      if (mag > peak) peak = mag;
-    }
-    info->peak = peak;
+
+  // A sound with its own target (the battery warning) is brought exactly to that peak. Everything
+  // else is only ever scaled DOWN when it would cross kPeakTarget, so a quiet sound stays quiet.
+  int target = 0;
+  if (r.targetPeak > 0) {
+    target = r.targetPeak > kPeakTarget ? kPeakTarget : (int)r.targetPeak;
+  } else if (measured->peak > kPeakTarget) {
+    target = kPeakTarget;
+  }
+  if (target > 0 && measured->peak > 0 && measured->peak != target) {
+    measured->peak = rescaleTo(out, n, measured->peak, target);
   }
   return n;
 }
@@ -312,27 +459,44 @@ const char* eventKey(Event ev) { return defFor(ev).key; }
 
 const char* eventLabel(Event ev) { return defFor(ev).label; }
 
-int variantCount(Event ev) { return (int)defFor(ev).count; }
+const char* eventTag(Event ev) { return defFor(ev).tag; }
+
+uint8_t defaultSound(Event ev) { return defFor(ev).def; }
+
+int variantCount(Event ev) {
+  const int i = (int)ev;
+  if (i < 0 || i >= kEventCount) return 0;
+  int count = 0;
+  for (int id = 0; id < kSoundTotal; ++id) {
+    if ((int)kLibrary[id].home == i) ++count;
+  }
+  return count;
+}
+
+uint8_t variantSoundId(Event ev, uint8_t variant) {
+  const int i = (int)ev;
+  if (i < 0 || i >= kEventCount) return kSoundOff;
+  int seen = 0;
+  for (int id = 0; id < kSoundTotal; ++id) {
+    if ((int)kLibrary[id].home != i) continue;
+    if (seen == (int)variant) return (uint8_t)id;
+    ++seen;
+  }
+  return kSoundOff;
+}
 
 const char* variantName(Event ev, uint8_t variant) {
-  if (!validVariant(ev, variant)) return nullptr;
-  return defFor(ev).variants[variant].name;
-}
-
-uint8_t defaultVariant(Event ev) { return defFor(ev).def; }
-
-bool validVariant(Event ev, uint8_t variant) {
-  const int i = (int)ev;
-  if (i < 0 || i >= kEventCount) return false;
-  return variant < defFor(ev).count;
-}
-
-int eventMs(Event ev, uint8_t variant) {
-  if (!validVariant(ev, variant)) return 0;
-  return (int)defFor(ev).variants[variant].recipe.ms;
+  const uint8_t id = variantSoundId(ev, variant);
+  return id == kSoundOff ? nullptr : soundName(id);
 }
 
 bool dndExempt(Event ev) { return defFor(ev).dndExempt; }
+
+uint8_t legacyVariantSound(Event ev, uint8_t oldVariant) {
+  const int i = (int)ev;
+  if (i < 0 || i >= kEventCount || oldVariant >= 3) return kSoundOff;
+  return kLegacy[i][oldVariant];
+}
 
 bool parseEvent(const char* token, Event* out) {
   if (token == nullptr) return false;

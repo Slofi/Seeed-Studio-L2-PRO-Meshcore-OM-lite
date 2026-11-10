@@ -73,8 +73,8 @@ static constexpr unsigned kLoopStackSize = 16384;
 
 // EST-351: the old palette and the old tab bar are gone from this file. Every colour, size and
 // rectangle comes from src/ui/ (theme.h, layout.h and the screen's own layout header).
-// EST-359: the sounds themselves live in sound_synth.cpp (one small synth, one table of events and
-// variants). This file only decides which event to play and which stored variant each event uses.
+// EST-359/361: the sounds themselves live in sound_synth.cpp (one small synth, one shared library).
+// This file only decides which event to play and which stored library id each event uses.
 using SoundEvent = om::sound::Event;
 
 static bool g_boardOk = false;
@@ -117,12 +117,12 @@ static char g_keyText[32];           // base64 key being typed (never printed)
 static int g_setPresetPending = -1;  // a preset waiting for its confirm
 static int g_setHashPending = 0;     // the path hash waiting for its confirm
 static int g_setSoundEvent = (int)SoundEvent::Message;   // the picker's SoundEvent
-static int g_setSoundPending = 0;    // the picker's chosen row: variantCount == Off
+static int g_setSoundPending = 0;    // the picker's chosen library id, or sound::kSoundOff
 static om::ui::CivilTime g_setTime;  // the manual-time steppers' civil time
 static uint8_t g_setBrightness = om::kScreenBrightness;
 // EST-357: PSRAM, allocated once in allocUiBuffers(). (The capacity constants are what the old
 // sizeof(array)/sizeof(array[0]) sites now use: a pointer has no element count.)
-static constexpr int kSetRowsCap = 28;
+static constexpr int kSetRowsCap = 64;   // the picker lists the whole 54-sound library
 static om::ui::SettingRow* g_setRows = nullptr;
 static int g_setRowCount = 0;
 static om::ui::RadioPrefsStore g_radio;
@@ -200,8 +200,8 @@ static int g_chatMsgCount = 0;
 static om::MeshDm* g_dmScratch = nullptr;   // PSRAM, allocUiBuffers()
 
 static bool g_touchSnd = false;   // EST-359: optional tap click, off by default
-static bool g_welcome = true;     // the boot TK-TK (Sound > Welcome; its variant is Sound > Boot)
-static uint8_t g_touchIdx = 0;    // the touch event's stored variant
+static bool g_welcome = true;     // the boot TK-TK (Sound > Welcome; its sound is Sound > Boot)
+static uint8_t g_touchIdx = 0;    // the touch event's stored library sound id
 
 static bool g_sdOk = false;
 static uint16_t g_packMb = 0;
@@ -293,11 +293,13 @@ static void allocUiBuffers() {
 // no longer text in the shell: ui/toast.h owns the text and its deadline, and every frame carries the
 // active toast through omFrameSetOverlay() (EST-344), so a repaint cannot wipe it.
 
-// Sound prefs (NVS "omlite"): master, volume %, one stored variant per event, DND. The variant's
-// meaning is per event (EST-359): index == variantCount(ev) is that event's Off row. An old NVS value
-// from the 17-chime picker is out of range for every event here and falls back to the default.
+// Sound prefs (NVS "omlite"): master, volume %, one stored library sound id per event, DND. The id
+// is a global sound library id (EST-361), not a per-event index; kSoundOff is that event's Off.
+// `sndver` says the keys already hold ids (2). An older value holds the EST-359 per-event index and
+// is migrated once through sound::legacyVariantSound.
 static bool g_soundOn = true;
 static uint8_t g_volume = 60;
+static uint8_t g_sndPrefsVersion = 0;
 static uint8_t g_sndBoot = 0;
 static uint8_t g_sndMsg = 0;
 static uint8_t g_sndDm = 0;
@@ -309,7 +311,7 @@ static uint8_t g_sndBatt = 0;
 static bool g_dnd = false;
 static Preferences g_prefs;
 
-static uint8_t& variantFor(SoundEvent ev) {
+static uint8_t& choiceFor(SoundEvent ev) {
   switch (ev) {
     case SoundEvent::Boot:       return g_sndBoot;
     case SoundEvent::Message:    return g_sndMsg;
@@ -324,10 +326,34 @@ static uint8_t& variantFor(SoundEvent ev) {
   }
 }
 
-// What the settings row and the picker call a stored value: the variant's name, or Off.
-static const char* choiceName(SoundEvent ev, uint8_t idx) {
-  const char* name = om::sound::variantName(ev, idx);
+// What the settings row and the picker call a stored value: the sound's name, or Off.
+static const char* choiceName(SoundEvent ev, uint8_t id) {
+  (void)ev;
+  const char* name = om::sound::soundName(id);
   return name != nullptr ? name : "OFF";
+}
+
+// The picker's small dim tag on a sound another event already uses: just the short event names,
+// no prefix. The current event's own choice is marked selected instead, so it is not repeated here.
+static void soundUseTags(SoundEvent current, uint8_t id, char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return;
+  out[0] = 0;
+  size_t used = 0;
+  for (int e = 0; e < (int)SoundEvent::Count; ++e) {
+    const SoundEvent ev = (SoundEvent)e;
+    if (ev == current || choiceFor(ev) != id) continue;
+    const char* tag = om::sound::eventTag(ev);
+    const size_t len = strlen(tag);
+    const size_t need = (used ? 2 : 0) + len;
+    if (used + need >= cap) break;
+    if (used) {
+      out[used++] = ',';
+      out[used++] = ' ';
+    }
+    memcpy(out + used, tag, len);
+    used += len;
+    out[used] = 0;
+  }
 }
 
 // Master off is absolute. DND silences every event except error and low battery (the two the ticket
@@ -338,38 +364,45 @@ static bool soundAllowed(SoundEvent ev, bool preview) {
   return true;
 }
 
-static bool playSound(SoundEvent ev, uint8_t variant, bool preview = false) {
+static bool playSound(SoundEvent ev, uint8_t soundId, bool preview = false) {
   if (!soundAllowed(ev, preview)) return false;
-  if (!om::sound::validVariant(ev, variant)) return false;   // the Off row
+  if (!om::sound::validSound(soundId)) return false;   // the Off choice
   om::audioVolume(g_volume);
-  return om::audioPlay(ev, variant);
+  return om::audioPlay(ev, soundId);
 }
 
-// The per-event door every trigger uses: the stored variant, the current volume and the DND rule.
-static void playEvent(SoundEvent ev) { (void)playSound(ev, variantFor(ev)); }
+// The per-event door every trigger uses: the stored library sound, the current volume and the DND
+// rule.
+static void playEvent(SoundEvent ev) { (void)playSound(ev, choiceFor(ev)); }
 
-// Boot welcome (Filip, 2026-11-10): the "TK-TK" character stays. D7, a gap, F7 is the phrase; the
-// variant picks the voice (bell, chime, soft). Retune in sound_synth.cpp's kBootVariants only.
+// Boot welcome (Filip, 2026-11-10): the "TK-TK" character stays as the default; the shared library
+// lets him pick any other sound too. Retune in sound_synth.cpp's library only.
 static void playWelcome() { playEvent(SoundEvent::Boot); }
 
 static void playClick() {
   if (g_touchSnd) playEvent(SoundEvent::Touch);
 }
 
-// A stored variant from NVS. 0..variantCount-1 is that variant, variantCount is Off. The value 17 is
-// the OLD picker's Off (17 chimes) and becomes Off here; any other out-of-range byte is a value from
-// the old table and falls back to this event's default rather than to a random new sound.
-static uint8_t loadVariant(const char* key, SoundEvent ev) {
-  const int count = om::sound::variantCount(ev);
-  int v = (int)g_prefs.getUChar(key, om::sound::defaultVariant(ev));
-  if (v == 17) v = count;
-  else if (v < 0 || v > count) v = om::sound::defaultVariant(ev);
-  return (uint8_t)v;
+// A stored choice from NVS. Version 2+ holds a library id (kSoundOff = Off). Version 0/1 holds the
+// EST-359 per-event index: 0..2 maps to the closest new sound, 3 and the old 17 are Off, and any
+// other out-of-range value falls back to the event's default. A key never written gets the default.
+static uint8_t loadChoice(const char* key, SoundEvent ev) {
+  const int raw = (int)g_prefs.getUChar(key, 0xFF);
+  if (raw == 0xFF) return om::sound::defaultSound(ev);
+  if (g_sndPrefsVersion >= 2) {
+    const uint8_t id = (uint8_t)raw;
+    if (id == om::sound::kSoundOff || om::sound::validSound(id)) return id;
+    return om::sound::defaultSound(ev);
+  }
+  if (raw == 3 || raw == 17) return om::sound::kSoundOff;   // EST-359 / the old 17-chime Off
+  if (raw > 3) return om::sound::defaultSound(ev);          // an older out-of-range value
+  return om::sound::legacyVariantSound(ev, (uint8_t)raw);
 }
 
 static void savePrefs() {
   g_prefs.putBool("sound", g_soundOn);
   g_prefs.putUChar("vol", g_volume);
+  g_prefs.putUChar("sndver", 2);   // the keys below now hold shared-library ids
   g_prefs.putUChar("boot", g_sndBoot);
   g_prefs.putUChar("msg", g_sndMsg);
   g_prefs.putUChar("dm", g_sndDm);
@@ -2567,7 +2600,7 @@ enum SetAct : uint16_t {
   A_CustomOpen, A_CustomFreq, A_CustomBw, A_CustomSf, A_CustomCr, A_CustomApply,
   A_PresetBase = 100,      // 100..103 the four presets
   A_HashBase = 120,        // 120..122 = 1B / 2B / 3B
-  A_PickBase = 140,        // 140.. the chimes, then Off
+  A_PickBase = 140,        // 140.. the shared sound library, then Off
   A_ChanBase = 200,        // 200..207 one row per channel
   A_TimeFieldBase = 220,   // 220..224 year / month / day / hour / minute
   A_WifiNetBase = 240,     // 240..247 the scan rows on the Wi-Fi page (strongest first)
@@ -3016,7 +3049,7 @@ static void buildSettingsRows() {
       setAdd(om::ui::SetRowKind::Toggle, A_SoundMaster, "Master sound", "ON", g_soundOn);
       snprintf(v, sizeof(v), "%u%%", (unsigned)g_volume);
       setAdd(om::ui::SetRowKind::Stepper, A_SoundVolume, "Volume", v);
-      // EST-359: one row per event, each with its own variants (2-3) and Off.
+      // EST-361: one row per event, each showing the shared-library sound it uses (or Off).
       setAdd(om::ui::SetRowKind::Chevron, A_SoundBoot, "Boot",
              choiceName(SoundEvent::Boot, g_sndBoot));
       setAdd(om::ui::SetRowKind::Chevron, A_SoundMsg, "Message",
@@ -3043,17 +3076,34 @@ static void buildSettingsRows() {
 
     case SetPage::SoundPicker: {
       const SoundEvent ev = (SoundEvent)g_setSoundEvent;
-      const int count = om::sound::variantCount(ev);
+      const int count = om::sound::soundCount();
       snprintf(g_setTitle, sizeof(g_setTitle), "%s sound", om::sound::eventLabel(ev));
       setSection("CHOOSE");
-      // Use sits above the list: it is at most four rows now, but keeping the key first means the
-      // user can preview the first variant and save without scrolling back down.
+      // Use sits above the list: the user can tap a sound, hear it, then save without scrolling back.
       setAdd(om::ui::SetRowKind::Button, A_SoundPickUse, "Use this sound");
-      for (int i = 0; i <= count; ++i) {
-        const char* name = i < count ? om::sound::variantName(ev, (uint8_t)i) : "Off";
-        setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PickBase + i), name != nullptr ? name : "?",
-               "", i == g_setSoundPending);
+      // The whole shared library, grouped by family. A sound another event already uses carries its
+      // short tag(s) in the dim value; it stays selectable (double duty is allowed).
+      char tags[om::ui::kSetValueCap];
+      for (int f = 0; f < om::sound::kFamilyCount; ++f) {
+        const om::sound::Family family = (om::sound::Family)f;
+        bool any = false;
+        for (int id = 0; id < count; ++id) {
+          if (om::sound::soundFamily((uint8_t)id) == family) {
+            any = true;
+            break;
+          }
+        }
+        if (!any) continue;
+        setSection(om::sound::familyName(family));
+        for (int id = 0; id < count; ++id) {
+          if (om::sound::soundFamily((uint8_t)id) != family) continue;
+          soundUseTags(ev, (uint8_t)id, tags, sizeof(tags));
+          setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PickBase + id),
+                 om::sound::soundName((uint8_t)id), tags, g_setSoundPending == id);
+        }
       }
+      setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PickBase + count), "Off", "",
+             g_setSoundPending == (int)om::sound::kSoundOff);
       setAdd(om::ui::SetRowKind::Note, A_None, "Tap a sound to hear it, then Use.");
       break;
     }
@@ -3358,7 +3408,7 @@ static void settingsEditorOk();
 
 static void openSoundPicker(SoundEvent ev) {
   g_setSoundEvent = (int)ev;
-  g_setSoundPending = (int)variantFor(ev);
+  g_setSoundPending = (int)choiceFor(ev);
   setGo(SetPage::SoundPicker);
   drawSettings();
 }
@@ -3535,10 +3585,12 @@ static void handleSettingsRow(uint16_t id) {
 
     case A_SoundPickUse: {
       const SoundEvent ev = (SoundEvent)g_setSoundEvent;
-      const int off = om::sound::variantCount(ev);
-      if (g_setSoundPending < 0) g_setSoundPending = 0;
-      if (g_setSoundPending > off) g_setSoundPending = off;
-      variantFor(ev) = (uint8_t)g_setSoundPending;
+      const int count = om::sound::soundCount();
+      if (g_setSoundPending != (int)om::sound::kSoundOff &&
+          (g_setSoundPending < 0 || g_setSoundPending >= count)) {
+        g_setSoundPending = (int)om::sound::defaultSound(ev);
+      }
+      choiceFor(ev) = (uint8_t)g_setSoundPending;
       savePrefs();
       setBack();                    // the picker's opener: Sound, or the Chat page it came from
       showToast("Sound saved");
@@ -3681,11 +3733,13 @@ static void handleSettingsRow(uint16_t id) {
         setGo(SetPage::ConfirmHash);
       } else if (id >= A_PickBase && id < A_ChanBase) {
         const SoundEvent ev = (SoundEvent)g_setSoundEvent;
-        const int count = om::sound::variantCount(ev);
+        const int count = om::sound::soundCount();
         const int idx = (int)(id - A_PickBase);
-        if (idx >= 0 && idx <= count) {
+        if (idx >= 0 && idx < count) {
           g_setSoundPending = idx;
-          if (idx < count) playSound(ev, (uint8_t)idx, true);   // preview ignores DND, not master
+          playSound(ev, (uint8_t)idx, true);   // preview ignores DND, not master
+        } else if (idx == count) {
+          g_setSoundPending = (int)om::sound::kSoundOff;   // the Off row
         }
       } else if (id >= A_ChanBase && id < A_ChanBase + om::kMaxChannels) {
         openChannelPage((int)(id - A_ChanBase));
@@ -4021,20 +4075,27 @@ void setup() {
   }
   g_soundOn = g_prefs.getBool("sound", true);
   g_volume = g_prefs.getUChar("vol", 60);
-  // EST-359: one stored variant per event (variantCount == Off; see loadVariant for the old table).
-  g_sndBoot = loadVariant("boot", SoundEvent::Boot);
-  g_sndMsg = loadVariant("msg", SoundEvent::Message);
-  g_sndDm = loadVariant("dm", SoundEvent::Dm);
-  g_sndMen = loadVariant("men", SoundEvent::Mention);
-  g_sndSent = loadVariant("sent", SoundEvent::Sent);
-  g_sndErr = loadVariant("err", SoundEvent::Error);
-  g_sndNew = loadVariant("newn", SoundEvent::NewNode);
-  g_sndBatt = loadVariant("batt", SoundEvent::LowBattery);
-  g_touchIdx = loadVariant("tone", SoundEvent::Touch);
+  // EST-361: one shared-library sound id per event (kSoundOff = Off). A pre-2 value is the EST-359
+  // per-event index and loadChoice migrates it through sound::legacyVariantSound.
+  g_sndPrefsVersion = g_prefs.getUChar("sndver", 0);
+  g_sndBoot = loadChoice("boot", SoundEvent::Boot);
+  g_sndMsg = loadChoice("msg", SoundEvent::Message);
+  g_sndDm = loadChoice("dm", SoundEvent::Dm);
+  g_sndMen = loadChoice("men", SoundEvent::Mention);
+  g_sndSent = loadChoice("sent", SoundEvent::Sent);
+  g_sndErr = loadChoice("err", SoundEvent::Error);
+  g_sndNew = loadChoice("newn", SoundEvent::NewNode);
+  g_sndBatt = loadChoice("batt", SoundEvent::LowBattery);
+  g_touchIdx = loadChoice("tone", SoundEvent::Touch);
   g_dnd = g_prefs.getBool("dnd", false);
   // EST-359: the touch click is optional and OFF for a fresh device.
   g_touchSnd = g_prefs.getBool("tsnd", false);
   g_welcome = g_prefs.getBool("welc", true);
+  // Persist the migrated ids once, so the next boot reads ids directly.
+  if (g_sndPrefsVersion < 2) {
+    g_sndPrefsVersion = 2;
+    savePrefs();
+  }
   loadEmojiRecent();
   // EST-347: the one brightness setting, in NVS as "bright". The fade starts from it.
   g_setBrightness = g_prefs.getUChar("bright", om::kScreenBrightness);
@@ -4045,10 +4106,10 @@ void setup() {
   // until the switch is on (or a saved "on" is applied by the first loop pass).
   om::wifiBegin();
   om::printMemLine("boot (Wi-Fi stack off)");
-  Serial.printf("[prefs] sound=%d vol=%u boot=%u msg=%u dm=%u men=%u sent=%u err=%u new=%u batt=%u "
-                "dnd=%d tsnd=%d tone=%u emoji_rec=%u\n",
-                g_soundOn, g_volume, g_sndBoot, g_sndMsg, g_sndDm, g_sndMen, g_sndSent, g_sndErr,
-                g_sndNew, g_sndBatt, g_dnd, g_touchSnd, g_touchIdx,
+  Serial.printf("[prefs] sound=%d vol=%u sndver=%u boot=%u msg=%u dm=%u men=%u sent=%u err=%u "
+                "new=%u batt=%u dnd=%d tsnd=%d tone=%u emoji_rec=%u\n",
+                g_soundOn, g_volume, g_sndPrefsVersion, g_sndBoot, g_sndMsg, g_sndDm, g_sndMen,
+                g_sndSent, g_sndErr, g_sndNew, g_sndBatt, g_dnd, g_touchSnd, g_touchIdx,
                 (unsigned)g_emojiRecent.count);
   Serial.printf("[emoji] table %s, %d cells\n",
                 om::ui::emojiReady() ? "ok" : "MISSING", om::ui::emojiTableCount());
@@ -4882,8 +4943,7 @@ void loop() {
       }
       if (lastText[0] != 0) {
         const om::ui::NodeNotice notice =
-            om::ui::newNodeNotice(true, g_soundOn, g_dnd,
-                                  g_sndNew >= om::sound::variantCount(SoundEvent::NewNode));
+            om::ui::newNodeNotice(true, g_soundOn, g_dnd, !om::sound::validSound(g_sndNew));
         g_newNodeDot = true;   // until the Nodes screen is next drawn
         if (notice.sound) playEvent(SoundEvent::NewNode);
         // showToast redraws the current screen, which also puts the dot on the tab bar of whatever
@@ -5976,31 +6036,31 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       return;
     }
 
-    // EST-359: `play <event> [variant]` is the reviewer's door to the sound bank. It is a diagnostic,
-    // so it bypasses master-off and DND (the codec volume still follows the Sound setting) and says
-    // exactly what it queued. The audio task renders and streams it; the reply never waits for it.
+    // EST-359/361: `play <event> [sound-id]` is the reviewer's door to the shared library. It is a
+    // diagnostic, so it bypasses master-off and DND (the codec volume still follows the Sound setting)
+    // and says exactly what it queued. The audio task renders and streams it; the reply never waits.
     case om::usb::Kind::Play: {
       om::sound::Event ev;
       if (!om::sound::parseEvent(cmd.target, &ev)) {
         cmdError(reply, cap, "args");
         return;
       }
-      int v = cmd.count;
-      if (v < 0) v = (int)om::sound::defaultVariant(ev);
-      if (!om::sound::validVariant(ev, (uint8_t)v)) {
+      int id = cmd.count;
+      if (id < 0) id = (int)om::sound::defaultSound(ev);
+      if (!om::sound::validSound((uint8_t)id)) {
         cmdError(reply, cap, "args");
         return;
       }
       om::audioVolume(g_volume);
-      if (!om::audioPlay(ev, (uint8_t)v)) {
+      if (!om::audioPlay(ev, (uint8_t)id)) {
         snprintf(reply, cap, "[cmd] error play audio_down dropped=%lu",
                  (unsigned long)om::audioDroppedCount());
         return;
       }
       snprintf(reply, cap,
-               "[cmd] ok play event=%s variant=%d name=\"%s\" ms=%d queued=1 played=%lu dropped=%lu",
-               om::sound::eventKey(ev), v, om::sound::variantName(ev, (uint8_t)v),
-               om::sound::eventMs(ev, (uint8_t)v), (unsigned long)om::audioPlayedCount(),
+               "[cmd] ok play event=%s sound=%d name=\"%s\" ms=%d queued=1 played=%lu dropped=%lu",
+               om::sound::eventKey(ev), id, om::sound::soundName((uint8_t)id),
+               om::sound::soundMs((uint8_t)id), (unsigned long)om::audioPlayedCount(),
                (unsigned long)om::audioDroppedCount());
       return;
     }

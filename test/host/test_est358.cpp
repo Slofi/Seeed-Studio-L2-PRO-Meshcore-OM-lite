@@ -467,8 +467,12 @@ static void testStatus() {
   CHECK_TEXT(t, "SNR 7.50 dB");
   snrBothText(t, sizeof(t), false, 0, false, 0);
   CHECK_TEXT(t, "");
-  clockText(t, sizeof(t), 1700000000u);   // 2023-11-14 22:13:20 UTC
-  CHECK_TEXT(t, "22:13 UTC");
+  clockText(t, sizeof(t), 1700000000u);   // 2023-11-14: below the 2025 cut-off
+  CHECK_TEXT(t, "not set (2023)");
+  clockText(t, sizeof(t), 1715779092u);   // Argus's 2024-05-15 MeshCore restart clock
+  CHECK_TEXT(t, "not set (2024)");
+  clockText(t, sizeof(t), 1735689600u);   // 2025-01-01 00:00 UTC is real
+  CHECK_TEXT(t, "00:00 UTC");
   clockText(t, sizeof(t), 0);
   CHECK_TEXT(t, "not set");
 }
@@ -574,7 +578,7 @@ static void testAdminRows() {
   CHECK_TEXT(rows[5].value, "-95 dBm");
   CHECK_TEXT(rows[6].value, "6.25 dB");
   CHECK_TEXT(rows[7].value, "level 4");
-  CHECK_TEXT(rows[8].value, "22:13 UTC");
+  CHECK_TEXT(rows[8].value, "not set (2023)");
   for (int i = 1; i < n; ++i) CHECK(rows[i].kind == RowKind::Fact);
   // EST-360: an implausible battery is "n/a" and only the detail line shows its raw mV.
   st.battMv = 65416;

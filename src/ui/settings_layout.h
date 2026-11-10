@@ -135,7 +135,7 @@ enum class SetRowKind : uint8_t {
 };
 
 constexpr int kSetLabelCap = 160;
-constexpr int kSetValueCap = 40;
+constexpr int kSetValueCap = 64;   // the picker's short use tags can name several events
 
 struct SettingRow {
   SetRowKind kind = SetRowKind::Value;

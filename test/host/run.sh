@@ -175,10 +175,10 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est358.cpp \
   ../../src/sound_synth.cpp -o "$BIN24"
 "$BIN24"
 
-# EST-359: the sound bank. The synth is the same sound_synth.cpp the firmware and tools/mksounds.cpp
-# build: every event's 2-3 variants, lengths 0.1..0.4 s (Sent/Touch shorter on purpose), the soft
-# attack and exponential decay (measured in windows), the boot D7-gap-F7 phrase, no clipping at full
-# scale, and the `play <event> [variant]` USB command.
+# EST-359/361: the shared sound library. The synth is the same sound_synth.cpp the firmware and
+# tools/mksounds.cpp build: 54 sounds, >=6 per event, unique names and note sequences, all lengths in
+# range (low battery 1.0..1.5 s and near the cap), the boot D7-gap-F7 phrase, no clipping at full
+# scale, the EST-359 choice migration, and the `play <event> [sound-id]` USB command.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est359.cpp \
   ../../src/sound_synth.cpp ../../src/usb_cmd_logic.cpp -o "$BIN25"
 "$BIN25"

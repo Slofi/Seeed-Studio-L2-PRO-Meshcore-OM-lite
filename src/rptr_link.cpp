@@ -576,7 +576,7 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
     LoginAnswer a;
     if (loginParse(data, (int)len, &a)) {
       a.clock = tag;
-      a.clockValid = true;
+      a.clockValid = a.clock >= kClockRealSince;   // 2024 is the MeshCore restart clock, not real
       s_login.succeed(a, millis());
       Serial.printf("[rptr] login %s: %s (%lu ms), fw level %u, permissions %u\n", s_currentName,
                     loginStateText(s_login.state), (unsigned long)s_login.rttMs,
@@ -661,11 +661,13 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
         s_found.setRegions(idx, ar);
         char hex[16];
         hexPrefix(s_found.rows[idx].prefix, 6, hex, sizeof(hex));
+        char clk[24];
+        if (ar.clockValid) snprintf(clk, sizeof(clk), "real");
+        else clockText(clk, sizeof(clk), ar.clock);   // "not set" / "not set (2024)"
         Serial.printf(
             "[rptr] regions <- %s (%s): clock=%lu (%s) regions=\"%s\" count=%d clean=%d\n",
             s_found.rows[idx].name[0] ? s_found.rows[idx].name : hex, hex,
-            (unsigned long)ar.clock, ar.clockValid ? "real" : "not set", ar.text, ar.count,
-            ar.clean ? 1 : 0);
+            (unsigned long)ar.clock, clk, ar.text, ar.count, ar.clean ? 1 : 0);
       }
       s_regionsPending = false;
       s_regionsRow = -1;

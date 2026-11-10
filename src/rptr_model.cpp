@@ -915,6 +915,15 @@ int64_t daysFromCivil(int y, int m, int d) {
   const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
   return (int64_t)era * 146097 + (int64_t)doe - 719468;
 }
+
+// The UTC year of an epoch. Used only for the "not set (2024)" label, so a small walk after a mean
+// year estimate is enough (and exact for every value the repeaters send).
+int utcYear(uint32_t epoch) {
+  int year = 1970 + (int)(epoch / 31556952u);
+  while (daysFromCivil(year + 1, 1, 1) * 86400 <= (int64_t)epoch) ++year;
+  while (daysFromCivil(year, 1, 1) * 86400 > (int64_t)epoch) --year;
+  return year;
+}
 }  // namespace
 
 bool clockReplyParse(const char* text, uint32_t* epoch) {
@@ -1026,8 +1035,10 @@ const char* viewName(int view) {
 
 int clockText(char* out, size_t cap, uint32_t epoch) {
   if (out == nullptr || cap == 0) return 0;
-  if (epoch < kClockRealSince) {   // before 2020: the repeater's clock is not set
-    snprintf(out, cap, "not set");
+  if (epoch < kClockRealSince) {
+    // The MeshCore restart clock reads 2024: say the year so "Sync clock" is the obvious next step.
+    if (epoch >= 1600000000u) snprintf(out, cap, "not set (%d)", utcYear(epoch));
+    else snprintf(out, cap, "not set");
     return (int)strlen(out);
   }
   const uint32_t secs = epoch % 86400u;

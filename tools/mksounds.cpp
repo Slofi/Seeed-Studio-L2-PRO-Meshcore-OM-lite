@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
-// EST-359: render every event variant of the OM Lite sound bank to a WAV on the host.
+// EST-361: render the shared OM Lite sound library to WAVs on the host, plus INDEX.md.
 //
 // This is the SAME sound_synth.cpp the firmware compiles, at the codec's 16 kHz, 16-bit mono, so the
-// file Claude listens to is the waveform the device streams (the ES8311 output stage adds only its
+// file Filip listens to is the waveform the device streams (the ES8311 output stage adds only its
 // own analog gain). Nothing here runs on the device.
 //
 // Build and run from the firmware folder:
 //   g++ -std=c++17 -O2 -I src tools/mksounds.cpp src/sound_synth.cpp -o /tmp/mksounds
 //   /tmp/mksounds docs/sounds
 //
-// It writes one file per variant (nine events, three variants each) and prints the length, peak and
-// RMS of every one; a clipped or empty render fails the tool with a non-zero exit.
+// One file per library sound, named <event>-<n>-<name>.wav where event is the sound's home event and
+// n is its index in that event's own set. The index lists the global library id too, so the id in
+// NVS and the preview file can be matched. A clipped or empty render fails the tool with non-zero.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -80,6 +81,22 @@ static bool writeWav(const std::string& path, const int16_t* samples, int n) {
   return f.good();
 }
 
+static std::string notesText(uint8_t id) {
+  char buf[192];
+  size_t used = 0;
+  buf[0] = 0;
+  for (int i = 0; i < soundNoteCount(id); ++i) {
+    NoteInfo n;
+    if (!soundNote(id, i, &n)) break;
+    const int wrote = snprintf(buf + used, sizeof(buf) - used, "%s%u Hz@%u+%u", i ? ", " : "",
+                               (unsigned)n.hz, (unsigned)n.atMs, (unsigned)n.durMs);
+    if (wrote <= 0) break;
+    used += (size_t)wrote;
+    if (used >= sizeof(buf)) break;
+  }
+  return std::string(buf);
+}
+
 int main(int argc, char** argv) {
   const std::string dir = argc > 1 ? argv[1] : "docs/sounds";
   mkdir(dir.c_str(), 0755);   // EEXIST is fine
@@ -87,14 +104,31 @@ int main(int argc, char** argv) {
   static int16_t buf[kMaxSamples];
   int written = 0;
   int failed = 0;
-  printf("%-8s %-3s %-12s %5s %7s %8s %8s\n", "event", "var", "name", "ms", "samples", "peak", "rms");
+  std::vector<std::string> index;
+  index.push_back("# OM Lite sound library (EST-361)");
+  index.push_back("");
+  index.push_back("Every file is the exact waveform the device streams (16 kHz, 16-bit mono, the same "
+                  "sound_synth.cpp). `id` is the shared-library id stored in NVS; `n` is the sound's "
+                  "index in its home event's own set. Any sound may be chosen for any notification.");
+  index.push_back("");
+  index.push_back("| file | event | n | id | family | name | notes (Hz@at+dur ms) | ms | peak |");
+  index.push_back("|---|---|---:|---:|---|---|---|---:|---:|");
+
+  printf("%-8s %-2s %-3s %-18s %-7s %5s %7s %8s %8s\n", "event", "n", "id", "name", "family", "ms",
+         "samples", "peak", "rms");
   for (int e = 0; e < kEventCount; ++e) {
     const Event ev = (Event)e;
     for (int v = 0; v < variantCount(ev); ++v) {
+      const uint8_t id = variantSoundId(ev, (uint8_t)v);
+      if (!validSound(id)) {
+        printf("FAIL no id for %s v%d\n", eventKey(ev), v);
+        ++failed;
+        continue;
+      }
       RenderInfo info{};
-      const int n = render(ev, (uint8_t)v, buf, kMaxSamples, &info);
+      const int n = renderSound(id, buf, kMaxSamples, &info);
       if (n <= 0) {
-        printf("FAIL render %s v%d\n", eventKey(ev), v);
+        printf("FAIL render %s v%d (%s)\n", eventKey(ev), v, soundName(id));
         ++failed;
         continue;
       }
@@ -112,9 +146,8 @@ int main(int argc, char** argv) {
         printf("FAIL headroom/end %s v%d: peak=%d last=%d\n", eventKey(ev), v, peak, buf[n - 1]);
         ++failed;
       }
-      char name[64];
-      snprintf(name, sizeof(name), "%s-%d-%s.wav", eventKey(ev), v,
-               slug(variantName(ev, (uint8_t)v)).c_str());
+      char name[80];
+      snprintf(name, sizeof(name), "%s-%d-%s.wav", eventKey(ev), v, slug(soundName(id)).c_str());
       const std::string path = dir + "/" + name;
       if (!writeWav(path, buf, n)) {
         printf("FAIL write %s\n", path.c_str());
@@ -122,10 +155,30 @@ int main(int argc, char** argv) {
         continue;
       }
       ++written;
-      printf("%-8s v%-2d %-12s %5d %7d %8d %8.1f  %s\n", eventKey(ev), v,
-             variantName(ev, (uint8_t)v), eventMs(ev, (uint8_t)v), n, peak, rms, name);
+      printf("%-8s v%-2d %-3u %-18s %-7s %5d %7d %8d %8.1f  %s\n", eventKey(ev), v, (unsigned)id,
+             soundName(id), familyName(soundFamily(id)), soundMs(id), n, peak, rms, name);
+      char row[320];
+      snprintf(row, sizeof(row), "| %s | %s | %d | %u | %s | %s | %s | %d | %d |", name,
+               eventKey(ev), v, (unsigned)id, familyName(soundFamily(id)), soundName(id),
+               notesText(id).c_str(), soundMs(id), peak);
+      index.push_back(row);
     }
   }
-  printf("\n%d WAV file(s) in %s, %d failure(s)\n", written, dir.c_str(), failed);
-  return failed == 0 && written == 27 ? 0 : 1;
+
+  std::ofstream idx(dir + "/INDEX.md");
+  if (!idx) {
+    printf("FAIL write %s/INDEX.md\n", dir.c_str());
+    ++failed;
+  } else {
+    for (const std::string& line : index) idx << line << '\n';
+    idx.close();
+    if (!idx) {
+      printf("FAIL close %s/INDEX.md\n", dir.c_str());
+      ++failed;
+    }
+  }
+
+  printf("\n%d WAV file(s) in %s, %d failure(s); INDEX.md lists all %d\n", written, dir.c_str(),
+         failed, written);
+  return failed == 0 && written == soundCount() ? 0 : 1;
 }

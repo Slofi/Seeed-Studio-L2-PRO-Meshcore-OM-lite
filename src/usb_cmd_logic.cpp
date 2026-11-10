@@ -332,9 +332,10 @@ Command parseCommand(char* line) {
     return c;
   }
 
-  // EST-359: hear the device's own sound bank from the host. The event word is the table's key
-  // (boot, message, dm, mention, sent, error, newnode, battery, touch); the optional variant must be
-  // one this event really has. A bad word is an argument error, never a silent default.
+  // EST-359/361: hear the device's own sound library from the host. The event word is the table's
+  // key (boot, message, dm, mention, sent, error, newnode, battery, touch); the optional number is a
+  // library sound id (any sound can play as any event). A bad word or id is an argument error, never
+  // a silent default.
   if (strcmp(verb, "play") == 0) {
     c.kind = Kind::Play;
     const char* word = cur.next();
@@ -348,15 +349,15 @@ Command parseCommand(char* line) {
       return c;
     }
     c.target = word;
-    c.count = (int)sound::defaultVariant(ev);
-    const char* variant = cur.next();
-    if (variant != nullptr) {
+    c.count = (int)sound::defaultSound(ev);
+    const char* soundId = cur.next();
+    if (soundId != nullptr) {
       int v = 0;
-      if (!toInt(variant, &v)) {
+      if (!toInt(soundId, &v)) {
         c.error = "number";
         return c;
       }
-      if (!sound::validVariant(ev, (uint8_t)v)) {
+      if (!sound::validSound((uint8_t)v)) {
         c.error = "args";
         return c;
       }

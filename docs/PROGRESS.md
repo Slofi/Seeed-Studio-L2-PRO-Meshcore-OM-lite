@@ -3020,3 +3020,80 @@ whether `region put` with a long parent line fits the CLI frame.
 - Built in the sandbox (exit 0, RAM 148,368 B, flash 2,752,545 B), tests exit 0, reviewed binary flashed (2,752,912 B).
 - `rptr scan`: Argus answered (Trnovo II did not this time). `rptr regions "Argus mobile RPTR"` (anonymous, no login): `clock=1715779092 (real) regions="*, si, lj"`. **Argus's clock reads 2024-05-15 13:18 UTC**: it is the MeshCore 2024 restart clock, so "Sync clock" is needed there. Small defect: the reply was labelled "(real)" although a 2024 stamp is below the 2025-01-01 cut-off; use the same kMinSaneEpoch rule.
 - The status card in volts, login and clock sync need Filip's repeater password: Filip.
+
+## 2026-11-10 19:34 (DeepSeek): EST-361 sounds round 2, one shared library, clock label
+
+**One shared library of 54 sounds, six per event, every note sequence different.** `sound_synth.cpp`
+now has a flat library with stable ids (0..53), a family (Bells, Chimes, Marimba, Soft, Alerts, Ticks)
+and a home event; each event's own set is six of them. No two library sounds share an ordered
+(Hz, start, duration) sequence, so the old boot problem cannot come back: the three old boot variants
+were the same D7/F7 notes in three voices, and now every boot choice is a different motif. One sound
+is still the original TK-TK (D7, a 55 ms gap, F7).
+
+**Message and new node are the same family, a fourth apart.** Message's six sounds are the old
+new-node timbres transposed up a fourth (and a fifth): Soft Hi 880/698 Hz is the default, plus
+Marimba Hi, Bell Hi, Soft High Fifth, Marimba High Fifth, Bell High Fifth. New node's six are the
+same voices down a fourth/fifth: Soft Lo 494/392 Hz is the default, plus Marimba Lo, Bell Lo and the
+two low fifths. Every message-home fundamental is above every new-node-home one (880 vs 784 is the
+closest pair).
+
+**Low battery is 1.35 s and at the cap.** It is a three-note descending figure (440, 349, 262 Hz)
+played twice, with just enough overlap to be loud, and it has its own target peak: the renderer
+normalises it to 27,000 of 32,767 (not clipping). All six battery sounds are 1.25..1.4 s and at the
+same target. DND still lets error and low battery through. The other sounds keep the old
+"normalise down only" rule, so quiet ticks stay quiet. The per-instant amplitude bound replaced the
+old whole-phrase sum, which was what made any multi-note phrase shy.
+
+**Choices are library ids, and EST-359 choices migrate.** NVS now has `sndver=2`; the event keys
+(`boot`, `msg`, ...) hold a global sound id, with `0xFF` for Off. A pre-2 value is read as the old
+per-event index and mapped by `legacyVariantSound` (0..2 -> the closest new sound, 3/17 -> Off), then
+written back as ids once. The picker lists all 54 sounds in six family sections, marks the current
+choice, plays on tap, and shows the other events using a sound as a small dim tag (`MSG`, `DM`,
+`MENT`, `SENT`, `ERR`, `NODE`, `BATT`, `TAP`, `BOOT`) with no prefix; a tagged sound stays
+selectable. The settings row value cap grew to 64 so the tags fit; the Check row now measures the
+tag string and clips the name instead of overlapping it. `play <event> [sound-id]` accepts any library
+id for any event; the reply says `sound=...`.
+
+**Repeater clock.** The anonymous regions parser, the login answer, the status card and the sync
+guard now use the same 2025-01-01 cut-off (`kClockRealSince = om::kMinSaneEpoch`). A 2024 stamp is
+not "real": `clockText` prints `not set (2024)` (and the year for any 2020..2024 value), so Argus's
+2024-05-15 MeshCore restart clock points straight at Sync clock. The serial regions line now prints
+`clock=1715779092 (not set (2024))` instead of `(real)`.
+
+**WAVs and INDEX.** `tools/mksounds.cpp` re-rendered `docs/sounds/`: 54 files named
+`<event>-<n>-<name>.wav` plus `docs/sounds/INDEX.md` with file, event, n, global id, family, name,
+notes (Hz@at+dur), length and peak. Claude's listen check method, run here with numpy: every file is
+1 ch, 16 bit, 16 kHz; 35..1400 ms according to the table; peaks 2,399..27,000 (never 32,767);
+every file starts at 0 and ends at exactly 0; the dominant FFT peak matches the recipe's first note
+(e.g. boot TK-TK shows 2,794 Hz, message Soft Hi 700 Hz, new node Soft Lo 392 Hz, battery Low 261 Hz).
+The four boot examples are clearly different: TK-TK (D7/F7), Bell Pair (784/1047), Soft Rise
+(440/554), Chime Arp (523/784/1047).
+
+**Build and tests.** Sandbox build exit 0: RAM **148,368 B** (45.3%), flash **2,757,061 B** (42.1%),
+`firmware.bin` **2,757,424 B** (was 148,368 / 2,752,545). `test/host/run.sh` exit 0.
+`test_est359.cpp` (now the EST-361 test) proves: 54 sounds, >=6 per event, unique names, no duplicate
+note sequences globally or per event, every default is one of its event's sounds, message default
+"Soft Hi" (880 Hz) is above new-node default "Soft Lo" (494 Hz) and every message-home sound is above
+every new-node-home one, boot is still D7-gap-F7 by correlation, all lengths in range (battery
+1.0..1.5 s, ticks 20..130 ms, others 100..400 ms), every render's peak equals `RenderInfo.peak`, no
+clipping, first sample 0/+-1 and last exactly 0, battery peak >= 25,000, the EST-359 migration table
+(including all three old boot choices -> TK-TK), and the USB `play <event> [sound-id]` accept/refuse
+set. `test_est358.cpp` and `test_est360.cpp` were updated for `not set (2023)` / `not set (2024)` and
+the 2025 boundary; all other host tests still pass.
+
+**Could not check** (no device, no flash, no serial): how the 54 sounds actually sound on the L2's
+small speaker and whether the battery warning is too loud through the ES8311 path; the 63-row
+picker's scroll and the dim tags on the glass; the one-time NVS migration on a device that really
+has EST-359 values; `play <event> <id>` over USB on the device; `render_us` for the 1.35 s battery
+phrase on the ESP32-S3 (host rendering is a few ms; the longer buffer is 48 KB of PSRAM).
+
+**Next step for Claude (USB):** flash `firmware.bin`, check `[sound] player up: 24000 samples
+(48000 B) in PSRAM`, then `tools/cmd.py play boot`, `play message`, `play newnode`, `play battery`
+(and `play battery 43..47`); the serial line is `[sound] play event=... sound=N name="..." ms=...
+peak=... render_us=...`. Open Settings > Sound > Message and confirm the family sections, the dim
+tags and the selected dot; pick one sound for two events (double duty) and confirm both rows show it.
+On the RPTR tab, `rptr regions "Argus mobile RPTR"` should log `(not set (2024))`, and Sync clock
+should now be allowed for it. Filip still listens to every WAV first.
+
+## 2026-11-10 20:45 (Claude): EST-361 on the device
+- 54 WAVs checked (0 clipped, edges at zero, none silent); INDEX.md lists notes per file: every boot variant now has its own notes; low battery is a 1.35 s two-pass falling figure. Built in the sandbox (exit 0, RAM 148,368 B, flash 2,757,061 B), tests exit 0, reviewed binary flashed (2,757,424 B), mesh up. Listening: Filip.

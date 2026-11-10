@@ -37,7 +37,7 @@ int s_writeFails = 0;
 
 struct PlayRequest {
   uint8_t event;
-  uint8_t variant;
+  uint8_t sound;
 };
 
 QueueHandle_t s_queue = nullptr;
@@ -149,14 +149,14 @@ void audioTask(void*) {
   for (;;) {
     if (xQueueReceive(s_queue, &req, portMAX_DELAY) != pdTRUE) continue;
     const sound::Event ev = (sound::Event)req.event;
-    if (!sound::validVariant(ev, req.variant)) continue;
+    if (!sound::validSound(req.sound)) continue;
     sound::RenderInfo info{};
     const uint32_t renderStart = micros();
-    const int n = sound::render(ev, req.variant, s_buf, sound::kMaxSamples, &info);
+    const int n = sound::renderSound(req.sound, s_buf, sound::kMaxSamples, &info);
     const uint32_t renderUs = micros() - renderStart;
     if (n <= 0) {
-      Serial.printf("[sound] render failed event=%s v%u\n", sound::eventKey(ev),
-                    (unsigned)req.variant);
+      Serial.printf("[sound] render failed event=%s sound=%u\n", sound::eventKey(ev),
+                    (unsigned)req.sound);
       continue;
     }
     size_t done = 0;
@@ -173,10 +173,10 @@ void audioTask(void*) {
       done += wrote;
     }
     ++s_played;
-    Serial.printf("[sound] play event=%s v%u name=\"%s\" ms=%d samples=%d peak=%d render_us=%lu\n",
-                  sound::eventKey(ev), (unsigned)req.variant,
-                  sound::variantName(ev, req.variant) ? sound::variantName(ev, req.variant) : "?",
-                  sound::eventMs(ev, req.variant), info.samples, info.peak,
+    Serial.printf("[sound] play event=%s sound=%u name=\"%s\" ms=%d samples=%d peak=%d render_us=%lu\n",
+                  sound::eventKey(ev), (unsigned)req.sound,
+                  sound::soundName(req.sound) ? sound::soundName(req.sound) : "?",
+                  sound::soundMs(req.sound), info.samples, info.peak,
                   (unsigned long)renderUs);
   }
 }
@@ -186,7 +186,8 @@ bool soundTaskBegin() {
   s_bufPsram = s_buf != nullptr;
   if (s_buf == nullptr) {
     // Internal RAM fallback keeps a board whose PSRAM did not come up audible; the log says which
-    // one answered. 12.8 KB is small enough that the EST-357 internal-heap work still holds.
+    // one answered. The buffer is 48 KB (1.5 s at 16 kHz), small enough for the EST-357 internal-heap
+    // work to still hold on a board with PSRAM.
     s_buf = (int16_t*)malloc((size_t)sound::kMaxSamples * sizeof(int16_t));
   }
   s_queue = xQueueCreate(kQueueLen, sizeof(PlayRequest));
@@ -250,14 +251,14 @@ void audioVolume(uint8_t pct) {
   w(0x32, (uint8_t)(kFloor + ((uint32_t)(0xFF - kFloor) * pct) / 100));
 }
 
-bool audioPlay(sound::Event ev, uint8_t variant) {
+bool audioPlay(sound::Event ev, uint8_t soundId) {
   if (!s_open || !s_i2s || s_queue == nullptr) return false;
-  if (!sound::validVariant(ev, variant)) return false;
-  const PlayRequest req{(uint8_t)ev, variant};
+  if (!sound::validSound(soundId)) return false;
+  const PlayRequest req{(uint8_t)ev, soundId};
   if (xQueueSend(s_queue, &req, 0) != pdTRUE) {
     ++s_dropped;
-    Serial.printf("[sound] queue full, dropped event=%s v%u (%lu dropped since boot)\n",
-                  sound::eventKey(ev), (unsigned)variant, (unsigned long)s_dropped);
+    Serial.printf("[sound] queue full, dropped event=%s sound=%u (%lu dropped since boot)\n",
+                  sound::eventKey(ev), (unsigned)soundId, (unsigned long)s_dropped);
     return false;
   }
   return true;

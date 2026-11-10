@@ -185,7 +185,8 @@ static void testAnonRegions() {
   CHECK(!a.valid);
   CHECK(!anonRegionsParse(nullptr, 10, &a));
 
-  // The clock field must be plausible to be used; the list still parses.
+  // The clock field must be plausible to be used; the list still parses. Argus's 2024-05-15
+  // MeshCore restart clock is below kMinSaneEpoch, so it is not real, and the label says the year.
   const uint32_t zero = 0;
   memcpy(buf, &zero, 4);
   memcpy(&buf[4], "*", 1);
@@ -193,6 +194,14 @@ static void testAnonRegions() {
   CHECK(!a.clockValid);
   CHECK(a.count == 1);
   CHECK_TEXT(a.text, "*");
+  const uint32_t restart2024 = 1715779092u;
+  memcpy(buf, &restart2024, 4);
+  CHECK(anonRegionsParse(buf, 5, &a));
+  CHECK(a.clock == restart2024);
+  CHECK(!a.clockValid);
+  char year[24];
+  clockText(year, sizeof(year), restart2024);
+  CHECK_TEXT(year, "not set (2024)");
 
   // More names than the card keeps: the first 12 are shown, clean goes false.
   char body[8 * 12];

@@ -70,7 +70,7 @@ int regionNameFilter(const char* src, char* out, size_t cap);
 // The anonymous regions query needs the FULL key (to derive the shared secret), so the row keeps it.
 struct AnonRegions {
   uint32_t clock = 0;        // the repeater's clock from the same reply (4 B LE)
-  bool clockValid = false;   // >= 2020, i.e. a real clock
+  bool clockValid = false;   // >= 2025-01-01, i.e. a real clock
   int count = 0;             // names kept
   bool valid = false;        // a parseable reply was decoded
   bool clean = true;         // every non-empty token was a legal region name
@@ -252,8 +252,9 @@ bool regionHomeReplyParse(const char* text, char* name, size_t cap);
 bool regionDefaultReplyParse(const char* text, char* name, size_t cap);
 
 // ---------------------------------------------------------------------------------------- clock sync
-// 2020-09-13: anything earlier is not a real clock (an unset RTC reads 0).
-constexpr uint32_t kClockRealSince = 1600000000u;
+// The same 2025-01-01 cut-off as om::kMinSaneEpoch. Anything earlier is not a real clock: 0 is an
+// unset RTC, and 2024 is the MeshCore restart clock (Argus read 1715779092, 2024-05-15).
+constexpr uint32_t kClockRealSince = 1735689600u;
 // A repeater's clock can only move FORWARD (`time <epoch>` and `clock sync` both refuse to go
 // backwards), and only `clkreboot` can undo it. Sending our clock when the repeater is a day or more
 // behind would be a one-way jump, so the guard refuses anything more than a day ahead.

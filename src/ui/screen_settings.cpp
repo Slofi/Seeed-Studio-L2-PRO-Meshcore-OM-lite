@@ -208,8 +208,14 @@ void drawRow(lgfx::LovyanGFX* d, const SettingRow& row, const Rect& r) {
       break;
     }
     case SetRowKind::Check: {
-      drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, labelX, cy,
-                       r.w - 2 * kSetPadX - 90, row.label);
+      // The dim value can be a list of short event tags (EST-361), so reserve its measured width
+      // before clipping the name; long tag lists must never push the name off the row.
+      const int valueW = row.value[0] ? measureText(d, FontRole::MonoMeta, row.value,
+                                                    (int)strlen(row.value))
+                                      : 0;
+      int labelW = r.w - 2 * kSetPadX - valueW - 20;
+      if (labelW < 40) labelW = 40;
+      drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, labelX, cy, labelW, row.label);
       drawTextRight(d, FontRole::MonoMeta, kDim, kScreen, r.right() - kSetPadX - 14, cy,
                     row.value);
       if (row.on) {

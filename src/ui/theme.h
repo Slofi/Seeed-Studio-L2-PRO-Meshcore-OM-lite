@@ -79,12 +79,32 @@ constexpr int16_t kRowH       = 30;
 
 constexpr int16_t kStatusPadX = 6;
 constexpr int16_t kStatusGap  = 6;
-constexpr int16_t kStatusDot  = 5;
+
+// The new top bar (EST-337): time on the left, then from the right edge the gear, battery, GPS and
+// the status icons that appear only when they are on. The clock is always five mono glyphs ("08:53"
+// or "--:--"), so its width is fixed by the mono advance (6 px) and the fault mark's slot does not
+// move when the time arrives. Icons are the vector masks from tools/mkicons.py; the Wi-Fi and
+// Bluetooth slots are reserved here and drawn only when those settings exist (later tickets).
+constexpr int16_t kStatusClockW    = 30;  // 5 glyphs x 6 px, MonoStatus
+constexpr int16_t kStatusIconBtW   = 9;   // the rune mask is 9 x 13
+constexpr int16_t kStatusIconBtH   = 13;
+constexpr int16_t kStatusIconWifi  = 11;
+constexpr int16_t kStatusIconDnd   = 11;  // a moon: "do not disturb", the existing dnd setting
+constexpr int16_t kStatusIconFault = 11;  // the red radio-fault mark
 
 constexpr int16_t kRowPadX    = 7;
 constexpr int16_t kRowPadY    = 3;
 constexpr int16_t kRowGap     = 6;
 constexpr int16_t kTypeDot    = 6;
+
+// The Nodes screen's one-line header above the list ("4 nodes heard · 2 in the last hour"), in mono
+// dim. It is part of the content, so the rows start below it and the tap bands use the same split.
+constexpr int16_t kNodesHeadH = 18;
+
+// A one-line toast near the bottom of the content (the fault mark's explanation). Above the tab bar
+// with a margin, so it never covers the bar.
+constexpr int16_t kToastH     = 22;
+constexpr int16_t kToastMargin = 8;
 
 constexpr int16_t kTabGap     = 2;
 constexpr int16_t kTabIcon    = 11;

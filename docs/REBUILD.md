@@ -62,6 +62,7 @@ spacing. Check the size cost of fonts in flash and say it.
    (REPLY / INFO / COPY), channels, map from SD, settings, sound settings, USB OTA.
 6. WadaMesh is GPL-3.0: read it for what it does, write our own code, copy nothing. OverMesh is ours.
 7. No em dashes in any text on the screen: commas, colons, full stops.
+8. Times, not ages (Filip, 2026-11-10: "time instead of 'heard ago' is always preferred, it gives better info"): wherever the app says when something happened, it shows the clock time (HH:MM today, weekday + time this week, date older). The age is only a fallback when the clock was not real at that moment.
 
 ## MeshCore core: upgradeable (Filip, 2026-11-10: "we still need to be able to update the MC core version")
 

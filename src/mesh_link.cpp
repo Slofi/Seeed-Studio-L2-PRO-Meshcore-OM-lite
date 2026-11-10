@@ -25,6 +25,7 @@
 #include "contact_store.h"
 #include "mc_board.h"
 #include "mesh_text.h"
+#include "radio_fault.h"
 #include "target.h"
 #include "timekeeper.h"
 
@@ -431,6 +432,67 @@ class OmRTCClock : public mesh::RTCClock {
   void tick() override {}
 };
 
+// MeshCore's own send path queues a packet and reports success before the radio has transmitted;
+// RadioLibWrapper::startSendRaw() is where the SX1262 actually answers. This subclass is the only
+// place the status bar's TX fault can be honest:
+//   * startSendRaw() false: a RadioLib startTransmit error (no chip answer, bad params, ...) -> fault;
+//   * a send that never completes inside kTxTimeoutMs (RadioLib TX timeout) -> fault;
+//   * onSendFinished(): the TX completed, so the mark clears.
+// Nothing here looks at received traffic: a quiet band can never set the mark.
+class OmSX1262Wrapper : public CustomSX1262Wrapper {
+ public:
+  OmSX1262Wrapper(CustomSX1262& radio, mesh::MainBoard& board)
+      : CustomSX1262Wrapper(radio, board) {}
+
+  bool startSendRaw(const uint8_t* bytes, int len) override {
+    const bool ok = CustomSX1262Wrapper::startSendRaw(bytes, len);
+    if (!ok) {
+      txWaiting_ = false;
+      txTimedOut_ = false;
+      if (radioFaultState().set(RadioFault::Tx)) {
+        Serial.printf("[radio] fault: %s\n", radioFaultToken(RadioFault::Tx));
+      }
+      return false;
+    }
+    txWaiting_ = true;
+    txTimedOut_ = false;
+    txStartMs_ = millis();
+    return true;
+  }
+
+  bool isSendComplete() override {
+    const bool done = CustomSX1262Wrapper::isSendComplete();
+    if (done) {
+      txWaiting_ = false;
+      return true;
+    }
+    if (txWaiting_ && (uint32_t)(millis() - txStartMs_) > kTxTimeoutMs) {
+      txWaiting_ = false;
+      txTimedOut_ = true;   // a late completion still clears the mark in onSendFinished()
+      if (radioFaultState().set(RadioFault::Tx)) {
+        Serial.printf("[radio] fault: %s\n", radioFaultToken(RadioFault::Tx));
+      }
+    }
+    return false;
+  }
+
+  void onSendFinished() override {
+    CustomSX1262Wrapper::onSendFinished();
+    const bool wasSending = txWaiting_ || txTimedOut_;
+    txWaiting_ = false;
+    txTimedOut_ = false;
+    if (wasSending && radioFaultState().onTxOk()) {
+      Serial.println("[radio] fault cleared");
+    }
+  }
+
+ private:
+  static constexpr uint32_t kTxTimeoutMs = 15000;   // longer than any legal packet's airtime
+  bool txWaiting_ = false;
+  bool txTimedOut_ = false;
+  uint32_t txStartMs_ = 0;
+};
+
 // Lazily created; the constructor only runs inside meshLinkBegin(), after USB is up.
 struct Ctx {
   Ctx() : mod(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi), radio(&mod) {}
@@ -451,7 +513,7 @@ struct Ctx {
 Ctx* s_ctx = nullptr;
 Preferences s_netPrefs;
 
-// One place that sets the setting and the label together, so the status bar can never disagree
+// One place that sets the setting and the label together, so Settings > Radio can never disagree
 // with what goes on the air.
 void applyPathHashBytes(uint8_t bytes) {
   if (bytes < 1) bytes = 1;
@@ -516,6 +578,11 @@ bool meshLinkBegin() {
   s_ctx->spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI, P_LORA_NSS);
   if (!s_ctx->radio.std_init(&s_ctx->spi)) {
     Serial.println("[mc] radio init failed");
+    // The chip itself did not answer, which outranks "MeshCore did not start": the status bar's
+    // toast should name the radio, not the layer above it.
+    if (radioFaultState().set(RadioFault::Radio)) {
+      Serial.printf("[radio] fault: %s\n", radioFaultToken(RadioFault::Radio));
+    }
     return false;
   }
 
@@ -523,7 +590,7 @@ bool meshLinkBegin() {
   s_ctx->radio.setOutputPower(LORA_TX_POWER);
 
   Serial.println("[mc] 5 wrapper");
-  s_ctx->wrapper = new CustomSX1262Wrapper(s_ctx->radio, s_ctx->board);
+  s_ctx->wrapper = new OmSX1262Wrapper(s_ctx->radio, s_ctx->board);
   if (!s_ctx->wrapper) return false;
 
   Serial.println("[mc] 6 chat object");
@@ -541,6 +608,10 @@ bool meshLinkBegin() {
 
   Serial.println("[mc] 7 channels");
   meshLinkReloadChannels();
+
+  // The chip answered std_init and the mesh is built, so a startup mark is resolved here, BEFORE the
+  // first advert: an advert TX failure after this must still be able to set the mark.
+  if (radioFaultState().onRadioReinit()) Serial.println("[radio] fault cleared");
 
   s_ready = true;   // before advert/hello, because meshLinkSend() checks it
 
@@ -786,6 +857,9 @@ bool meshLinkSend(int channelIdx, const char* text) {
                                                 (int)strlen(text));
   s_ctx->tables.endOwnSend(ok);
   Serial.printf("[mc] sendGroupMessage -> %d\n", (int)ok);
+  // The TX fault is NOT read from this return value: MeshCore queues the packet and returns true
+  // before the radio transmits. OmSX1262Wrapper's startSendRaw()/isSendComplete()/onSendFinished()
+  // are the real RadioLib result and own the mark (see the class above).
   if (ok) {
     // Locally echo what we sent, so the channel view shows the outgoing message too.
     const int slot = slotFor(s_msgCount);

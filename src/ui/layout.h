@@ -75,18 +75,30 @@ struct Layout {
     return -1;
   }
 
-  // Full row rectangle in screen coordinates; negative y when scrolled above the content.
+  // The Nodes screen's one-line header above the list, and the list body below it. Both come from
+  // the content rectangle, so the screen, the drawing and the tap test can never disagree.
+  constexpr Rect listHeader() const {
+    return Rect{content.x, content.y, content.w, kNodesHeadH};
+  }
+
+  constexpr Rect listBody() const {
+    return Rect{content.x, (int16_t)(content.y + kNodesHeadH), content.w,
+                (int16_t)(content.h - kNodesHeadH)};
+  }
+
+  // Full row rectangle in screen coordinates; negative y when scrolled above the list body.
   constexpr Rect row(int index, int scroll) const {
-    return Rect{content.x, (int16_t)(content.y + index * kRowH - scroll), content.w, kRowH};
+    const Rect body = listBody();
+    return Rect{body.x, (int16_t)(body.y + index * kRowH - scroll), body.w, kRowH};
   }
 
   // The part of the row that is actually on screen. Empty for rows above or below the list.
   constexpr Rect rowVisible(int index, int scroll) const {
-    return row(index, scroll).intersect(content);
+    return row(index, scroll).intersect(listBody());
   }
 
   // -1 when the point hits no row. Only the visible part of a row counts, so a tap under the status
-  // bar or the tab bar can never select a row hidden behind it.
+  // bar, on the header or under the tab bar can never select a row hidden behind it.
   constexpr int rowAt(int px, int py, int scroll, int count) const {
     for (int i = 0; i < count; ++i) {
       const Rect v = rowVisible(i, scroll);
@@ -97,16 +109,26 @@ struct Layout {
 
   constexpr int maxScroll(int count) const {
     const int total = count * kRowH;
-    return total > content.h ? total - content.h : 0;
+    const int bodyH = listBody().h;
+    return total > bodyH ? total - bodyH : 0;
   }
 
   constexpr int visibleRows() const {
-    return (content.h + kRowH - 1) / kRowH;
+    return (listBody().h + kRowH - 1) / kRowH;
   }
 
   constexpr Rect gear() const {
     return Rect{(int16_t)(status.right() - kStatusPadX - kGearSize),
                 (int16_t)(status.y + (status.h - kGearSize) / 2), kGearSize, kGearSize};
+  }
+
+  // The radio-fault mark's slot, right after the clock on the left. The clock is always five mono
+  // glyphs, so this rectangle is fixed and the same one draws and answers the tap. When there is no
+  // fault nothing is drawn there and the tap does nothing.
+  constexpr Rect radioFault() const {
+    return Rect{(int16_t)(status.x + kStatusPadX + kStatusClockW + kStatusGap),
+                (int16_t)(status.y + (status.h - kStatusIconFault) / 2),
+                kStatusIconFault, kStatusIconFault};
   }
 };
 

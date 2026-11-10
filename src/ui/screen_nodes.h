@@ -24,6 +24,10 @@ struct NodesView {
   int selected = -1;
   int scroll = 0;
   int unread = 0;
+  // The one-line header above the list: "<N> nodes heard", plus "<M> in the last hour" only when
+  // the timestamps are real (main computes both from the contact table).
+  int heardLastHour = 0;
+  bool heardLastHourKnown = false;
 };
 
 // Opens the frame, draws the screen, closes (and pushes) the frame. The caller keeps the state.

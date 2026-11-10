@@ -2,7 +2,8 @@
 """Render the OM Lite icon masks and the C++ table the widgets blend over the frame.
 
 The status bar's gear is a VECTOR gear (13x13, 8 teeth) and Bluetooth is the rune drawn as one
-polyline, 13 px tall (9 px wide). Both are rendered 16x supersampled and reduced with LANCZOS to an
+polyline, 13 px tall (9 px wide). The do-not-disturb moon and the radio-fault triangle (both 11x11,
+EST-337) are vector shapes too. All are rendered 16x supersampled and reduced with LANCZOS to an
 8-bit alpha mask at the exact on-screen size (Claude's shapes, chosen 2026-11-10; the old U+2699
 glyph read as a ring with a dot and the old Bluetooth mask as a diamond). Wi-Fi stays the simple
 three-arc shape for its later tab.
@@ -29,6 +30,8 @@ ICONS = [
     ("Gear", "gear", 13),
     ("Wifi", "wifi", 11),
     ("Bluetooth", "bluetooth", 13),
+    ("Dnd", "dnd", 11),
+    ("Fault", "fault", 11),
 ]
 
 
@@ -102,6 +105,39 @@ def wifi_mask(size):
         r = int(round(work * frac))
         d.arc((cx - r, base - r, cx + r, base + r), start=225, end=315, fill=255, width=stroke)
     return fit(canvas, size)
+
+
+def dnd_mask(size=11):
+    """Do-not-disturb: a crescent moon. A filled disc with an offset disc erased, so the moon's
+    opening faces up-right and the lit part is a clean crescent at 11 px."""
+    S = SUPERSAMPLE
+    N = size * S
+    img = Image.new("L", (N, N), 0)
+    d = ImageDraw.Draw(img)
+    c = N / 2
+    r = N * 0.47
+    d.ellipse((c - r, c - r, c + r, c + r), fill=255)
+    ox = N * 0.28
+    oy = -N * 0.16
+    rr = N * 0.42
+    d.ellipse((c + ox - rr, c + oy - rr, c + ox + rr, c + oy + rr), fill=0)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def fault_mask(size=11):
+    """Radio fault: a filled warning triangle with the exclamation cut out of it. Small and solid so
+    it stays legible in kBad at 11 px; the cut-out keeps it from reading as a plain blob."""
+    S = SUPERSAMPLE
+    N = size * S
+    img = Image.new("L", (N, N), 0)
+    d = ImageDraw.Draw(img)
+    d.polygon([(N * 0.5, N * 0.06), (N * 0.96, N * 0.94), (N * 0.04, N * 0.94)], fill=255)
+    stroke = max(1, int(round(N * 0.11)))
+    cx = N * 0.5
+    d.rectangle((cx - stroke / 2, N * 0.32, cx + stroke / 2, N * 0.58), fill=0)
+    dot_r = max(1, int(round(N * 0.075)))
+    d.ellipse((cx - dot_r, N * 0.735 - dot_r, cx + dot_r, N * 0.735 + dot_r), fill=0)
+    return img.resize((size, size), Image.LANCZOS)
 
 
 def clean(mask):
@@ -241,6 +277,10 @@ def main():
             mask = wifi_mask(size)
         elif kind == "bluetooth":
             mask = bluetooth_mask(size)
+        elif kind == "dnd":
+            mask = dnd_mask(size)
+        elif kind == "fault":
+            mask = fault_mask(size)
         else:
             raise SystemExit("unknown icon kind %s" % kind)
         mask, peak = clean(mask)

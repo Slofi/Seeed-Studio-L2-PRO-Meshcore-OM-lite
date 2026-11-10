@@ -820,3 +820,65 @@
 
 ## 2026-11-10 09:28 (Claude): EST-336 on the device
 - Built in the sandbox (exit 0, RAM 85,724 B, flash 860,777 B), tests exit 0, OTA ok (861,136 B). Boot: `[mc] path hash 2B (NVS phs=2)`, advert sent as a 2B flood. Status bar: `GPS 0` indoors (heard only), 2B from the setting. On-air check through OM on gandalf still to do (needs a message or advert from the L2 heard there). Wake, message sheet: Filip to check.
+
+## 2026-11-10 09:43 (DeepSeek): EST-337 — GLONASS mode 7 for real, and the new top bar
+- **1. GLONASS.** The old `configureL76K()` sent `$PCAS04,7` 250 ms after `gpsBegin()`, i.e. while the
+  L76K was still starting (the boot reply window had binary bytes before the first NMEA line), so the
+  module ignored it and stayed in its GPS+BeiDou factory mode (`expected=12(g9 l0 b3 a0)`).
+  - New plain-C++ `src/gps_mode.h` (`GpsModeSetter`): waits for the first sentence with a valid
+    checksum, sends once, watches 15 s for `$GLGSV` (or a GL PRN in `$GNGSV`, or the NMEA 4.1 system
+    id 2 in `$GNGSA`), resends at 15 s and 30 s, then gives up. Logs exactly
+    `[gps] mode 7: sent (try N)`, `[gps] mode 7: GLONASS seen`, `[gps] mode 7: not taken after 3 tries`.
+  - A module reboot resets it: an explicit `onModuleReboot()` from `gpsBegin()`, or a >5 s gap between
+    valid sentences, sends again on the next sentence.
+  - `board.cpp` no longer blocks or dumps a reply window: `gpsBegin()` only opens the UART, and
+    `gpsPoll()` drives the machine on every complete, checksum-valid line and on its own clock.
+    Nothing writes the module's flash ($PCAS00 is never sent), so a factory-reset module still works.
+- **2. Top bar (EST-337).** `ui/status_cells.h` is rebuilt around `statusBarRects()`: LEFT is the clock
+  only (mono ink, `--:--` until a real source), then the radio-fault mark; RIGHT from the screen edge is
+  the gear, the battery cell (percent + icon, unchanged 8 px inner gap), the GPS cell from EST-336, then
+  DND, Wi-Fi and Bluetooth. The last three are drawn only when on; the DND setting is live, Wi-Fi and
+  Bluetooth are reserved slots (their widths are theme.h constants) for later tickets. Every adjacent
+  pair is exactly `kStatusGap`. The green dot, `MC`, `EU868`, `2B` and the node count are gone, and
+  `chooseStatusRow()`/the node cell/short GPS forms are deleted rather than left dead. The measured-fit
+  test remains and covers the worst case (all icons on, `100%`, `GPS 14`).
+- **Radio fault mark.** New plain-C++ `src/radio_fault.h`: reasons Radio (chip failed to start / stopped
+  answering), Mesh (MeshCore did not start) and Tx (last transmission failed); the more severe reason
+  wins; a good TX or a radio re-init clears it; there is deliberately no silence input. Logs
+  `[radio] fault: <reason>` and `[radio] fault cleared`. `radio.cpp` sets Radio on a failed `begin()`;
+  `mesh_link.cpp` sets Radio on a failed `std_init()`, main sets Mesh when `meshLinkBegin()` fails, and a
+  new `OmSX1262Wrapper` reads the real RadioLib result (`startSendRaw` false or a >15 s incomplete TX
+  sets Tx, `onSendFinished` clears it). A tap on the 11 px red mark opens a one-line toast naming the
+  reason (2.5 s, then the screen is redrawn).
+- **Nodes header.** `ui/nodes_header.h` draws one mono dim line above the list:
+  `<N> nodes heard`, plus `· <M> in the last hour` only when `timeKeeper().realSinceBoot()` (the same
+  real-timestamp rule as the ages). `Layout::listHeader()/listBody()` feed both drawing and hit testing;
+  rows and scroll now start under the 18 px header.
+- **Icons.** `tools/mkicons.py` gains the 11x11 DND moon and the 11x11 fault triangle; the preview was
+  generated and checked first (`docs/shots/icons-preview.png`).
+- **Build** (`pio run -e om_lite_l2`, REBUILD.md command): exit 0, SUCCESS. RAM 85,804 B of 327,680
+  (26.2 %, previous 85,724, +80 B), flash 863,189 B of 6,553,600 (13.2 %, previous 860,777, +2,412 B),
+  `firmware.bin` 863,552 B (previous 861,136, +2,416 B).
+- **Tests**: `test/host/run.sh` exit 0 (10 C++ binaries + the 9 python checks). New:
+  `test_gps_mode.cpp` (line detection; send only after the module talks; seen; 15 s retry x3; give up;
+  explicit and gap reboots; GLONASS already on sends nothing), `test_radio_fault.cpp` (each reason,
+  severity, clears by TX and re-init, silence never sets it, tokens/toast text), `test_status_bar.cpp`
+  (left time, right chain with one gap, every optional icon on/off, fault rect, worst-case fit at 320
+  and 800 px, a 200 px screen correctly reported as too narrow, Nodes header text). `test_layout.cpp`
+  was updated for the 18 px header/list body and the fault rect; `test_age.cpp` now covers the GPS cell
+  only (the bar arithmetic moved).
+- **Could not check** (no device): whether the L76K takes mode 7 and the heartbeat changes to
+  `expected=..(g.. l.. b..)`; the bar at 1:1 (time, fault mark, DND moon, the toast, the reserved empty
+  slots); the fault mark in a real failure (we cannot make the SX1262 fail on demand, so only the state
+  machine is proven); the Nodes header with real "in the last hour" stamps; the list with 6 rows and
+  the 18 px header.
+- **Next step**: Claude flashes and checks, in this order: boot log `[gps] mode 7: sent (try 1)` after
+  the first NMEA line, then `[gps] mode 7: GLONASS seen` within 15 s and the heartbeat's `l` count
+  above 0; the top bar (time left; gear, battery, `GPS n`; DND moon when DND is on); the Nodes header
+  (`4 nodes heard`, and the last-hour clause once GPS has set the clock); then Settings > Radio for the
+  settings that left the bar (region, frequency, path hash) in the next Settings ticket.
+
+## 2026-11-10 09:49 (Claude): EST-337 on the device
+- Built in the sandbox (exit 0, RAM 85,804 B, flash 863,189 B), tests exit 0, OTA ok (863,552 B). Top bar as specified (time left; GPS, battery, gear right), Nodes header shows (`docs/shots/2026-11-10-0949-topbar.png`).
+- **GLONASS still 0** (`expected=15(g12 l0 b3 a0)` after the retries): not taken; whether commands reach the module at all is unproven. Next ticket diagnoses it.
+- **Bug (EST-333 rule):** every node shows `--` and the header says `0 in the last hour`: the "older than the build" cut-off moves with every flash. Fixed cut-off in the next ticket. Emoji in node names draw as the placeholder box (emoji ticket).

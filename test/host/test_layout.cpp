@@ -51,34 +51,46 @@ int main() {
   CHECK(L.tabAt(320, 220) == -1);
   CHECK(L.tabAt(80, 220) == 1);   // exact shared edge belongs to the right-hand tab
 
-  // --- rows: 30 px pitch, first row starts at the content top ---------------
-  CHECK(L.visibleRows() == 7);                               // 189 / 30 -> 6 full + 1
-  CHECK(L.row(0, 0).y == 26);
-  CHECK(L.row(1, 0).y == 56);
+  // --- the content is split: a one-line Nodes header, then the list body -----
+  const Rect head = L.listHeader();
+  const Rect body = L.listBody();
+  CHECK(head.x == 0 && head.y == 26 && head.w == 320 && head.h == kNodesHeadH);
+  CHECK(body.x == 0 && body.y == 26 + kNodesHeadH && body.w == 320);
+  CHECK(body.h == 189 - kNodesHeadH);
+  CHECK(head.bottom() == body.y);
+  CHECK(body.bottom() == L.content.bottom());
+  CHECK(kNodesHeadH == 18);   // one 10 px mono line plus its breathing room
+
+  // --- rows: 30 px pitch, first row starts at the list body's top -----------
+  CHECK(L.visibleRows() == 6);                               // 171 / 30 -> 5 full + 1
+  CHECK(L.row(0, 0).y == body.y);                            // 44: below the header
+  CHECK(L.row(1, 0).y == body.y + 30);                       // 74
   CHECK(L.row(1, 0).h == 30);
   CHECK(L.row(0, 0).w == 320);
   CHECK(L.row(0, 0).bottom() == L.row(1, 0).y);
   CHECK(!L.row(0, 0).overlaps(L.row(1, 0)));
 
-  // Under scroll: row 0 moves up but its visible part is clipped at the content top.
-  CHECK(L.row(0, 17).y == 9);
-  CHECK(L.row(0, 17).bottom() == 39);
-  CHECK(L.rowVisible(0, 17).y == 26);
-  CHECK(L.rowVisible(0, 17).bottom() == 39);
+  // Under scroll: row 0 moves up but its visible part is clipped at the body top.
+  CHECK(L.row(0, 17).y == body.y - 17);                      // 27
+  CHECK(L.row(0, 17).bottom() == body.y + 13);               // 57
+  CHECK(L.rowVisible(0, 17).y == body.y);
+  CHECK(L.rowVisible(0, 17).bottom() == body.y + 13);
   CHECK(L.rowVisible(0, 17).h == 13);
-  CHECK(L.rowVisible(1, 17).y == 39);
+  CHECK(L.rowVisible(1, 17).y == body.y + 13);
   CHECK(L.rowVisible(1, 17).h == 30);
 
-  // A row scrolled fully above the content is not visible and cannot be tapped.
+  // The header is not a row: a tap on it selects nothing.
   CHECK(L.rowVisible(0, 30).empty());
-  CHECK(L.rowAt(10, 26, 30, 10) == 1);
+  CHECK(L.rowAt(10, 26, 30, 10) == -1);
+  CHECK(L.rowAt(10, body.y - 1, 30, 10) == -1);
+  CHECK(L.rowAt(10, body.y, 30, 10) == 1);
   CHECK(L.rowAt(10, 25, 30, 10) == -1);
 
   // The last row is clipped by the tab bar, not drawn under it.
   const int big = 20;
   const int sc = L.maxScroll(big);
-  CHECK(sc == big * 30 - 189);
-  CHECK(L.rowVisible(big - 1, sc).bottom() == L.content.bottom());
+  CHECK(sc == big * 30 - body.h);
+  CHECK(L.rowVisible(big - 1, sc).bottom() == body.bottom());
   CHECK(L.rowVisible(big, sc).empty());
 
   // maxScroll is 0 when everything fits.
@@ -86,15 +98,15 @@ int main() {
   CHECK(L.maxScroll(0) == 0);
 
   // --- edge taps: top edge in, bottom edge belongs to the next row ----------
-  const Rect r1 = L.row(1, 0);   // y 56 .. 85
-  CHECK(r1.contains(0, 56));     // top-left is inside
-  CHECK(r1.contains(319, 56));
-  CHECK(r1.contains(0, 85));     // last pixel row is inside
-  CHECK(!r1.contains(0, 86));    // bottom edge is not
-  CHECK(!r1.contains(320, 60));  // right edge is not
-  CHECK(L.rowAt(0, 56, 0, 5) == 1);
-  CHECK(L.rowAt(0, 85, 0, 5) == 1);
-  CHECK(L.rowAt(0, 86, 0, 5) == 2);
+  const Rect r1 = L.row(1, 0);   // y 74 .. 103
+  CHECK(r1.contains(0, 74));     // top-left is inside
+  CHECK(r1.contains(319, 74));
+  CHECK(r1.contains(0, 103));    // last pixel row is inside
+  CHECK(!r1.contains(0, 104));   // bottom edge is not
+  CHECK(!r1.contains(320, 80));  // right edge is not
+  CHECK(L.rowAt(0, 74, 0, 5) == 1);
+  CHECK(L.rowAt(0, 103, 0, 5) == 1);
+  CHECK(L.rowAt(0, 104, 0, 5) == 2);
   CHECK(L.rowAt(0, 25, 0, 5) == -1);
   CHECK(L.rowAt(0, 215, 0, 5) == -1);   // under the tab bar
   CHECK(L.rowAt(0, 500, 0, 5) == -1);
@@ -112,6 +124,17 @@ int main() {
   CHECK(g.contains(g.x, g.y));
   CHECK(g.contains(g.x + g.w - 1, g.y + g.h - 1));
   CHECK(!g.contains(g.x + g.w, g.y));
+
+  // --- the radio fault mark: one gap after the clock, the same rect draws and hit-tests -------
+  const Rect f = L.radioFault();
+  CHECK(f.w == kStatusIconFault && f.h == kStatusIconFault);
+  CHECK(f.x == kStatusPadX + kStatusClockW + kStatusGap);   // 6 + 30 + 6 = 42
+  CHECK(f.right() == kStatusPadX + kStatusClockW + kStatusGap + kStatusIconFault);
+  CHECK(f.y >= 0 && f.bottom() <= 26);
+  CHECK(f.contains(f.x, f.y));
+  CHECK(!f.contains(f.right(), f.y));
+  CHECK(!f.overlaps(g));
+  CHECK(!f.overlaps(head));   // the mark lives in the bar, never over the list
 
   // --- a non-320 screen still splits without overlap ------------------------
   const Layout tan = layoutFor(800, 480);

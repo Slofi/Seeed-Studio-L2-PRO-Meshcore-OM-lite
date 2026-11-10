@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: MIT
-// The status bar's GPS cell, the node count cell, and the arithmetic that proves the row fits.
+// The top bar's cells and the arithmetic that proves the row fits (EST-337).
 //
-// Why the GPS cell changed: GGA's satellite count only counts the satellites USED in the fix, and
-// GSV's "in view" number is what the module's ALMANAC expects, not what it hears. Filip asked for
-// ONE number, so the cell shows the satellites heard right now (GSV with a C/N0 value). Searching:
-// "GPS 3" in dim. With a fix: the same heard number in the fix colour (kGreen), so a fix is visible
-// without a second number. The module silent: "GPS --". The used count and the expected count stay
-// in the heartbeat, not on the glass (EST-336).
+// The bar is now the phone convention Filip asked for:
+//   left:  HH:MM (mono, ink), "--:--" until a real source has set the clock; then, in their place,
+//          the RADIO FAULT mark: a small red mark that appears only when the device knows something
+//          is wrong with ITSELF (see radio_fault.h). A tap on it opens a one-line toast.
+//   right: from the right edge the gear, the battery icon + percent, the GPS cell (one number,
+//          satellites heard, dim while searching, fix colour with a fix, "GPS --" when the module is
+//          silent), then the status icons that appear only when they are on: do-not-disturb, Wi-Fi
+//          and Bluetooth. The Wi-Fi/Bluetooth slots are reserved here (their widths are theme.h
+//          constants) and are drawn only when those settings exist in a later ticket.
 //
-// The row is 320 px and the mono face advances 6 px per glyph, so the text is short on purpose and
-// every width below is measured, not guessed: widgets.cpp measures with the real font and asks
-// chooseStatusRow() before it commits, and test/host repeats the measurement.
+// The green dot, "MC", "EU868", "2B" and the node count are gone. The node count now lives in the
+// Nodes screen's header (ui/nodes_header.h); region/frequency/path hash go to Settings > Radio.
 //
-// Fitting order (the ticket's rule): the full row first; if it does not fit, drop the node count's
-// word ("12 nodes" -> "12"); only then shorten the GPS cell ("GPS 13" -> "13"); as the last
-// resort drop the node cell. Adjacent cells are always at least kStatusGap apart, including the gap
-// between the left group and the right one, so the two groups can never run into each other.
+// There is no shortening order any more: nothing on the row has a short form, so chooseStatusRow()
+// and the node cell are removed rather than left as dead branches. The measured-fit check stays:
+// widgets.cpp measures the real text and asks statusBarRects() for the rectangles it then draws, and
+// test/host repeats the measurement for the worst case (all icons on, 100 %, "GPS 14").
 //
 // Plain C++ (no Arduino, no LovyanGFX), so test/host compiles it with the system g++.
 #pragma once
@@ -23,6 +25,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "ui/layout.h"
 #include "ui/theme.h"
 
 namespace om {
@@ -33,7 +36,7 @@ namespace ui {
 constexpr int kMonoStatusAdvancePx = 6;
 
 constexpr int kGpsCellMax = 12;    // "GPS 99" is 6 chars plus room
-constexpr int kNodeCellMax = 16;   // "255 nodes" is 9 chars plus room
+constexpr int kClockCellMax = 8;   // "HH:MM" is 5 chars plus room
 
 struct GpsCell {
   bool valid = false;    // a fix: the heard number changes colour, nothing else
@@ -52,76 +55,96 @@ inline void gpsCellText(char* out, size_t cap, const GpsCell& g) {
   else snprintf(out, cap, "GPS %d", gpsCountClamp(g.heard));
 }
 
-// The same cell without the label, for a row that would otherwise collide with the left group.
-inline void gpsCellTextShort(char* out, size_t cap, const GpsCell& g) {
-  if (!out || cap == 0) return;
-  if (!g.talked) snprintf(out, cap, "--");
-  else snprintf(out, cap, "%d", gpsCountClamp(g.heard));
-}
-
-// The node count cell: "2 nodes" normally, just "2" when the row is tight (the ticket's first thing
-// to drop). A count of 1 uses "node". The number is clamped to three digits: a status cell, not a
-// table, and the clamp keeps the text provably inside kNodeCellMax for the snprintf.
-inline void nodeCellText(char* out, size_t cap, int nodes, bool withWord) {
-  if (!out || cap == 0) return;
-  const int n = nodes < 0 ? 0 : (nodes > 999 ? 999 : nodes);
-  if (withWord) snprintf(out, cap, "%d %s", n, n == 1 ? "node" : "nodes");
-  else snprintf(out, cap, "%d", n);
-}
-
-// Widths of the right-hand cells in px, as measured by the caller with the real mono face.
-struct StatusRightWidths {
-  int nodes = 0;        // "2 nodes"
-  int nodesNumber = 0;  // "2"
-  int gps = 0;          // "GPS 0/13"
-  int gpsShort = 0;     // "0/13"
-  int pct = 0;          // "97%"
-  int clock = 0;        // "08:53"
+// Measured widths of the three text cells, in px. Icons have fixed widths from theme.h.
+struct StatusCellWidths {
+  int clock = kStatusClockW;  // "08:53" or "--:--" (always five mono glyphs)
+  int pct = 0;                // "97%" or "--"
+  int gps = 0;                // "GPS 14" or "GPS --"
 };
 
-// Which form of the right-hand group is drawn. The order is the fitting order above.
-enum class StatusRowForm : uint8_t {
-  Full = 0,             // "2 nodes" + "GPS 0/13"
-  NodeNumber,           // "2" + "GPS 0/13"
-  NodeNumberGpsShort,   // "2" + "0/13"
-  NodesDropped,         // no node cell + "0/13" (last resort; nothing to shorten any more)
+// Which optional cells are on. Bluetooth and Wi-Fi are reserved slots: drawn only when true, and no
+// firmware path sets them yet (later tickets).
+struct StatusCellFlags {
+  bool fault = false;
+  bool dnd = false;
+  bool bt = false;
+  bool wifi = false;
 };
 
-// The whole right-hand group, from its leftmost pixel to the screen edge: the gear and its padding
-// included, and every adjacent pair separated by exactly kStatusGap, as drawStatusBar lays it out.
-inline int statusRightWidth(const StatusRightWidths& w, StatusRowForm form) {
-  int nodes = 0;
-  switch (form) {
-    case StatusRowForm::Full: nodes = w.nodes; break;
-    case StatusRowForm::NodeNumber:
-    case StatusRowForm::NodeNumberGpsShort: nodes = w.nodesNumber; break;
-    case StatusRowForm::NodesDropped: nodes = 0; break;
+// Every rectangle the bar draws into, in screen coordinates. An optional cell that is off is empty
+// (w == 0), so drawing can ask the same struct the tap test uses and nothing is guessed.
+struct StatusBarRects {
+  Rect time;
+  Rect fault;
+  Rect bt;
+  Rect wifi;
+  Rect dnd;
+  Rect gps;
+  Rect battery;     // the icon and the percent as one cell (they keep the mock's 8 px inner gap)
+  Rect battIcon;
+  Rect battText;
+  Rect gear;
+  int leftEnd = 0;    // one past the left group's last pixel (time, or the fault mark)
+  int rightStart = 0; // the right group's leftmost pixel (Bluetooth when it is on, else GPS)
+  bool fits = false;  // left group + one gap <= right group
+};
+
+// Lay the row out from both edges. The right group is placed from the gear leftwards, every adjacent
+// pair exactly kStatusGap apart; the fault mark follows the clock with one kStatusGap. The battery's
+// icon and percent keep kBattGap between them ("as now") and count as ONE cell to the row.
+inline StatusBarRects statusBarRects(const Layout& L, const StatusCellWidths& w,
+                                     const StatusCellFlags& f) {
+  StatusBarRects r;
+  const Rect& s = L.status;
+  const int cy = s.y + s.h / 2;
+
+  // --- right, from the screen edge -------------------------------------------------------------
+  r.gear = L.gear();
+  int right = r.gear.x - kStatusGap;
+
+  r.battText = Rect{(int16_t)(right - w.pct), s.y, (int16_t)w.pct, s.h};
+  right -= w.pct + kBattGap;
+  r.battIcon = Rect{(int16_t)(right - kBattW), (int16_t)(cy - kBattH / 2), kBattW, kBattH};
+  r.battery = Rect{r.battIcon.x, s.y, (int16_t)(r.battText.right() - r.battIcon.x), s.h};
+  right = r.battIcon.x - kStatusGap;
+
+  r.gps = Rect{(int16_t)(right - w.gps), s.y, (int16_t)w.gps, s.h};
+  right = r.gps.x - kStatusGap;
+
+  // The optional icons, from the GPS cell leftwards. DND sits closest to the GPS number; Wi-Fi and
+  // Bluetooth keep the slots the next tickets draw into.
+  if (f.dnd) {
+    r.dnd = Rect{(int16_t)(right - kStatusIconDnd), (int16_t)(cy - kStatusIconDnd / 2),
+                 kStatusIconDnd, kStatusIconDnd};
+    right = r.dnd.x - kStatusGap;
   }
-  const bool shortGps = (form == StatusRowForm::NodeNumberGpsShort ||
-                         form == StatusRowForm::NodesDropped);
-  const int gps = shortGps ? w.gpsShort : w.gps;
-  int width = gps + kStatusGap + kBattW + kBattGap + w.pct + kStatusGap + w.clock + kStatusGap +
-              kGearSize + kStatusPadX;
-  if (form != StatusRowForm::NodesDropped) width += nodes + kStatusGap;
-  return width;
+  if (f.wifi) {
+    r.wifi = Rect{(int16_t)(right - kStatusIconWifi), (int16_t)(cy - kStatusIconWifi / 2),
+                  kStatusIconWifi, kStatusIconWifi};
+    right = r.wifi.x - kStatusGap;
+  }
+  if (f.bt) {
+    r.bt = Rect{(int16_t)(right - kStatusIconBtW), (int16_t)(cy - kStatusIconBtH / 2),
+                kStatusIconBtW, kStatusIconBtH};
+    right = r.bt.x - kStatusGap;
+  }
+  r.rightStart = right + kStatusGap;   // the left edge of the leftmost right-hand cell
+
+  // --- left: the time, then the fault mark -----------------------------------------------------
+  r.time = Rect{(int16_t)(s.x + kStatusPadX), s.y, (int16_t)w.clock, s.h};
+  r.leftEnd = r.time.right();
+  if (f.fault) {
+    r.fault = L.radioFault();
+    r.leftEnd = r.fault.right();
+  }
+
+  r.fits = r.leftEnd + kStatusGap <= r.rightStart;
+  return r;
 }
 
-// leftEnd = x one past the left group's last pixel. True when the right group starts at least
-// kStatusGap to the right of it.
-inline bool statusRowFits(int screenW, int leftEnd, const StatusRightWidths& w, StatusRowForm form) {
-  return leftEnd + kStatusGap <= screenW - statusRightWidth(w, form);
-}
-
-// The widest form that fits, tried in the ticket's order. NodesDropped is the narrowest, so it is
-// also the answer when even that is too wide (the caller then draws it; with the current left group
-// that cannot happen, and test/host sweeps the realistic widths to say so).
-inline StatusRowForm chooseStatusRow(int screenW, int leftEnd, const StatusRightWidths& w) {
-  const StatusRowForm order[] = {StatusRowForm::Full, StatusRowForm::NodeNumber,
-                                 StatusRowForm::NodeNumberGpsShort, StatusRowForm::NodesDropped};
-  for (StatusRowForm form : order) {
-    if (statusRowFits(screenW, leftEnd, w, form)) return form;
-  }
-  return StatusRowForm::NodesDropped;
+// The measured-fit answer on its own, for a caller that only wants to know.
+inline bool statusBarFits(const Layout& L, const StatusCellWidths& w, const StatusCellFlags& f) {
+  return statusBarRects(L, w, f).fits;
 }
 
 }  // namespace ui

@@ -11,6 +11,7 @@
 
 #include "board.h"
 #include "channels.h"
+#include "radio_fault.h"
 
 namespace om {
 namespace {
@@ -43,6 +44,9 @@ bool radioBegin(RadioInfo& out) {
   if (status == RADIOLIB_ERR_NONE) {
     s_radio.setDio2AsRfSwitch(true);
     s_info.ok = true;
+    // The chip answered and took its configuration: the fault mark, if it was up from an earlier
+    // attempt, is cleared (the radio is re-initialised).
+    if (radioFaultState().onRadioReinit()) Serial.println("[radio] fault cleared");
     // The SX126x driver does not expose getters for these; they are what begin() was given.
     s_info.frequency = plan.freq;
     s_info.bandwidth = plan.bw;
@@ -51,6 +55,8 @@ bool radioBegin(RadioInfo& out) {
     Serial.printf("[radio] %.3f MHz bw %.0f sf %u cr %u pwr %d dBm\n", s_info.frequency,
                   s_info.bandwidth, s_info.spreading, (unsigned)plan.cr,
                   (int)s_info.power);
+  } else if (radioFaultState().set(RadioFault::Radio)) {
+    Serial.printf("[radio] fault: %s\n", radioFaultToken(RadioFault::Radio));
   }
   out = s_info;
   return s_info.ok;

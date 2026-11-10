@@ -18,6 +18,7 @@
 #include "channels.h"
 #include "ota.h"
 #include "radio.h"
+#include "radio_fault.h"
 #include "timekeeper.h"
 #include "touch_gate.h"
 #include "fonts.h"
@@ -128,10 +129,17 @@ static om::TouchGate g_touchGate;
 // Nodes tab state. The rows are copied out of mesh_link's contact table, never sample data.
 static om::ui::NodeItem g_nodes[64];
 static int g_nodeCount = 0;
+static int g_nodeLastHour = 0;       // contacts heard in the last hour, only when times are real
+static bool g_nodeLastHourKnown = false;
 static int g_nodeSel = -1;
 static int g_nodeScroll = 0;
 static int g_nodeScroll0 = 0;      // finger-down base for the list drag
 static uint32_t g_nodeSig = 0;     // contact-table change detector
+
+// The one-line toast a tap on the radio fault mark opens: which of the three things is wrong. The
+// text and its deadline live here; the widget and the rectangle live in the UI layer.
+static char g_toastText[48] = "";
+static uint32_t g_toastUntil = 0;
 
 // Sound prefs (NVS "omlite"): master, volume %, per-event pattern index, DND.
 static bool g_soundOn = true;
@@ -529,6 +537,10 @@ static void refreshNodes() {
   const int n = om::meshContactList(list, 64);
   const uint32_t now = om::meshNow();
   g_nodeCount = n;
+  // "M in the last hour" is only honest once a real source has set the clock since boot; before
+  // that every timestamp is a floor and the header drops the clause (ui/nodes_header.h).
+  g_nodeLastHour = 0;
+  g_nodeLastHourKnown = om::timeKeeper().realSinceBoot();
   for (int i = 0; i < n; ++i) {
     om::ui::NodeItem& it = g_nodes[i];
     snprintf(it.name, sizeof(it.name), "%s", list[i].name);
@@ -545,6 +557,13 @@ static void refreshNodes() {
     else if (list[i].path_len == 0xFF) snprintf(it.note, sizeof(it.note), "path --");
     else snprintf(it.note, sizeof(it.note), "path %uB", (unsigned)list[i].path_len);
     om::ui::ageText(it.age, sizeof(it.age), list[i].lastmod, now, g_buildEpoch);
+    // The same "is this stamp real" rule ageText uses: not in the future, not from before the build,
+    // and inside the hour.
+    if (g_nodeLastHourKnown && list[i].lastmod != 0 && list[i].lastmod <= now &&
+        (g_buildEpoch == 0 || list[i].lastmod >= g_buildEpoch) &&
+        now - list[i].lastmod <= 3600UL) {
+      ++g_nodeLastHour;
+    }
   }
   if (g_nodeSel >= n) g_nodeSel = n - 1;
   const int maxScroll = om::ui::l2().maxScroll(n);
@@ -554,16 +573,16 @@ static void refreshNodes() {
 
 static void buildStatus(om::ui::StatusModel& s) {
   s = om::ui::StatusModel();
-  s.meshReady = om::meshLinkReady();
-  // The path hash size is the node's own setting (NVS, 2 by default), never a literal: what the
-  // status bar says is exactly what sendFlood() puts on every packet we transmit (EST-336).
-  s.pathHashBytes = om::meshPathHashBytes();
-  s.nodes = g_nodeCount;
   s.gpsValid = g_gps.valid;
-  s.gpsSats = g_gps.sats;         // not drawn any more; the heartbeat still reports it
   s.gpsHeard = g_gps.heardTotal;  // the one GPS number on the glass
   s.gpsTalked = g_gps.sentences > 0;
   s.batteryPct = batteryPercent(g_battMv);
+  // The status icons that appear only when they are on. Bluetooth and Wi-Fi have no settings yet
+  // (later tickets), so their slots stay empty; DND is the existing sound setting.
+  s.dnd = g_dnd;
+  s.bt = false;
+  s.wifi = false;
+  s.fault = om::radioFaultState().reason();
   // Data honesty: show HH:MM only after a real source (GPS today) has set the clock since boot.
   // Before that the time is only the floor (max saved, build time), which is not a real time.
   static char clockText[8];
@@ -585,8 +604,33 @@ static void drawHome() {
   view.selected = g_nodeSel;
   view.scroll = g_nodeScroll;
   view.unread = unreadTotal();
+  view.heardLastHour = g_nodeLastHour;
+  view.heardLastHourKnown = g_nodeLastHourKnown;
   om::ui::nodesScreenDraw(view);
   g_nodeSig = om::meshContactSignature();
+}
+
+// The fault mark's toast. The screen underneath is already in the off-screen frame, so this opens a
+// frame, draws only the toast on top and pushes once: no flicker, no second full redraw.
+static void drawToastNow() {
+  if (g_toastText[0] == 0) return;
+  if (!om::omFrameBegin()) {
+    om::omFrameEnd();
+    return;
+  }
+  lgfx::LovyanGFX* d = om::om_display();
+  if (d) om::ui::drawToast(d, om::ui::l2(), g_toastText);
+  om::omFrameEnd();
+}
+
+// A tap on the mark says which of the three it is. Nothing happens when the mark is not showing.
+static void showRadioFaultToast() {
+  const om::RadioFault reason = om::radioFaultState().reason();
+  if (reason == om::RadioFault::None) return;
+  snprintf(g_toastText, sizeof(g_toastText), "%s", om::radioFaultText(reason));
+  g_toastUntil = millis() + 2500;
+  Serial.printf("[radio] fault toast: %s\n", g_toastText);
+  drawToastNow();
 }
 
 // ---------------------------------------------------------------------------------- chat shell
@@ -951,10 +995,16 @@ static void handleChatTap(int x, int y) {
       g_compose = false;   // a tap outside the sheet closes it and leaves the tab bar back
       break;
     case om::ui::ChatHit::None:
-      // Not the chat surface: the tab bar (hidden while the sheet is open) and the status gear.
+      // Not the chat surface: the tab bar (hidden while the sheet is open), the fault mark and the
+      // status gear.
       if (!g_compose) {
         const int tab = L.tabAt(x, y);
         if (tab >= 0) { showTab(tab); return; }
+      }
+      // A tap on the radio fault mark says which fault it is; nothing when the mark is not showing.
+      if (L.radioFault().contains(x, y)) {
+        showRadioFaultToast();
+        return;
       }
       // The gear is the only door to Settings (Filip, 2026-11-10); the channel list is reached from
       // the selector's "Manage channels" row.
@@ -1189,6 +1239,11 @@ void setup() {
 #if defined(OM_ENABLE_MESH)
   const bool meshOk = om::meshLinkBegin();
   Serial.printf("[mc] mesh: %s\n", meshOk ? "up" : "FAILED");
+  // The status bar's red mark, second of its three reasons: MeshCore did not start (its radio,
+  // identity, settings or contact store). A radio fault already showing outranks this one.
+  if (!meshOk && om::radioFaultState().set(om::RadioFault::Mesh)) {
+    Serial.printf("[radio] fault: %s\n", om::radioFaultToken(om::RadioFault::Mesh));
+  }
 #endif
 
   om::gpsBegin();
@@ -1261,6 +1316,11 @@ static void handleTap(int x, int y, bool longPress) {
       g_pickerSel = -1;
       g_chanSel = -1;
       drawSettings();
+      return;
+    }
+    // The radio fault mark: a tap explains it, an empty slot does nothing.
+    if (L.radioFault().contains(x, y)) {
+      showRadioFaultToast();
       return;
     }
     const int row = L.rowAt(x, y, g_nodeScroll, g_nodeCount);
@@ -1830,6 +1890,11 @@ void loop() {
                       om::timeSourceName(om::timeKeeper().source()));
       }
     }
+  }
+  // The fault toast lives for 2.5 s; when it expires the screen underneath is redrawn clean.
+  if (g_toastText[0] != 0 && (int32_t)(millis() - g_toastUntil) >= 0) {
+    g_toastText[0] = 0;
+    if (screenOn) redrawCurrentScreen();
   }
   // The floor is a one-way lower bound; persistence every 10 minutes is enough once a sync has set it.
   if (om::timeKeeper().saveDue(millis() / 1000)) saveTimeFloor();

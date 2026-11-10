@@ -54,7 +54,7 @@ bool meshDmAvailable();
 // self advert); the received side needs nothing, MeshCore reads the size from each packet.
 uint8_t meshPathHashBytes();
 bool meshPathHashSet(uint8_t bytes);   // 1..3; saved in NVS, false for a bad value
-const char* meshPathHashLabel();       // "1B" / "2B" / "3B", the status bar's text
+const char* meshPathHashLabel();       // "1B" / "2B" / "3B", for Settings > Radio
 
 // --- node DB for the Nodes screen -----------------------------------------------------------------
 // The MeshCore contact table, read-only. type is MeshCore's ADV_TYPE_* (1 chat/client, 2 repeater,

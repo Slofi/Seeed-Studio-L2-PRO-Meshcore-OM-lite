@@ -108,8 +108,9 @@ void sdUnmount();
 uint16_t batteryMilliVolts();
 
 // L76K GNSS: UART1, RX 18 / TX 17 at 9600. gpsPoll() chews whatever has arrived and returns the
-// latest GGA/GSV state; it never blocks. gpsBegin() sends the L76K's constellation mode once the
-// module's power and reset sequence is done (see board.cpp).
+// latest GGA/GSV state; it never blocks. gpsBegin() only opens the UART: the constellation mode
+// ($PCAS04,7) is sent by gpsPoll() after the first checksum-valid sentence, through the state machine
+// in gps_mode.h (the module ignored the old boot-time command while it was still starting).
 //
 // GpsState and the GSV half of the parser live in gps_sky.h (plain C++): GSV's "in view" number is
 // what the module's almanac EXPECTS, and only a satellite with a C/N0 value above zero is HEARD, so

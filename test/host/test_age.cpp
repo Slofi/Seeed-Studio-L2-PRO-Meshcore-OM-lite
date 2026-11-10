@@ -1,8 +1,8 @@
-// Host test for the two text rules in this ticket that a host can prove without a panel:
+// Host test for the two text rules this file owns (EST-335; the status-bar arithmetic moved to
+// test_status_bar.cpp with the new top bar, EST-337):
 //   * ui/age.cpp: a stored "last heard" older than the build says "--" (the old 2024 clock), and
 //     beyond a month says "30d+";
-//   * ui/status_cells.h: the status bar's GPS cell text and the arithmetic that keeps "GPS 0/5" (and
-//     its short form) out of the left-hand group at 320 px.
+//   * ui/status_cells.h: the GPS cell text, one number (heard), dim searching / fix colour.
 #include <stdio.h>
 #include <string.h>
 
@@ -88,8 +88,6 @@ static void testStatusCells() {
   gpsCellText(out, sizeof(out), c);
   CHECK(strcmp(out, "GPS 4") == 0);
   CHECK(width(out) == 30);
-  gpsCellTextShort(out, sizeof(out), c);
-  CHECK(strcmp(out, "4") == 0);
 
   // With a fix the number stays the heard count: the fix is the colour (kGreen in widgets.cpp), not
   // a second number. The old "GPS 7" (used) and "GPS 0/4" (used/heard) are gone (EST-336).
@@ -103,15 +101,11 @@ static void testStatusCells() {
   c.heard = 0;
   gpsCellText(out, sizeof(out), c);
   CHECK(strcmp(out, "GPS 0") == 0);
-  gpsCellTextShort(out, sizeof(out), c);
-  CHECK(strcmp(out, "0") == 0);
 
   // --- the module has never said anything ------------------------------------
   c = GpsCell();
   gpsCellText(out, sizeof(out), c);
   CHECK(strcmp(out, "GPS --") == 0);
-  gpsCellTextShort(out, sizeof(out), c);
-  CHECK(strcmp(out, "--") == 0);
 
   // --- two digits stay inside the cap; three clamp to 99 ---------------------
   c = GpsCell();
@@ -124,93 +118,6 @@ static void testStatusCells() {
   CHECK(strcmp(out, "GPS 99") == 0);
   CHECK(width(out) <= kGpsCellMax * kMonoStatusAdvancePx);
   CHECK((int)strlen("GPS 99") <= kGpsCellMax);
-
-  // --- the node count cell ---------------------------------------------------
-  nodeCellText(out, sizeof(out), 2, true);
-  CHECK(strcmp(out, "2 nodes") == 0);
-  nodeCellText(out, sizeof(out), 2, false);
-  CHECK(strcmp(out, "2") == 0);
-  nodeCellText(out, sizeof(out), 1, true);
-  CHECK(strcmp(out, "1 node") == 0);
-  nodeCellText(out, sizeof(out), 12, true);
-  CHECK(strcmp(out, "12 nodes") == 0);
-  nodeCellText(out, sizeof(out), -3, false);
-  CHECK(strcmp(out, "0") == 0);
-  CHECK((int)strlen("255 nodes") <= kNodeCellMax);
-
-  // --- the row fits: measure it the way widgets.cpp does ---------------------
-  // Left group: pad 6 + dot 5 + gap 6 + "MC · EU868 · 2B" (15 glyphs).
-  const int leftEnd = kStatusPadX + kStatusDot + kStatusGap + width("MC \xC2\xB7 EU868 \xC2\xB7 2B");
-  CHECK(leftEnd == 107);
-
-  // Claude's screenshot: two nodes, 97 %, 08:53, "GPS 13" heard. It fits with the full cells, and
-  // the gap at the group boundary is at least kStatusGap (measured: 8 px).
-  StatusRightWidths w;
-  const auto set = [&w](int nodes, int heard, int pct, const char* clock) {
-    char buf[16];
-    nodeCellText(buf, sizeof(buf), nodes, true);
-    w.nodes = width(buf);
-    nodeCellText(buf, sizeof(buf), nodes, false);
-    w.nodesNumber = width(buf);
-    GpsCell cell;
-    cell.talked = true;
-    cell.heard = heard;
-    gpsCellText(buf, sizeof(buf), cell);   // the same one number widgets.cpp draws
-    w.gps = width(buf);
-    gpsCellTextShort(buf, sizeof(buf), cell);
-    w.gpsShort = width(buf);
-    snprintf(buf, sizeof(buf), "%d%%", pct);
-    w.pct = width(buf);
-    w.clock = width(clock);
-  };
-  set(2, 13, 97, "08:53");
-  CHECK(statusRightWidth(w, StatusRowForm::Full) == 193);
-  CHECK(statusRowFits(kScreenW, leftEnd, w, StatusRowForm::Full));
-  CHECK(chooseStatusRow(kScreenW, leftEnd, w) == StatusRowForm::Full);
-  CHECK(kScreenW - statusRightWidth(w, StatusRowForm::Full) >= leftEnd + kStatusGap);
-
-  // The tight row: "999 nodes", a full battery, "GPS 24". The full row runs into the left group, so
-  // the node count's word goes FIRST (the ticket's order): "999" with the GPS cell still whole.
-  set(999, 24, 100, "08:20");
-  CHECK(!statusRowFits(kScreenW, leftEnd, w, StatusRowForm::Full));
-  CHECK(statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodeNumber));
-  CHECK(chooseStatusRow(kScreenW, leftEnd, w) == StatusRowForm::NodeNumber);
-  CHECK(statusRightWidth(w, StatusRowForm::NodeNumber) <
-        statusRightWidth(w, StatusRowForm::Full));
-
-  // Only when dropping the word is not enough does the GPS cell lose its label.
-  set(999, 24, 100, "08:20");
-  w.pct = width("100%") + 40;   // a wider right group than any real text, same order of fit
-  CHECK(!statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodeNumber));
-  CHECK(statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodeNumberGpsShort));
-  CHECK(chooseStatusRow(kScreenW, leftEnd, w) == StatusRowForm::NodeNumberGpsShort);
-
-  // The order holds: the chosen form always fits, and no earlier form fits when it is chosen.
-  for (int nodes = 0; nodes <= 999; ++nodes) {
-    for (int gps = 0; gps <= 99; gps += 3) {
-      set(nodes, gps, 100, "08:20");
-      for (int pct = 0; pct <= 100; pct += 25) {
-        char pctText[8];
-        snprintf(pctText, sizeof(pctText), "%d%%", pct);
-        w.pct = width(pctText);
-        const StatusRowForm form = chooseStatusRow(kScreenW, leftEnd, w);
-        CHECK(statusRowFits(kScreenW, leftEnd, w, form));
-        if (form != StatusRowForm::Full) {
-          CHECK(!statusRowFits(kScreenW, leftEnd, w, StatusRowForm::Full));
-        }
-        if (form == StatusRowForm::NodeNumberGpsShort) {
-          CHECK(!statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodeNumber));
-        }
-      }
-    }
-  }
-
-  // Even the widest node cell at the widest numbers: the narrowest form still fits, so the status
-  // bar can never draw the two groups into each other.
-  set(999, 99, 100, "08:20");
-  CHECK(statusRowFits(kScreenW, leftEnd, w, StatusRowForm::NodesDropped));
-  CHECK(statusRightWidth(w, StatusRowForm::NodesDropped) <
-        statusRightWidth(w, StatusRowForm::NodeNumberGpsShort));
 }
 
 int main() {

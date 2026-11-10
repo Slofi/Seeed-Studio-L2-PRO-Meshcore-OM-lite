@@ -17,5 +17,7 @@ struct IconMask {
 extern const IconMask kIconGear;
 extern const IconMask kIconWifi;
 extern const IconMask kIconBluetooth;
+extern const IconMask kIconDnd;
+extern const IconMask kIconFault;
 }  // namespace ui
 }  // namespace om

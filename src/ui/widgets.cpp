@@ -274,79 +274,59 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   d->drawFastHLine(r.x, r.bottom() - 1, r.w, kLine);
 
   const int cy = r.y + r.h / 2;
-  const int dotCx = r.x + kStatusPadX + kStatusDot / 2;
-  d->fillCircle(dotCx, cy, kStatusDot / 2, m.meshReady ? kGreen : kDimmer);
 
-  char left[40];
-  // The mock separates with U+00B7 MIDDLE DOT, not an ASCII period on the baseline. The mono blob
-  // carries that glyph (tools/mkvlw.py --extra 0xb7), so the UTF-8 bytes below draw at x-height.
-  // The "2B" comes from the node's own path hash setting, not from a literal (EST-336).
-  uint8_t hashBytes = m.pathHashBytes;
-  if (hashBytes < 1) hashBytes = 1;
-  if (hashBytes > 3) hashBytes = 3;
-  char hashText[4];
-  snprintf(hashText, sizeof(hashText), "%uB", (unsigned)hashBytes);
-  snprintf(left, sizeof(left), "%s \xC2\xB7 %s \xC2\xB7 %s", m.protocol, m.region, hashText);
-  const int leftX = r.x + kStatusPadX + kStatusDot + kStatusGap;
-  drawTextLeft(d, FontRole::MonoStatus, kDim, kBar, leftX, cy, left);
-
-  // Right-hand group, laid out from the gear leftwards with the same measurements that draw it.
-  const Rect gear = L.gear();
-  drawGear(d, gear, kDim, kBar);
-  int rx = gear.x - kStatusGap;
-
-  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, m.clock) + kStatusGap;
-
-  char pct[8];
-  if (m.batteryPct < 0) snprintf(pct, sizeof(pct), "--");
-  else snprintf(pct, sizeof(pct), "%d%%", m.batteryPct);
-  const int pctW = drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, pct);
-  rx -= pctW + kBattGap;   // mock .bits gap: the icon no longer touches "97%"
-  drawBattery(d, rx - kBattW, cy, m.batteryPct);
-  rx -= kBattW + kStatusGap;
-
-  // ONE GPS number: "GPS 4", the satellites heard right now, in dim while searching and in kGreen
-  // with a fix (the fix is the colour, not a second number), "GPS --" when the module never talked.
-  // The row is measured before anything on the right is drawn: the fitting order is the ticket's
-  // (drop the node count's "nodes" word first, then shorten the GPS cell, then drop the node cell),
-  // so the left group and the right group are always at least kStatusGap apart.
+  // Everything is measured first, then the same rectangles draw and answer the taps (EST-337).
   GpsCell cell;
   cell.valid = m.gpsValid;
   cell.talked = m.gpsTalked;
   cell.heard = m.gpsHeard;
+  char gps[kGpsCellMax];
+  gpsCellText(gps, sizeof(gps), cell);
 
-  char nodesFull[kNodeCellMax];
-  char nodesNumber[kNodeCellMax];
-  nodeCellText(nodesFull, sizeof(nodesFull), m.nodes, true);
-  nodeCellText(nodesNumber, sizeof(nodesNumber), m.nodes, false);
+  char pct[8];
+  if (m.batteryPct < 0) snprintf(pct, sizeof(pct), "--");
+  else snprintf(pct, sizeof(pct), "%d%%", m.batteryPct);
 
-  char gpsFull[kGpsCellMax];
-  char gpsShort[kGpsCellMax];
-  gpsCellText(gpsFull, sizeof(gpsFull), cell);
-  gpsCellTextShort(gpsShort, sizeof(gpsShort), cell);
-
-  StatusRightWidths widths;
-  widths.nodes = textWidth(d, FontRole::MonoStatus, nodesFull);
-  widths.nodesNumber = textWidth(d, FontRole::MonoStatus, nodesNumber);
-  widths.gps = textWidth(d, FontRole::MonoStatus, gpsFull);
-  widths.gpsShort = textWidth(d, FontRole::MonoStatus, gpsShort);
+  const char* clock = (m.clock && m.clock[0]) ? m.clock : "--:--";
+  StatusCellWidths widths;
+  widths.clock = textWidth(d, FontRole::MonoStatus, clock);
   widths.pct = textWidth(d, FontRole::MonoStatus, pct);
-  widths.clock = textWidth(d, FontRole::MonoStatus, m.clock);
+  widths.gps = textWidth(d, FontRole::MonoStatus, gps);
 
-  const int leftEnd = leftX + textWidth(d, FontRole::MonoStatus, left);
-  const StatusRowForm form = chooseStatusRow(r.w, leftEnd, widths);
-  const char* nodes = nodesFull;
-  const char* gps = gpsFull;
-  switch (form) {
-    case StatusRowForm::Full: break;
-    case StatusRowForm::NodeNumber: nodes = nodesNumber; break;
-    case StatusRowForm::NodeNumberGpsShort: nodes = nodesNumber; gps = gpsShort; break;
-    case StatusRowForm::NodesDropped: nodes = nullptr; gps = gpsShort; break;
-  }
+  StatusCellFlags flags;
+  flags.fault = (m.fault != RadioFault::None);
+  flags.dnd = m.dnd;
+  flags.bt = m.bt;
+  flags.wifi = m.wifi;
+  const StatusBarRects rects = statusBarRects(L, widths, flags);
 
+  // LEFT: the time in ink, nothing else unless the radio fault mark is up.
+  drawTextLeft(d, FontRole::MonoStatus, kInk, kBar, rects.time.x, cy, clock);
+  if (flags.fault) drawIcon(d, kIconFault, rects.fault.x, rects.fault.y, kBad, kBar);
+
+  // RIGHT, from the right edge: gear, battery (percent then icon), GPS, then the optional icons.
+  drawGear(d, rects.gear, kDim, kBar);
+  drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rects.battText.right(), cy, pct);
+  drawBattery(d, rects.battIcon.x, cy, m.batteryPct);
+  // ONE GPS number: the satellites heard right now, dim while searching and in kGreen with a fix
+  // (the fix is the colour, not a second number), "GPS --" when the module never talked.
   const uint16_t gpsColour = cell.valid ? kGreen : kDim;
-  rx -= drawTextRight(d, FontRole::MonoStatus, gpsColour, kBar, rx, cy, gps) + kStatusGap;
-  if (nodes != nullptr) drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, nodes);
+  drawTextRight(d, FontRole::MonoStatus, gpsColour, kBar, rects.gps.right(), cy, gps);
+  if (flags.dnd) drawIcon(d, kIconDnd, rects.dnd.x, rects.dnd.y, kDim, kBar);
+  if (flags.wifi) drawIcon(d, kIconWifi, rects.wifi.x, rects.wifi.y, kDim, kBar);
+  if (flags.bt) drawIcon(d, kIconBluetooth, rects.bt.x, rects.bt.y, kDim, kBar);
+}
+
+void drawToast(lgfx::LovyanGFX* d, const Layout& L, const char* text) {
+  if (d == nullptr || text == nullptr || text[0] == 0) return;
+  const Rect box{(int16_t)kToastMargin, (int16_t)(L.tabbar.y - kToastMargin - kToastH),
+                 (int16_t)(L.width - 2 * kToastMargin), kToastH};
+  d->fillRoundRect(box.x, box.y, box.w, box.h, kRadius, kPanel2);
+  d->drawRoundRect(box.x, box.y, box.w, box.h, kRadius, kLine);
+  setRole(d, FontRole::SansBody);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(kInk, kPanel2);
+  d->drawString(text, box.x + box.w / 2, box.y + box.h / 2);
 }
 
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {

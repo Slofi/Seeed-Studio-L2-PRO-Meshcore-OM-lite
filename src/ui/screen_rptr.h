@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: MIT
-// RPTR screen (EST-351, rebuilt EST-358): the mock's three stages, all of them real work now.
-//   list   Scan sends the companion's own discovery request and every answer is a row
-//   login  the password on the shared keyboard sheet, upstream's login, the result and its round trip
-//   admin  the mock's six management views, each control sending its CLI line through MeshCore's CLI
-//          path, with the repeater's answer under it
-// The shell owns the state and the actions; this file owns the pixels and the rectangles.
+// EST-362: the RPTR screen. Two things only: the list of repeaters (which scans when the tab opens)
+// and one page at a time (the repeater page, one setting, the regions, the neighbours, the console).
+// A confirmation is a pop-up over the page. The rows come from rptr_page.h; this file owns pixels and
+// rectangles only.
 #pragma once
 
 #include <LovyanGFX.hpp>
 
 #include "rptr_model.h"
+#include "rptr_page.h"
 #include "ui/chat_layout.h"
 #include "ui/layout.h"
 #include "ui/rptr_layout.h"
@@ -18,64 +17,53 @@
 namespace om {
 namespace ui {
 
-constexpr int kRptrMaxItems = 16;    // the discovery list's own cap
-constexpr int kRptrInfoLines = 4;    // the login page's facts card
-constexpr int kRptrAdminRows = rptr::kAdminRowCap;
-
-enum class RptrStage : uint8_t { List = 0, Login, Admin };
+constexpr int kRptrMaxItems = 20;    // remembered repeaters plus the scan's own cap
 
 struct RptrItem {
   char name[32] = "";
-  char meta[64] = "";      // "SNR 6.2/7.5 dB · 0 hops · 14:02"
-  bool inContacts = false;
+  char meta[64] = "";      // "good 11 dB · 14:02"
+  bool saved = false;      // a remembered password: the small key icon
+  uint8_t foundIndex = 255;
 };
 
 struct RptrView {
   StatusModel status;
-  RptrStage stage = RptrStage::List;
+  bool list = true;                 // the list is showing; otherwise `page`
+  rptr::Page page = rptr::Page::List;
 
-  // --- the scan page
+  // --- the list
   int count = 0;
   RptrItem items[kRptrMaxItems];
   int scroll = 0;
   bool scanning = false;
-  bool regionsBusy = false;  // the anonymous nearby-regions read is running
-  char state[40] = "";     // "listening, 2 found" / "3 found" / "none answered"
+  char state[40] = "";              // "listening, 2 found" / "3 found" / "none answered"
 
-  // --- the login page
-  char name[32] = "";
-  char sub[80] = "";       // "repeater · 0 hops · heard 14:02"
-  char info[kRptrInfoLines][72] = {};
-  int infoCount = 0;
-  char pwText[64] = "";      // never drawn as text on the password field, only as dots
-  int pwLen = 0;
-  char result[64] = "";
+  // --- one page
+  rptr::ScreenOut screen;
+  int pageScroll = 0;
+  char result[80] = "";             // "Applied" or the repeater's error, in plain words
   bool resultOk = false;
-  bool canForget = false;    // a remembered repeater: Forget is offered
-  char note[96] = "";
-  bool loggingIn = false;
+  bool resultPending = false;
 
-  // --- the keyboard sheet (the login password and the identity editors)
+  // --- the confirmation pop-up
+  bool modal = false;
+  char modalText[128] = "";
+  char modalVerb[12] = "";
+  int modalWhat = 0;                // the shell's own id for what the pop-up will do
+
+  // --- the keyboard sheet (name, position, region name, console line, password)
   bool osk = false;
   bool shift = false;
   bool nums = false;
-  uint8_t field = 0;         // KeyboardField as a byte
-  char editTitle[32] = "";   // "(lat, lon)" placeholder, and the sheet's hint
-  const char* okLabel = "Login";
-  uint8_t accentRow = 255;   // 255 = no accent bubble (this sheet wants none)
+  uint8_t field = 0;                // KeyboardField as a byte
+  char editTitle[32] = "";
+  const char* okLabel = "OK";
+  char text[64] = "";               // the sheet's buffer (never the password)
+  int textLen = 0;
+  bool secret = false;              // draw dots instead of the text
+  uint8_t accentRow = 255;
   uint8_t accentCol = 255;
   uint32_t accentCp = 0;
-
-  // --- the admin page
-  int view = 0;
-  rptr::AdminRow rows[kRptrAdminRows];
-  int rowCount = 0;
-  int aScroll = 0;
-  char lastCmd[80] = "";
-  char lastAnswer[120] = "";
-  bool answerBad = false;
-  bool answerPending = false;
-  char backLabel[12] = "< list";   // "< regions" on one region's page
 };
 
 void rptrScreenDraw(const RptrView& v);
@@ -83,7 +71,7 @@ void rptrScreenDraw(const RptrView& v);
 // The floor the screen must not put a tap on: true while the sheet covers the tab bar.
 bool rptrSheetOpen(const RptrView& v);
 
-// One key of the open sheet, resolved for the shell (same pattern as the Settings editor).
+// One key of the open sheet, resolved for the shell (the Settings editor's pattern).
 struct RptrKeyHit {
   bool pressed = false;
   KeyKind kind = KeyKind::Char;

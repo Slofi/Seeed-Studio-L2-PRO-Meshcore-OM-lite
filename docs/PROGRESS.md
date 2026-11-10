@@ -3097,3 +3097,110 @@ should now be allowed for it. Filip still listens to every WAV first.
 
 ## 2026-11-10 20:45 (Claude): EST-361 on the device
 - 54 WAVs checked (0 clipped, edges at zero, none silent); INDEX.md lists notes per file: every boot variant now has its own notes; low battery is a 1.35 s two-pass falling figure. Built in the sandbox (exit 0, RAM 148,368 B, flash 2,757,061 B), tests exit 0, reviewed binary flashed (2,757,424 B), mesh up. Listening: Filip.
+
+## 2026-11-10 20:05 (DeepSeek): EST-362 RPTR redesigned: the list, one page, one Apply, a pop-up, a Console
+
+**The interaction is the ticket's, and the old one is gone.** No more six chips, no "Send now", no
+"Save to repeater", no bare H/D keys, no per-control CLI hint, no CLI line shown as a row, no SI
+preset (it was already gone), no separate confirm page. The RPTR tab is the list; a row opens one
+page; every setting has ONE Apply that sends and makes permanent in the same step; risks are a
+pop-up over the page; raw commands and answers exist only in the Console.
+
+- **List.** Opening the tab sends the scan by itself (`showTab` calls `rptrScanStart`; the header's
+  Scan is the rescan). Rows are the remembered repeaters first with a small gold key, then the scan
+  answers; an unnamed answer is "unnamed 86a8ee" (first 3 key bytes); the second line is the signal
+  in words and dB ("good 11 dB", the better of the two directions) plus the heard time.
+- **Repeater page, before login.** The page fills itself with what needs no password: Regions (the
+  anonymous read, "* , si, lj" or "none"), Clock ("2026-11-10 19:05 UTC", "not set (2024-05-15)"
+  for the MeshCore restart clock) and Signal. One big Log in button. A remembered password logs in
+  by itself; Forget password sits lower on the page.
+- **Repeater page, logged in.** A status card (battery "3.59 V 49 %", noise floor, uptime, airtime,
+  clock) with a refresh icon; a "Clock is wrong: <date>" line with one Set clock button when the
+  clock is not set or off by more than a minute; then the plain list Name, Position, Radio, TX power,
+  Regions, Neighbours, Advertising, Repeat on/off, More, Restart repeater, and Console at the very
+  bottom. No CLI text anywhere on these pages.
+- **One Apply per page.** Name, Position, Radio, TX power, Repeat, Advertising, More, Regions, Add
+  region and the two pickers each have exactly one Apply. It sends the exact CLI lines (unchanged
+  from EST-358/360) and, on the Regions page, appends `region save` in the same step, because the
+  region map is the only thing that needs it (every `set ...` handler in CommonCLI.cpp calls
+  savePrefs itself). The result is a drawn tick and "Applied", or the repeater's error in plain
+  words; the page then shows the value read back from the repeater (`get name`, `get radio`,
+  `get tx`, `get repeat`, `get advert.interval`, `get flood.advert.interval`, `get flood.max`,
+  `get loop.detect`, `get path.hash.mode`, `region`, `region home`, `region default`, `clock`).
+- **Confirm only what is risky, as a pop-up.** Radio ("The repeater will drop off the mesh until it
+  restarts with the new radio settings."), Restart, Repeat off, removing a region, and a clock jump
+  over a day. Two buttons, Cancel and the verb; a tap outside cancels and is consumed. Name,
+  Position, TX, Advertising, More and the region checkboxes apply directly.
+- **Clock guard fixed as in C.** `clockGuard` refuses only when our clock is not real or the repeater
+  is ahead by more than a minute; a jump over a day is allowed after a confirm that shows both dates
+  ("Set the repeater's clock from 2024-05-15 13:18 to 2026-11-10 19:00 UTC?"). The old
+  `timeSyncCheck`/`TimeVerdict` (which refused a big jump) is removed. `clockStampText` prints the
+  full date and keeps "not set (2024-05-15)" for a 2024 stamp.
+- **Regions page.** The repeater's regions as checkboxes "Repeats floods here" (tap = draft), a small
+  x key with the remove confirmation, Home region and Default scope as normal rows opening pickers
+  ("* (anywhere)", "none", the named regions), and Add region with a name and an optional parent
+  (the Parent row cycles none and the regions). Everything is one Apply.
+- **Console.** A row at the very bottom of the logged-in page. The raw log (" > line", "< answer")
+  and a free command line with Send. Log lines are not rows at all, so an answer can never be tapped;
+  no other page carries CLI text.
+
+**The model is host-testable and separate.** New `src/rptr_page.h/.cpp`: the pages, the rows, the
+Apply plan, the read-back lines, the confirmation rules, the list order and the signal words, with no
+Arduino and no LovyanGFX. `rptr_model.h/.cpp` keeps discovery, login, status, parsers and the CLI
+builders, and gains `clockGuard`, `clockStampText`/`clockJumpText` and the CommonCLI read-back
+parsers (`valueReplyParse`, `intReplyParse`, `radioReplyParse`, `coordReplyParse`,
+`switchReplyParse`, `loopReplyParse`, `answerOk`, `answerPlainText`). The old `adminRows`, `RowId`,
+`RowKind`, `AdminRow`, `viewName` and `Confirm` are removed. `ui/rptr_layout.*` and
+`ui/screen_rptr.*` are rewritten for the list, one page, the pop-up and the Console; `main.cpp`'s
+RPTR section is rewritten around a one-line-at-a-time command queue (a lost line times out after
+3 s and becomes an error, never a hang).
+
+**Build and tests.** Sandbox build exit 0: RAM **152,272 B** (46.5%), flash **2,764,177 B** (42.2%),
+`firmware.bin` **2,764,544 B** (was 148,368 / 2,757,061 / 2,757,424). `test/host/run.sh` exit 0. New
+`test_est362.cpp`: the page model before login (3 facts + one big Log in, nothing tappable) and after
+it (5 status cells and the 11 rows in order, Console last, Restart dangerous), every Apply plan
+verbatim (Name/Position/Radio/TX/Repeat/Advertising/More, the Regions one with allowf/home/default/
+put and exactly one `region save` at the end, both pickers, Add region), the clock guard (our clock
+unset, 60 s ahead allowed, 61 s ahead refused, 86400 behind direct, 86401 asks, 2024 and 0 ask), the
+two dates in the jump sentence, the confirm table (Radio, Restart, Repeat off, Remove; not Name,
+Position, TX, Advertising, More, Regions, Repeat on), the Console (6 log lines, no rows, a copied
+command line, no "OK" or ">" value on the Regions rows), the read-back parsers and the plain-word
+results, the list order/unnamed/signal words, and the layout (one Apply, the pop-up's Cancel/Confirm,
+outside = a consumed Cancel). `test_est351` was updated for the new layout rectangles, `test_est358`
+dropped the removed row-table/confirm tests, `test_est360`'s guard block now tests `clockGuard`.
+
+**Could not check** (no device in the sandbox): the look and the scroll of the new page on the glass,
+in particular that the logged-in repeater page shows only about two rows at once between the 44 px
+status card and the Apply slot (it scrolls, but Filip should judge); the pop-up's opaque scrim (no
+alpha available, the page behind is covered with panel2); how fast the read-backs fill in, because
+the queue sends ONE line at a time and a silent line costs 3 s; the real CommonCLI replies for
+`get radio`, `get tx`, `get loop.detect` and friends (read from lib/meshcore v1.18.0, never seen on a
+repeater); the anonymous regions read when the repeater is not a direct neighbour (then Regions says
+"not read"); the optional parent cycle and `region put <name> <parent>` with a long name; and that
+the new Name Apply to the same value is harmless on a real repeater.
+
+**Next step for Claude (USB):**
+1. Flash `firmware.bin`; tap RPTR and confirm the tab scans by itself (no Scan tap needed). Serial:
+   `[rptr] auto scan`, then `[rptr] row ...` per answer.
+2. `tools/cmd.py rptr scan` (the same discovery the tab sends) and `tools/cmd.py rptr regions Argus`:
+   the anonymous read. Open Argus in the app instead and watch the page fill with "*, si, lj" and
+   "not set (2024-05-15)", with the one big Log in button.
+3. Log in to Argus. The page should show the status card (battery about 4.1 V, noise about -120 dBm),
+   the "Clock is wrong: not set (2024-05-15)" line with Set clock, and the settings list. Tap Restart
+   once: the pop-up must appear and Cancel must come back; tap outside it and nothing happens.
+4. Harmless Apply: open Name, leave the value as it is, tap Apply. Serial: `[rptr] > set name <same>`,
+   `[rptr] < OK`, then `get name` and its answer; the page shows a tick + "Applied". Then
+   `tools/cmd.py rptr status Argus` still parses.
+5. Regions: tick one region, tap Apply; serial shows `region allowf/denyf <name>`, `region save`, then
+   `region`/`region home`/`region default` and their answers; the page shows the read-back. Try Home
+   region and Default scope pickers. Tap a region's x: the remove pop-up names the region.
+6. Console (the last row): confirm `get radio` and its answer appear only there; type a harmless
+   command such as `clock` in the free line and Send. No other page may show a CLI line.
+7. Radio: step the frequency, tap Apply, confirm the pop-up sentence about dropping off the mesh.
+   Repeat: set off, Apply, confirm the silent-mesh sentence. Both should be the only two setting
+   pages that ask.
+
+## 2026-11-10 21:10 (Claude): EST-362 on the device: list and page good, Log in panics
+- Built in the sandbox (exit 0, RAM 152,272 B, flash 2,764,177 B), tests exit 0, reviewed binary flashed (2,764,544 B).
+- RPTR tab: the auto scan lists Argus (key icon, "good 8 dB") and "unnamed 86a8ee" ("excellent 14 dB") (`docs/shots/2026-11-10-2007-rptr-list.png`). Argus page before login: Regions "*, si, lj", Clock "not set (2024-05-15)", Signal, Log in (`docs/shots/2026-11-10-2008-rptr-page.png`). Layout defects there: the title "Argus mobile RPTR" is overlapped by its subtitle "repeater, not logged in"; the hint "The password is remembered, so Log in goes st..." is cut; the Signal row's value runs under the Log in button.
+- **Tapping Log in panics the device** (twice). Captured with one reader (`docs/est362-login-crash.log`): `[rptr] login sent to Argus mobile RPTR (direct)` then a core dump: task loopTask, PC 0x42158b5c, exc cause 65, sha b9c309a69633ceeb = the EST-362 ELF. Decoded by Claude: __ssprint_r <- _svfprintf_r <- snprintf <- om::rptr::clockStampText (rptr_model.cpp:1096) <- om::rptr::buildScreen (rptr_page.cpp:274) <- buildRptrView (main.cpp:2252/2268) <- drawRptrTab (2288) <- handleTap (2707/4698) <- loop. The buffers passed are fine (clock[40]), so most likely the loop task's stack ran out inside the logged-in page build (exc cause 65 is not an Xtensa exception number; a stack canary/overflow fits): ScreenIn/ScreenOut and the row texts live on the stack.

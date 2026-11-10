@@ -2,7 +2,9 @@
 // EST-358: the RPTR model's arithmetic and text. See rptr_model.h for the spec and the sources.
 #include "rptr_model.h"
 
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 namespace om {
@@ -859,26 +861,6 @@ bool regionDefaultReplyParse(const char* text, char* name, size_t cap) {
 }
 
 // ---------------------------------------------------------------------------------------- clock sync
-TimeVerdict timeSyncCheck(uint32_t ourEpoch, bool ourReal, bool rptrKnown, uint32_t rptrEpoch) {
-  if (!ourReal || ourEpoch < kClockRealSince) return TimeVerdict::OurClockNotSet;
-  if (rptrKnown && rptrEpoch >= kClockRealSince) {
-    const int64_t ahead = (int64_t)ourEpoch - (int64_t)rptrEpoch;
-    if (ahead > (int64_t)kTimeMaxAheadSecs) return TimeVerdict::TooFarAhead;
-    if (-ahead > (int64_t)kTimeMinBehindSecs) return TimeVerdict::RepeaterAhead;
-  }
-  return TimeVerdict::Ok;
-}
-
-const char* timeVerdictText(TimeVerdict v) {
-  switch (v) {
-    case TimeVerdict::Ok: return "sync is safe";
-    case TimeVerdict::OurClockNotSet: return "our clock is not set";
-    case TimeVerdict::TooFarAhead: return "more than a day ahead: refused";
-    case TimeVerdict::RepeaterAhead: return "repeater's clock is ahead: refused";
-    default: return "";
-  }
-}
-
 int clockAgoText(char* out, size_t cap, int32_t deltaSecs) {
   if (out == nullptr || cap == 0) return 0;
   int32_t d = deltaSecs;
@@ -1019,19 +1001,6 @@ int cliGpsAdvert(char* out, size_t cap, bool share) {
   return n > 0 && (size_t)n < cap ? n : 0;
 }
 
-// ------------------------------------------------------------------------------------- the admin rows
-const char* viewName(int view) {
-  switch (view) {
-    case 0: return "Overview";
-    case 1: return "Radio";
-    case 2: return "Regions";
-    case 3: return "Mesh";
-    case 4: return "Neigh.";
-    case 5: return "Actions";
-    case 6: return "Region";
-    default: return "";
-  }
-}
 
 int clockText(char* out, size_t cap, uint32_t epoch) {
   if (out == nullptr || cap == 0) return 0;
@@ -1047,314 +1016,255 @@ int clockText(char* out, size_t cap, uint32_t epoch) {
   return n > 0 ? n : 0;
 }
 
-namespace {
-
-// A bounded copy: never a truncation warning, never a missing terminator.
-void copyInto(char* dst, size_t cap, const char* src) {
-  if (dst == nullptr || cap == 0) return;
-  if (src == nullptr) src = "";
-  size_t n = strlen(src);
-  if (n >= cap) n = cap - 1;
-  memcpy(dst, src, n);
-  dst[n] = 0;
+// -------------------------------------------------------------------------------------- clock guard
+ClockVerdict clockGuard(uint32_t ourEpoch, bool ourReal, bool rptrKnown, uint32_t rptrEpoch) {
+  if (!ourReal || ourEpoch < kClockRealSince) return ClockVerdict::OurClockNotSet;
+  // No read yet: treat the repeater as unset (a jump of decades, so the confirm shows "not set").
+  const uint32_t r = rptrKnown ? rptrEpoch : 0;
+  if (r >= kClockRealSince) {
+    if (r > ourEpoch) {
+      // The repeater is ahead: a minute of drift is ignored, more is the one refusal.
+      return (r - ourEpoch) > kTimeMinBehindSecs ? ClockVerdict::RepeaterAhead
+                                                 : ClockVerdict::Ok;
+    }
+    return (ourEpoch - r) <= kTimeMaxAheadSecs ? ClockVerdict::Ok : ClockVerdict::NeedConfirm;
+  }
+  // An unset clock (or the 2024 restart clock) is a one-way jump of more than a day.
+  return ClockVerdict::NeedConfirm;
 }
 
-AdminRow makeRow(RowId id, const char* label, const char* value, RowKind kind) {
-  AdminRow r;
-  r.id = id;
-  copyInto(r.label, sizeof(r.label), label);
-  copyInto(r.value, sizeof(r.value), value);
-  r.kind = kind;
-  return r;
+const char* clockVerdictText(ClockVerdict v) {
+  switch (v) {
+    case ClockVerdict::Ok: return "the clock can be set";
+    case ClockVerdict::NeedConfirm: return "this is a jump of more than a day";
+    case ClockVerdict::OurClockNotSet: return "our clock is not set";
+    case ClockVerdict::RepeaterAhead: return "the repeater's clock is ahead of ours";
+    default: return "";
+  }
+}
+
+bool clockWrong(bool rptrKnown, uint32_t rptrEpoch, uint32_t ourEpoch, bool ourReal) {
+  // Not read, unset, or the 2024 restart clock: definitely wrong, whatever our clock says.
+  if (!rptrKnown || rptrEpoch < kClockRealSince) return true;
+  if (!ourReal || ourEpoch < kClockRealSince) return false;   // nothing to compare against
+  const uint32_t diff = rptrEpoch > ourEpoch ? rptrEpoch - ourEpoch : ourEpoch - rptrEpoch;
+  return diff > kTimeMinBehindSecs;
+}
+
+namespace {
+
+// Days since 1970-01-01 -> civil date (Howard Hinnant's inverse, UTC only).
+void civilFromDays(int64_t z, int* outY, int* outM, int* outD) {
+  z += 719468;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = (unsigned)(z - era * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const int64_t y = (int64_t)yoe + era * 400;
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  const unsigned d = doy - (153 * mp + 2) / 5 + 1;
+  const unsigned m = mp < 10 ? mp + 3 : mp - 9;
+  *outY = (int)(y + (m <= 2 ? 1 : 0));
+  *outM = (int)m;
+  *outD = (int)d;
+}
+
+// "2026-11-10 19:05" (no zone), or "not set" for the restart clock.
+void stampShort(char* out, size_t cap, uint32_t epoch) {
+  if (out == nullptr || cap == 0) return;
+  // A 2020..2024 stamp is MeshCore's restart clock: it is still a date, and a jump confirmation
+  // must show it as one. Only an unset (or nonsense) clock has no date at all.
+  if (epoch < 1600000000u) {
+    snprintf(out, cap, "not set");
+    return;
+  }
+  int y = 0, mo = 0, d = 0;
+  civilFromDays((int64_t)(epoch / 86400u), &y, &mo, &d);
+  const uint32_t secs = epoch % 86400u;
+  snprintf(out, cap, "%04d-%02d-%02d %02u:%02u", y, mo, d, (unsigned)(secs / 3600u),
+           (unsigned)((secs / 60u) % 60u));
 }
 
 }  // namespace
 
-int adminRows(int view, const AdminValues& v, const Status& status, uint8_t fwLevel,
-              const char* repeaterName, const RegionList& regions, const NeighbourList& neighbours,
-              const char* home, const char* defaultScope, int regionSel, const char* pendingLine,
-              AdminRow* out, int cap) {
-  if (out == nullptr || cap <= 0) return 0;
-  int n = 0;
-  char buf[96];
-  auto push = [&](const AdminRow& r) {
-    if (n < cap) out[n++] = r;
+int clockStampText(char* out, size_t cap, uint32_t epoch) {
+  if (out == nullptr || cap == 0) return 0;
+  if (epoch < kClockRealSince) {
+    if (epoch >= 1600000000u) {
+      int y = 0, mo = 0, d = 0;
+      civilFromDays((int64_t)(epoch / 86400u), &y, &mo, &d);
+      snprintf(out, cap, "not set (%04d-%02d-%02d)", y, mo, d);
+    } else {
+      snprintf(out, cap, "not set");
+    }
+    return (int)strlen(out);
+  }
+  char s[32];
+  stampShort(s, sizeof(s), epoch);
+  const int n = snprintf(out, cap, "%s UTC", s);
+  return n > 0 ? n : 0;
+}
+
+int clockJumpText(char* out, size_t cap, uint32_t fromEpoch, uint32_t toEpoch) {
+  if (out == nullptr || cap == 0) return 0;
+  char from[32];
+  char to[32];
+  stampShort(from, sizeof(from), fromEpoch);
+  stampShort(to, sizeof(to), toEpoch);
+  const int n = snprintf(out, cap, "Set the repeater's clock from %s to %s UTC?", from, to);
+  return n > 0 ? n : 0;
+}
+
+// ---------------------------------------------------------------------------------------- read-backs
+namespace {
+
+// CommonCLI answers start with "> "; a multi-line answer may carry trailing CR/LF. Trim both.
+void replyValue(const char* text, char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return;
+  out[0] = 0;
+  if (text == nullptr) return;
+  const char* p = text;
+  while (*p == ' ' || *p == '\t') ++p;
+  if (p[0] == '>' && p[1] == ' ') p += 2;
+  size_t n = strlen(p);
+  while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' ')) --n;
+  if (n >= cap) n = cap - 1;
+  memcpy(out, p, n);
+  out[n] = 0;
+}
+
+}  // namespace
+
+bool valueReplyParse(const char* text, char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return false;
+  replyValue(text, out, cap);
+  return out[0] != 0 && strcmp(out, "Error") != 0 && strncmp(out, "Err", 3) != 0;
+}
+
+bool intReplyParse(const char* text, int32_t* out) {
+  if (out == nullptr) return false;
+  char v[24];
+  replyValue(text, v, sizeof(v));
+  if (v[0] == 0) return false;
+  char* end = nullptr;
+  const long n = strtol(v, &end, 10);
+  if (end == v || end == nullptr) return false;
+  while (*end == ' ') ++end;
+  if (*end != 0) return false;
+  *out = (int32_t)n;
+  return true;
+}
+
+bool radioReplyParse(const char* text, RadioValues* out) {
+  if (out == nullptr) return false;
+  char v[40];
+  replyValue(text, v, sizeof(v));
+  float freq = 0, bw = 0;
+  int sf = 0, cr = 0;
+  char tail = 0;
+  if (sscanf(v, "%f,%f,%d,%d%c", &freq, &bw, &sf, &cr, &tail) != 4) return false;
+  if (freq < 150.0f || freq > 2500.0f || bw < 7.0f || bw > 500.0f) return false;
+  if (sf < 5 || sf > 12 || cr < 5 || cr > 8) return false;
+  out->freq_khz = (uint32_t)(freq * 1000.0f + 0.5f);
+  out->bw_hz = (uint32_t)(bw * 1000.0f + 0.5f);
+  out->sf = (uint8_t)sf;
+  out->cr = (uint8_t)cr;
+  return true;
+}
+
+bool coordReplyParse(const char* text, int32_t* e6) {
+  if (e6 == nullptr) return false;
+  char v[24];
+  replyValue(text, v, sizeof(v));
+  if (v[0] == 0) return false;
+  char* end = nullptr;
+  const double deg = strtod(v, &end);
+  if (end == v || end == nullptr) return false;
+  while (*end == ' ') ++end;
+  if (*end != 0) return false;
+  if (deg < -180.0 || deg > 180.0) return false;
+  *e6 = (int32_t)lround(deg * 1000000.0);
+  return true;
+}
+
+bool switchReplyParse(const char* text, bool* on) {
+  if (on == nullptr) return false;
+  char v[12];
+  replyValue(text, v, sizeof(v));
+  if (strcmp(v, "on") == 0) { *on = true; return true; }
+  if (strcmp(v, "off") == 0) { *on = false; return true; }
+  return false;
+}
+
+bool loopReplyParse(const char* text, LoopDetect* out) {
+  if (out == nullptr) return false;
+  char v[12];
+  replyValue(text, v, sizeof(v));
+  if (strcmp(v, "off") == 0) { *out = LoopDetect::Off; return true; }
+  if (strcmp(v, "minimal") == 0) { *out = LoopDetect::Minimal; return true; }
+  if (strcmp(v, "moderate") == 0) { *out = LoopDetect::Moderate; return true; }
+  if (strcmp(v, "strict") == 0) { *out = LoopDetect::Strict; return true; }
+  return false;
+}
+
+bool answerOk(const char* text) {
+  if (text == nullptr) return false;
+  const char* p = text;
+  while (*p == ' ' || *p == '\t') ++p;
+  if (strncmp(p, "OK", 2) == 0) return true;
+  // region home / region default answer " home is now ..." / " default scope is now ...".
+  if (strstr(p, " is now ") != nullptr) return true;
+  return false;
+}
+
+int answerPlainText(const char* text, char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return 0;
+  if (text == nullptr || text[0] == 0) {
+    snprintf(out, cap, "No answer");
+    return (int)strlen(out);
+  }
+  char v[120];
+  replyValue(text, v, sizeof(v));
+  struct Map { const char* raw; const char* plain; };
+  static const Map kMap[] = {
+      {"OK - reboot to apply", "Applied. Restart the repeater to use it."},
+      {"OK - (flood allowed)", "Applied"},
+      {"OK - repeat is now OFF", "Applied. Repeat is off."},
+      {"OK - repeat is now ON", "Applied. Repeat is on."},
+      {"Err - unknown region", "The repeater does not know that region."},
+      {"Err - unknown parent", "The repeater does not know that parent region."},
+      {"Err - not empty", "That region still has child regions."},
+      {"Err - not found", "That region is not there."},
+      {"Err - unable to put", "The repeater could not add that region."},
+      {"Err - save failed", "The repeater could not save its regions."},
+      {"Err - region table full", "The repeater's region table is full."},
+      {"Err - ??", "The repeater did not understand that."},
+      {"Error, invalid radio params", "Those radio settings were refused."},
+      {"Error, bad chars", "The repeater refused that name."},
+      {"Error, max 64", "The maximum is 64."},
+      {"Error: interval range is 3-168 hours", "The flood interval must be 3 to 168 hours."},
+      {"ERR: clock cannot go backwards", "The repeater's clock cannot go backwards."},
+      {"(ERR: clock cannot go backwards)", "The repeater's clock cannot go backwards."},
   };
-
-  // EST-360: the one-step confirm. Every CLI line that changes the repeater is armed first; these
-  // two rows show the EXACT line and let the finger send it (or cancel) with one more tap.
-  if (pendingLine != nullptr && pendingLine[0]) {
-    AdminRow send = makeRow(RowId::PendingSend, "Send now", pendingLine, RowKind::Action);
-    push(send);
-    push(makeRow(RowId::PendingCancel, "Cancel", "", RowKind::Action));
+  for (const Map& m : kMap) {
+    if (strcmp(v, m.raw) == 0) {
+      snprintf(out, cap, "%s", m.plain);
+      return (int)strlen(out);
+    }
   }
-
-  switch (view) {
-    case 0: {   // Overview: what the status reply says, plus the login answer's firmware and clock
-      push(makeRow(RowId::StatusRefresh, "Read all", "REQ_TYPE_GET_STATUS", RowKind::Action));
-      if (!status.valid) {
-        AdminRow r = makeRow(RowId::None, "status", "not read yet, tap Read", RowKind::Fact);
-        push(r);
-        return n;
-      }
-      uptimeText(buf, sizeof(buf), status.uptimeSec);
-      push(makeRow(RowId::StatusUptime, "uptime", buf, RowKind::Fact));
-      {
-        // EST-360: volts with two decimals. Outside 2.5..30 V (or 0) the primary value is "n/a"; the
-        // raw mV is on this row's detail line only, so a wrong decode cannot look like a voltage.
-        char volts[16];
-        batteryVoltsText(volts, sizeof(volts), status.battMv);
-        const int pct = batteryPercent(status.battMv);
-        if (!batteryPlausible(status.battMv)) {
-          snprintf(buf, sizeof(buf), "%s (%u mV)", volts, (unsigned)status.battMv);
-        } else if (pct >= 0) {
-          snprintf(buf, sizeof(buf), "%s, %d%%", volts, pct);
-        } else {
-          snprintf(buf, sizeof(buf), "%s", volts);
-        }
-        push(makeRow(RowId::StatusBattery, "battery", buf, RowKind::Fact));
-      }
-      uptimeText(buf, sizeof(buf), status.airtimeSec);
-      push(makeRow(RowId::StatusAirtime, "airtime", buf, RowKind::Fact));
-      snprintf(buf, sizeof(buf), "rx %lu, tx %lu", (unsigned long)status.rxPackets,
-               (unsigned long)status.txPackets);
-      push(makeRow(RowId::StatusPackets, "packets", buf, RowKind::Fact));
-      snprintf(buf, sizeof(buf), "%d dBm", (int)status.noiseFloor);
-      push(makeRow(RowId::StatusNoise, "noise floor", buf, RowKind::Fact));
-      snrText(buf, sizeof(buf), status.lastSnr4);
-      push(makeRow(RowId::StatusSnr, "last SNR", buf, RowKind::Fact));
-      snprintf(buf, sizeof(buf), "level %u", (unsigned)fwLevel);
-      push(makeRow(RowId::StatusFirmware, "firmware", buf, RowKind::Fact));
-      clockText(buf, sizeof(buf), status.clock);
-      push(makeRow(RowId::StatusClock, "clock", buf, RowKind::Fact));
-      return n;
-    }
-    case 1: {   // Radio: the mock's +/- steppers, and Apply sends the two lines
-      char f[16];
-      freqText(f, sizeof(f), v.radio.freq_khz);
-      snprintf(buf, sizeof(buf), "%s MHz", f);
-      AdminRow freq = makeRow(RowId::RadioFreq, "Freq", buf, RowKind::Stepper);
-      freq.keys = 2;
-      push(freq);
-      char bw[16];
-      bwText(bw, sizeof(bw), v.radio.bw_hz);
-      snprintf(buf, sizeof(buf), "%s kHz", bw);
-      AdminRow bwRow = makeRow(RowId::RadioBw, "BW", buf, RowKind::Stepper);
-      bwRow.keys = 2;
-      push(bwRow);
-      snprintf(buf, sizeof(buf), "%u", (unsigned)v.radio.sf);
-      AdminRow sf = makeRow(RowId::RadioSf, "SF", buf, RowKind::Stepper);
-      sf.keys = 2;
-      push(sf);
-      snprintf(buf, sizeof(buf), "4/%u", (unsigned)v.radio.cr);
-      AdminRow cr = makeRow(RowId::RadioCr, "CR", buf, RowKind::Stepper);
-      cr.keys = 2;
-      push(cr);
-      snprintf(buf, sizeof(buf), "%d dBm", (int)v.radio.tx);
-      AdminRow tx = makeRow(RowId::RadioTx, "TX power", buf, RowKind::Stepper);
-      tx.keys = 2;
-      push(tx);
-      push(makeRow(RowId::RadioApply, "Apply to repeater", "reboot", RowKind::Action));
-      return n;
-    }
-    case 2: {   // Regions: read, add, save, home and default as words, then one row per region
-      push(makeRow(RowId::RegionRead, "Read regions", kCliRegionList, RowKind::Action));
-      push(makeRow(RowId::RegionAdd, "Add region", "region put", RowKind::Action));
-      push(makeRow(RowId::RegionSave, "Save to repeater", "makes changes permanent",
-                   RowKind::Action));
-      // The repeater's own answers, not what this device remembers.
-      if (home == nullptr) snprintf(buf, sizeof(buf), "not read");
-      else if (strcmp(home, "*") == 0) snprintf(buf, sizeof(buf), "* (no region)");
-      else snprintf(buf, sizeof(buf), "%s", home);
-      push(makeRow(RowId::RegionHomeFact, "Home", buf, RowKind::Fact));
-      if (defaultScope == nullptr) snprintf(buf, sizeof(buf), "not read");
-      else if (defaultScope[0] == 0) snprintf(buf, sizeof(buf), "none");
-      else snprintf(buf, sizeof(buf), "%s", defaultScope);
-      push(makeRow(RowId::RegionDefaultFact, "Default scope", buf, RowKind::Fact));
-      push(makeRow(RowId::RegionSetHomeNone, "Home: * (no region)", "region home *",
-                   RowKind::Action));
-      push(makeRow(RowId::RegionDefaultNone, "Default scope: none", "region default <null>",
-                   RowKind::Action));
-      if (!regions.valid || regions.count == 0) {
-        push(makeRow(RowId::None, "regions", "none read yet", RowKind::Fact));
-      } else {
-        for (int i = 0; i < regions.count && n < cap; ++i) {
-          const Region& rg = regions.rows[i];
-          AdminRow r = makeRow(RowId::RegionRow, rg.name[0] ? rg.name : "*", "", RowKind::Open);
-          snprintf(r.value, sizeof(r.value), "%s%s", rg.home ? "^ home, " : "",
-                   rg.allow ? "allow" : "deny");
-          r.keys = 1;
-          r.on = rg.allow;
-          r.index = (uint8_t)i;
-          push(r);
-        }
-      }
-      return n;
-    }
-    case 3: {   // Mesh: path hash, loop detect, adverts, flood, repeat, power save, position, identity
-      {
-        AdminRow r = makeRow(RowId::PathHash, "path hash", pathHashText(v.pathHash),
-                             RowKind::Stepper);
-        r.keys = 2;
-        push(r);
-      }
-      {
-        AdminRow r = makeRow(RowId::LoopDetect, "loop detect", loopDetectText(v.loop),
-                             RowKind::Stepper);
-        r.keys = 2;
-        push(r);
-      }
-      {
-        snprintf(buf, sizeof(buf), "%u min", (unsigned)v.advertLocal);
-        AdminRow r = makeRow(RowId::AdvertLocal, "adverts local", buf, RowKind::Stepper);
-        r.keys = 2;
-        push(r);
-      }
-      {
-        snprintf(buf, sizeof(buf), "%u h", (unsigned)v.advertFlood);
-        AdminRow r = makeRow(RowId::AdvertFlood, "adverts flood", buf, RowKind::Stepper);
-        r.keys = 2;
-        push(r);
-      }
-      {
-        snprintf(buf, sizeof(buf), "%u", (unsigned)v.floodMax);
-        AdminRow r = makeRow(RowId::FloodMax, "flood max", buf, RowKind::Stepper);
-        r.keys = 2;
-        push(r);
-      }
-      {
-        AdminRow r = makeRow(RowId::Repeat, "repeat", v.repeat ? "on" : "off", RowKind::Toggle);
-        r.on = v.repeat;
-        push(r);
-      }
-      {
-        AdminRow r = makeRow(RowId::PowerSave, "power save", v.powerSave ? "on" : "off",
-                             RowKind::Toggle);
-        r.on = v.powerSave;
-        push(r);
-      }
-      {
-        AdminRow r = makeRow(RowId::SharePos, "share position", v.sharePosition ? "on" : "off",
-                             RowKind::Toggle);
-        r.on = v.sharePosition;
-        push(r);
-      }
-      push(makeRow(RowId::EditName, "name", repeaterName == nullptr ? "" : repeaterName,
-                   RowKind::Edit));
-      push(makeRow(RowId::EditOwner, "owner", "tap to set", RowKind::Edit));
-      push(makeRow(RowId::EditPos, "position", "tap to set", RowKind::Edit));
-      push(makeRow(RowId::UseGpsPos, "use my GPS position", "send", RowKind::Action));
-      return n;
-    }
-    case 4: {   // Neighbours
-      push(makeRow(RowId::NeighDiscover, "Discover neighbours", "discover.neighbors",
-                   RowKind::Action));
-      push(makeRow(RowId::NeighRead, "Read stored list", "neighbors", RowKind::Action));
-      if (!neighbours.valid || neighbours.count == 0) {
-        push(makeRow(RowId::None, "neighbours", "none read yet", RowKind::Fact));
-      } else {
-        for (int i = 0; i < neighbours.count && n < cap; ++i) {
-          const Neighbour& nb = neighbours.rows[i];
-          char snr[12];
-          snrText(snr, sizeof(snr), nb.snr4);
-          snprintf(buf, sizeof(buf), "SNR %s", snr);
-          AdminRow r = makeRow(RowId::NeighRow, nb.name[0] ? nb.name : "?", buf, RowKind::Fact);
-          r.index = (uint8_t)i;
-          push(r);
-        }
-      }
-      return n;
-    }
-    case 5: {   // Actions
-      push(makeRow(RowId::AdvertLocalOnce, "Local advert", "advert.zerohop", RowKind::Action));
-      push(makeRow(RowId::AdvertFloodOnce, "Flood advert", "advert", RowKind::Action));
-      // The clock rows' values are filled by the shell from timeKeeper() and the last `clock` reply
-      // (this table is pure text and has no clock).
-      push(makeRow(RowId::ClockSync, "Sync clock", "", RowKind::Action));
-      push(makeRow(RowId::ClockBefore, "clock before", "", RowKind::Fact));
-      push(makeRow(RowId::ClockAfter, "clock after", "", RowKind::Fact));
-      push(makeRow(RowId::Silent, "Silent mode", "4 commands", RowKind::Action));
-      push(makeRow(RowId::Resume, "Resume", "4 commands", RowKind::Action));
-      {
-        AdminRow r = makeRow(RowId::Reboot, "Reboot", "tap twice", RowKind::Action);
-        r.danger = true;
-        push(r);
-      }
-      return n;
-    }
-    case 6: {   // One region's page: every action is a word with the exact CLI line beside it
-      if (regionSel < 0 || regionSel >= regions.count) {
-        push(makeRow(RowId::None, "region", "none selected", RowKind::Fact));
-        return n;
-      }
-      const Region& rg = regions.rows[regionSel];
-      const char* name = rg.name[0] ? rg.name : "*";
-      const bool wildcard = rg.wildcard || strcmp(name, "*") == 0;
-      if (wildcard) snprintf(buf, sizeof(buf), "* (no region)%s", rg.home ? ", the home" : "");
-      else snprintf(buf, sizeof(buf), "%s%s", name, rg.home ? ", the home region" : "");
-      push(makeRow(RowId::RegionNameFact, "Region", buf, RowKind::Fact));
-      if (!wildcard) {
-        snprintf(buf, sizeof(buf), "region put <new> %s", name);
-        push(makeRow(RowId::RegionAddChild, "Add child region", buf, RowKind::Action));
-      } else {
-        push(makeRow(RowId::RegionAddChild, "Add region", "region put", RowKind::Action));
-      }
-      cliRegionFlood(buf, sizeof(buf), name, true);
-      push(makeRow(RowId::RegionAllow, "Allow flood", buf, RowKind::Action));
-      cliRegionFlood(buf, sizeof(buf), name, false);
-      push(makeRow(RowId::RegionDeny, "Deny flood", buf, RowKind::Action));
-      if (wildcard) {
-        push(makeRow(RowId::RegionHome, "Set as home: none", "region home *", RowKind::Action));
-      } else {
-        cliRegionHome(buf, sizeof(buf), name);
-        push(makeRow(RowId::RegionHome, "Set as home", buf, RowKind::Action));
-      }
-      if (!wildcard) {
-        cliRegionDefault(buf, sizeof(buf), name);
-        push(makeRow(RowId::RegionDefault, "Set as default scope", buf, RowKind::Action));
-        cliRegionRemove(buf, sizeof(buf), name);
-        AdminRow r = makeRow(RowId::RegionRemove, "Remove region", buf, RowKind::Action);
-        r.danger = true;
-        push(r);
-      }
-      return n;
-    }
-    default:
-      return 0;
+  if (answerOk(v)) {
+    snprintf(out, cap, "Applied");
+    return (int)strlen(out);
   }
-}
-
-// ------------------------------------------------------------------------------------------ confirm
-void Confirm::arm(const char* what, uint32_t nowMs) {
-  key = what;
-  armedMs = nowMs;
-  armed = true;
-}
-
-bool Confirm::take(const char* what, uint32_t nowMs) {
-  if (!armed || key == nullptr || what == nullptr) return false;
-  if (key != what && strcmp(key, what) != 0) return false;
-  if ((uint32_t)(nowMs - armedMs) > kConfirmMs) {
-    armed = false;
-    return false;
-  }
-  armed = false;
-  key = nullptr;
-  return true;
-}
-
-bool Confirm::tick(uint32_t nowMs) {
-  if (!armed) return false;
-  if ((uint32_t)(nowMs - armedMs) <= kConfirmMs) return false;
-  armed = false;
-  key = nullptr;
-  return true;
-}
-
-void Confirm::clear() {
-  armed = false;
-  key = nullptr;
-  armedMs = 0;
+  // An error we have no sentence for: say it was refused, then the repeater's own words.
+  const char* rest = v;
+  if (strncmp(rest, "Error, ", 7) == 0) rest += 7;
+  else if (strncmp(rest, "Error: ", 7) == 0) rest += 7;
+  else if (strncmp(rest, "Err - ", 6) == 0) rest += 6;
+  else if (strncmp(rest, "Error", 5) == 0) rest += 5;
+  while (*rest == ' ' || *rest == '-') ++rest;
+  const int n = snprintf(out, cap, "Refused: %s", rest);
+  return n > 0 ? n : 0;
 }
 
 }  // namespace rptr

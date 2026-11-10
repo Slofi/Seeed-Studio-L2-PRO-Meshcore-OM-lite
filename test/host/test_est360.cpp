@@ -221,27 +221,28 @@ static void testAnonRegions() {
 static void testTimeGuard() {
   const uint32_t our = 1762790400u;
   // Our clock unset: always refused, whatever the repeater says.
-  CHECK(timeSyncCheck(our, false, false, 0) == TimeVerdict::OurClockNotSet);
-  CHECK(timeSyncCheck(0, true, false, 0) == TimeVerdict::OurClockNotSet);
-  CHECK(timeSyncCheck(1234567u, true, true, 1762790400u) == TimeVerdict::OurClockNotSet);
-  CHECK_TEXT(timeVerdictText(TimeVerdict::OurClockNotSet), "our clock is not set");
+  CHECK(clockGuard(our, false, false, 0) == ClockVerdict::OurClockNotSet);
+  CHECK(clockGuard(0, true, true, our) == ClockVerdict::OurClockNotSet);
+  CHECK(clockGuard(1234567u, true, true, our) == ClockVerdict::OurClockNotSet);
+  CHECK_TEXT(clockVerdictText(ClockVerdict::OurClockNotSet), "our clock is not set");
 
-  // The repeater's clock is unset (0): our real clock is exactly what it needs.
-  CHECK(timeSyncCheck(our, true, true, 0) == TimeVerdict::Ok);
-  CHECK(timeSyncCheck(our, true, false, 0) == TimeVerdict::Ok);
+  // EST-362: an unset repeater clock (or the 2024 restart clock) is a one-way jump over a day, so
+  // the page asks first with both dates; it is no longer refused.
+  CHECK(clockGuard(our, true, true, 0) == ClockVerdict::NeedConfirm);
+  CHECK(clockGuard(our, true, false, 0) == ClockVerdict::NeedConfirm);
+  CHECK(clockGuard(our, true, true, 1715779092u) == ClockVerdict::NeedConfirm);
 
-  // The one-day ceiling: exactly 86400 ahead is allowed, 86401 is not.
-  CHECK(timeSyncCheck(our, true, true, our - 86400u) == TimeVerdict::Ok);
-  CHECK(timeSyncCheck(our, true, true, our - 86401u) == TimeVerdict::TooFarAhead);
-  CHECK_TEXT(timeVerdictText(TimeVerdict::TooFarAhead), "more than a day ahead: refused");
-  CHECK(timeSyncCheck(our, true, true, our - 100000u) == TimeVerdict::TooFarAhead);
+  // The one-day boundary: exactly 86400 behind applies directly, 86401 asks first.
+  CHECK(clockGuard(our, true, true, our - 86400u) == ClockVerdict::Ok);
+  CHECK(clockGuard(our, true, true, our - 86401u) == ClockVerdict::NeedConfirm);
+  CHECK(clockGuard(our, true, true, our - 100000u) == ClockVerdict::NeedConfirm);
 
-  // A repeater slightly ahead is fine (up to a minute); more must not be moved backwards.
-  CHECK(timeSyncCheck(our, true, true, our + 59u) == TimeVerdict::Ok);
-  CHECK(timeSyncCheck(our, true, true, our + 60u) == TimeVerdict::Ok);
-  CHECK(timeSyncCheck(our, true, true, our + 61u) == TimeVerdict::RepeaterAhead);
-  CHECK_TEXT(timeVerdictText(TimeVerdict::RepeaterAhead), "repeater's clock is ahead: refused");
-  CHECK_TEXT(timeVerdictText(TimeVerdict::Ok), "sync is safe");
+  // A repeater slightly ahead is fine (up to a minute); more is the only refusal.
+  CHECK(clockGuard(our, true, true, our + 59u) == ClockVerdict::Ok);
+  CHECK(clockGuard(our, true, true, our + 60u) == ClockVerdict::Ok);
+  CHECK(clockGuard(our, true, true, our + 61u) == ClockVerdict::RepeaterAhead);
+  CHECK_TEXT(clockVerdictText(ClockVerdict::RepeaterAhead),
+             "the repeater's clock is ahead of ours");
 
   char t[32];
   clockAgoText(t, sizeof(t), 0);

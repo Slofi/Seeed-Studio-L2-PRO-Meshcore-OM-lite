@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-// RPTR (EST-358, regions/clock rework EST-360): the parts of repeater discovery, login, status and
-// remote admin that are plain arithmetic or plain text. No Arduino, no LovyanGFX, no MeshCore, so
-// test/host proves them with the system g++: the discovery list, the login state machine and its
-// timeouts, the password and region-name filters, the status reply decode, the neighbour and region
-// reply parsers, the anonymous nearby-regions reply, the clock guard, and the EXACT CLI line every
-// admin control sends.
+// RPTR (EST-358, regions/clock EST-360, interaction rework EST-362): the parts of repeater
+// discovery, login, status, remote admin and the read-backs that are plain arithmetic or plain text.
+// No Arduino, no LovyanGFX, no MeshCore, so test/host proves them with the system g++: the discovery
+// list, the login state machine and its timeouts, the password and region-name filters, the status
+// reply decode, the neighbour and region reply parsers, the anonymous nearby-regions reply, the
+// clock guard, the CommonCLI read-back parsers, and the EXACT CLI line every control sends.
 //
 // The shell (main.cpp) owns the taps and the words on the glass; rptr_link.cpp owns the radio. This
 // file owns only what can be checked on a laptop.
@@ -37,8 +37,6 @@ constexpr uint32_t kLoginExtraMs = 2500;
 // The anonymous regions query is one direct request/response; the repeater delays a server reply a
 // little, so allow a few seconds on top of the airtime estimate.
 constexpr uint32_t kRegionsExtraMs = 4000;
-// A destructive action needs a second tap inside this window (the mock's two-step confirm).
-constexpr uint32_t kConfirmMs = 6000;
 
 // ------------------------------------------------------------------------------------------- password
 // The admin password is taken literally: printable ASCII only, and MeshCore compares it with strcmp.
@@ -256,24 +254,39 @@ bool regionDefaultReplyParse(const char* text, char* name, size_t cap);
 // unset RTC, and 2024 is the MeshCore restart clock (Argus read 1715779092, 2024-05-15).
 constexpr uint32_t kClockRealSince = 1735689600u;
 // A repeater's clock can only move FORWARD (`time <epoch>` and `clock sync` both refuse to go
-// backwards), and only `clkreboot` can undo it. Sending our clock when the repeater is a day or more
-// behind would be a one-way jump, so the guard refuses anything more than a day ahead.
+// backwards), and only `clkreboot` can undo it. A jump of more than a day is therefore a one-way
+// move: EST-362 allows it, but asks first with both dates (see clockGuard below).
 constexpr uint32_t kTimeMaxAheadSecs = 86400;
 // The repeater may be slightly ahead of us; a minute is not worth a refusal.
 constexpr uint32_t kTimeMinBehindSecs = 60;
 
-enum class TimeVerdict : uint8_t {
-  Ok = 0,
-  OurClockNotSet,   // timeKeeper().realSinceBoot() is false, or our epoch is nonsense
-  TooFarAhead,      // our clock is more than a day ahead of the repeater's
-  RepeaterAhead,    // the repeater's clock is more than a minute ahead of ours
-};
-TimeVerdict timeSyncCheck(uint32_t ourEpoch, bool ourReal, bool rptrKnown, uint32_t rptrEpoch);
-const char* timeVerdictText(TimeVerdict v);
-
 // "in sync", "3 s behind", "2m 05s ahead": the repeater's clock relative to ours (positive delta
 // means the repeater is BEHIND ours).
 int clockAgoText(char* out, size_t cap, int32_t deltaSecs);
+
+// EST-362: the guard Filip wants on the page. A repeater's clock can only move FORWARD (`time` and
+// `clock sync` both refuse to go backwards, and only `clkreboot` undoes a jump), so:
+//   - our own clock must be real (otherwise nothing can be set),
+//   - a repeater that is AHEAD of us is refused (our `time` would be a no-op or an error, and there
+//     is nothing safe to send),
+//   - a jump of MORE THAN A DAY needs a confirmation that shows both dates (it is one-way),
+//   - anything else (up to a day) is applied directly.
+enum class ClockVerdict : uint8_t {
+  Ok = 0,
+  NeedConfirm,      // a legal sync, but the jump is over a day: confirm with both dates
+  OurClockNotSet,   // our clock is not real; nothing to send
+  RepeaterAhead,    // the repeater is ahead of us; refuse
+};
+ClockVerdict clockGuard(uint32_t ourEpoch, bool ourReal, bool rptrKnown, uint32_t rptrEpoch);
+const char* clockVerdictText(ClockVerdict v);
+// True when the logged-in page must show the "Clock is wrong" line: no clock read yet, an unset
+// repeater clock, or a difference of more than a minute either way.
+bool clockWrong(bool rptrKnown, uint32_t rptrEpoch, uint32_t ourEpoch, bool ourReal);
+// "2026-11-10 19:05 UTC", and "not set (2024-05-15)" for the MeshCore restart clock (below the
+// kClockRealSince cut-off). This is the form the repeater page and the jump confirm show.
+int clockStampText(char* out, size_t cap, uint32_t epoch);
+// The confirm's one sentence: "Set the repeater's clock from 2024-05-15 13:18 to 2026-11-10 19:05?"
+int clockJumpText(char* out, size_t cap, uint32_t fromEpoch, uint32_t toEpoch);
 // CommonCLI's `clock` reply: "14:02 - 10/11/2026 UTC" -> epoch seconds (UTC), false for anything
 // else. Used for the after-sync read, because the answer carries no epoch.
 bool clockReplyParse(const char* text, uint32_t* epoch);
@@ -399,85 +412,34 @@ int batteryRawText(char* out, size_t cap, uint16_t milliVolts);   // "4120 mV"
 // A battery voltage as a percentage of a 3.0..4.2 V single cell, -1 when out of range.
 int batteryPercent(uint16_t milliVolts);
 
-// ------------------------------------------------------------------------------------- the admin rows
-// One table drives the drawing and the taps (the Settings screens' rule): the shell builds the open
-// view's rows with adminRows(), draws them, and when a row is pressed it switches on the row's id.
-// Keeping the table here is what lets test/host prove the label and the CLI line agree.
-enum class RowId : uint8_t {
-  None = 0,
-  // Overview: facts from the status reply, no action.
-  StatusRefresh,
-  StatusUptime, StatusBattery, StatusAirtime, StatusPackets, StatusNoise, StatusSnr,
-  StatusFirmware, StatusClock,
-  // Radio.
-  RadioFreq, RadioBw, RadioSf, RadioCr, RadioTx, RadioApply,
-  // Regions (EST-360: every control is a word, no H/D letters).
-  RegionRead, RegionAdd, RegionSave,
-  RegionHomeFact, RegionDefaultFact, RegionSetHomeNone, RegionDefaultNone,
-  RegionRow,
-  // One region's page.
-  RegionNameFact, RegionAddChild, RegionAllow, RegionDeny, RegionHome, RegionDefault, RegionRemove,
-  // Mesh.
-  PathHash, LoopDetect, AdvertLocal, AdvertFlood, FloodMax,
-  Repeat, PowerSave, SharePos,
-  EditName, EditOwner, EditPos, UseGpsPos,
-  // Neighbours.
-  NeighDiscover, NeighRead, NeighRow,
-  // Actions.
-  AdvertLocalOnce, AdvertFloodOnce, ClockSync, ClockBefore, ClockAfter, Silent, Resume, Reboot,
-  // The one-step confirm rows (prepended to whatever view is open while a line is armed).
-  PendingSend, PendingCancel,
-};
-
-enum class RowKind : uint8_t {
-  Action = 0,   // tap the row: one or more CLI lines
-  Stepper,      // two keys: - and +
-  Toggle,       // tap the row: on/off
-  Edit,         // tap the row: the keyboard
-  Open,         // tap the row: its own page (one ">" key)
-  Fact,         // a value from the status reply, nothing to press
-};
-
-struct AdminRow {
-  RowId id = RowId::None;
-  char label[32] = "";
-  char value[80] = "";   // long enough for "region put <name> <parent>" verbatim
-  RowKind kind = RowKind::Action;
-  uint8_t keys = 0;     // 0, 1 or 2 small keys on the row's right
-  uint8_t index = 0;    // the region / neighbour ordinal this row stands for
-  bool on = false;      // toggle state, or a region's flood allowed
-  bool danger = false;  // a red row (reboot, remove)
-};
-
-constexpr int kAdminRowCap = 24;
-// Fills `out` for one view:
-//   0 Overview  1 Radio  2 Regions  3 Mesh  4 Neigh.  5 Actions  6 one region's page
-// and returns the row count. `status` and `regions`/`neighbours` may be empty; the rows then say so
-// honestly instead of inventing numbers. `home` / `defaultScope` are the repeater's own answers to
-// `region home` and `region default` (nullptr = not read; defaultScope "" = <null>). `regionSel` picks
-// the region for view 6. `pendingLine` (non-null) prepends the one-step confirm: the exact CLI line
-// and a Cancel row.
-int adminRows(int view, const AdminValues& v, const Status& status, uint8_t fwLevel,
-              const char* repeaterName, const RegionList& regions, const NeighbourList& neighbours,
-              const char* home, const char* defaultScope, int regionSel, const char* pendingLine,
-              AdminRow* out, int cap);
-// The views' names, in the mock's order.
-const char* viewName(int view);
-
-// "14:02 UTC" from the repeater's clock (its login answer), for the status card.
+// "14:02 UTC" from the repeater's clock (its login answer), for a compact line.
 int clockText(char* out, size_t cap, uint32_t epoch);
 
-// The two-step confirm (reboot, silent mode): armed for kConfirmMs, a second press inside the window
-// fires. Host-tested so a stray tap can never reboot a repeater.
-struct Confirm {
-  const char* key = nullptr;    // what is armed, compared by pointer or text by the caller
-  uint32_t armedMs = 0;
-  bool armed = false;
-  void arm(const char* what, uint32_t nowMs);
-  bool take(const char* what, uint32_t nowMs);   // true = the second press, the action may run
-  bool tick(uint32_t nowMs);                     // true when the window closed this pass
-  void clear();
-};
+// ------------------------------------------------------------------------------------ read-backs
+// EST-362: after Apply the page shows the value the repeater itself reports, never what we hoped it
+// took. These parse CommonCLI's own replies (the `> value` prefix is CommonCLI's):
+//   get name            -> "> rptr-1"           set name persists, so a read-back is the proof
+//   get lat / get lon   -> "> 46.25000"         the store is float; five decimals is enough
+//   get radio           -> "> 869.525,62.5,8,5" (CommonRadioPrefs, freq MHz, bw kHz)
+//   get tx              -> "> 14"
+//   get repeat          -> "> on" / "> off"
+//   get advert.interval -> "> 120"              minutes
+//   get flood.advert.interval -> "> 13"         hours
+//   get flood.max       -> "> 8"
+//   get loop.detect     -> "> moderate"
+//   get path.hash.mode  -> "> 1"
+// (CommonCLI.cpp handleGetCmd and CommonRadioPrefs.cpp; checked against lib/meshcore v1.18.0.)
+bool valueReplyParse(const char* text, char* out, size_t cap);
+bool intReplyParse(const char* text, int32_t* out);
+bool radioReplyParse(const char* text, RadioValues* out);   // freq/bw/sf/cr, tx untouched
+bool coordReplyParse(const char* text, int32_t* e6);        // degrees -> micro-degrees
+bool switchReplyParse(const char* text, bool* on);          // "on"/"off"
+bool loopReplyParse(const char* text, LoopDetect* out);
+// An answered `region save` (and every other write) comes back as "OK", "OK - ..." or an error.
+bool answerOk(const char* text);
+// "OK - reboot to apply" -> "Applied, restart the repeater to use it"; an error -> its own words
+// without the "Error, " / "Err - " prefix. Never a raw CLI line on a setting page.
+int answerPlainText(const char* text, char* out, size_t cap);
 
 }  // namespace rptr
 }  // namespace om

@@ -115,7 +115,7 @@ static void testMapHit() {
 
 static void testRptr() {
   const Layout& L = l2();
-  const RptrLayout list = rptrLayoutFor(L, false);
+  const RptrListLayout list = rptrListLayoutFor(L);
   CHECK(list.head.y == L.status.bottom());
   CHECK(list.head.bottom() == list.list.y);
   CHECK(list.head.h == kRptrHeadH);
@@ -124,41 +124,51 @@ static void testRptr() {
   CHECK(list.scan.y >= list.head.y && list.scan.bottom() <= list.head.bottom());
   CHECK(list.visibleRows >= 4);
 
-  // Rows tile the list: 34 px, adjacent, only the visible part answers.
-  const RptrRow r0 = rptrRow(list, 0, 0);
-  const RptrRow r1 = rptrRow(list, 1, 0);
+  // Rows tile the list, adjacent, only the visible part answers.
+  const RptrRow r0 = rptrListRow(list, 0, 0);
+  const RptrRow r1 = rptrListRow(list, 1, 0);
   CHECK(r0.y == list.list.y);
   CHECK(r1.y == r0.y + kRptrRowH);
-  CHECK(rptrRowAt(list, 5, 0, 10, list.list.y + 5) == 0);
-  CHECK(rptrRowAt(list, 5, 0, 10, list.list.y + kRptrRowH + 5) == 1);
-  CHECK(rptrRowAt(list, 5, 0, 10, list.head.y) == -1);
-  CHECK(rptrRowAt(list, 5, 0, 10, list.list.bottom()) == -1);
-  CHECK(rptrRowAt(list, 5, 17, 10, list.list.y + 2) == 0);   // scrolled: row 0 is partly gone
-  CHECK(rptrMaxScroll(list, 4) == 0);
-  CHECK(rptrMaxScroll(list, 20) == 20 * kRptrRowH - list.list.h);
+  CHECK(rptrListRowAt(list, 5, 0, 10, list.list.y + 5) == 0);
+  CHECK(rptrListRowAt(list, 5, 0, 10, list.list.y + kRptrRowH + 5) == 1);
+  CHECK(rptrListRowAt(list, 5, 0, 10, list.head.y) == -1);
+  CHECK(rptrListRowAt(list, 5, 0, 10, list.list.bottom()) == -1);
+  CHECK(rptrListRowAt(list, 5, 17, 10, list.list.y + 2) == 0);   // scrolled: row 0 is partly gone
+  CHECK(rptrListMaxScroll(list, 4) == 0);
+  CHECK(rptrListMaxScroll(list, 20) == 20 * kRptrRowH - list.list.h);
 
-  RptrHitResult h = rptrHitAt(list, false, 5, 0, list.scan.x + 2, list.scan.y + 2);
+  RptrHitResult h = rptrListHitAt(list, 5, 0, list.scan.x + 2, list.scan.y + 2);
   CHECK(h.kind == RptrHit::Scan);
-  h = rptrHitAt(list, false, 5, 0, 10, list.list.y + 3);
-  CHECK(h.kind == RptrHit::Row && h.row == 0);
-  h = rptrHitAt(list, false, 5, 0, 10, list.head.y + 2);
+  h = rptrListHitAt(list, 5, 0, 10, list.list.y + 3);
+  CHECK(h.kind == RptrHit::ListRow && h.row == 0);
+  h = rptrListHitAt(list, 5, 0, 10, list.head.y + 2);
   CHECK(h.kind == RptrHit::None);
 
-  const RptrLayout det = rptrLayoutFor(L, true);
-  CHECK(det.back.y >= L.status.bottom());
-  CHECK(det.back.right() < det.title.x);
-  CHECK(det.title.right() <= L.width);
-  CHECK(det.infoCard.y > det.title.bottom());
-  CHECK(det.infoCard.bottom() < det.loginLabel.y);
-  CHECK(det.loginField.right() < det.loginButton.x);
-  CHECK(det.loginButton.x == det.loginField.right() + 8);
-  CHECK(det.loginButton.right() <= L.width);
-  CHECK(det.note.bottom() <= L.tabbar.y);
-  CHECK(rptrHitAt(det, true, 0, 0, det.back.x + 2, det.back.y + 2).kind == RptrHit::Back);
-  CHECK(rptrHitAt(det, true, 0, 0, det.loginField.x + 2, det.loginField.y + 2).kind ==
-        RptrHit::LoginField);
-  CHECK(rptrHitAt(det, true, 0, 0, det.loginButton.x + 2, det.loginButton.y + 2).kind ==
-        RptrHit::LoginButton);
+  // EST-362: one page layout. A back key, a title, the rows and at most one Apply button; the
+  // status card and the clock banner sit above the rows and never overlap them.
+  const RptrPageLayout a = rptrPageLayoutFor(L, true, true, true, false, false);
+  CHECK(a.back.y >= L.status.bottom());
+  CHECK(a.back.right() < a.title.x);
+  CHECK(a.title.right() <= L.width);
+  CHECK(a.card.y > a.title.bottom());
+  CHECK(a.banner.y > a.card.bottom());
+  CHECK(a.body.y >= a.banner.bottom());
+  CHECK(a.body.bottom() <= a.apply.y);
+  CHECK(a.apply.bottom() <= L.tabbar.y);
+  CHECK(a.visibleRows >= 1);   // card + clock banner + Apply: the rows scroll
+  const RptrPageLayout plain = rptrPageLayoutFor(L, false, false, true, false, false);
+  CHECK(plain.visibleRows >= 3);  om::rptr::ScreenOut screen;
+  CHECK(rptrPageHitAt(a, screen, 0, a.back.x + 2, a.back.y + 2).kind == RptrHit::Back);
+  CHECK(rptrPageHitAt(a, screen, 0, a.apply.x + 2, a.apply.y + 2).kind == RptrHit::Apply);
+  CHECK(rptrPageHitAt(a, screen, 0, a.refresh.x + 2, a.refresh.y + 2).kind == RptrHit::Refresh);
+  CHECK(rptrPageHitAt(a, screen, 0, a.sub.x + 2, a.sub.y + 2).kind == RptrHit::None);
+
+  // The confirmation's own geometry: two buttons, everything else cancels.
+  const RptrModalLayout m = rptrModalLayoutFor(L, "Restart");
+  CHECK(m.box.right() <= L.width && m.box.bottom() <= L.height);
+  CHECK(rptrModalHitAt(m, m.cancel.x + 2, m.cancel.y + 2) == RptrModalHit::Cancel);
+  CHECK(rptrModalHitAt(m, m.confirm.x + 2, m.confirm.y + 2) == RptrModalHit::Confirm);
+  CHECK(rptrModalHitAt(m, 0, 0) == RptrModalHit::Outside);
 }
 
 // --- EST-352 ------------------------------------------------------------------------------------
@@ -268,51 +278,6 @@ static void testMapCredit() {
   }
   // Nothing to draw: no rectangle.
   CHECK(mapCreditRect(mapChromeFor(L, 13, 46.05, false), 0).empty());
-}
-
-static void testRptrMeta() {
-  char buf[64];
-  RptrRowFacts f;
-  rptrRowMeta(buf, sizeof(buf), f);
-  CHECK(buf[0] == 0);   // nothing known: no second line at all
-
-  f.path = "--";        // MeshCore's unknown path byte
-  f.heard = "--";       // no honest time
-  f.snr = "";
-  rptrRowMeta(buf, sizeof(buf), f);
-  CHECK(buf[0] == 0);   // the lone dash is gone
-
-  f.path = "a1 > b2";
-  f.heard = "14:02";
-  f.snr = "SNR 7.5 dB";
-  rptrRowMeta(buf, sizeof(buf), f);
-  CHECK(strcmp(buf, "heard 14:02 \xC2\xB7 SNR 7.5 dB \xC2\xB7 path a1 > b2") == 0);
-
-  f.path = "direct";
-  f.heard = "--";
-  f.snr = "";
-  rptrRowMeta(buf, sizeof(buf), f);
-  CHECK(strcmp(buf, "path direct") == 0);
-
-  f.path = "";
-  f.heard = "Mon 14:02";
-  f.snr = "";
-  rptrRowMeta(buf, sizeof(buf), f);
-  CHECK(strcmp(buf, "heard Mon 14:02") == 0);
-
-  f.path = "";
-  f.heard = "";
-  f.snr = "SNR 3 dB";
-  rptrRowMeta(buf, sizeof(buf), f);
-  CHECK(strcmp(buf, "SNR 3 dB") == 0);
-
-  // A short buffer is truncated, never overrun, and always terminated.
-  char tiny[8];
-  f.path = "a1 > b2";
-  f.heard = "14:02";
-  f.snr = "SNR 7.5 dB";
-  rptrRowMeta(tiny, sizeof(tiny), f);
-  CHECK(strlen(tiny) < sizeof(tiny));
 }
 
 static void testKeyboardFilters() {
@@ -456,7 +421,6 @@ int main() {
   testRgb565RoundTrip();
   testScaleLabels();
   testMapCredit();
-  testRptrMeta();
   testKeyboardFilters();
   testKeyboardSheet();
   if (g_fail) {

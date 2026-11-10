@@ -471,12 +471,6 @@ static const char* contactTypeName(uint8_t type) {
   return type == 2 ? "repeater" : (type == 3 ? "room" : (type == 4 ? "sensor" : "client"));
 }
 
-static void appendInfoLine(om::ui::RptrView& v, const char* label, const char* value) {
-  if (v.infoCount >= om::ui::kRptrInfoLines) return;
-  snprintf(v.info[v.infoCount], sizeof(v.info[0]), "%s|%s", label, value);
-  ++v.infoCount;
-}
-
 static void buildMapView(om::ui::MapView& v) {
   v = om::ui::MapView();
   buildStatus(v.status);
@@ -1517,128 +1511,225 @@ static const char* chatOverlayName(om::ui::ChatOverlay which) {
   }
 }
 
-// ----------------------------------------------------------------------------- RPTR (EST-358)
-// The tab does real work now: Scan runs MeshCore's own discovery (the companion's control-data
-// DISCOVER request), login is upstream's sendLogin with the answer's admin/guest/refused/no-answer
-// state and its round trip, the status card is upstream's REQ_TYPE_GET_STATUS reply, and every admin
-// control sends exactly the CLI line the mock's tests assert through MeshCore's CLI path. The wording
-// and the arithmetic live in rptr_model.h; the radio lives in rptr_link.h; this is the state and the
-// taps.
+// ----------------------------------------------------------------------------- RPTR (EST-362)
+// The tab's interaction design, rebuilt around Filip's list/page/Apply rule:
+//   list    the tab scans when it opens; every remembered repeater first (with a key icon), then
+//           the scan answers. Tap a row: that repeater's page.
+//   page    before login: Regions / Clock / Signal, all read without a password, and ONE big Log in.
+//           after login: the status card, a "Clock is wrong" line with Set clock, then the plain
+//           settings list and the Console at the bottom.
+//   setting one page each, ONE Apply that sends and makes permanent (regions append `region save`),
+//           the result and the read-back on the same page.
+//   confirm only what is risky, as a pop-up over the page. No Send now, no Save to repeater, no CLI
+//           text outside the Console.
+// The rows, the exact lines and the confirmation rules live in rptr_page.h (host-tested); this is
+// the state, the taps and the radio queue.
 static void showToast(const char* text);
 static void drawRptrTab();
 
-static om::ui::RptrStage g_rptrStage = om::ui::RptrStage::List;
-static char g_rptrNode[32] = "";        // the repeater this tab is about (also the Settings page's)
+static bool g_rptrList = true;                       // the list is showing (else one page)
+static om::rptr::Page g_rptrPage = om::rptr::Page::List;
 static int g_rptrScroll = 0;
 static int g_rptrScroll0 = 0;
-static int g_rptrCount = 0;             // the last build's row count (for the drag clamp)
-static int g_rptrView = 0;              // the admin view (0..5)
-static int g_rptrAScroll = 0;
-static int g_rptrAScroll0 = 0;
-static char g_rptrPw[om::rptr::kPasswordMax + 1] = "";   // typed, never drawn as text
-static char g_rptrEdit[64] = "";        // the identity editor's buffer
-static uint8_t g_rptrEditRow = 255;     // which admin row opened the sheet
-static bool g_rptrNums = false;         // the sheet's 123 page
-static bool g_rptrShift = false;
-static om::rptr::AdminValues g_rptrValues;
+static int g_rptrCount = 0;                          // the last build's list rows (drag clamp)
+static int g_rptrPageScroll = 0;
+static int g_rptrPageScroll0 = 0;
+
+// --- the open session
+static char g_rptrNode[32] = "";                     // the repeater this page is about (Settings too)
+static bool g_rptrLoggedIn = false;
+static bool g_rptrRemembered = false;
+static uint8_t g_rptrFoundIndex = 255;               // the row in the last scan
+static char g_rptrPw[om::rptr::kPasswordMax + 1] = "";   // typed, never drawn, never logged
+static om::rptr::Facts g_rptrFacts;
+static om::rptr::Draft g_rptrDraft;
 static om::rptr::RegionList g_rptrRegions;
 static om::rptr::NeighbourList g_rptrNeighbours;
-static om::rptr::Confirm g_rptrConfirm;
-static char g_rptrLastCmd[80] = "";
-static char g_rptrLastAnswer[120] = "";
-static bool g_rptrAnswerBad = false;
-static bool g_rptrAnswerPending = false;
-// EST-360: what the repeater itself answered to `region home` / `region default` (CommonCLI answers
-// both). `Known` says a read succeeded; empty default scope means <null>.
+static om::rptr::AnonFacts g_rptrAnon;
 static char g_rptrHome[32] = "";
 static bool g_rptrHomeKnown = false;
-static char g_rptrDefaultScope[32] = "";
+static char g_rptrDefault[32] = "";
 static bool g_rptrDefaultKnown = false;
-// The one-step confirm: the exact CLI line, shown in the rows before it goes out.
-static char g_rptrSendLine[80] = "";
-static char g_rptrSendFollow1[48] = "";
-static char g_rptrSendFollow2[48] = "";
-static bool g_rptrSendArmed = false;
-// One region's page (view 6) and the parent for "Add child region".
-static int g_rptrRegionSel = 0;
-// Clock sync (EST-360): the last repeater clock read, and the before/after of the last sync.
-static uint32_t g_rptrClockLast = 0;
-static uint32_t g_rptrClockBefore = 0;
-static uint32_t g_rptrClockAfter = 0;
-static bool g_rptrSyncPending = false;
+static uint32_t g_rptrLoginWait = 0;                 // millis() when a login went out
 static uint32_t g_rptrReplySerial = 0;
 static uint32_t g_rptrStatusSerial = 0;
-static uint32_t g_rptrLoginWait = 0;        // millis() when a login went out
-static bool g_rptrOsk = false;
-static uint8_t g_rptrField = (uint8_t)om::ui::KeyboardField::RptrPassword;
-static char g_rptrEditTitle[32] = "";
-static om::ui::RptrView g_rptrViewStore;    // one instance (the model is ~3 KB, not on the loop stack)
+static uint32_t g_rptrScanSerialSeen = 0;
 
-static void rptrClearSession() {
-  g_rptrStage = om::ui::RptrStage::List;
-  g_rptrNode[0] = 0;
-  g_rptrPw[0] = 0;
-  g_rptrRegions = om::rptr::RegionList();
-  g_rptrNeighbours = om::rptr::NeighbourList();
-  g_rptrValues.reset();
-  g_rptrLastCmd[0] = 0;
-  g_rptrLastAnswer[0] = 0;
-  g_rptrAnswerPending = false;
-  g_rptrAnswerBad = false;
-  g_rptrOsk = false;
-  g_rptrConfirm.clear();
-  g_rptrView = 0;
-  g_rptrAScroll = 0;
-  g_rptrEditRow = 255;
-  g_rptrHomeKnown = false;
-  g_rptrHome[0] = 0;
-  g_rptrDefaultKnown = false;
-  g_rptrDefaultScope[0] = 0;
-  g_rptrSendArmed = false;
-  g_rptrSendLine[0] = 0;
-  g_rptrRegionSel = 0;
-  g_rptrClockLast = g_rptrClockBefore = g_rptrClockAfter = 0;
-  g_rptrSyncPending = false;
+// --- one line in flight, the rest in a small queue, so commands never collide
+enum : uint8_t { kRptrOutRead = 0, kRptrOutWrite = 1, kRptrOutCmd = 2 };
+struct RptrOutLine {
+  char line[80] = "";
+  uint8_t kind = kRptrOutRead;
+};
+constexpr int kRptrOutCap = 24;
+static RptrOutLine g_rptrOut[kRptrOutCap];
+static int g_rptrOutCount = 0;
+static int g_rptrOutHead = 0;
+static char g_rptrInFlight[80] = "";
+static uint8_t g_rptrInFlightKind = 0xFF;
+static uint32_t g_rptrInFlightMs = 0;
+
+// --- Apply
+static bool g_rptrApplyPending = false;
+static om::rptr::Page g_rptrApplyPage = om::rptr::Page::List;
+static int g_rptrApplyWritesLeft = 0;
+static bool g_rptrApplyErr = false;
+static char g_rptrApplyErrText[64] = "";
+static char g_rptrResult[64] = "";
+static bool g_rptrResultOk = false;
+static bool g_rptrResultPending = false;
+
+// --- Console (the raw log, the only place CLI answers live)
+static constexpr int kRptrLogLines = om::rptr::kConsoleLines;
+static char g_rptrLog[kRptrLogLines][88];
+static int g_rptrLogCount = 0;
+static char g_rptrCmd[64] = "";                      // the console's free command line
+
+// --- the pop-up
+static bool g_rptrAskOpen = false;
+static om::rptr::ConfirmAsk g_rptrAsk;
+static int g_rptrAskWhat = 0;                        // 1 apply, 2 restart, 3 remove, 4 clock
+static char g_rptrAskArg[32] = "";
+
+// --- the keyboard sheet
+static bool g_rptrOsk = false;
+static bool g_rptrNums = false;
+static bool g_rptrShift = false;
+static bool g_rptrSecret = false;
+static uint8_t g_rptrField = (uint8_t)om::ui::KeyboardField::RptrPassword;
+static uint8_t g_rptrEditWhat = 0;   // 1 password, 2 name, 3 lat, 4 lon, 5 add-name, 6 console
+static char g_rptrEditTitle[32] = "";
+static char g_rptrText[64] = "";
+static int g_rptrTextLen = 0;
+static om::ui::RptrView g_rptrViewStore;   // one instance, not on the loop stack
+
+static void rptrLog(const char* prefix, const char* text) {
+  char line[88];
+  size_t w = 0;
+  const char* p = prefix;
+  while (*p && w + 1 < sizeof(line)) line[w++] = *p++;
+  if (w + 1 < sizeof(line)) line[w++] = ' ';
+  p = text == nullptr ? "" : text;
+  while (*p && w + 1 < sizeof(line)) {
+    line[w++] = (*p == '\n' || *p == '\r') ? ' ' : *p;
+    ++p;
+  }
+  line[w] = 0;
+  if (g_rptrLogCount >= kRptrLogLines) {
+    for (int i = 1; i < kRptrLogLines; ++i) memcpy(g_rptrLog[i - 1], g_rptrLog[i], sizeof(g_rptrLog[0]));
+    --g_rptrLogCount;
+  }
+  snprintf(g_rptrLog[g_rptrLogCount++], sizeof(g_rptrLog[0]), "%s", line);
+  Serial.printf("[rptr] %s\n", line);
 }
 
-// Open one repeater: auto-login when the switch is on and its password is remembered, otherwise the
-// login page with an empty field.
-static void rptrOpen(const char* name) {
-  snprintf(g_rptrNode, sizeof(g_rptrNode), "%s", name);
-  g_rptrValues.reset();
+static void rptrQueue(const char* line, uint8_t kind) {
+  if (line == nullptr || line[0] == 0) return;
+  if (g_rptrOutCount >= kRptrOutCap) {
+    Serial.printf("[rptr] queue full, dropped: %s\n", line);
+    return;
+  }
+  RptrOutLine& o = g_rptrOut[g_rptrOutCount++];
+  snprintf(o.line, sizeof(o.line), "%s", line);
+  o.kind = kind;
+}
+
+static void rptrSyncDraft() {
+  g_rptrDraft.reset(g_rptrFacts, g_rptrRegions, g_rptrHomeKnown ? g_rptrHome : "*",
+                    g_rptrDefaultKnown ? g_rptrDefault : nullptr);
+}
+
+static void rptrClearSession() {
+  g_rptrList = true;
+  g_rptrPage = om::rptr::Page::List;
+  g_rptrNode[0] = 0;
+  g_rptrLoggedIn = false;
+  g_rptrRemembered = false;
+  g_rptrFoundIndex = 255;
+  g_rptrPw[0] = 0;
+  g_rptrFacts.reset();
   g_rptrRegions = om::rptr::RegionList();
   g_rptrNeighbours = om::rptr::NeighbourList();
-  g_rptrLastCmd[0] = 0;
-  g_rptrLastAnswer[0] = 0;
-  g_rptrAnswerPending = false;
-  g_rptrAnswerBad = false;
-  g_rptrPw[0] = 0;
-  g_rptrOsk = false;
-  g_rptrView = 0;
-  g_rptrAScroll = 0;
-  g_rptrStage = om::ui::RptrStage::Login;
-  g_rptrHomeKnown = false;
+  g_rptrAnon = om::rptr::AnonFacts();
   g_rptrHome[0] = 0;
+  g_rptrHomeKnown = false;
+  g_rptrDefault[0] = 0;
   g_rptrDefaultKnown = false;
-  g_rptrDefaultScope[0] = 0;
-  g_rptrSendArmed = false;
-  g_rptrSendLine[0] = 0;
-  g_rptrRegionSel = 0;
-  g_rptrClockLast = g_rptrClockBefore = g_rptrClockAfter = 0;
-  g_rptrSyncPending = false;
-  char pw[om::rptr::kPasswordMax + 1] = "";
-  if (om::rptrAutoLogin() && om::rptrPasswordFor(g_rptrNode, pw, sizeof(pw))) {
-    // Never printed: the remembered password goes straight to upstream's sendLogin.
-    if (om::rptrLoginStart(g_rptrNode, pw)) {
+  g_rptrDraft = om::rptr::Draft();
+  g_rptrOsk = false;
+  g_rptrAskOpen = false;
+  g_rptrOutCount = g_rptrOutHead = 0;
+  g_rptrInFlightKind = 0xFF;
+  g_rptrInFlight[0] = 0;
+  g_rptrApplyPending = false;
+  g_rptrApplyWritesLeft = 0;
+  g_rptrResult[0] = 0;
+  g_rptrResultPending = false;
+  g_rptrPageScroll = 0;
+  g_rptrLoginWait = 0;
+  g_rptrFoundIndex = 255;
+}
+
+static void rptrFillAnonFromScan() {
+  const om::rptr::FoundList& found = om::rptrScan();
+  if (g_rptrFoundIndex < 255 && g_rptrFoundIndex < found.count) {
+    const om::rptr::Found& f = found.rows[g_rptrFoundIndex];
+    g_rptrAnon.signalKnown = f.hasSnrOut || f.hasSnrIn;
+    g_rptrAnon.snr4 = f.hasSnrOut ? f.snrOut4 : f.snrIn4;
+    if (f.anon.valid) {
+      g_rptrAnon.valid = true;
+      g_rptrAnon.regionCount = f.anon.count;
+      g_rptrAnon.clock = f.anon.clock;
+      snprintf(g_rptrAnon.regions, sizeof(g_rptrAnon.regions), "%s", f.anon.text);
+    } else if (f.regionsAsked) {
+      g_rptrAnon.asked = true;
+    }
+  }
+}
+
+// Open one repeater's page. `index` is the scan row, 255 when only a name is known (a remembered
+// repeater opened from the Nodes menu).
+static void rptrOpenAt(const char* name, uint8_t index) {
+  rptrClearSession();
+  snprintf(g_rptrNode, sizeof(g_rptrNode), "%s", name != nullptr ? name : "");
+  g_rptrList = false;
+  g_rptrPage = om::rptr::Page::Repeater;
+  g_rptrFoundIndex = index;
+  g_rptrFacts.reset();
+  rptrSyncDraft();
+  rptrFillAnonFromScan();
+  for (int i = 0; i < om::rptrRememberedCount(); ++i) {
+    if (strcmp(om::rptrRememberedName(i), g_rptrNode) == 0) g_rptrRemembered = true;
+  }
+  if (index == 255) {
+    // A remembered name with no scan row: look it up by name in the last scan.
+    const om::rptr::FoundList& found = om::rptrScan();
+    for (int i = 0; i < found.count; ++i) {
+      if (strcmp(found.rows[i].name, g_rptrNode) == 0) {
+        g_rptrFoundIndex = (uint8_t)i;
+        rptrFillAnonFromScan();
+        break;
+      }
+    }
+  }
+  // Before login the page fills itself: the anonymous regions read needs no password.
+  if (g_rptrFoundIndex < 255 && !g_rptrAnon.valid && !om::rptrRegionsBusy()) {
+    if (om::rptrRegionsQuery(g_rptrFoundIndex)) g_rptrAnon.asked = true;
+  }
+  if (g_rptrRemembered && om::rptrAutoLogin()) {
+    char pw[om::rptr::kPasswordMax + 1] = "";
+    if (om::rptrPasswordFor(g_rptrNode, pw, sizeof(pw)) && om::rptrLoginStart(g_rptrNode, pw)) {
       g_rptrLoginWait = millis();
       Serial.printf("[rptr] auto-login %s\n", g_rptrNode);
     }
     memset(pw, 0, sizeof(pw));
   }
+  Serial.printf("[rptr] open %s\n", g_rptrNode);
 }
 
+static void rptrOpen(const char* name) { rptrOpenAt(name, 255); }
+
 static void rptrLoginNow() {
-  // The mock's own refusal: an empty field never goes on the air.
   if (g_rptrPw[0] == 0) {
     showToast("password required");
     return;
@@ -1648,85 +1739,314 @@ static void rptrLoginNow() {
     return;
   }
   g_rptrLoginWait = millis();
-  g_rptrStage = om::ui::RptrStage::Login;
   g_rptrOsk = false;
+  g_rptrResult[0] = 0;
   drawRptrTab();
 }
 
-static void rptrSendLine(const char* line, uint8_t tag) {
-  if (!om::rptrCliSend(line, tag)) {
-    showToast("Login first");
+// Back: from a setting to the repeater page, from the repeater page to the list (and out of the
+// session, exactly like the mock's "< list").
+static void rptrBack() {
+  if (g_rptrList) return;
+  if (g_rptrPage != om::rptr::Page::Repeater) {
+    g_rptrPage = om::rptr::Page::Repeater;
+    g_rptrPageScroll = 0;
+    g_rptrResult[0] = 0;
+    g_rptrResultPending = false;
+    rptrSyncDraft();
     return;
   }
-  snprintf(g_rptrLastCmd, sizeof(g_rptrLastCmd), "%s", line);
-  g_rptrLastAnswer[0] = 0;
-  g_rptrAnswerPending = true;
-  g_rptrAnswerBad = false;
+  om::rptrLogout();
+  rptrClearSession();
 }
 
-// EST-360: the one-step confirm. A region/clock row never sends on the first tap: it arms the exact
-// CLI line, the rows show "Send now" with that line (and Cancel), and only the second tap sends it.
-// A follow-up read is sent after the line so the screen shows the repeater's own answer (`region home`,
-// `region default`, `region`, or `clock`).
-static void rptrSendClear() {
-  g_rptrSendArmed = false;
-  g_rptrSendLine[0] = 0;
-  g_rptrSendFollow1[0] = 0;
-  g_rptrSendFollow2[0] = 0;
+// Open one setting page and ask the repeater for its own values.
+static void rptrGoPage(om::rptr::Page page) {
+  g_rptrPage = page;
+  g_rptrPageScroll = 0;
+  g_rptrResult[0] = 0;
+  g_rptrResultPending = false;
+  g_rptrApplyPending = false;
+  g_rptrAskOpen = false;
+  rptrSyncDraft();
+  if (!g_rptrLoggedIn) return;
+  char reads[om::rptr::kReadBackMax][24];
+  const int n = om::rptr::readBackLines(page, reads);
+  for (int i = 0; i < n; ++i) rptrQueue(reads[i], kRptrOutRead);
 }
 
-static void rptrSendArm(const char* line, const char* follow1, const char* follow2) {
-  if (line == nullptr || line[0] == 0) return;
-  snprintf(g_rptrSendLine, sizeof(g_rptrSendLine), "%s", line);
-  snprintf(g_rptrSendFollow1, sizeof(g_rptrSendFollow1), "%s", follow1 == nullptr ? "" : follow1);
-  snprintf(g_rptrSendFollow2, sizeof(g_rptrSendFollow2), "%s", follow2 == nullptr ? "" : follow2);
-  g_rptrSendArmed = true;
-  showToast("Check the line, then tap Send now");
-  drawRptrTab();
+// The apply's end: the result is the repeater's own answer, in plain words.
+static bool g_rptrDirty = false;
+
+static void rptrCheckApplyDone() {
+  if (!g_rptrApplyPending || g_rptrApplyWritesLeft > 0) return;
+  g_rptrApplyPending = false;
+  g_rptrResultPending = false;
+  g_rptrResultOk = !g_rptrApplyErr;
+  g_rptrDirty = true;
+  if (g_rptrApplyErr && g_rptrApplyErrText[0]) {
+    snprintf(g_rptrResult, sizeof(g_rptrResult), "%s", g_rptrApplyErrText);
+  } else {
+    snprintf(g_rptrResult, sizeof(g_rptrResult), "Applied");
+    // The read-backs that follow fill in the repeater's own values; only reset the page that was
+    // applied, never a page the finger has moved on to.
+    if (g_rptrPage == g_rptrApplyPage) rptrSyncDraft();
+  }
 }
 
-// The "Send now" row. The clock guard is checked again here: time may have moved since the arm.
-static void rptrSendNow() {
-  if (!g_rptrSendArmed || g_rptrSendLine[0] == 0) return;
-  if (strncmp(g_rptrSendLine, "time ", 5) == 0) {
-    const om::rptr::TimeVerdict verdict = om::rptr::timeSyncCheck(
-        om::timeKeeper().now(), om::timeKeeper().realSinceBoot(),
-        g_rptrClockLast >= om::rptr::kClockRealSince, g_rptrClockLast);
-    if (verdict != om::rptr::TimeVerdict::Ok) {
-      showToast(om::rptr::timeVerdictText(verdict));
-      rptrSendClear();
-      drawRptrTab();
+// Start an Apply: the writes, then the read-backs for this page.
+static void rptrApplyNow() {
+  om::rptr::ApplyPlan plan;
+  const int n = om::rptr::applyPlan(g_rptrPage, g_rptrDraft, g_rptrRegions, &plan);
+  if (n <= 0) {
+    snprintf(g_rptrResult, sizeof(g_rptrResult), "Nothing to change");
+    g_rptrResultOk = true;
+    g_rptrResultPending = false;
+    g_rptrApplyPending = false;
+    return;
+  }
+  g_rptrApplyPending = true;
+  g_rptrApplyPage = g_rptrPage;
+  g_rptrApplyWritesLeft = n;
+  g_rptrApplyErr = false;
+  g_rptrApplyErrText[0] = 0;
+  g_rptrResultPending = true;
+  snprintf(g_rptrResult, sizeof(g_rptrResult), "Applying...");
+  for (int i = 0; i < plan.count; ++i) {
+    rptrQueue(plan.line[i], kRptrOutWrite);
+    rptrLog(">", plan.line[i]);
+  }
+  char reads[om::rptr::kReadBackMax][24];
+  const int rn = om::rptr::readBackLines(g_rptrPage, reads);
+  for (int i = 0; i < rn; ++i) rptrQueue(reads[i], kRptrOutRead);
+}
+
+// The same path for an action that writes without a setting page (remove a region, set the clock).
+static void rptrApplyLines(char lines[][80], int n) {
+  if (n <= 0) return;
+  g_rptrApplyPending = true;
+  g_rptrApplyPage = g_rptrPage;
+  g_rptrApplyWritesLeft = n;
+  g_rptrApplyErr = false;
+  g_rptrApplyErrText[0] = 0;
+  g_rptrResultPending = true;
+  snprintf(g_rptrResult, sizeof(g_rptrResult), "Applying...");
+  for (int i = 0; i < n; ++i) {
+    rptrQueue(lines[i], kRptrOutWrite);
+    rptrLog(">", lines[i]);
+  }
+}
+
+static void rptrSetClockNow() {
+  char line[32];
+  const uint32_t our = om::timeKeeper().now();
+  if (om::rptr::cliTime(line, sizeof(line), our) == 0) {
+    snprintf(g_rptrResult, sizeof(g_rptrResult), "Our clock is not usable");
+    g_rptrResultOk = false;
+    return;
+  }
+  char lines[1][80];
+  snprintf(lines[0], sizeof(lines[0]), "%s", line);
+  rptrApplyLines(lines, 1);
+  rptrQueue(om::rptr::kCliClockRead, kRptrOutRead);
+}
+
+// The clock line's one button. The guard (rptr_model.h) is the fixed one: our clock must be real, a
+// repeater ahead of us is refused, a jump over a day asks first with both dates, else it just sets.
+static void rptrClockPressed() {
+  const uint32_t our = om::timeKeeper().now();
+  const bool real = om::timeKeeper().realSinceBoot();
+  const om::rptr::ClockVerdict verdict =
+      om::rptr::clockGuard(our, real, g_rptrFacts.hasClock, g_rptrFacts.clock);
+  if (verdict == om::rptr::ClockVerdict::OurClockNotSet ||
+      verdict == om::rptr::ClockVerdict::RepeaterAhead) {
+    snprintf(g_rptrResult, sizeof(g_rptrResult), "%s", om::rptr::clockVerdictText(verdict));
+    g_rptrResultOk = false;
+    g_rptrResultPending = false;
+    return;
+  }
+  if (verdict == om::rptr::ClockVerdict::NeedConfirm) {
+    const om::rptr::ConfirmAsk ask = om::rptr::confirmClock(g_rptrFacts.hasClock ? g_rptrFacts.clock : 0, our);
+    if (ask.need) {
+      g_rptrAsk = ask;
+      g_rptrAskWhat = 4;
+      g_rptrAskOpen = true;
       return;
     }
-    g_rptrClockBefore = g_rptrClockLast;
-    g_rptrClockAfter = 0;
-    g_rptrSyncPending = true;
   }
-  char line[80];
-  snprintf(line, sizeof(line), "%s", g_rptrSendLine);
-  rptrSendLine(line, 0);
-  if (g_rptrSendFollow1[0]) rptrSendLine(g_rptrSendFollow1, 0);
-  if (g_rptrSendFollow2[0]) rptrSendLine(g_rptrSendFollow2, 0);
-  rptrSendClear();
-  showToast("sent");
+  rptrSetClockNow();
 }
 
-// Where a CLI answer goes: the neighbour list and the region list are the two the screen parses.
-static void rptrTakeReply(const om::RptrReply& rep) {
-  snprintf(g_rptrLastCmd, sizeof(g_rptrLastCmd), "%s", rep.cmd);
-  // A CLI answer can be several lines (the neighbour list); the strip is one line, so a newline
-  // becomes a separator instead of a glyph the mono face cannot draw.
-  size_t w = 0;
-  for (const char* p = rep.text; *p && w + 1 < sizeof(g_rptrLastAnswer); ++p) {
-    g_rptrLastAnswer[w++] = (*p == '\n') ? ' ' : *p;
+static void rptrRemoveRegion(const char* name) {
+  g_rptrAsk = om::rptr::confirmRemoveRegion(name);
+  g_rptrAskWhat = 3;
+  snprintf(g_rptrAskArg, sizeof(g_rptrAskArg), "%s", name != nullptr ? name : "*");
+  g_rptrAskOpen = g_rptrAsk.need;
+}
+
+static void rptrRunAsk() {
+  switch (g_rptrAskWhat) {
+    case 1:
+      rptrApplyNow();
+      break;
+    case 2:
+      rptrLog(">", om::rptr::kCliReboot);
+      rptrQueue(om::rptr::kCliReboot, kRptrOutCmd);
+      snprintf(g_rptrResult, sizeof(g_rptrResult), "Restarting");
+      g_rptrResultOk = true;
+      break;
+    case 3: {
+      char removeLine[80];
+      om::rptr::cliRegionRemove(removeLine, sizeof(removeLine), g_rptrAskArg);
+      char lines[2][80];
+      snprintf(lines[0], sizeof(lines[0]), "%s", removeLine);
+      snprintf(lines[1], sizeof(lines[1]), "%s", om::rptr::kCliRegionSave);
+      rptrApplyLines(lines, 2);
+      char reads[om::rptr::kReadBackMax][24];
+      const int n = om::rptr::readBackLines(om::rptr::Page::Regions, reads);
+      for (int i = 0; i < n; ++i) rptrQueue(reads[i], kRptrOutRead);
+      break;
+    }
+    case 4:
+      rptrSetClockNow();
+      break;
+    default:
+      break;
   }
-  g_rptrLastAnswer[w] = 0;
-  g_rptrAnswerPending = false;
-  g_rptrAnswerBad = (rep.kind == (uint8_t)om::RptrReplyKind::Error);
+  g_rptrAskWhat = 0;
+}
+
+static void rptrOpenAsk(const om::rptr::ConfirmAsk& ask, int what) {
+  if (!ask.need) return;
+  g_rptrAsk = ask;
+  g_rptrAskWhat = what;
+  g_rptrAskOpen = true;
+}
+
+// The console's free line: sent verbatim through the same CLI path.
+static void rptrSendConsole() {
+  if (g_rptrCmd[0] == 0) {
+    showToast("type a command first");
+    return;
+  }
+  rptrLog(">", g_rptrCmd);
+  rptrQueue(g_rptrCmd, kRptrOutCmd);
+  g_rptrCmd[0] = 0;
+}
+
+// Which page a read-back belongs to: a reply only resets the draft of the page the finger is on.
+static om::rptr::Page rptrReadPage(const char* cmd) {
+  if (strcmp(cmd, "get name") == 0) return om::rptr::Page::Name;
+  if (strcmp(cmd, "get lat") == 0 || strcmp(cmd, "get lon") == 0) return om::rptr::Page::Position;
+  if (strcmp(cmd, "get radio") == 0) return om::rptr::Page::Radio;
+  if (strcmp(cmd, "get tx") == 0) return om::rptr::Page::Tx;
+  if (strcmp(cmd, "get repeat") == 0) return om::rptr::Page::Repeat;
+  if (strcmp(cmd, "get advert.interval") == 0 ||
+      strcmp(cmd, "get flood.advert.interval") == 0) return om::rptr::Page::Advertising;
+  if (strcmp(cmd, "get flood.max") == 0 || strcmp(cmd, "get loop.detect") == 0 ||
+      strcmp(cmd, "get path.hash.mode") == 0) return om::rptr::Page::More;
+  if (strcmp(cmd, om::rptr::kCliRegionList) == 0 ||
+      strcmp(cmd, om::rptr::kCliRegionHomeRead) == 0 ||
+      strcmp(cmd, om::rptr::kCliRegionDefaultRead) == 0) return om::rptr::Page::Regions;
+  if (strcmp(cmd, om::rptr::kCliNeighboursRead) == 0) return om::rptr::Page::Neighbours;
+  if (strcmp(cmd, om::rptr::kCliClockRead) == 0) return om::rptr::Page::Repeater;
+  return om::rptr::Page::List;
+}
+
+// Where one CLI answer goes: the read-backs that make the page truthful, the two list replies, and
+// the console. A write's answer is the Apply's result.
+static void rptrTakeReply(const om::RptrReply& rep) {
+  g_rptrDirty = true;
+  rptrLog("<", rep.text);
+  if (g_rptrInFlightKind != 0xFF && strcmp(rep.cmd, g_rptrInFlight) == 0) {
+    const uint8_t kind = g_rptrInFlightKind;
+    g_rptrInFlightKind = 0xFF;
+    g_rptrInFlight[0] = 0;
+    if (kind == kRptrOutWrite && g_rptrApplyPending && g_rptrApplyWritesLeft > 0) {
+      --g_rptrApplyWritesLeft;
+      if (!om::rptr::answerOk(rep.text)) {
+        g_rptrApplyErr = true;
+        om::rptr::answerPlainText(rep.text, g_rptrApplyErrText, sizeof(g_rptrApplyErrText));
+      }
+      rptrCheckApplyDone();
+    }
+  }
+  if (rep.kind == (uint8_t)om::RptrReplyKind::Error) {
+    if (!g_rptrResultPending) {
+      om::rptr::answerPlainText(rep.text, g_rptrResult, sizeof(g_rptrResult));
+      g_rptrResultOk = false;
+    }
+    return;
+  }
   if (rep.kind != (uint8_t)om::RptrReplyKind::Cli) return;
-  if (strcmp(rep.cmd, om::rptr::kCliNeighboursRead) == 0) {
+
+  char value[64] = "";
+  int32_t number = 0;
+  const char* cmd = rep.cmd;
+  bool read = true;
+  if (strcmp(cmd, "get name") == 0) {
+    if (om::rptr::valueReplyParse(rep.text, value, sizeof(value))) {
+      snprintf(g_rptrFacts.name, sizeof(g_rptrFacts.name), "%s", value);
+      g_rptrFacts.nameKnown = true;
+    }
+  } else if (strcmp(cmd, "get lat") == 0) {
+    if (om::rptr::coordReplyParse(rep.text, &g_rptrFacts.latE6)) g_rptrFacts.posKnown = true;
+  } else if (strcmp(cmd, "get lon") == 0) {
+    if (om::rptr::coordReplyParse(rep.text, &g_rptrFacts.lonE6)) g_rptrFacts.posKnown = true;
+  } else if (strcmp(cmd, "get radio") == 0) {
+    if (om::rptr::radioReplyParse(rep.text, &g_rptrFacts.radio)) {
+      g_rptrFacts.radio.tx = g_rptrFacts.tx;
+      g_rptrFacts.radioKnown = true;
+    }
+  } else if (strcmp(cmd, "get tx") == 0) {
+    if (om::rptr::intReplyParse(rep.text, &number)) {
+      g_rptrFacts.tx = (int8_t)number;
+      g_rptrFacts.radio.tx = (int8_t)number;
+      g_rptrFacts.txKnown = true;
+    }
+  } else if (strcmp(cmd, "get repeat") == 0) {
+    if (om::rptr::switchReplyParse(rep.text, &g_rptrFacts.repeat)) g_rptrFacts.repeatKnown = true;
+  } else if (strcmp(cmd, "get advert.interval") == 0) {
+    if (om::rptr::intReplyParse(rep.text, &number)) {
+      g_rptrFacts.advertLocal = (uint8_t)number;
+      g_rptrFacts.advertLocalKnown = true;
+    }
+  } else if (strcmp(cmd, "get flood.advert.interval") == 0) {
+    if (om::rptr::intReplyParse(rep.text, &number)) {
+      g_rptrFacts.advertFlood = (uint8_t)number;
+      g_rptrFacts.advertFloodKnown = true;
+    }
+  } else if (strcmp(cmd, "get flood.max") == 0) {
+    if (om::rptr::intReplyParse(rep.text, &number)) {
+      g_rptrFacts.floodMax = (uint8_t)number;
+      g_rptrFacts.floodMaxKnown = true;
+    }
+  } else if (strcmp(cmd, "get loop.detect") == 0) {
+    if (om::rptr::loopReplyParse(rep.text, &g_rptrFacts.loop)) g_rptrFacts.loopKnown = true;
+  } else if (strcmp(cmd, "get path.hash.mode") == 0) {
+    if (om::rptr::intReplyParse(rep.text, &number)) {
+      g_rptrFacts.pathHash = (uint8_t)number;
+      g_rptrFacts.pathHashKnown = true;
+    }
+  } else if (strcmp(cmd, om::rptr::kCliRegionList) == 0) {
+    om::rptr::regionsParse(rep.text, &g_rptrRegions);
+    g_rptrRegions.valid = true;
+  } else if (strcmp(cmd, om::rptr::kCliRegionHomeRead) == 0) {
+    if (om::rptr::regionHomeReplyParse(rep.text, g_rptrHome, sizeof(g_rptrHome))) {
+      g_rptrHomeKnown = true;
+    }
+  } else if (strcmp(cmd, om::rptr::kCliRegionDefaultRead) == 0) {
+    if (om::rptr::regionDefaultReplyParse(rep.text, g_rptrDefault, sizeof(g_rptrDefault))) {
+      g_rptrDefaultKnown = true;
+    }
+  } else if (strcmp(cmd, om::rptr::kCliClockRead) == 0) {
+    uint32_t epoch = 0;
+    if (om::rptr::clockReplyParse(rep.text, &epoch)) {
+      g_rptrFacts.clock = epoch;
+      g_rptrFacts.hasClock = true;
+    }
+  } else if (strcmp(cmd, om::rptr::kCliNeighboursRead) == 0) {
     om::rptr::neighboursParse(rep.text, &g_rptrNeighbours);
-    // A neighbour's name comes from our own contact table: the reply carries only the key prefix.
     static om::MeshContact list[32];
     const int n = om::meshContactList(list, 32);
     for (int i = 0; i < g_rptrNeighbours.count; ++i) {
@@ -1745,41 +2065,60 @@ static void rptrTakeReply(const om::RptrReply& rep) {
       }
     }
     g_rptrNeighbours.valid = true;
-    showToast("Neighbours read");
-  } else if (strcmp(rep.cmd, om::rptr::kCliRegionList) == 0) {
-    om::rptr::regionsParse(rep.text, &g_rptrRegions);
-    g_rptrRegions.valid = true;
-    showToast("Regions read");
-  } else if (strcmp(rep.cmd, om::rptr::kCliRegionHomeRead) == 0) {
-    // The repeater's own answer; this is the only home truth the screen shows.
-    char name[32] = "";
-    if (om::rptr::regionHomeReplyParse(rep.text, name, sizeof(name))) {
-      snprintf(g_rptrHome, sizeof(g_rptrHome), "%s", name);
-      g_rptrHomeKnown = true;
-      char toast[48];
-      snprintf(toast, sizeof(toast), "home is %s", name);
-      showToast(toast);
-    }
-  } else if (strcmp(rep.cmd, om::rptr::kCliRegionDefaultRead) == 0) {
-    char name[32] = "";
-    if (om::rptr::regionDefaultReplyParse(rep.text, name, sizeof(name))) {
-      snprintf(g_rptrDefaultScope, sizeof(g_rptrDefaultScope), "%s", name);
-      g_rptrDefaultKnown = true;
-    }
-  } else if (strcmp(rep.cmd, om::rptr::kCliClockRead) == 0) {
-    uint32_t epoch = 0;
-    if (om::rptr::clockReplyParse(rep.text, &epoch)) {
-      g_rptrClockLast = epoch;
-      if (g_rptrSyncPending) {
-        g_rptrClockAfter = epoch;
-        g_rptrSyncPending = false;
-      }
+  } else {
+    read = false;   // a console command's answer: logged, nothing parsed
+  }
+  if (read && g_rptrLoggedIn && !g_rptrResultPending) {
+    const om::rptr::Page from = rptrReadPage(cmd);
+    if (g_rptrPage == om::rptr::Page::Repeater || g_rptrPage == from ||
+        (from == om::rptr::Page::Regions &&
+         (g_rptrPage == om::rptr::Page::HomePicker || g_rptrPage == om::rptr::Page::DefaultPicker ||
+          g_rptrPage == om::rptr::Page::AddRegion))) {
+      rptrSyncDraft();
     }
   }
 }
 
-// The two asynchronous things the glass must follow: a login answer and the CLI replies.
+// One line on the air at a time. A write's silence is an error, not a hang.
+static void rptrPumpOutbox() {
+  if (g_rptrInFlightKind != 0xFF && millis() - g_rptrInFlightMs > 3000) {
+    if (g_rptrInFlightKind == kRptrOutWrite && g_rptrApplyPending && g_rptrApplyWritesLeft > 0) {
+      --g_rptrApplyWritesLeft;
+      g_rptrApplyErr = true;
+      snprintf(g_rptrApplyErrText, sizeof(g_rptrApplyErrText), "No answer from the repeater");
+      rptrCheckApplyDone();
+    }
+    Serial.printf("[rptr] no answer to %s\n", g_rptrInFlight);
+    g_rptrDirty = true;
+    g_rptrInFlightKind = 0xFF;
+    g_rptrInFlight[0] = 0;
+  }
+  if (g_rptrInFlightKind != 0xFF) return;
+  if (g_rptrOutHead >= g_rptrOutCount) {
+    g_rptrOutHead = g_rptrOutCount = 0;
+    return;
+  }
+  const RptrOutLine& o = g_rptrOut[g_rptrOutHead++];
+  snprintf(g_rptrInFlight, sizeof(g_rptrInFlight), "%s", o.line);
+  g_rptrInFlightKind = o.kind;
+  g_rptrInFlightMs = millis();
+  if (!om::rptrCliSend(o.line, 0)) {
+    Serial.printf("[rptr] not sent (no login): %s\n", o.line);
+    g_rptrInFlightKind = 0xFF;
+    if (o.kind == kRptrOutWrite && g_rptrApplyPending && g_rptrApplyWritesLeft > 0) {
+      --g_rptrApplyWritesLeft;
+      g_rptrApplyErr = true;
+      snprintf(g_rptrApplyErrText, sizeof(g_rptrApplyErrText), "Not logged in, nothing sent");
+      rptrCheckApplyDone();
+    }
+  }
+  if (g_rptrOutHead >= g_rptrOutCount) g_rptrOutHead = g_rptrOutCount = 0;
+}
+
+// The asynchronous things the glass follows: the login answer, the CLI replies, the status and the
+// list.
 static void rptrPump() {
+  rptrPumpOutbox();
   const uint32_t serial = om::rptrReplySerial();
   if (serial != g_rptrReplySerial) {
     g_rptrReplySerial = serial;
@@ -1787,223 +2126,162 @@ static void rptrPump() {
     while (om::rptrReplyTake(&rep)) rptrTakeReply(rep);
   }
   const om::rptr::LoginMachine& login = om::rptrLogin();
-  if (g_rptrStage == om::ui::RptrStage::Login && login.loggedIn() && g_rptrLoginWait != 0) {
-    // In: the mock's admin views. The status card is read on arrival, one request.
-    g_rptrStage = om::ui::RptrStage::Admin;
-    g_rptrView = 0;
-    g_rptrAScroll = 0;
-    g_rptrOsk = false;
-    g_rptrPw[0] = 0;
-    g_rptrLoginWait = 0;
-    // EST-360: the login answer's first four bytes are the repeater's clock (MyMesh hands them to us
-    // as the tag). That is the first honest "before" for a clock sync.
-    if (login.answer.clockValid) g_rptrClockLast = login.answer.clock;
-    snprintf(g_rptrLastCmd, sizeof(g_rptrLastCmd), "login");
-    om::rptrStatusRequest();
-    redrawCurrentScreen();
-  } else if (g_rptrStage == om::ui::RptrStage::Login &&
-             (login.state == om::rptr::LoginState::Refused ||
-              login.state == om::rptr::LoginState::NoAnswer) &&
-             g_rptrLoginWait != 0) {
-    g_rptrLoginWait = 0;
-    redrawCurrentScreen();
+  if (!g_rptrList && g_rptrPage == om::rptr::Page::Repeater && !g_rptrLoggedIn) {
+    if (login.loggedIn()) {
+      g_rptrLoggedIn = true;
+      g_rptrLoginWait = 0;
+      g_rptrOsk = false;
+      g_rptrPw[0] = 0;
+      if (login.answer.clockValid) {
+        g_rptrFacts.clock = login.answer.clock;
+        g_rptrFacts.hasClock = true;
+      }
+      snprintf(g_rptrResult, sizeof(g_rptrResult), "Logged in");
+      g_rptrResultOk = true;
+      g_rptrResultPending = false;
+      om::rptrStatusRequest();
+      // The repeater page's own facts, one command at a time through the queue.
+      static const char* const kFirst[] = {"get name", "get lat", "get lon", "get radio", "get tx",
+                                           "get repeat", "clock", "region", "region home",
+                                           "region default"};
+      for (const char* line : kFirst) rptrQueue(line, kRptrOutRead);
+      rptrSyncDraft();
+      redrawCurrentScreen();
+    } else if (login.state == om::rptr::LoginState::Refused ||
+               login.state == om::rptr::LoginState::NoAnswer) {
+      if (g_rptrLoginWait != 0) {
+        g_rptrLoginWait = 0;
+        snprintf(g_rptrResult, sizeof(g_rptrResult),
+                 "No answer. The password is wrong, or the repeater is out of range.");
+        g_rptrResultOk = false;
+        g_rptrResultPending = false;
+        redrawCurrentScreen();
+      }
+    }
   }
-  // The status card changed: one redraw, only while the panel is up.
   const uint32_t st = om::rptrStatusSerial();
   if (st != g_rptrStatusSerial) {
     g_rptrStatusSerial = st;
-    g_rptrAnswerPending = false;
-    if (g_rptrStage == om::ui::RptrStage::Admin) redrawCurrentScreen();
+    if (!g_rptrList && g_rptrPage == om::rptr::Page::Repeater) redrawCurrentScreen();
   }
-  if (g_tab == 3 && !g_settings && g_rptrStage == om::ui::RptrStage::List) {
-    static uint32_t lastScanSerial = 0;
-    const uint32_t sc = om::rptrScanSerial();
-    if (sc != lastScanSerial) {
-      lastScanSerial = sc;
+  const uint32_t sc = om::rptrScanSerial();
+  if (sc != g_rptrScanSerialSeen) {
+    g_rptrScanSerialSeen = sc;
+    if (g_rptrList) {
       redrawCurrentScreen();
+    } else if (!g_rptrLoggedIn && g_rptrPage == om::rptr::Page::Repeater) {
+      const om::rptr::AnonFacts before = g_rptrAnon;
+      rptrFillAnonFromScan();
+      if (g_rptrAnon.valid != before.valid ||
+          strcmp(g_rptrAnon.regions, before.regions) != 0 ||
+          g_rptrAnon.clock != before.clock) {
+        redrawCurrentScreen();
+      }
     }
   }
+  // Every read-back and every Apply answer changes what the open page shows; one redraw per pass.
+  if (g_rptrDirty) {
+    g_rptrDirty = false;
+    if (g_tab == 3 && !g_settings && !g_rptrList) redrawCurrentScreen();
+  }
+}
+
+static void rptrBuildList(om::ui::RptrView& v) {
+  v.scanning = om::rptrScan().listening;
+  om::rptrScan().stateText(v.state, sizeof(v.state));
+  const char* remembered[8] = {};
+  int rn = om::rptrRememberedCount();
+  if (rn > 8) rn = 8;
+  for (int i = 0; i < rn; ++i) remembered[i] = om::rptrRememberedName(i);
+  om::rptr::ListRow rows[om::ui::kRptrMaxItems];
+  const int n = om::rptr::listRows(om::rptrScan(), remembered, rn, rows, om::ui::kRptrMaxItems);
+  const uint32_t nowWall = om::timeKeeper().now();
+  const uint32_t nowUp = millis() / 1000;
+  const bool nowReal = om::timeKeeper().realSinceBoot();
+  const om::rptr::FoundList& found = om::rptrScan();
+  for (int i = 0; i < n; ++i) {
+    om::ui::RptrItem& it = v.items[i];
+    snprintf(it.name, sizeof(it.name), "%s", rows[i].name);
+    it.saved = rows[i].saved;
+    it.foundIndex = rows[i].foundIndex;
+    if (rows[i].foundIndex < 255 && rows[i].foundIndex < found.count) {
+      const om::rptr::Found& f = found.rows[rows[i].foundIndex];
+      char heard[24] = "";
+      om::ui::stampText(heard, sizeof(heard), om::ui::Stamp{f.heardWall, f.heardMs / 1000, f.heardReal},
+                        nowWall, nowUp, nowReal, om::ui::StampForm::DayTime);
+      if (rows[i].signal[0] && heard[0]) {
+        snprintf(it.meta, sizeof(it.meta), "%s \xC2\xB7 %s", rows[i].signal, heard);
+      } else if (rows[i].signal[0]) {
+        snprintf(it.meta, sizeof(it.meta), "%s", rows[i].signal);
+      } else {
+        snprintf(it.meta, sizeof(it.meta), "heard %s", heard);
+      }
+    } else {
+      snprintf(it.meta, sizeof(it.meta), "remembered, not heard in the last scan");
+    }
+  }
+  v.count = n;
+  g_rptrCount = n;
+}
+
+static void rptrBuildPage(om::ui::RptrView& v) {
+  const om::rptr::Status& status = om::rptrStatus();
+  const om::rptr::LoginMachine& login = om::rptrLogin();
+  om::rptr::ScreenIn in;
+  in.page = g_rptrPage;
+  in.loggedIn = g_rptrLoggedIn;
+  in.busy = login.busy();
+  in.remembered = g_rptrRemembered;
+  in.name = g_rptrNode;
+  in.status = &status;
+  in.facts = &g_rptrFacts;
+  in.draft = &g_rptrDraft;
+  in.regions = &g_rptrRegions;
+  in.neighbours = &g_rptrNeighbours;
+  in.anon = &g_rptrAnon;
+  in.home = g_rptrHomeKnown ? g_rptrHome : nullptr;
+  in.defaultScope = g_rptrDefaultKnown ? g_rptrDefault : nullptr;
+  in.clockWrong = g_rptrLoggedIn && om::rptr::clockWrong(g_rptrFacts.hasClock, g_rptrFacts.clock,
+                                                         om::timeKeeper().now(),
+                                                         om::timeKeeper().realSinceBoot());
+  const char* logs[kRptrLogLines] = {};
+  for (int i = 0; i < g_rptrLogCount && i < kRptrLogLines; ++i) logs[i] = g_rptrLog[i];
+  in.log = logs;
+  in.logCount = g_rptrLogCount;
+  in.consoleInput = g_rptrCmd;
+  om::rptr::buildScreen(in, &v.screen);
+  snprintf(v.result, sizeof(v.result), "%s", g_rptrResult);
+  v.resultOk = g_rptrResultOk;
+  v.resultPending = g_rptrResultPending;
 }
 
 static void buildRptrView(om::ui::RptrView& v) {
   v = om::ui::RptrView();
   buildStatus(v.status);
-  v.stage = g_rptrStage;
+  v.list = g_rptrList;
+  v.page = g_rptrPage;
   v.scroll = g_rptrScroll;
-  v.view = g_rptrView;
-  v.aScroll = g_rptrAScroll;
+  v.pageScroll = g_rptrPageScroll;
+  if (g_rptrList) {
+    rptrBuildList(v);
+  } else {
+    rptrBuildPage(v);
+  }
+  v.modal = g_rptrAskOpen;
+  if (g_rptrAskOpen) {
+    snprintf(v.modalText, sizeof(v.modalText), "%s", g_rptrAsk.text);
+    snprintf(v.modalVerb, sizeof(v.modalVerb), "%s", g_rptrAsk.verb);
+    v.modalWhat = g_rptrAskWhat;
+  }
   v.osk = g_rptrOsk;
-  v.nums = g_rptrNums;
   v.shift = g_rptrShift;
+  v.nums = g_rptrNums;
   v.field = g_rptrField;
-  v.okLabel = (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) ? "Login" : "Set";
-  if (g_rptrEditRow != 255) snprintf(v.editTitle, sizeof(v.editTitle), "%s", g_rptrEditTitle);
-  // The sheet's field shows the buffer it is editing: the typed password, or the identity text.
-  {
-    const bool isPw = g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword;
-    if (isPw) {
-      snprintf(v.pwText, sizeof(v.pwText), "%s", g_rptrPw);
-      v.pwLen = (int)strlen(g_rptrPw);
-    } else {
-      snprintf(v.pwText, sizeof(v.pwText), "%s", g_rptrEdit);
-      v.pwLen = (int)strlen(g_rptrEdit);
-    }
-  }
-
-  const uint32_t nowWall = om::timeKeeper().now();
-  const uint32_t nowUp = millis() / 1000;
-  const bool nowReal = om::timeKeeper().realSinceBoot();
-  auto stamp = [&](char* out, size_t cap, uint32_t wall, uint32_t up, bool real) {
-    om::ui::stampText(out, cap, om::ui::Stamp{wall, up, real}, nowWall, nowUp, nowReal,
-                      om::ui::StampForm::DayTime);
-  };
-
-  if (v.stage == om::ui::RptrStage::List) {
-    const om::rptr::FoundList& found = om::rptrScan();
-    v.scanning = found.listening;
-    v.regionsBusy = om::rptrRegionsBusy();
-    found.stateText(v.state, sizeof(v.state));
-    for (int i = 0; i < found.count && v.count < om::ui::kRptrMaxItems; ++i) {
-      const om::rptr::Found& f = found.rows[i];
-      om::ui::RptrItem& it = v.items[v.count++];
-      if (f.name[0]) {
-        snprintf(it.name, sizeof(it.name), "%s", f.name);
-      } else {
-        snprintf(it.name, sizeof(it.name), "%02x%02x%02x", f.prefix[0], f.prefix[1], f.prefix[2]);
-      }
-      it.inContacts = f.inContacts;
-      char snr[32] = "";
-      om::rptr::snrBothText(snr, sizeof(snr), f.hasSnrIn, f.snrIn4, f.hasSnrOut, f.snrOut4);
-      char hops[16];
-      if (f.hops == 0) snprintf(hops, sizeof(hops), "direct");
-      else snprintf(hops, sizeof(hops), "%u hops", (unsigned)f.hops);
-      char heard[24] = "";
-      stamp(heard, sizeof(heard), f.heardWall, f.heardMs / 1000, f.heardReal);
-      if (f.anon.valid) {
-        // EST-360: the anonymous reply's second line: the regions it named and its own clock. A
-        // repeater that answered with no names says "none" (a real answer), never an empty line.
-        char clk[16] = "";
-        om::rptr::clockText(clk, sizeof(clk), f.anon.clock);
-        snprintf(it.meta, sizeof(it.meta), "regions %s \xC2\xB7 clock %s",
-                 f.anon.count > 0 ? f.anon.text : "none", clk);
-      } else {
-        om::ui::RptrRowFacts facts;
-        facts.path = hops;
-        facts.heard = heard;
-        facts.snr = snr;
-        om::ui::rptrRowMeta(it.meta, sizeof(it.meta), facts);
-      }
-    }
-    g_rptrCount = v.count;
-    return;
-  }
-
-  const om::rptr::LoginMachine& login = om::rptrLogin();
-  const om::rptr::Status& status = om::rptrStatus();
-  snprintf(v.name, sizeof(v.name), "%s", g_rptrNode);
-  if (v.stage == om::ui::RptrStage::Login) {
-    // The facts card: what we know before the password, all of it real.
-    char path[28] = "";
-    om::meshContactPathText(g_rptrNode, path, sizeof(path));
-    om::MeshContact c;
-    if (om::meshContactByName(g_rptrNode, &c)) {
-      appendInfoLine(v, "contact", c.name);
-      appendInfoLine(v, "kind", c.type == 2 ? "repeater" : "other");
-      appendInfoLine(v, "path", path);
-      char heard[24] = "";
-      stamp(heard, sizeof(heard), c.lastmod, c.lastmodUp, c.lastmodReal);
-      appendInfoLine(v, "heard", heard);
-    } else {
-      appendInfoLine(v, "contact", "no longer in the table");
-    }
-    snprintf(v.sub, sizeof(v.sub), "repeater%s%s", path[0] ? " \xC2\xB7 " : "", path);
-    if (login.state != om::rptr::LoginState::Idle) {
-      om::rptrLoginResultText(v.result, sizeof(v.result));
-    }
-    v.loggingIn = login.busy();
-    v.resultOk = login.loggedIn();
-    // Forget is offered when this repeater is remembered (its password is never read here).
-    v.canForget = false;
-    for (int i = 0; i < om::rptrRememberedCount(); ++i) {
-      if (strcmp(om::rptrRememberedName(i), g_rptrNode) == 0) v.canForget = true;
-    }
-    snprintf(v.note, sizeof(v.note),
-             "The password is checked by the repeater. A wrong one gets no answer.");
-    return;
-  }
-
-  // Admin.
-  snprintf(v.sub, sizeof(v.sub), "MC remote admin \xC2\xB7 CLI \xC2\xB7 %s",
-           om::rptr::loginStateText(login.state));
-  snprintf(v.backLabel, sizeof(v.backLabel), "%s", g_rptrView == 6 ? "< regions" : "< list");
-  const char* home = g_rptrHomeKnown ? g_rptrHome : nullptr;
-  const char* def = g_rptrDefaultKnown ? g_rptrDefaultScope : nullptr;
-  const int n = om::rptr::adminRows(g_rptrView, g_rptrValues, status, login.answer.fwLevel,
-                                    g_rptrNode, g_rptrRegions, g_rptrNeighbours, home, def,
-                                    g_rptrRegionSel,
-                                    g_rptrSendArmed ? g_rptrSendLine : nullptr, v.rows,
-                                    om::ui::kRptrAdminRows);
-  v.rowCount = n;
-  // The neighbour rows' heard time comes from the reply's seconds and OUR clock (a clock time, not
-  // an age, unless the clock was not real when the reply arrived).
-  if (g_rptrView == 4 && g_rptrNeighbours.valid) {
-    for (int i = 0; i < v.rowCount; ++i) {
-      if (v.rows[i].id != om::rptr::RowId::NeighRow) continue;
-      const om::rptr::Neighbour& nb = g_rptrNeighbours.rows[v.rows[i].index];
-      char snr[12];
-      om::rptr::snrText(snr, sizeof(snr), nb.snr4);
-      char heard[24] = "";
-      const uint32_t ago = (uint32_t)(nb.secsAgo < 0 ? 0 : nb.secsAgo);
-      stamp(heard, sizeof(heard), nowWall > ago ? nowWall - ago : 0,
-            nowUp > ago ? nowUp - ago : 0, nowReal);
-      snprintf(v.rows[i].value, sizeof(v.rows[i].value), "SNR %s \xC2\xB7 %s", snr, heard);
-    }
-  }
-  // EST-360: the clock rows. "Sync clock" shows the exact line it will send; the guard's refusal is
-  // the value when our clock is not real. The before/after rows carry the repeater's own clock and
-  // the difference to ours at the read.
-  if (g_rptrView == 5) {
-    const uint32_t our = om::timeKeeper().now();
-    const bool real = om::timeKeeper().realSinceBoot();
-    const uint32_t rptrClock = g_rptrClockLast;
-    for (int i = 0; i < v.rowCount; ++i) {
-      char line[64] = "";
-      if (v.rows[i].id == om::rptr::RowId::ClockSync) {
-        const om::rptr::TimeVerdict verdict =
-            om::rptr::timeSyncCheck(our, real, rptrClock >= om::rptr::kClockRealSince, rptrClock);
-        if (verdict != om::rptr::TimeVerdict::Ok) {
-          snprintf(v.rows[i].value, sizeof(v.rows[i].value), "%s",
-                   om::rptr::timeVerdictText(verdict));
-        } else if (om::rptr::cliTime(line, sizeof(line), our) > 0) {
-          snprintf(v.rows[i].value, sizeof(v.rows[i].value), "%s", line);
-        }
-      } else if (v.rows[i].id == om::rptr::RowId::ClockBefore) {
-        if (g_rptrClockBefore >= om::rptr::kClockRealSince) {
-          char t[16];
-          om::rptr::clockText(t, sizeof(t), g_rptrClockBefore);
-          char ago[24];
-          om::rptr::clockAgoText(ago, sizeof(ago), (int32_t)(our - g_rptrClockBefore));
-          snprintf(v.rows[i].value, sizeof(v.rows[i].value), "%s (%s)", t, ago);
-        } else {
-          snprintf(v.rows[i].value, sizeof(v.rows[i].value), "not read yet");
-        }
-      } else if (v.rows[i].id == om::rptr::RowId::ClockAfter) {
-        if (g_rptrClockAfter >= om::rptr::kClockRealSince) {
-          char t[16];
-          om::rptr::clockText(t, sizeof(t), g_rptrClockAfter);
-          char ago[24];
-          om::rptr::clockAgoText(ago, sizeof(ago), (int32_t)(our - g_rptrClockAfter));
-          snprintf(v.rows[i].value, sizeof(v.rows[i].value), "%s (%s)", t, ago);
-        } else {
-          snprintf(v.rows[i].value, sizeof(v.rows[i].value), "not synced yet");
-        }
-      }
-    }
-  }
-  snprintf(v.lastCmd, sizeof(v.lastCmd), "%s", g_rptrLastCmd);
-  snprintf(v.lastAnswer, sizeof(v.lastAnswer), "%s", g_rptrLastAnswer);
-  v.answerPending = g_rptrAnswerPending;
-  v.answerBad = g_rptrAnswerBad;
+  v.secret = g_rptrSecret;
+  v.okLabel = g_rptrEditWhat == 1 ? "Log in" : "Send";
+  snprintf(v.editTitle, sizeof(v.editTitle), "%s", g_rptrEditTitle);
+  snprintf(v.text, sizeof(v.text), "%s", g_rptrText);
+  v.textLen = g_rptrTextLen;
 }
 
 static void drawRptrTab() {
@@ -2011,388 +2289,98 @@ static void drawRptrTab() {
   om::ui::rptrScreenDraw(g_rptrViewStore);
 }
 
-// The identity editor's text goes through the same byte filter as the Settings editors.
-static bool rptrEditAppend(char ch) {
-  const om::ui::KeyboardField field = (om::ui::KeyboardField)g_rptrField;
-  if (!om::ui::keyboardAllowsChar(field, ch)) return false;
-  const int used = (int)strlen(g_rptrEdit);
-  if (!om::ui::keyboardAcceptsBytes(field, used, 1)) return false;
-  if ((size_t)used + 1 >= sizeof(g_rptrEdit)) return false;
-  g_rptrEdit[used] = ch;
-  g_rptrEdit[used + 1] = 0;
-  return true;
+// ------------------------------------------------------------------------------------------ the sheet
+static void rptrOpenSheet(uint8_t what, om::ui::KeyboardField field, const char* title,
+                          const char* initial, bool secret) {
+  g_rptrEditWhat = what;
+  g_rptrField = (uint8_t)field;
+  g_rptrSecret = secret;
+  snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "%s", title);
+  snprintf(g_rptrText, sizeof(g_rptrText), "%s", initial != nullptr ? initial : "");
+  g_rptrTextLen = (int)strlen(g_rptrText);
+  g_rptrOsk = true;
+  g_rptrNums = field == om::ui::KeyboardField::RptrPosition;
+  g_rptrShift = false;
 }
 
-// "46.25000, 14.40000" -> micro-degrees. False for anything a coordinate cannot be.
-static bool rptrParsePosition(const char* text, int32_t* latE6, int32_t* lonE6) {
-  if (text == nullptr) return false;
-  const char* comma = strchr(text, ',');
-  if (comma == nullptr) return false;
-  char a[16] = "";
-  char b[16] = "";
-  const char* q = text;
-  while (*q == ' ') ++q;
-  int na = (int)(comma - q);
-  if (na <= 0 || na >= (int)sizeof(a)) return false;
-  memcpy(a, q, (size_t)na);
-  a[na] = 0;
-  q = comma + 1;
-  while (*q == ' ') ++q;
-  snprintf(b, sizeof(b), "%s", q);
+static bool rptrParseCoord(const char* text, bool lat, int32_t* e6) {
+  if (text == nullptr || e6 == nullptr || text[0] == 0) return false;
   char* end = nullptr;
-  const double la = strtod(a, &end);
-  if (end == a || *end != 0) return false;
-  const double lo = strtod(b, &end);
-  if (end == b || *end != 0) return false;
-  if (la < -90.0 || la > 90.0 || lo < -180.0 || lo > 180.0) return false;
-  *latE6 = (int32_t)lround(la * 1000000.0);
-  *lonE6 = (int32_t)lround(lo * 1000000.0);
+  const double v = strtod(text, &end);
+  if (end == text || end == nullptr || *end != 0) return false;
+  if (lat && (v < -90.0 || v > 90.0)) return false;
+  if (!lat && (v < -180.0 || v > 180.0)) return false;
+  *e6 = (int32_t)lround(v * 1000000.0);
   return true;
 }
 
-// The sheet's Send key for the identity editors: build the CLI lines and send them.
-static void rptrCommitEdit() {
-  if (g_rptrEditRow == 255) return;
-  char line[80] = "";
-  switch ((om::rptr::RowId)g_rptrEditRow) {
-    case om::rptr::RowId::EditName:
-      if (g_rptrEdit[0] == 0) {
+static void rptrSheetCommit() {
+  switch (g_rptrEditWhat) {
+    case 1: {   // the repeater password
+      if (g_rptrText[0] == 0) {
+        showToast("password required");
+        return;
+      }
+      snprintf(g_rptrPw, sizeof(g_rptrPw), "%s", g_rptrText);
+      g_rptrOsk = false;
+      rptrLoginNow();
+      return;
+    }
+    case 2:   // name
+      if (g_rptrText[0] == 0) {
         showToast("name cannot be empty");
         return;
       }
-      if (strlen(g_rptrEdit) > (size_t)om::rptr::kNameMax) {
-        showToast("name is over 31 bytes");
-        return;
-      }
-      om::rptr::cliName(line, sizeof(line), g_rptrEdit);
+      snprintf(g_rptrDraft.name, sizeof(g_rptrDraft.name), "%s", g_rptrText);
       break;
-    case om::rptr::RowId::EditOwner:
-      if (g_rptrEdit[0] == 0) {
-        showToast("owner cannot be empty");
+    case 3:   // latitude
+      if (!rptrParseCoord(g_rptrText, true, &g_rptrDraft.latE6)) {
+        showToast("enter a latitude, e.g. 46.25000");
         return;
       }
-      om::rptr::cliOwner(line, sizeof(line), g_rptrEdit);
       break;
-    case om::rptr::RowId::EditPos: {
-      int32_t lat = 0, lon = 0;
-      if (!rptrParsePosition(g_rptrEdit, &lat, &lon)) {
-        showToast("enter lat, lon");
+    case 4:   // longitude
+      if (!rptrParseCoord(g_rptrText, false, &g_rptrDraft.lonE6)) {
+        showToast("enter a longitude, e.g. 14.40000");
         return;
       }
-      char lonLine[40] = "";
-      om::rptr::cliLat(line, sizeof(line), lat);
-      om::rptr::cliLon(lonLine, sizeof(lonLine), lon);
-      rptrSendLine(line, 0);
-      rptrSendLine(lonLine, 0);
-      g_rptrEditRow = 255;
-      g_rptrOsk = false;
-      showToast("set lat and lon sent");
-      drawRptrTab();
-      return;
-    }
-    case om::rptr::RowId::RegionAdd:
-    case om::rptr::RowId::RegionAddChild: {
-      // EST-360: the typed name is already filtered by the shared keyboard's RptrRegion field; this
-      // is the model's second check, then the exact `region put <name> [<parent>]` is armed, not sent.
+      break;
+    case 5: {   // a new region's name
       char name[om::rptr::kRegionNameMax + 1] = "";
-      om::rptr::regionNameFilter(g_rptrEdit, name, sizeof(name));
+      om::rptr::regionNameFilter(g_rptrText, name, sizeof(name));
       if (!om::rptr::regionNameValid(name)) {
         showToast("a region name is needed");
         return;
       }
-      const char* parent = nullptr;
-      if ((om::rptr::RowId)g_rptrEditRow == om::rptr::RowId::RegionAddChild &&
-          g_rptrRegionSel >= 0 && g_rptrRegionSel < g_rptrRegions.count) {
-        parent = g_rptrRegions.rows[g_rptrRegionSel].name;
-      }
-      if (om::rptr::cliRegionPut(line, sizeof(line), name, parent) == 0) {
-        showToast("that name is not legal");
-        return;
-      }
-      g_rptrEditRow = 255;
-      g_rptrOsk = false;
-      rptrSendArm(line, om::rptr::kCliRegionList, om::rptr::kCliRegionHomeRead);
-      return;
+      snprintf(g_rptrDraft.addName, sizeof(g_rptrDraft.addName), "%s", name);
+      g_rptrDraft.hasAdd = true;
+      break;
     }
+    case 6:   // the console's free command
+      snprintf(g_rptrCmd, sizeof(g_rptrCmd), "%s", g_rptrText);
+      break;
     default:
-      g_rptrEditRow = 255;
-      g_rptrOsk = false;
-      return;
+      break;
   }
-  rptrSendLine(line, 0);
-  g_rptrEditRow = 255;
   g_rptrOsk = false;
-  showToast(line);
   drawRptrTab();
 }
 
-static void rptrOpenEdit(om::rptr::RowId id) {
-  g_rptrEditRow = (uint8_t)id;
-  g_rptrField = (uint8_t)(id == om::rptr::RowId::EditPos
-                              ? om::ui::KeyboardField::RptrPosition
-                              : ((id == om::rptr::RowId::RegionAdd ||
-                                  id == om::rptr::RowId::RegionAddChild)
-                                     ? om::ui::KeyboardField::RptrRegion
-                                     : om::ui::KeyboardField::NodeName));
-  g_rptrNums = (id == om::rptr::RowId::EditPos);
-  g_rptrShift = false;
-  g_rptrOsk = true;
-  g_rptrEdit[0] = 0;
-  if (id == om::rptr::RowId::EditName) {
-    snprintf(g_rptrEdit, sizeof(g_rptrEdit), "%s", g_rptrNode);
-    snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "name");
-  } else if (id == om::rptr::RowId::EditOwner) {
-    snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "owner");
-  } else if (id == om::rptr::RowId::RegionAdd || id == om::rptr::RowId::RegionAddChild) {
-    snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "region name");
-  } else {
-    snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "lat, lon");
+static void rptrAppendText(char ch) {
+  const om::ui::KeyboardField field = (om::ui::KeyboardField)g_rptrField;
+  if (!om::ui::keyboardAllowsChar(field, ch)) return;
+  if (!om::ui::keyboardAcceptsBytes(field, g_rptrTextLen, 1)) return;
+  if ((size_t)g_rptrTextLen + 1 >= sizeof(g_rptrText)) return;
+  g_rptrText[g_rptrTextLen++] = ch;
+  g_rptrText[g_rptrTextLen] = 0;
+  if (field == om::ui::KeyboardField::RptrPassword) {
+    char filtered[om::rptr::kPasswordMax + 1] = "";
+    om::rptr::passwordFilter(g_rptrText, filtered, sizeof(filtered));
+    snprintf(g_rptrText, sizeof(g_rptrText), "%s", filtered);
+    g_rptrTextLen = (int)strlen(g_rptrText);
   }
 }
 
-// One admin row, pressed. `part` 0 = the row, 1 = key A, 2 = key B.
-static void rptrAdminPressed(const om::rptr::AdminRow& row, int part) {
-  char line[64] = "";
-  switch (row.id) {
-    case om::rptr::RowId::RadioFreq:
-      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Freq, part == 2 ? 1 : -1);
-      break;
-    case om::rptr::RowId::RadioBw:
-      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Bw, part == 2 ? 1 : -1);
-      break;
-    case om::rptr::RowId::RadioSf:
-      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Sf, part == 2 ? 1 : -1);
-      break;
-    case om::rptr::RowId::RadioCr:
-      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Cr, part == 2 ? 1 : -1);
-      break;
-    case om::rptr::RowId::RadioTx:
-      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Tx, part == 2 ? 1 : -1);
-      break;
-    case om::rptr::RowId::RadioApply: {
-      // The mock's two lines, exactly; the repeater's own reply says "reboot to apply".
-      char tx[24] = "";
-      om::rptr::cliRadio(line, sizeof(line), g_rptrValues.radio);
-      om::rptr::cliTx(tx, sizeof(tx), g_rptrValues.radio);
-      rptrSendLine(line, 0);
-      rptrSendLine(tx, 0);
-      showToast("radio sent, reboot the repeater to apply");
-      break;
-    }
-    case om::rptr::RowId::StatusRefresh:
-      // The status card's refresh: upstream's REQ_TYPE_GET_STATUS again.
-      if (!om::rptrStatusRequest()) showToast("Status not requested");
-      break;
-    case om::rptr::RowId::RegionRead:
-      // EST-360: read all three answers the repeater can give: the tree, the home and the default
-      // scope (`region home` / `region default` with no argument are answered by CommonCLI).
-      rptrSendLine(om::rptr::kCliRegionList, 0);
-      rptrSendLine(om::rptr::kCliRegionHomeRead, 0);
-      rptrSendLine(om::rptr::kCliRegionDefaultRead, 0);
-      break;
-    case om::rptr::RowId::RegionAdd:
-    case om::rptr::RowId::RegionAddChild:
-      rptrOpenEdit(row.id);
-      break;
-    case om::rptr::RowId::RegionSave:
-      // Separate from every change, and it says what it does: on the repeater only `region save`
-      // writes the map to flash. Arming it shows the exact line one more time.
-      rptrSendArm(om::rptr::kCliRegionSave, nullptr, nullptr);
-      break;
-    case om::rptr::RowId::RegionSetHomeNone:
-      om::rptr::cliRegionHomeNone(line, sizeof(line));
-      rptrSendArm(line, om::rptr::kCliRegionHomeRead, om::rptr::kCliRegionList);
-      break;
-    case om::rptr::RowId::RegionDefaultNone:
-      om::rptr::cliRegionDefaultNone(line, sizeof(line));
-      rptrSendArm(line, om::rptr::kCliRegionDefaultRead, nullptr);
-      break;
-    case om::rptr::RowId::RegionRow:
-      // One region's page: the five words with their exact CLI lines.
-      if (row.index < (uint8_t)g_rptrRegions.count) {
-        g_rptrRegionSel = row.index;
-        g_rptrView = 6;
-        g_rptrAScroll = 0;
-        rptrSendClear();
-        break;
-      }
-      return;
-    case om::rptr::RowId::RegionAllow:
-    case om::rptr::RowId::RegionDeny:
-    case om::rptr::RowId::RegionHome:
-    case om::rptr::RowId::RegionDefault:
-    case om::rptr::RowId::RegionRemove: {
-      if (g_rptrRegionSel < 0 || g_rptrRegionSel >= g_rptrRegions.count) return;
-      const om::rptr::Region& rg = g_rptrRegions.rows[g_rptrRegionSel];
-      const char* name = rg.name[0] ? rg.name : "*";
-      const bool wildcard = rg.wildcard || strcmp(name, "*") == 0;
-      if (row.id == om::rptr::RowId::RegionAllow) {
-        om::rptr::cliRegionFlood(line, sizeof(line), name, true);
-        rptrSendArm(line, om::rptr::kCliRegionList, nullptr);
-      } else if (row.id == om::rptr::RowId::RegionDeny) {
-        om::rptr::cliRegionFlood(line, sizeof(line), name, false);
-        rptrSendArm(line, om::rptr::kCliRegionList, nullptr);
-      } else if (row.id == om::rptr::RowId::RegionHome) {
-        if (wildcard) om::rptr::cliRegionHomeNone(line, sizeof(line));
-        else om::rptr::cliRegionHome(line, sizeof(line), name);
-        // The ticket's rule: read the home back with `region home` after every home change, and
-        // refresh the tree so the "^" marker moves with the answer.
-        rptrSendArm(line, om::rptr::kCliRegionHomeRead, om::rptr::kCliRegionList);
-      } else if (row.id == om::rptr::RowId::RegionDefault) {
-        om::rptr::cliRegionDefault(line, sizeof(line), name);
-        rptrSendArm(line, om::rptr::kCliRegionDefaultRead, nullptr);
-      } else {
-        om::rptr::cliRegionRemove(line, sizeof(line), name);
-        // A removed region may have been the home; read both back.
-        rptrSendArm(line, om::rptr::kCliRegionList, om::rptr::kCliRegionHomeRead);
-      }
-      break;
-    }
-    case om::rptr::RowId::PendingSend:
-      rptrSendNow();
-      break;
-    case om::rptr::RowId::PendingCancel:
-      rptrSendClear();
-      showToast("cancelled, nothing sent");
-      break;
-    case om::rptr::RowId::PathHash: {
-      int v = (int)g_rptrValues.pathHash + (part == 2 ? 1 : -1);
-      if (v < 0) v = 0;
-      if (v > 2) v = 2;
-      g_rptrValues.pathHash = (uint8_t)v;
-      om::rptr::cliPathHash(line, sizeof(line), g_rptrValues.pathHash);
-      rptrSendLine(line, 0);
-      break;
-    }
-    case om::rptr::RowId::LoopDetect: {
-      int v = (int)g_rptrValues.loop + (part == 2 ? 1 : -1);
-      if (v < 0) v = 0;
-      if (v > 3) v = 3;
-      g_rptrValues.loop = (om::rptr::LoopDetect)v;
-      om::rptr::cliLoopDetect(line, sizeof(line), g_rptrValues.loop);
-      rptrSendLine(line, 0);
-      break;
-    }
-    case om::rptr::RowId::AdvertLocal:
-      om::rptr::advertLocalStep(&g_rptrValues, part == 2 ? 1 : -1);
-      om::rptr::cliAdvertLocal(line, sizeof(line), g_rptrValues.advertLocal);
-      rptrSendLine(line, 0);
-      break;
-    case om::rptr::RowId::AdvertFlood:
-      om::rptr::advertFloodStep(&g_rptrValues, part == 2 ? 1 : -1);
-      om::rptr::cliAdvertFlood(line, sizeof(line), g_rptrValues.advertFlood);
-      rptrSendLine(line, 0);
-      break;
-    case om::rptr::RowId::FloodMax:
-      om::rptr::floodMaxStep(&g_rptrValues, part == 2 ? 1 : -1);
-      om::rptr::cliFloodMax(line, sizeof(line), g_rptrValues.floodMax);
-      rptrSendLine(line, 0);
-      break;
-    case om::rptr::RowId::Repeat:
-      g_rptrValues.repeat = !g_rptrValues.repeat;
-      om::rptr::cliRepeat(line, sizeof(line), g_rptrValues.repeat);
-      rptrSendLine(line, 0);
-      break;
-    case om::rptr::RowId::PowerSave:
-      g_rptrValues.powerSave = !g_rptrValues.powerSave;
-      om::rptr::cliPowerSaving(line, sizeof(line), g_rptrValues.powerSave);
-      rptrSendLine(line, 0);
-      break;
-    case om::rptr::RowId::SharePos:
-      g_rptrValues.sharePosition = !g_rptrValues.sharePosition;
-      om::rptr::cliGpsAdvert(line, sizeof(line), g_rptrValues.sharePosition);
-      rptrSendLine(line, 0);
-      break;
-    case om::rptr::RowId::EditName:
-    case om::rptr::RowId::EditOwner:
-    case om::rptr::RowId::EditPos:
-      rptrOpenEdit(row.id);
-      break;
-    case om::rptr::RowId::UseGpsPos: {
-      if (!g_gps.valid) {
-        showToast("no GPS fix");
-        break;
-      }
-      char lon[40] = "";
-      om::rptr::cliLat(line, sizeof(line), (int32_t)lround(g_gps.lat * 1000000.0));
-      om::rptr::cliLon(lon, sizeof(lon), (int32_t)lround(g_gps.lon * 1000000.0));
-      rptrSendLine(line, 0);
-      rptrSendLine(lon, 0);
-      showToast("position sent");
-      break;
-    }
-    case om::rptr::RowId::NeighDiscover:
-      rptrSendLine(om::rptr::kCliNeighboursDiscover, 0);
-      showToast("discover.neighbors sent, replies take a few seconds");
-      break;
-    case om::rptr::RowId::NeighRead:
-      rptrSendLine(om::rptr::kCliNeighboursRead, 0);
-      break;
-    case om::rptr::RowId::AdvertLocalOnce:
-      rptrSendLine(om::rptr::kCliAdvertLocal, 0);
-      break;
-    case om::rptr::RowId::AdvertFloodOnce:
-      rptrSendLine(om::rptr::kCliAdvertFlood, 0);
-      break;
-    case om::rptr::RowId::ClockSync: {
-      // EST-360: `time <epoch>` from OUR clock, never `clock sync` (OverMesh's finding: clock sync
-      // cannot move a repeater whose clock is 0, and `time` can; both refuse to go backwards). The
-      // guard refuses an unset clock and anything more than a day ahead, because a repeater's clock
-      // can only be moved forward and only `clkreboot` undoes a wrong jump.
-      const uint32_t our = om::timeKeeper().now();
-      const bool real = om::timeKeeper().realSinceBoot();
-      const om::rptr::TimeVerdict verdict = om::rptr::timeSyncCheck(
-          our, real, g_rptrClockLast >= om::rptr::kClockRealSince, g_rptrClockLast);
-      if (verdict != om::rptr::TimeVerdict::Ok) {
-        showToast(om::rptr::timeVerdictText(verdict));
-        break;
-      }
-      if (om::rptr::cliTime(line, sizeof(line), our) == 0) {
-        showToast("the time line could not be built");
-        break;
-      }
-      // The follow-up `clock` read is the proof: it answers the repeater's new time in UTC.
-      rptrSendArm(line, om::rptr::kCliClockRead, nullptr);
-      break;
-    }
-    case om::rptr::RowId::Silent:
-      // Two steps: four lines do not go out on one stray tap.
-      if (!g_rptrConfirm.take("silent", millis())) {
-        g_rptrConfirm.arm("silent", millis());
-        showToast("Silent mode: tap again to send");
-        break;
-      }
-      for (int i = 0; i < om::rptr::kSilentCount; ++i) rptrSendLine(om::rptr::kSilent[i], 0);
-      g_rptrValues.repeat = false;
-      g_rptrValues.advertLocal = om::rptr::kSilentAdvertLocal;
-      g_rptrValues.advertFlood = om::rptr::kSilentAdvertFlood;
-      g_rptrValues.sharePosition = false;
-      showToast("silent: repeat, adverts and position off");
-      break;
-    case om::rptr::RowId::Resume:
-      for (int i = 0; i < om::rptr::kSilentCount; ++i) rptrSendLine(om::rptr::kResume[i], 0);
-      g_rptrValues.repeat = true;
-      g_rptrValues.advertLocal = om::rptr::kResumeAdvertLocal;
-      g_rptrValues.advertFlood = om::rptr::kResumeAdvertFlood;
-      g_rptrValues.sharePosition = true;
-      showToast("resume: repeat, adverts and position on");
-      break;
-    case om::rptr::RowId::Reboot:
-      if (!g_rptrConfirm.take("reboot", millis())) {
-        g_rptrConfirm.arm("reboot", millis());
-        showToast("Reboot: tap again to send");
-        break;
-      }
-      rptrSendLine(om::rptr::kCliReboot, 0);
-      showToast("reboot sent");
-      break;
-    default:
-      return;
-  }
-  drawRptrTab();
-}
-
-// The sheet's keys, one press, one action (the Settings editor's pattern).
 static bool rptrKeyPressed(const om::ui::RptrKeyHit& key) {
   switch (key.kind) {
     case om::ui::KeyKind::Shift:
@@ -2403,30 +2391,23 @@ static bool rptrKeyPressed(const om::ui::RptrKeyHit& key) {
       g_rptrShift = false;
       break;
     case om::ui::KeyKind::Del:
-      if (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) {
-        const size_t n = strlen(g_rptrPw);
-        if (n > 0) g_rptrPw[n - 1] = 0;
+      if (g_rptrSecret) {
+        if (g_rptrTextLen > 0) {
+          --g_rptrTextLen;
+          g_rptrText[g_rptrTextLen] = 0;
+        }
       } else {
-        om::ui::composeBackspace(g_rptrEdit);
+        om::ui::composeBackspace(g_rptrText);
+        g_rptrTextLen = (int)strlen(g_rptrText);
       }
       break;
     case om::ui::KeyKind::Send:
-      if (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) {
-        rptrLoginNow();
-        return true;
-      }
-      rptrCommitEdit();
+      rptrSheetCommit();
       return true;
     case om::ui::KeyKind::Space:
     case om::ui::KeyKind::Char: {
       const char ch = (key.kind == om::ui::KeyKind::Space) ? ' ' : key.ch;
-      if (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) {
-        char tmp[om::rptr::kPasswordMax + 2];
-        snprintf(tmp, sizeof(tmp), "%s%c", g_rptrPw, ch);
-        om::rptr::passwordFilter(tmp, g_rptrPw, sizeof(g_rptrPw));
-      } else {
-        rptrEditAppend(ch);
-      }
+      rptrAppendText(ch);
       break;
     }
     case om::ui::KeyKind::Reveal:
@@ -2438,26 +2419,197 @@ static bool rptrKeyPressed(const om::ui::RptrKeyHit& key) {
   return true;
 }
 
+// -------------------------------------------------------------------------------------- the page taps
+static void rptrToggleRegion(int i) {
+  if (i < 0 || i >= g_rptrRegions.count || i >= om::rptr::kMaxRegions) return;
+  g_rptrDraft.flood[i] = !g_rptrDraft.flood[i];
+  g_rptrDraft.floodChanged[i] = g_rptrDraft.flood[i] != g_rptrRegions.rows[i].allow;
+}
+
+static void rptrPickerChoose(const om::rptr::UiRow& row) {
+  if (g_rptrPage == om::rptr::Page::HomePicker) {
+    if (row.index == 0) snprintf(g_rptrDraft.home, sizeof(g_rptrDraft.home), "*");
+    else if (row.index >= 2 && (row.index - 2) < g_rptrRegions.count) {
+      snprintf(g_rptrDraft.home, sizeof(g_rptrDraft.home), "%s",
+               g_rptrRegions.rows[row.index - 2].name);
+    } else {
+      return;
+    }
+    const char* was = g_rptrHomeKnown ? g_rptrHome : "*";
+    g_rptrDraft.homeChanged = strcmp(g_rptrDraft.home, was) != 0;
+  } else if (g_rptrPage == om::rptr::Page::DefaultPicker) {
+    if (row.index == 0) {
+      g_rptrDraft.defaultNone = true;
+      g_rptrDraft.defaultScope[0] = 0;
+    } else if (row.index == 1) {
+      g_rptrDraft.defaultNone = false;
+      snprintf(g_rptrDraft.defaultScope, sizeof(g_rptrDraft.defaultScope), "*");
+    } else if ((row.index - 2) < g_rptrRegions.count) {
+      g_rptrDraft.defaultNone = false;
+      snprintf(g_rptrDraft.defaultScope, sizeof(g_rptrDraft.defaultScope), "%s",
+               g_rptrRegions.rows[row.index - 2].name);
+    } else {
+      return;
+    }
+    const char* was = g_rptrDefaultKnown ? g_rptrDefault : "";
+    g_rptrDraft.defaultChanged =
+        g_rptrDraft.defaultNone ? (was[0] != 0) : (strcmp(g_rptrDraft.defaultScope, was) != 0);
+  }
+}
+
+static void rptrCoordText(char* out, size_t cap, int32_t e6) {
+  const bool neg = e6 < 0;
+  const int64_t a = neg ? -(int64_t)e6 : (int64_t)e6;
+  snprintf(out, cap, "%s%lld.%05u", neg ? "-" : "", (long long)(a / 1000000),
+           (unsigned)(a % 1000000));
+}
+
+static void rptrPageRowTapped(const om::rptr::UiRow& row, bool key, int dir) {
+  switch (row.act) {
+    case om::rptr::Act::None:
+    case om::rptr::Act::Forget:
+    case om::rptr::Act::Refresh:
+    case om::rptr::Act::SetClock:
+      break;
+    case om::rptr::Act::ConsoleSend:
+      rptrSendConsole();
+      break;
+    case om::rptr::Act::Open:
+      rptrGoPage((om::rptr::Page)row.index);
+      break;
+    case om::rptr::Act::Restart:
+      rptrOpenAsk(om::rptr::confirmRestart(), 2);
+      break;
+    case om::rptr::Act::Apply: {
+      const om::rptr::ConfirmAsk ask = om::rptr::confirmForApply(g_rptrPage, g_rptrDraft);
+      if (ask.need) {
+        rptrOpenAsk(ask, 1);
+        break;
+      }
+      rptrApplyNow();
+      break;
+    }
+    case om::rptr::Act::Toggle:
+      if (g_rptrPage == om::rptr::Page::Repeat) {
+        g_rptrDraft.v.repeat = !g_rptrDraft.v.repeat;
+      } else if (g_rptrPage == om::rptr::Page::More) {
+        if (row.index == 10) {
+          int v = (int)g_rptrDraft.v.loop + 1;
+          if (v > 3) v = 0;
+          g_rptrDraft.v.loop = (om::rptr::LoopDetect)v;
+        } else if (row.index == 11) {
+          g_rptrDraft.v.pathHash = (uint8_t)((g_rptrDraft.v.pathHash + 1) % 3);
+        }
+      } else if (g_rptrPage == om::rptr::Page::AddRegion) {
+        // Cycle the optional parent: the wildcard (none) and every named region.
+        int v = (int)g_rptrDraft.parentSel + 1;
+        int max = g_rptrRegions.count;
+        if (v > max - 1) v = -1;
+        g_rptrDraft.parentSel = (int8_t)v;
+        if (g_rptrDraft.parentSel >= 0) {
+          snprintf(g_rptrDraft.addParent, sizeof(g_rptrDraft.addParent), "%s",
+                   g_rptrRegions.rows[g_rptrDraft.parentSel].name);
+        } else {
+          g_rptrDraft.addParent[0] = 0;
+        }
+      } else if (g_rptrPage == om::rptr::Page::HomePicker ||
+                 g_rptrPage == om::rptr::Page::DefaultPicker) {
+        rptrPickerChoose(row);
+      }
+      break;
+    case om::rptr::Act::Step:
+      if (g_rptrPage == om::rptr::Page::Radio) {
+        om::rptr::radioStep(&g_rptrDraft.v.radio, (om::rptr::RadioKey)row.index, dir);
+      } else if (g_rptrPage == om::rptr::Page::Tx) {
+        om::rptr::radioStep(&g_rptrDraft.v.radio, om::rptr::RadioKey::Tx, dir);
+      } else if (g_rptrPage == om::rptr::Page::Advertising) {
+        if (row.index == 0) om::rptr::advertLocalStep(&g_rptrDraft.v, dir);
+        else om::rptr::advertFloodStep(&g_rptrDraft.v, dir);
+      } else if (g_rptrPage == om::rptr::Page::More) {
+        om::rptr::floodMaxStep(&g_rptrDraft.v, dir);
+      }
+      break;
+    case om::rptr::Act::Edit:
+      if (g_rptrPage == om::rptr::Page::Name) {
+        rptrOpenSheet(2, om::ui::KeyboardField::NodeName, "name", g_rptrDraft.name, false);
+      } else if (g_rptrPage == om::rptr::Page::Position) {
+        char v[24];
+        if (row.index == 0) {
+          rptrCoordText(v, sizeof(v), g_rptrDraft.latE6);
+          rptrOpenSheet(3, om::ui::KeyboardField::RptrPosition, "latitude", v, false);
+        } else {
+          rptrCoordText(v, sizeof(v), g_rptrDraft.lonE6);
+          rptrOpenSheet(4, om::ui::KeyboardField::RptrPosition, "longitude", v, false);
+        }
+      } else if (g_rptrPage == om::rptr::Page::AddRegion) {
+        rptrOpenSheet(5, om::ui::KeyboardField::RptrRegion, "region name", g_rptrDraft.addName,
+                      false);
+      } else if (g_rptrPage == om::rptr::Page::Console) {
+        rptrOpenSheet(6, om::ui::KeyboardField::WifiPassword, "command", g_rptrCmd, false);
+      }
+      break;
+    case om::rptr::Act::Pick:
+      rptrGoPage(row.index == 0 ? om::rptr::Page::HomePicker : om::rptr::Page::DefaultPicker);
+      break;
+    case om::rptr::Act::AddRegion:
+      rptrGoPage(om::rptr::Page::AddRegion);
+      break;
+    case om::rptr::Act::RegionToggle:
+      if (key) {
+        rptrRemoveRegion(row.label);
+      } else {
+        rptrToggleRegion(row.index);
+      }
+      break;
+    case om::rptr::Act::RemoveRegion:
+      rptrRemoveRegion(row.label);
+      break;
+    case om::rptr::Act::Discover:
+      rptrLog(">", om::rptr::kCliNeighboursDiscover);
+      rptrQueue(om::rptr::kCliNeighboursDiscover, kRptrOutCmd);
+      snprintf(g_rptrResult, sizeof(g_rptrResult), "Asking, replies take a few seconds");
+      g_rptrResultOk = true;
+      break;
+    case om::rptr::Act::ConsoleEdit:
+      rptrOpenSheet(6, om::ui::KeyboardField::WifiPassword, "command", g_rptrCmd, false);
+      break;
+    case om::rptr::Act::LogIn:
+    default:
+      break;
+  }
+}
+
 // One tap on the RPTR tab. True when it was consumed.
 static bool handleRptrTap(int x, int y) {
   const om::ui::Layout& L = om::ui::l2();
+  buildRptrView(g_rptrViewStore);
+
+  if (g_rptrAskOpen) {
+    const om::ui::RptrModalLayout m = om::ui::rptrModalLayoutFor(L, g_rptrAsk.verb);
+    const om::ui::RptrModalHit hit = om::ui::rptrModalHitAt(m, x, y);
+    g_rptrAskOpen = false;
+    if (hit == om::ui::RptrModalHit::Confirm) rptrRunAsk();
+    else g_rptrResult[0] = 0;   // Cancel, and a tap outside is a Cancel (consumed)
+    drawRptrTab();
+    return true;
+  }
+
   if (g_rptrOsk) {
-    // The sheet owns the screen while it is up; a tap above it closes it (never acts behind it).
-    buildRptrView(g_rptrViewStore);
     const om::ui::RptrKeyHit key = om::ui::rptrEditorKeyAt(g_rptrViewStore, x, y);
     if (key.pressed) return rptrKeyPressed(key);
     const om::ui::ChatLayout g = om::ui::chatLayoutFor(L, true, false, g_rptrNums, false,
                                                        om::ui::rptrEditorField(g_rptrViewStore));
     if (y < g.sheet.y) {
       g_rptrOsk = false;
-      g_rptrEditRow = 255;
       drawRptrTab();
     }
     return true;
   }
-  if (g_rptrStage == om::ui::RptrStage::List) {
-    const om::ui::RptrLayout r = om::ui::rptrLayoutFor(L, false);
-    const om::ui::RptrHitResult hit = om::ui::rptrHitAt(r, false, g_rptrCount, g_rptrScroll, x, y);
+
+  if (g_rptrList) {
+    const om::ui::RptrListLayout r = om::ui::rptrListLayoutFor(L);
+    const om::ui::RptrHitResult hit =
+        om::ui::rptrListHitAt(r, g_rptrViewStore.count, g_rptrScroll, x, y);
     switch (hit.kind) {
       case om::ui::RptrHit::Scan:
         if (!om::rptrScanStart()) {
@@ -2467,116 +2619,95 @@ static bool handleRptrTap(int x, int y) {
         showToast("Scan sent, listening");
         drawRptrTab();
         return true;
-      case om::ui::RptrHit::Regions: {
-        // EST-360: the anonymous read from every direct repeater in the last scan. No login.
-        if (om::rptrRegionsBusy()) {
-          showToast("Already reading the repeater regions");
-          return true;
-        }
-        const int asked = om::rptrRegionsQueryAll();
-        if (asked <= 0) {
-          showToast("No direct repeater: scan first");
-        } else {
-          char t[48];
-          snprintf(t, sizeof(t), "Asking %d repeater(s), one at a time", asked);
-          showToast(t);
-        }
-        drawRptrTab();
-        return true;
-      }
-      case om::ui::RptrHit::Row:
-        if (hit.row < 0 || hit.row >= g_rptrCount) return true;
-        rptrOpen(g_rptrViewStore.items[hit.row].name);
-        Serial.printf("[rptr] open %s\n", g_rptrNode);
+      case om::ui::RptrHit::ListRow:
+        if (hit.row < 0 || hit.row >= g_rptrViewStore.count) return true;
+        rptrOpenAt(g_rptrViewStore.items[hit.row].name, g_rptrViewStore.items[hit.row].foundIndex);
         drawRptrTab();
         return true;
       default:
         return false;
     }
   }
-  if (g_rptrStage == om::ui::RptrStage::Login) {
-    const om::ui::RptrLayout r = om::ui::rptrLayoutFor(L, true);
-    const om::ui::RptrHitResult hit = om::ui::rptrHitAt(r, true, 0, 0, x, y);
-    switch (hit.kind) {
-      case om::ui::RptrHit::Back:
-        om::rptrLogout();
-        rptrClearSession();
-        drawRptrTab();
-        return true;
-      case om::ui::RptrHit::LoginField:
-        g_rptrField = (uint8_t)om::ui::KeyboardField::RptrPassword;
-        g_rptrNums = false;
-        g_rptrShift = false;
-        g_rptrOsk = true;
-        g_rptrEditRow = 255;
-        g_rptrEditTitle[0] = 0;
-        drawRptrTab();
-        return true;
-      case om::ui::RptrHit::LoginButton:
-        rptrLoginNow();
-        return true;
-      case om::ui::RptrHit::Forget:
-        om::rptrForget(g_rptrNode);
-        showToast("Forget: the password is gone");
-        drawRptrTab();
-        return true;
-      default:
-        return false;
-    }
-  }
-  // Admin.
-  const om::ui::RptrAdminLayout a = om::ui::rptrAdminLayoutFor(L);
-  if (a.back.contains(x, y)) {
-    if (g_rptrView == 6) {
-      // One region's page: back to the Regions view, the session stays open.
-      g_rptrView = 2;
-      g_rptrAScroll = 0;
-      rptrSendClear();
+
+  const om::ui::RptrPageLayout a =
+      om::ui::rptrPageLayoutFor(L, g_rptrViewStore.screen.cellCount > 0,
+                                g_rptrViewStore.screen.banner[0] != 0,
+                                g_rptrViewStore.screen.hasApply, g_rptrViewStore.screen.bigButton,
+                                g_rptrViewStore.screen.hasConsole);
+  const om::ui::RptrHitResult hit =
+      om::ui::rptrPageHitAt(a, g_rptrViewStore.screen, g_rptrPageScroll, x, y);
+  switch (hit.kind) {
+    case om::ui::RptrHit::Back:
+      rptrBack();
       drawRptrTab();
       return true;
+    case om::ui::RptrHit::Refresh:
+      if (!om::rptrStatusRequest()) showToast("Status not requested");
+      rptrQueue(om::rptr::kCliClockRead, kRptrOutRead);
+      drawRptrTab();
+      return true;
+    case om::ui::RptrHit::BannerButton:
+      rptrClockPressed();
+      drawRptrTab();
+      return true;
+    case om::ui::RptrHit::Apply: {
+      const om::rptr::ConfirmAsk ask = om::rptr::confirmForApply(g_rptrPage, g_rptrDraft);
+      if (ask.need) {
+        rptrOpenAsk(ask, 1);
+        break;
+      }
+      rptrApplyNow();
+      break;
     }
-    // Back = log out, exactly like the mock's "‹ list": the session ends and the scanned list stays.
-    om::rptrLogout();
-    g_rptrStage = om::ui::RptrStage::List;
-    g_rptrNode[0] = 0;
-    g_rptrPw[0] = 0;
-    g_rptrView = 0;
-    g_rptrAScroll = 0;
-    g_rptrValues.reset();
-    g_rptrRegions = om::rptr::RegionList();
-    g_rptrNeighbours = om::rptr::NeighbourList();
-    g_rptrLastCmd[0] = 0;
-    g_rptrLastAnswer[0] = 0;
-    g_rptrAnswerPending = false;
-    rptrSendClear();
-    drawRptrTab();
-    return true;
+    case om::ui::RptrHit::BigButton:
+      if (g_rptrRemembered) {
+        char pw[om::rptr::kPasswordMax + 1] = "";
+        if (!om::rptrPasswordFor(g_rptrNode, pw, sizeof(pw))) {
+          showToast("No stored password, type it");
+          rptrOpenSheet(1, om::ui::KeyboardField::RptrPassword, "repeater password", "", true);
+        } else if (!om::rptrLoginStart(g_rptrNode, pw)) {
+          showToast("Login not sent: no such contact");
+          rptrOpenSheet(1, om::ui::KeyboardField::RptrPassword, "repeater password", "", true);
+        } else {
+          g_rptrLoginWait = millis();
+        }
+        memset(pw, 0, sizeof(pw));
+      } else {
+        rptrOpenSheet(1, om::ui::KeyboardField::RptrPassword, "repeater password", "", true);
+      }
+      break;
+    case om::ui::RptrHit::Input:
+      rptrOpenSheet(6, om::ui::KeyboardField::WifiPassword, "command", g_rptrCmd, false);
+      break;
+    case om::ui::RptrHit::Send:
+      rptrSendConsole();
+      break;
+    case om::ui::RptrHit::RowBody:
+    case om::ui::RptrHit::RowKey:
+    case om::ui::RptrHit::RowMinus:
+    case om::ui::RptrHit::RowPlus: {
+      if (hit.row < 0 || hit.row >= g_rptrViewStore.screen.count) return true;
+      const om::rptr::UiRow& row = g_rptrViewStore.screen.rows[hit.row];
+      if (row.act == om::rptr::Act::Forget) {
+        om::rptrForget(g_rptrNode);
+        g_rptrRemembered = false;
+        snprintf(g_rptrResult, sizeof(g_rptrResult), "Password forgotten");
+        g_rptrResultOk = true;
+        break;
+      }
+      int dir = 0;
+      if (hit.kind == om::ui::RptrHit::RowMinus) dir = -1;
+      if (hit.kind == om::ui::RptrHit::RowPlus) dir = 1;
+      rptrPageRowTapped(row, hit.kind == om::ui::RptrHit::RowKey, dir);
+      break;
+    }
+    default:
+      return false;
   }
-  const int chip = om::ui::rptrAdminChipAt(a, x, y);
-  if (chip >= 0) {
-    g_rptrView = chip;
-    g_rptrAScroll = 0;
-    rptrSendClear();   // an armed line belongs to the view it was armed in
-    drawRptrTab();
-    return true;
-  }
-  // The row hit test needs each row's key count; build the table once.
-  buildRptrView(g_rptrViewStore);
-  uint8_t keys[om::ui::kRptrAdminRows] = {};
-  for (int i = 0; i < g_rptrViewStore.rowCount && i < om::ui::kRptrAdminRows; ++i) {
-    keys[i] = g_rptrViewStore.rows[i].keys;
-  }
-  const om::ui::RptrRowHit rh = om::ui::rptrAdminRowAt(a, keys, g_rptrViewStore.rowCount,
-                                                       g_rptrAScroll, x, y);
-  if (rh.row < 0) return false;
-  const om::rptr::AdminRow& row = g_rptrViewStore.rows[rh.row];
-  if (row.kind == om::rptr::RowKind::Fact) return true;   // a value, nothing to press
-  if (row.kind == om::rptr::RowKind::Stepper && rh.part == 0) return true;
-  // An Open row's whole body and its one ">" key both open the region page; every other kind keeps
-  // its key meaning (-/+ or the row's action).
-  rptrAdminPressed(row, row.kind == om::rptr::RowKind::Open ? 0 : rh.part);
+  drawRptrTab();
   return true;
 }
+
 
 // --------------------------------------------------------------------------------- settings shell
 // EST-347: Settings rebuilt on the new layer. Every page is a list of SettingRow built here and
@@ -4303,13 +4434,10 @@ static void showTab(int tab) {
   g_replyName[0] = 0;
   g_selector = false;   // the dropdown belongs to the chat we are leaving
   g_mapSelName[0] = 0;
-  if (tab == 3 && g_rptrNode[0] && g_rptrStage == om::ui::RptrStage::List) {
-    // Coming from the Nodes menu's "Admin" (or a repeater remembered from the last visit): open
-    // that page, not the list. Auto-login happens in rptrOpen() when the Settings switch is on and
-    // the password is remembered. A login page that is already up is left exactly as it was.
-    char name[32];
-    snprintf(name, sizeof(name), "%s", g_rptrNode);
-    rptrOpen(name);
+  if (tab == 3 && g_rptrList && !om::rptrScan().listening) {
+    // EST-362: opening the tab scans by itself. The header's Scan is the rescan (and the only
+    // control on the list besides the rows).
+    if (om::rptrScanStart()) Serial.printf("[rptr] auto scan\n");
   }
   Serial.printf("[tab] %s\n", om::ui::tabLabel((om::ui::Tab)g_tab));
   beginScreenChange(fromTab, tab);
@@ -5170,24 +5298,28 @@ void loop() {
           g_nodeScroll = clamped;
           if (g_drag || changed) drawHome();
         }
-        // The repeater list (and the admin panel's rows) snaps its give back the same way.
+        // The repeater list and a page's rows snap their give back the same way.
         if (g_tab == 3 && !g_settings && !g_rptrOsk) {
           bool changed = false;
-          if (g_rptrStage == om::ui::RptrStage::Admin) {
-            const int maxScroll =
-                om::ui::rptrAdminMaxScroll(om::ui::rptrAdminLayoutFor(om::ui::l2()),
-                                           g_rptrViewStore.rowCount);
-            const int clamped =
-                g_rptrAScroll < 0 ? 0 : (g_rptrAScroll > maxScroll ? maxScroll : g_rptrAScroll);
-            changed = clamped != g_rptrAScroll;
-            g_rptrAScroll = clamped;
-          } else if (g_rptrStage == om::ui::RptrStage::List) {
-            const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
-            const int maxScroll = om::ui::rptrMaxScroll(rr, g_rptrCount);
+          if (g_rptrList) {
+            const om::ui::RptrListLayout rr = om::ui::rptrListLayoutFor(om::ui::l2());
+            const int maxScroll = om::ui::rptrListMaxScroll(rr, g_rptrCount);
             const int clamped =
                 g_rptrScroll < 0 ? 0 : (g_rptrScroll > maxScroll ? maxScroll : g_rptrScroll);
             changed = clamped != g_rptrScroll;
             g_rptrScroll = clamped;
+          } else {
+            const om::ui::RptrPageLayout aa = om::ui::rptrPageLayoutFor(
+                om::ui::l2(), g_rptrViewStore.screen.cellCount > 0,
+                g_rptrViewStore.screen.banner[0] != 0, g_rptrViewStore.screen.hasApply,
+                g_rptrViewStore.screen.bigButton, g_rptrViewStore.screen.hasConsole);
+            const int maxScroll =
+                om::ui::rptrPageMaxScroll(aa, g_rptrViewStore.screen.count);
+            const int clamped = g_rptrPageScroll < 0
+                                    ? 0
+                                    : (g_rptrPageScroll > maxScroll ? maxScroll : g_rptrPageScroll);
+            changed = clamped != g_rptrPageScroll;
+            g_rptrPageScroll = clamped;
           }
           if (g_drag || changed) drawRptrTab();
         }
@@ -5220,7 +5352,7 @@ void loop() {
     g_setSelScroll0 = g_setSelScroll;
     g_nodeScroll0 = g_nodeScroll;
     g_rptrScroll0 = g_rptrScroll;
-    g_rptrAScroll0 = g_rptrAScroll;
+    g_rptrPageScroll0 = g_rptrPageScroll;
     g_drag = false;
     g_acted = false;
     g_nodeHoldArmed = false;
@@ -5448,22 +5580,24 @@ void loop() {
           drawMapTab();
         }
       } else if (g_tab == 3 && !g_rptrOsk) {
-        // The list, or the admin panel's rows, follows the finger; the release snaps the give back.
-        if (g_rptrStage == om::ui::RptrStage::Admin) {
-          const int maxScroll =
-              om::ui::rptrAdminMaxScroll(om::ui::rptrAdminLayoutFor(om::ui::l2()),
-                                         g_rptrViewStore.rowCount);
-          const int next = om::ui::selDragScroll(g_rptrAScroll0, dy, maxScroll);
-          if (next != g_rptrAScroll) {
-            g_rptrAScroll = next;
-            if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
-          }
-        } else if (g_rptrStage == om::ui::RptrStage::List) {
-          const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
+        // The list, or the open page's rows, follows the finger; the release snaps the give back.
+        if (g_rptrList) {
+          const om::ui::RptrListLayout rr = om::ui::rptrListLayoutFor(om::ui::l2());
           const int next =
-              om::ui::selDragScroll(g_rptrScroll0, dy, om::ui::rptrMaxScroll(rr, g_rptrCount));
+              om::ui::selDragScroll(g_rptrScroll0, dy, om::ui::rptrListMaxScroll(rr, g_rptrCount));
           if (next != g_rptrScroll) {
             g_rptrScroll = next;
+            if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
+          }
+        } else {
+          const om::ui::RptrPageLayout aa = om::ui::rptrPageLayoutFor(
+              om::ui::l2(), g_rptrViewStore.screen.cellCount > 0,
+              g_rptrViewStore.screen.banner[0] != 0, g_rptrViewStore.screen.hasApply,
+              g_rptrViewStore.screen.bigButton, g_rptrViewStore.screen.hasConsole);
+          const int next = om::ui::selDragScroll(
+              g_rptrPageScroll0, dy, om::ui::rptrPageMaxScroll(aa, g_rptrViewStore.screen.count));
+          if (next != g_rptrPageScroll) {
+            g_rptrPageScroll = next;
             if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
           }
         }

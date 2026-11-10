@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// RPTR screen drawing (EST-358): the scan list, the login page and the six admin views, in the
-// mock's layer. Rectangles come from ui/rptr_layout.h (the same ones the taps use), colours and
-// fonts from ui/theme.h, keys from the shared sheet (ui/keyboard_draw.h).
+// EST-362: the RPTR screen's pixels. The list, one page, the console and the one confirmation pop-up.
+// Rectangles come from ui/rptr_layout.h (the same ones the taps use), colours and fonts from
+// ui/theme.h, keys from the shared sheet (ui/keyboard_draw.h).
 #include "ui/screen_rptr.h"
 
 #include <Arduino.h>
@@ -24,7 +24,6 @@ void chip(lgfx::LovyanGFX* d, const Rect& r, const char* text, bool on) {
   d->drawString(text, r.x + r.w / 2, r.y + r.h / 2);
 }
 
-// A row's small key: - / + / H / D. A rounded box with one mono glyph in the middle.
 void smallKey(lgfx::LovyanGFX* d, const Rect& r, const char* text, bool strong) {
   d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, strong ? kSelBg2 : kPanel2);
   d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, strong ? kAcc : kLine);
@@ -40,70 +39,154 @@ void drawBack(lgfx::LovyanGFX* d, const Rect& r, const char* label) {
   drawTextLeft(d, FontRole::MonoMeta, kInk, kPanel2, r.x + 8, r.y + r.h / 2, label);
 }
 
+// A small gold key: the remembered password. A ring and a stem, no font glyph involved.
+void drawKeyIcon(lgfx::LovyanGFX* d, int cx, int cy, uint16_t ink, uint16_t bg) {
+  d->drawCircle(cx, cy, 3, ink);
+  d->drawFastHLine(cx + 3, cy, 5, ink);
+  d->drawFastVLine(cx + 6, cy, 3, ink);
+  d->drawFastVLine(cx + 8, cy, 2, ink);
+  (void)bg;
+}
+
+void checkbox(lgfx::LovyanGFX* d, const Rect& r, bool on, bool danger) {
+  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, on ? kSelBg2 : kPanel);
+  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, on ? kAcc : kLine);
+  if (on) {
+    // A tick, drawn as two strokes: no glyph the small faces might lack.
+    d->drawLine(r.x + 4, r.y + 8, r.x + 7, r.y + 11, danger ? kBad : kGreen);
+    d->drawLine(r.x + 7, r.y + 11, r.x + 12, r.y + 5, danger ? kBad : kGreen);
+  }
+}
+
 void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RptrItem& it) {
   d->fillCircle(r.x + kRowPadX + 3, r.y + 12, 3, kGreen);
-  drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, r.x + kRowPadX + 12, r.y + 11,
-                   r.w - 24 - (it.inContacts ? 40 : 0), it.name);
-  if (it.inContacts) {
-    // The ticket's mark: this repeater already has a contact here.
-    drawTextRight(d, FontRole::MonoMeta, kAcc, kScreen, r.right() - kRowPadX, r.y + 11, "saved");
+  int right = r.right() - kRowPadX;
+  if (it.saved) {
+    drawKeyIcon(d, right - 8, r.y + 11, kAcc, kScreen);
+    right -= 20;
   }
+  drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, r.x + kRowPadX + 12, r.y + 11,
+                   right - (r.x + kRowPadX + 12), it.name);
   if (it.meta[0]) {
-    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, r.x + kRowPadX + 12, r.y + 24,
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, r.x + kRowPadX + 12, r.y + 25,
                      r.w - 2 * kRowPadX - 12, it.meta);
   }
   d->drawFastHLine(r.x + kRowPadX, r.bottom() - 1, r.w - 2 * kRowPadX, kRowLine);
 }
 
-void drawInfoCard(lgfx::LovyanGFX* d, const Rect& r, const RptrView& v) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadius, kPanel);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadius, kLine);
-  int y = r.y + 11;
-  for (int i = 0; i < v.infoCount; ++i) {
-    char label[20] = "";
-    char value[52] = "";
-    const char* bar = strchr(v.info[i], '|');
-    if (bar) {
-      const int n = (int)(bar - v.info[i]);
-      snprintf(label, sizeof(label), "%.*s", n < (int)sizeof(label) - 1 ? n : (int)sizeof(label) - 1,
-               v.info[i]);
-      snprintf(value, sizeof(value), "%s", bar + 1);
-    } else {
-      snprintf(value, sizeof(value), "%s", v.info[i]);
+void drawPageRow(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::UiRow& row, int i,
+                 int scroll) {
+  const RptrRowRects r = rptrPageRowRects(a, row, i, scroll);
+  if (!r.body.overlaps(a.body)) return;
+  const uint16_t bg = row.danger ? kDangerBg : kScreen;
+  if (row.danger) d->fillRect(r.body.x, r.body.y, r.body.w, r.body.h, kDangerBg);
+  const bool checkboxRow = row.act == rptr::Act::RegionToggle || row.act == rptr::Act::Toggle;
+  if (checkboxRow) checkbox(d, r.box, row.on, row.danger);
+  drawTextEllipsis(d, FontRole::SansBody, row.danger ? kDangerInk : kInk, bg, r.label.x,
+                   r.label.y + 7, r.label.w, row.label);
+  if (row.value[0]) {
+    uint16_t ink = kDim;
+    if (row.act == rptr::Act::Toggle || row.act == rptr::Act::RegionToggle) {
+      ink = row.on ? kGreen : kBad;
+    } else if (row.act == rptr::Act::Open || row.act == rptr::Act::Step ||
+               row.act == rptr::Act::Pick) {
+      ink = kInk;
     }
-    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, r.x + 7, y, 76, label);
-    drawTextEllipsis(d, FontRole::MonoMeta, kInk, kPanel, r.x + 88, y, r.w - 95, value);
-    y += 17;
+    drawTextEllipsis(d, FontRole::MonoMeta, ink, bg, r.value.x, r.value.y + 6, r.value.w,
+                     row.value);
+  }
+  if (row.stepKeys) {
+    smallKey(d, r.keyA, "-", false);
+    smallKey(d, r.keyB, "+", false);
+  } else if (row.key[0]) {
+    smallKey(d, r.keyA, row.key, false);
+  } else if (row.arrow) {
+    smallKey(d, r.keyA, ">", false);
+  }
+  d->drawFastHLine(r.body.x, r.body.bottom() - 1, r.body.w, kRowLine);
+}
+
+void drawCard(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut& s) {
+  if (a.card.empty()) return;
+  d->fillRoundRect(a.card.x, a.card.y, a.card.w, a.card.h, kRadius, kPanel);
+  d->drawRoundRect(a.card.x, a.card.y, a.card.w, a.card.h, kRadius, kLine);
+  const int16_t colW = (int16_t)((a.card.w - 16) / 2);
+  for (int i = 0; i < s.cellCount && i < 6; ++i) {
+    const int col = i % 2;
+    const int row = i / 2;
+    const int16_t x = (int16_t)(a.card.x + 8 + col * colW);
+    const int16_t y = (int16_t)(a.card.y + 3 + row * kRptrCardRowH);
+    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, x, y, colW - 4, s.cells[i].label);
+    // The value on the same line, right-aligned to the cell.
+    drawTextRight(d, FontRole::MonoMeta, kInk, kPanel, (int16_t)(x + colW - 6), y,
+                  s.cells[i].value);
+  }
+  // The refresh icon: a small open ring with an arrowhead, in the card's top right corner.
+  if (!a.refresh.empty()) {
+    const int cx = a.refresh.x + a.refresh.w / 2;
+    const int cy = a.refresh.y + a.refresh.h / 2;
+    d->drawArc(cx, cy, 7, 8, 40, 320, kDim);
+    d->fillTriangle((int16_t)(cx + 6), (int16_t)(cy - 6), (int16_t)(cx + 10), (int16_t)(cy - 2),
+                    (int16_t)(cx + 3), (int16_t)(cy - 2), kDim);
   }
 }
 
-// One admin row: label in sans, value in mono under it, and the row's small keys on the right.
-void drawAdminRow(lgfx::LovyanGFX* d, const RptrAdminLayout& a, const rptr::AdminRow& row, int i,
-                  int scroll) {
-  const RptrRowRects r = rptrRowRects(a, row.keys, i, scroll);
-  if (r.body.y >= a.body.bottom() || r.body.bottom() <= a.body.y) return;
-  const bool danger = row.danger;
-  if (danger) d->fillRect(r.body.x, r.body.y, r.body.w, r.body.h, kDangerBg);
-  // A toggle's or a region's state colours its value, the mock's green/red .meta.
-  uint16_t valueInk = kDim;
-  if (row.kind == rptr::RowKind::Toggle) valueInk = row.on ? kGreen : kBad;
-  if (row.kind == rptr::RowKind::Open) valueInk = row.on ? kGreen : kBad;
-  if (row.kind == rptr::RowKind::Fact) valueInk = kInk;
-  drawTextEllipsis(d, FontRole::SansBody, danger ? kDangerInk : kInk, danger ? kDangerBg : kScreen,
-                   r.label.x, r.label.y + 8, r.label.w, row.label);
-  if (row.value[0]) {
-    drawTextEllipsis(d, FontRole::MonoMeta, valueInk, danger ? kDangerBg : kScreen, r.value.x,
-                     r.value.y + 6, r.value.w, row.value);
+void drawBanner(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut& s) {
+  if (a.banner.empty() || s.banner[0] == 0) return;
+  d->fillRoundRect(a.banner.x, a.banner.y, a.banner.w, a.banner.h, kRadius, kWarnBg);
+  d->drawRoundRect(a.banner.x, a.banner.y, a.banner.w, a.banner.h, kRadius, kWarnLine);
+  const int16_t textW = s.bannerButton ? (int16_t)(a.bannerButton.x - a.banner.x - 8)
+                                       : (int16_t)(a.banner.w - 12);
+  drawTextEllipsis(d, FontRole::SansBody, kWarnInk, kWarnBg, a.banner.x + 6, a.banner.y + 9,
+                   textW, s.banner);
+  if (s.bannerButton) {
+    d->fillRoundRect(a.bannerButton.x, a.bannerButton.y, a.bannerButton.w, a.bannerButton.h,
+                     kRadiusSm, kSelBg2);
+    d->drawRoundRect(a.bannerButton.x, a.bannerButton.y, a.bannerButton.w, a.bannerButton.h,
+                     kRadiusSm, kAcc);
+    setRole(d, FontRole::MonoMeta);
+    d->setTextDatum(lgfx::textdatum_t::middle_center);
+    d->setTextColor(kAccInk, kSelBg2);
+    d->drawString("Set clock", a.bannerButton.x + a.bannerButton.w / 2,
+                  a.bannerButton.y + a.bannerButton.h / 2);
   }
-  if (row.keys >= 1) {
-    // A region row's one key opens its page; a stepper's first key is "-".
-    const char* aText = row.kind == rptr::RowKind::Open ? ">" : "-";
-    smallKey(d, r.keyA, aText, false);
+}
+
+void drawWrapped(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, uint16_t bg, const Rect& box,
+                 const char* text) {
+  setRole(d, role);
+  int y = box.y + 2;
+  const int lineH = 15;
+  char line[48];
+  const char* p = text;
+  while (*p && y + lineH <= box.bottom()) {
+    // Take as many words as fit the box, then draw that line.
+    size_t n = 0;
+    size_t lastSpace = 0;
+    line[0] = 0;
+    while (p[n] && n + 1 < sizeof(line)) {
+      line[n] = p[n];
+      line[n + 1] = 0;
+      if (p[n] == ' ') lastSpace = n;
+      if (measureText(d, role, line, (int)n + 1) > box.w) break;
+      ++n;
+    }
+    if (p[n] && lastSpace > 0) n = lastSpace;
+    line[n < sizeof(line) ? n : sizeof(line) - 1] = 0;
+    drawTextLeft(d, role, ink, bg, box.x, y, line);
+    p += n;
+    while (*p == ' ') ++p;
+    y += lineH;
   }
-  if (row.keys >= 2) {
-    smallKey(d, r.keyB, "+", false);
-  }
-  d->drawFastHLine(r.body.x, r.body.bottom() - 1, r.body.w, kRowLine);
+}
+
+void drawButton(lgfx::LovyanGFX* d, const Rect& r, const char* label, bool danger) {
+  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, danger ? kDangerBg : kSelBg2);
+  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, danger ? kBad : kAcc);
+  setRole(d, FontRole::SansBody);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(danger ? kDangerInk : kAccInk, danger ? kDangerBg : kSelBg2);
+  d->drawString(label, r.x + r.w / 2, r.y + r.h / 2);
 }
 
 // The sheet over the tab bar: the same shared keyboard the Settings editors and the composer use.
@@ -121,10 +204,9 @@ void drawSheet(lgfx::LovyanGFX* d, const RptrView& v) {
   d->fillRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kCodeBg);
   d->drawRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kAcc);
   const int cy = g.draft.y + g.draft.h / 2;
-  if (field == KeyboardField::RptrPassword) {
-    // A password is never shown again, not even back to the finger that typed it.
+  if (v.secret) {
     const int cap = (g.draft.w - 2 * kFieldPadX - 40) / 6;
-    int n = v.pwLen;
+    int n = v.textLen;
     if (n > cap) n = cap;
     if (n == 0) {
       drawTextLeft(d, FontRole::MonoMeta, kDimmer, kCodeBg, g.draft.x + kFieldPadX, cy,
@@ -134,18 +216,15 @@ void drawSheet(lgfx::LovyanGFX* d, const RptrView& v) {
         d->fillCircle((int16_t)(g.draft.x + kFieldPadX + 3 + i * 6), (int16_t)cy, 2, kInk);
       }
     }
+  } else if (v.text[0] == 0) {
+    drawTextLeft(d, FontRole::MonoMeta, kDimmer, kCodeBg, g.draft.x + kFieldPadX, cy,
+                 v.editTitle[0] ? v.editTitle : "(type below)");
   } else {
-    const char* text = v.pwText != nullptr ? v.pwText : "";
-    if (text[0] == 0) {
-      drawTextLeft(d, FontRole::MonoMeta, kDimmer, kCodeBg, g.draft.x + kFieldPadX, cy,
-                   v.editTitle[0] ? v.editTitle : "(type below)");
-    } else {
-      drawTextEllipsis(d, FontRole::MonoMeta, kInk, kCodeBg, g.draft.x + kFieldPadX, cy,
-                       g.draft.w - 2 * kFieldPadX - 34, text);
-    }
+    drawTextEllipsis(d, FontRole::MonoMeta, kInk, kCodeBg, g.draft.x + kFieldPadX, cy,
+                     g.draft.w - 2 * kFieldPadX - 34, v.text);
   }
   char used[16];
-  snprintf(used, sizeof(used), "%d/%d", v.pwLen, keyboardMaxBytes(field));
+  snprintf(used, sizeof(used), "%d/%d", v.textLen, keyboardMaxBytes(field));
   drawTextRight(d, FontRole::MonoMeta, kDimmer, kCodeBg, g.draft.right() - kFieldPadX, cy, used);
 
   for (int r = 0; r < 4; ++r) {
@@ -158,23 +237,20 @@ void drawSheet(lgfx::LovyanGFX* d, const RptrView& v) {
       drawKeyCap(d, g.keys[r][c], defs[c], v.shift);
     }
   }
-
   if (v.accentCp != 0 && v.accentRow < 4 && v.accentCol < 10) {
     drawAccentBubble(d, g.keys[v.accentRow][v.accentCol], v.accentCp);
   }
 }
 
-void drawListStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrLayout& r) {
+void drawListStage(lgfx::LovyanGFX* d, const RptrView& v) {
+  const RptrListLayout r = rptrListLayoutFor(l2());
   d->fillRect(r.head.x, r.head.y, r.head.w, r.head.h, kPanel);
   d->drawFastHLine(r.head.x, r.head.bottom() - 1, r.head.w, kLine);
   drawTextLeft(d, FontRole::MonoMeta, kDimmer, kPanel, 8, r.head.y + r.head.h / 2, "REPEATERS");
   drawTextLeft(d, FontRole::MonoMeta, kAcc, kPanel, 76, r.head.y + r.head.h / 2, v.state);
   chip(d, r.scan, v.scanning ? "Scanning" : "Scan", v.scanning);
-  // EST-360: the anonymous nearby-region read, its own labelled chip (no login and no password).
-  chip(d, r.regions, v.regionsBusy ? "Reading" : "Regions", v.regionsBusy);
 
   if (v.count <= 0) {
-    // Never an empty list without a word: the window is open or it closed with no answer.
     const char* title = v.scanning ? "Listening..." : "No repeaters yet.";
     const char* sub = v.scanning ? "Scan sent. Waiting for repeater replies."
                                  : "Scan sends a request,\nevery repeater in range answers.";
@@ -183,7 +259,7 @@ void drawListStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrLayout& r) {
   }
   d->setClipRect(r.list.x, r.list.y, r.list.w, r.list.h);
   for (int i = 0; i < v.count; ++i) {
-    const RptrRow row = rptrRow(r, i, v.scroll);
+    const RptrRow row = rptrListRow(r, i, v.scroll);
     const Rect rr{r.list.x, row.y, r.list.w, row.h};
     if (!rr.overlaps(r.list)) continue;
     drawListRow(d, rr, v.items[i]);
@@ -191,88 +267,77 @@ void drawListStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrLayout& r) {
   d->clearClipRect();
 }
 
-void drawLoginStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrLayout& r) {
-  drawBack(d, r.back, "< list");
-  drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen, r.title.x, r.title.y + 11, r.title.w,
-                   v.name);
-  drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, r.title.x, r.title.y + 21, r.title.w,
-                   v.sub);
-  drawInfoCard(d, r.infoCard, v);
-
-  drawTextLeft(d, FontRole::MonoMeta, kDimmer, kScreen, r.loginLabel.x,
-               r.loginLabel.y + r.loginLabel.h / 2, "ADMIN LOGIN");
-  d->fillRoundRect(r.loginField.x, r.loginField.y, r.loginField.w, r.loginField.h, kRadiusSm,
-                   kFieldBg);
-  d->drawRoundRect(r.loginField.x, r.loginField.y, r.loginField.w, r.loginField.h, kRadiusSm,
-                   v.osk ? kAcc : kLine);
-  const int fy = r.loginField.y + r.loginField.h / 2;
-  if (v.pwLen == 0) {
-    drawTextLeft(d, FontRole::MonoMeta, kDimmer, kFieldBg, r.loginField.x + 6, fy, "password");
-  } else {
-    int n = v.pwLen;
-    const int cap = (r.loginField.w - 16) / 6;
-    if (n > cap) n = cap;
-    for (int i = 0; i < n; ++i) {
-      d->fillCircle((int16_t)(r.loginField.x + 9 + i * 6), (int16_t)fy, 2, kInk);
-    }
-  }
-  d->fillRoundRect(r.loginButton.x, r.loginButton.y, r.loginButton.w, r.loginButton.h, kRadiusSm,
-                   kSelBg2);
-  d->drawRoundRect(r.loginButton.x, r.loginButton.y, r.loginButton.w, r.loginButton.h, kRadiusSm,
-                   kAcc);
-  setRole(d, FontRole::SansBody);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kAccInk, kSelBg2);
-  d->drawString(v.loggingIn ? "..." : "Login", r.loginButton.x + r.loginButton.w / 2,
-                r.loginButton.y + r.loginButton.h / 2);
-
+void drawPageStage(lgfx::LovyanGFX* d, const RptrView& v) {
+  const rptr::ScreenOut& s = v.screen;
+  const bool console = s.hasConsole;
+  const bool card = s.cellCount > 0;
+  const bool banner = s.banner[0] != 0;
+  const RptrPageLayout a =
+      rptrPageLayoutFor(l2(), card, banner, s.hasApply, s.bigButton, console);
+  drawBack(d, a.back, v.page == rptr::Page::Repeater ? "< list" : "< back");
+  drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen, a.title.x, a.title.y + 11, a.title.w,
+                   s.title);
+  // The result of the last Apply is the page's second line: a check and "Applied", or the
+  // repeater's error in plain words. Nothing else competes for it.
   if (v.result[0]) {
-    drawTextEllipsis(d, FontRole::MonoMeta, v.resultOk ? kGreen : kBad, kScreen, r.result.x,
-                     r.result.y + 7, r.result.w, v.result);
+    const uint16_t ink = v.resultPending ? kDim : (v.resultOk ? kGreen : kBad);
+    int16_t x = a.sub.x;
+    if (!v.resultPending && v.resultOk) {
+      // The tick is drawn, not typed: the faces carry ASCII only.
+      d->drawLine((int16_t)(x + 2), (int16_t)(a.sub.y + 7), (int16_t)(x + 5), (int16_t)(a.sub.y + 10),
+                  kGreen);
+      d->drawLine((int16_t)(x + 5), (int16_t)(a.sub.y + 10), (int16_t)(x + 10), (int16_t)(a.sub.y + 3),
+                  kGreen);
+      x = (int16_t)(x + 14);
+    } else if (!v.resultPending) {
+      drawTextLeft(d, FontRole::MonoMeta, kBad, kScreen, x, a.sub.y + 6, "!");
+      x = (int16_t)(x + 8);
+    }
+    drawTextEllipsis(d, FontRole::MonoMeta, ink, kScreen, x, a.sub.y + 1,
+                     (int16_t)(a.sub.w - (x - a.sub.x)), v.result);
+  } else {
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, a.sub.x, a.sub.y + 1, a.sub.w,
+                     s.subtitle);
   }
-  if (v.canForget) {
-    smallKey(d, r.forget, "Forget", false);
+
+  drawCard(d, a, s);
+  drawBanner(d, a, s);
+  if (console) {
+    // The raw log: answers live ONLY here, in mono, with nothing to tap.
+    d->setClipRect(a.body.x, a.body.y, a.body.w, a.body.h);
+    setRole(d, FontRole::MonoMeta);
+    int y = a.body.y + 2;
+    for (int i = 0; i < s.logLineCount && y + 12 <= a.body.bottom(); ++i) {
+      drawTextEllipsis(d, FontRole::MonoMeta, i == s.logLineCount - 1 ? kInk : kDim, kScreen,
+                       a.body.x + 6, y, a.body.w - 12, s.logLines[i]);
+      y += 13;
+    }
+    d->clearClipRect();
+    d->fillRoundRect(a.input.x, a.input.y, a.input.w, a.input.h, kRadiusSm, kFieldBg);
+    d->drawRoundRect(a.input.x, a.input.y, a.input.w, a.input.h, kRadiusSm, kLine);
+    const char* typed = s.consoleInput[0] ? s.consoleInput : "command";
+    drawTextEllipsis(d, FontRole::MonoMeta, s.consoleInput[0] ? kInk : kDimmer, kFieldBg,
+                     a.input.x + 6, a.input.y + a.input.h / 2, a.input.w - 12, typed);
+    drawButton(d, a.send, "Send", false);
+  } else {
+    d->setClipRect(a.body.x, a.body.y, a.body.w, a.body.h);
+    for (int i = 0; i < s.count; ++i) drawPageRow(d, a, s.rows[i], i, v.pageScroll);
+    d->clearClipRect();
   }
-  if (r.note.h > 0 && v.note[0]) {
-    d->fillRoundRect(r.note.x, r.note.y, r.note.w, r.note.h, kRadius, kWarnBg);
-    d->drawRoundRect(r.note.x, r.note.y, r.note.w, r.note.h, kRadius, kWarnLine);
-    drawTextEllipsis(d, FontRole::SansBody, kWarnInk, kWarnBg, r.note.x + 6, r.note.y + 10,
-                     r.note.w - 12, v.note);
-  }
+
+  if (!a.apply.empty()) drawButton(d, a.apply, "Apply", s.applyDanger);
+  if (!a.big.empty()) drawButton(d, a.big, s.bigLabel, false);
 }
 
-void drawAdminStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrAdminLayout& a) {
-  drawBack(d, a.back, v.backLabel);
-  drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen, a.title.x, a.title.y + 11, a.title.w,
-                   v.name);
-  drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, a.title.x, a.title.y + 21, a.title.w,
-                   v.sub);
-  for (int i = 0; i < kRptrViewCount; ++i) {
-    // A region's page (view 6) is a child of the Regions chip, so Regions stays lit there.
-    const bool on = (i == v.view) || (v.view == 6 && i == 2);
-    chip(d, a.chips[i], kRptrViewLabel[i], on);
-  }
-
-  d->setClipRect(a.body.x, a.body.y, a.body.w, a.body.h);
-  for (int i = 0; i < v.rowCount; ++i) drawAdminRow(d, a, v.rows[i], i, v.aScroll);
-  d->clearClipRect();
-
-  // The answer strip: the exact line the last control sent, and what the repeater said.
-  d->fillRect(a.answer.x, a.answer.y, a.answer.w, a.answer.h, kPanel);
-  d->drawFastHLine(a.answer.x, a.answer.y, a.answer.w, kLine);
-  if (v.lastCmd[0]) {
-    char line[96];
-    snprintf(line, sizeof(line), "> %s", v.lastCmd);
-    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, 8, a.answer.y + 9, a.answer.w - 16,
-                     line);
-    drawTextEllipsis(d, FontRole::MonoMeta,
-                     v.answerPending ? kDim : (v.answerBad ? kBad : kGreen), kPanel, 8,
-                     a.answer.y + 24, a.answer.w - 16,
-                     v.answerPending ? "waiting..." : v.lastAnswer);
-  } else {
-    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, 8, a.answer.y + 17, a.answer.w - 16,
-                     "no command sent yet");
-  }
+void drawModal(lgfx::LovyanGFX* d, const RptrView& v) {
+  // A scrim: the page behind stays readable, but dimmed.
+  d->fillRect(0, 0, l2().width, l2().height, kPanel2);
+  const RptrModalLayout m = rptrModalLayoutFor(l2(), v.modalVerb);
+  d->fillRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kPanel);
+  d->drawRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kAcc);
+  drawWrapped(d, FontRole::SansBody, kInk, kPanel, m.text, v.modalText);
+  drawButton(d, m.cancel, "Cancel", false);
+  drawButton(d, m.confirm, v.modalVerb, true);
 }
 
 }  // namespace
@@ -288,16 +353,14 @@ void rptrScreenDraw(const RptrView& v) {
     return;
   }
   d->fillScreen(kScreen);
-
-  if (v.stage == RptrStage::List) {
-    drawListStage(d, v, rptrLayoutFor(l2(), false));
-  } else if (v.stage == RptrStage::Login) {
-    drawLoginStage(d, v, rptrLayoutFor(l2(), true));
+  if (v.list) {
+    drawListStage(d, v);
   } else {
-    drawAdminStage(d, v, rptrAdminLayoutFor(l2()));
+    drawPageStage(d, v);
   }
-
-  if (v.osk) {
+  if (v.modal) {
+    drawModal(d, v);
+  } else if (v.osk) {
     // The sheet covers the tab bar, exactly like the chat composer's (Filip, S459).
     drawSheet(d, v);
   } else {

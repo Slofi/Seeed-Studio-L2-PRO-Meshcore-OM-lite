@@ -1,0 +1,157 @@
+[hb] uptime=37s heap=155516 stack=10708 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=16312 nmea=408 bad=1 expected=11(g11 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[cmd] > tap 280 227
+[cmd] ok tap 280 227
+[tap] 280,227
+[rptr] scan: discover request tag 79ddeb89, listening 20000 ms
+[rptr] auto scan
+[tab] RPTR
+[ui] change Nodes -> RPTR: luma 14 -> 0 (unknown), instant
+[ui] change: composed in 12 ms (inside the dark)
+[ui] change: out 0 ms, push 11444 us, settle 0 ms, in 0 ms
+[hb] uptime=39s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=17434 nmea=436 bad=1 expected=11(g11 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[batt] 4173 mV
+[rptr] answer 86a8eedb744b (86a8eedb744b): snr in 53/4 out 53/4, key 32 B, 1 found
+[hb] uptime=41s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=18575 nmea=465 bad=1 expected=11(g11 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[rptr] answer Argus mobile RPTR (ce2192c987bc): snr in 48/4 out 31/4, key 32 B, 2 found
+[hb] uptime=43s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=19714 nmea=493 bad=1 expected=11(g11 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=45s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=20827 nmea=521 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=47s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=21933 nmea=549 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=49s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=23040 nmea=578 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[batt] 4174 mV
+[hb] uptime=51s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=24145 nmea=606 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=53s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=25250 nmea=634 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=55s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=26356 nmea=662 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=57s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=27454 nmea=690 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=59s heap=155516 stack=5748 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=28563 nmea=718 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[cmd] > tap 120 70
+[cmd] ok tap 120 70
+[tap] 120,70
+[rptr] regions -> Argus mobile RPTR (ce2192c987bc): 0-hop anon request sent, deadline 8782 ms
+[rptr] open Argus mobile RPTR
+[hb] uptime=61s heap=155516 stack=56 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=29675 nmea=747 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[rptr] regions <- Argus mobile RPTR (ce2192c987bc): clock=1715782075 (not set (2024)) regions="*, si, lj" count=3 clean=1
+[hb] uptime=63s heap=155516 stack=56 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=30789 nmea=775 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=65s heap=155516 stack=56 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=31894 nmea=803 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=67s heap=155516 stack=56 board=ok mesh=up tab=3 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=33000 nmea=831 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[cmd] > tap 160 189
+[cmd] ok tap 160 189
+[tap] 160,189
+[rptr] login sent to Argus mobile RPTR (direct), deadline 4782 ms
+[crash] stored core dump: task loopTask, PC 0x42158b5c, exc cause 65 (unknown), vaddr 0x00000000, backtrace 0x42158b5c 0x4214fefa 0x4214b891 0x42027e1f 0x42028cbe 0x42016555 0x42016587 0x420174f1 0x4201a93b 0x4205c0cd
+[crash] core dump app sha256: b9c309a69633ceeb
+[crash] core dump erased
+[i2c] found: 14 18 21 22 2C 34 48 5D (8 devices)
+[om] expander ready out=77/21 cfg=07/00
+[om] expander: ok
+[om] expander inputs: 73/21 (wake bit high)
+[i2c] found: 14 18 21 22 2C 34 48 5D (8 devices)
+[om] backlight: ok
+[  2297][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[om] display 320x240
+[om] board: ok
+[om] frame buffer 320x240 (150 KB)
+[om] frame probe 89ed (native gold ed89) -> push swap ON
+[om] colour push probe gold ed89 -> stored 89ed -> back ed89 OK
+[ui] font sans11: ok (28164 bytes)
+[ui] font sans14: ok (40044 bytes)
+[ui] font sans9: ok (22760 bytes)
+[ui] font mono10: ok (23886 bytes)
+[mem] ui buffers 41168 B in PSRAM: nodes 4480, chats 3024, chat msgs 3584, dm scratch 9472, set rows 14720, contacts 5888
+[mem] boot (before Wi-Fi, before BLE): internal=185264 largest=155636 psram=8179343 heap=185264
+[time] floor 1794337705 s (saved 1794337705, build 1794337331), waiting for a real source
+[  2327][E][Preferences.cpp:503] getBytesLength(): nvs_get_blob len fail: erec NOT_FOUND
+[wifi] off at boot: heap=184792 psram=8179343 saved=1 switch=off
+[mem] boot (Wi-Fi stack off): internal=184792 largest=155636 psram=8179343 heap=184792
+[prefs] sound=1 vol=70 sndver=2 boot=0 msg=4 dm=9 men=20 sent=24 err=30 new=36 batt=42 dnd=0 tsnd=0 tone=48 emoji_rec=0
+[emoji] table ok, 1416 cells
+[audio] codec probe: ack (err=0)
+[codec] write 44=08 failed err=2
+[audio] codec init: ok (1/18 writes failed)
+[audio] codec start: ok (1/37 writes failed)
+[sound] player up: 24000 samples (48000 B) in PSRAM, queue 3
+[audio] ok
+[radio] begin: 0 (ok)
+[radio] 869.618 MHz bw 62 sf 8 cr 8 pwr 22 dBm
+[radio] ok status=0
+[mc] message rings: channel 9216 B, DM 10708 B in PSRAM
+[mc] favourites: 0 from NVS
+[mc] 1 spiffs
+[mc] migrate /contacts: /contacts3 already valid (760 B, 12 in /contacts), kept
+[mc] 2 radio
+[  3068][E][esp32-hal-cpu.c:110] addApbChangeCallback(): duplicate func=0x4205a594 arg=0x3fc9b974
+[sound] play event=boot sound=0 name="Bell TK-TK" ms=205 samples=3280 peak=16659 render_us=310059
+[mc] 3 store + mesh begin
+[mc] known contacts: 5 for the new-node notice
+[mc] identity 564f7689850aa060
+[mc] identity same as before
+[mc] migration: complete (prefs, channels and contacts read back)
+[mc] store: /identity/_main.id 96 B
+[mc] store: /prefs.json 439 B
+[mc] store: /channels2 544 B
+[mc] store: /contacts3 760 B
+[mc] store: /contacts 1836 B
+[  3835][E][Preferences.cpp:503] getBytesLength(): nvs_get_blob len fail: e1 NOT_FOUND
+[  3835][E][Preferences.cpp:503] getBytesLength(): nvs_get_blob len fail: e2 NOT_FOUND
+[  3836][E][Preferences.cpp:503] getBytesLength(): nvs_get_blob len fail: e3 NOT_FOUND
+[rptr] ready: 1 remembered repeater(s), auto-login off
+[mc] sizes: MyMesh=28096 B, channel ring=9216 B, DM ring=9472 B, DM threads=1216 B
+[mc] up: 869.6 MHz SF8, path hash 2B, name "OM Lite"
+[mc] mesh: up
+[ble] off at boot: switch=off pin_set=1 heap=172072 psram=8110859 internal=172072 largest=147444 wifi=off
+[batt] 4174 mV
+[sd] present: yes
+[sd] mount: ok
+[sd] tiles.pack 945 MB
+[map] JPEG decoder 17884 B in PSRAM
+[map] overlay z16 opened: 225792 tiles
+[map] index 75986 tiles (1823664 bytes), cache 8 x 128 KB
+[map] decode z13 4426/2912 off=53749957 len=27684
+[map] tile pixel probe z13 4426/2912 at 0,0 jpeg ef5c -> stored 5cef -> back ef5c OK
+[hist] page buffer 32 x 288 B in PSRAM
+[hist] working memory 18656 B in PSRAM (queue 4832, window 4096, scan 9216, offs 512)
+[hist] store sd, 2048 KB/chat, 65536 KB total, 4 chats, 3 KB used
+[hist] restored 33 channel message(s), 2 DM message(s) from the card
+[gps] mode 7 sent
+[time] GPS -> 1794337770 s, floor 1794337770 s (GPS)
+[gps] no-fix used=0 expected=10 heard=0 best=0 maxheard=0
+[hb] uptime=5s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=709 nmea=17 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[time] GPS -> 1794337772 s, floor 1794337772 s (GPS)
+[hb] uptime=7s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=1805 nmea=45 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=9s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=2901 nmea=73 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=11s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=3997 nmea=101 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=13s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=5093 nmea=129 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=15s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=6189 nmea=157 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=17s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=7285 nmea=185 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=19s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=8381 nmea=213 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[batt] 4173 mV
+[hb] uptime=21s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=9477 nmea=241 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=23s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=10573 nmea=269 bad=1 expected=10(g10 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[gps] no-fix used=0 expected=10 heard=1 best=18 maxheard=1
+[hb] uptime=26s heap=155700 stack=12196 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0 wifi=off
+[hb] gps bytes=11673 nmea=297 bad=1 expected=10(g10 l0 b0 a0) heard=1(g1 l0 b0 a0) used=0 best=22 maxheard=1 fix=0

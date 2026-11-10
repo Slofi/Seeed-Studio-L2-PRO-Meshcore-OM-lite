@@ -44,7 +44,8 @@ BIN23="$(mktemp /tmp/om-lite-est356.XXXXXX)"
 BIN24="$(mktemp /tmp/om-lite-est358.XXXXXX)"
 BIN25="$(mktemp /tmp/om-lite-est359.XXXXXX)"
 BIN26="$(mktemp /tmp/om-lite-est360.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26"' EXIT
+BIN27="$(mktemp /tmp/om-lite-est362.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -191,3 +192,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est359.cpp \
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est360.cpp \
   ../../src/rptr_model.cpp ../../src/ui/chat_layout.cpp -o "$BIN26"
 "$BIN26"
+
+# EST-362: the RPTR section's redesigned interaction. The page model before and after login, one
+# Apply per setting page (regions append `region save` in the same step), the clock guard (a jump over
+# a day confirms with both dates, a repeater ahead is the only refusal), which actions confirm, the
+# console (log lines are not rows and nothing in them is tappable), the read-back parsers, the list
+# order and the one pop-up's Cancel/Confirm/outside.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est362.cpp \
+  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp -o "$BIN27"
+"$BIN27"

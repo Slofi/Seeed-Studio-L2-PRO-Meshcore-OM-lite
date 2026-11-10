@@ -38,7 +38,8 @@ BIN17="$(mktemp /tmp/om-lite-est346.XXXXXX)"
 BIN18="$(mktemp /tmp/om-lite-settings.XXXXXX)"
 BIN19="$(mktemp /tmp/om-lite-history.XXXXXX)"
 BIN20="$(mktemp /tmp/om-lite-est351.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20"' EXIT
+BIN21="$(mktemp /tmp/om-lite-wifi.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -122,6 +123,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_history.cpp -o "$BIN1
 # shared keyboard sheet's per-field filters, limits, key tables and rectangles (chat_layout.cpp).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est351.cpp \
   ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp ../../src/ui/chat_layout.cpp -o "$BIN20"
+# EST-354: the saved Wi-Fi network list (add, replace, forget, five at most), the scan list, the
+# asynchronous state machine (off / scanning / connecting / connected / failed, both timeouts and
+# millis() wrap) and the `wifi` USB command (no word reads or carries a password).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_wifi.cpp \
+  ../../src/usb_cmd_logic.cpp ../../src/ui/chat_layout.cpp -o "$BIN21"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -140,3 +146,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est351.cpp \
 "$BIN18"
 "$BIN19"
 "$BIN20"
+"$BIN21"

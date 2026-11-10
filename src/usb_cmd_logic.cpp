@@ -255,6 +255,25 @@ Command parseCommand(char* line) {
     c.error = cur.bad() ? "quote" : "args";
     return c;
   }
+  // EST-354: Wi-Fi is read and switched from the host, never configured: there is deliberately no
+  // word that carries an SSID or a password, so a stored secret cannot be printed back.
+  if (strcmp(verb, "wifi") == 0) {
+    c.kind = Kind::Wifi;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    const bool known = strcmp(sub, "status") == 0 || strcmp(sub, "scan") == 0 ||
+                       strcmp(sub, "on") == 0 || strcmp(sub, "off") == 0;
+    if (!known) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
 
   // Everything else, including anything that tries to read a key or a secret, is refused here and
   // never reaches a handler.

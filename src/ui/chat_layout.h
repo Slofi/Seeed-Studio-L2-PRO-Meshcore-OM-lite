@@ -15,7 +15,9 @@
 namespace om {
 namespace ui {
 
-enum class KeyKind : uint8_t { Char, Shift, Mode, Space, Del, Send, Emoji };
+// EST-354: Reveal is the password sheet's show/hide key. It exists only on the Wi-Fi password
+// field, so the chat keyboard's key tables are unchanged.
+enum class KeyKind : uint8_t { Char, Shift, Mode, Space, Del, Send, Emoji, Reveal };
 
 struct KeyDef {
   char label[8] = "";
@@ -68,13 +70,16 @@ uint32_t accentCodePoint(char key, bool shift);
 // editors. Each FIELD says which characters it accepts, how many bytes it holds, and whether the
 // accented s/c/z long press and the emoji page belong to it. The key rows are still the same sheet
 // (letters, 123, Del, Send); a field only filters the character keys it cannot accept.
-enum class KeyboardField : uint8_t { Chat = 0, NodeName, Base64Key };
+enum class KeyboardField : uint8_t { Chat = 0, NodeName, Base64Key, WifiPassword };
 
 // MeshCore's names: node_name[32] and ChannelDetails::name[32], so 31 bytes. AdvertDataParser::
 // isValidName rejects exactly [ ] \ : , ? * and accepts the rest of printable ASCII.
 constexpr int kKeyboardNameMaxBytes = 31;
 // A channel key is 16 bytes; base64 of 16 bytes is 22 significant chars plus "==", 24 in all.
 constexpr int kKeyboardBase64MaxBytes = 24;
+// A WPA2/WPA3 passphrase is 8..63 printable characters; the sheet accepts printable ASCII and caps
+// the buffer at 63 (the ESP32 driver enforces the minimum, not this keyboard).
+constexpr int kKeyboardWifiPassMaxBytes = 63;
 
 bool keyboardAllowsChar(KeyboardField field, char c);
 int keyboardMaxBytes(KeyboardField field);           // 0 for Chat (its own draft budget applies)

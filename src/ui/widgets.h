@@ -28,7 +28,8 @@ struct StatusModel {
   const char* clock = "--:--";
   bool dnd = false;         // the existing do-not-disturb setting, a moon in the bar
   bool bt = false;          // reserved: Bluetooth settings come in a later ticket
-  bool wifi = false;        // reserved: Wi-Fi settings come in a later ticket
+  bool wifi = false;        // EST-354: the Wi-Fi switch is on (icon present)
+  bool wifiConnected = false;   // ...and associated: the icon is ink, otherwise dim
   RadioFault fault = RadioFault::None;   // the red mark; None draws nothing
 };
 

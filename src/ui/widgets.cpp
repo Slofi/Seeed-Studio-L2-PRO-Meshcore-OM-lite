@@ -376,7 +376,10 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   const uint16_t gpsColour = cell.valid ? kGreen : kDim;
   drawTextRight(d, FontRole::MonoStatus, gpsColour, kBar, rects.gps.right(), cy, gps);
   if (flags.dnd) drawIcon(d, kIconDnd, rects.dnd.x, rects.dnd.y, kDim, kBar);
-  if (flags.wifi) drawIcon(d, kIconWifi, rects.wifi.x, rects.wifi.y, kDim, kBar);
+  // EST-354: present when Wi-Fi is on, dim until associated, ink once it has an IP.
+  if (flags.wifi) {
+    drawIcon(d, kIconWifi, rects.wifi.x, rects.wifi.y, m.wifiConnected ? kInk : kDim, kBar);
+  }
   if (flags.bt) drawIcon(d, kIconBluetooth, rects.bt.x, rects.bt.y, kDim, kBar);
 }
 

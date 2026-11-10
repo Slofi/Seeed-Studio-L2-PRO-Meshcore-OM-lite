@@ -2204,3 +2204,143 @@ blank.
 - Built in the sandbox (exit 0, RAM 170,424 B, flash 1,708,785 B), tests exit 0, reviewed binary flashed (1,709,152 B).
 - Tab switches by USB (Map, Nodes, Map, Chat): `[ui] frame push` 11,376..11,470 us each, i.e. the display is dark for about 11 ms per screen change (DISPOFF -> push -> DISPON). Whether the diagonal is gone and the blink is invisible can only be judged on the glass: Filip.
 - Map bottom (`docs/shots/2026-11-10-1625-map-labels.png`): scale "500m / 1km" and the attribution "Esri, HERE, Garmin, OSM" now sit apart.
+
+## 2026-11-10 16:35 (DS): EST-354, Wi-Fi (off by default), its Settings page and NTP
+
+Built with the REBUILD.md command, **exit 0**: RAM 197,456 B of 327,680 (60.3%), flash
+2,129,921 B of 6,553,600 (32.5%), `firmware.bin` 2,130,288 B. `test/host/run.sh` **exit 0**
+(all suites, including the new `test_wifi.cpp`).
+
+**The pieces.**
+- `src/wifi_model.h`: plain C++, host-tested. `SavedStore` (five networks, one row per SSID, adding
+  an existing SSID replaces its password in place, forget compacts), `ScanList` (one row per SSID,
+  stronger sighting wins, strongest first), and `Machine` (Off / Idle / Scanning / Connecting /
+  Connected / Failed, 15 s scan and 20 s connect timeouts, millis() wrap safe). The page and the
+  status bar read only this state; the radio side reports facts into it.
+- `src/wifi_link.cpp/.h`: ESP32 STA. `WiFi.begin()` is non-blocking, the scan is
+  `WiFi.scanNetworks(true)` polled with `scanComplete()`, and both timeouts are the model's, checked
+  in `wifiLoop()` on the loop task. `WiFi.persistent(false)` and `setAutoReconnect(false)`: our NVS
+  blob is the only credential store and the model owns retries (none while it says Failed).
+- Settings > General > Connections > Wi-Fi is now the real page: On/Off toggle (saved in NVS,
+  **default off**), the state line (Off / On, not connected / Scanning / Connecting / Connected /
+  Failed: reason), Network + IP + Signal when connected, `Scan networks ›`, the visible networks
+  strongest first with an RSSI and a vector lock mark for secured ones, and `Saved networks ›` (five
+  slots, Forget asks for a second tap). Tapping a network already saved connects with the stored
+  password; a new secured one opens the password sheet; an open one connects at once.
+- The password sheet is the shared chat keyboard (`KeyboardField::WifiPassword`, 63 bytes, printable
+  ASCII, no accented long press, no emoji page) with the chat's own key rectangles. The draft shows
+  one dot per byte and a `show` / `hide` key toggles the text. The passphrase is wiped from the
+  working and display buffers on Connect, on Back and on switch-off, and is never printed: no serial
+  line, and no USB command carries or reads one.
+- NTP: on every successful association `esp_sntp_init()` asks pool.ntp.org once. `configTime()` is
+  deliberately not used because it would overwrite TZ (the timekeeper owns Ljubljana). The IDF's
+  `sntp_sync_time` is weak (`nm liblwip.a`: `W sntp_sync_time`), so our definition captures the
+  epoch and does not touch the clock; the loop then calls
+  `timeKeeper().setFromSource(epoch, TimeSource::Wifi, millis()/1000)`. GPS stays the higher source:
+  if it set the clock in the last 6 h the log says `kept (a higher source holds the clock)` and the
+  source stays GPS. That is the ranking, not a failure. Nothing else is started on the network.
+- Status bar: `s.wifi` = the switch, `s.wifiConnected` = associated (a scan that keeps the link stays
+  ink). The reserved `kIconWifi` slot is drawn dim while on but not associated and in ink with an IP;
+  absent when off. A Wi-Fi serial bumps on every visible change and the loop does one redraw
+  (never while the password sheet is open).
+- USB: `wifi status`, `wifi scan`, `wifi on`, `wifi off` (`Kind::Wifi` in usb_cmd_logic). `wifi scan`
+  is asynchronous like the screen: the first call starts the scan and answers `state=scanning`; a
+  second call a few seconds later prints one `[wifi] ssid="..." rssi=-NN secured=0|1` line per SSID
+  and `[cmd] ok wifi scan N`. Blocking the command until the radio answered would stop the mesh loop,
+  which the ticket forbids. `wifi status` prints switch, state, SSID, IP, RSSI, reason, saved count,
+  scan count, time source, heap, PSRAM, `service_us_max` and `mesh_serial`; no password exists in
+  that line or in any handler.
+
+**RAM, before and after.** Baseline (same sandbox, before this ticket): RAM 170,424 B, flash
+1,708,785 B. After: **197,456 B (+27,032 B)** and **2,129,921 B (+421,136 B)**. Of the RAM, our own
+objects are small: `SavedStore` 492 B, `ScanList` 612 B, `Machine` 96 B, `Status` 96 B, about 1.3 KB
+together; the remaining ~25.7 KB is the Wi-Fi/lwIP library's own static BSS that the link pulls in
+even with the radio off. That is why the switch is not the whole memory story: the driver's heap is
+allocated only when the switch turns on, and `startDriver()` prints the exact internal-heap and
+PSRAM delta with its duration (`[wifi] driver up in N ms: heap A -> B (+/-X B), PSRAM ...`). Turning
+it off prints `[wifi] driver down: heap ...`. The device numbers are the ones to quote; they could
+not be measured in the sandbox.
+
+**Radio coexistence, what was checked.** The SX1262 is on SPI2 (NSS 21, SCK 4, MISO 5, MOSI 6,
+`radio.h`), the panel on SPI3, the card on SPI2/1-bit; Wi-Fi is the SoC's internal radio and has no
+SPI bus or pin in common, so there is no bus arbitration to lose. What it does share is CPU: the
+Wi-Fi/lwIP tasks run on the other core, and this firmware only polls (`wifiLoop()`); the measured
+steady-state cost is in `wifi status` as `service_us_max`. `[hb]` now carries `wifi=<phase>` next to
+`mesh=up`, and `wifi status` carries `mesh_serial` (`meshMsgSerial()`), so reception while Wi-Fi is
+on can be shown by sending a channel message from another node and seeing `mesh_serial` grow and the
+message arrive. Nothing in the history flush moved: `history::loop()` still runs first in the loop.
+
+**Host tests prove**: the saved list (add, replace in place, full at five, sixth refused, forget by
+name and index, bad/long input), the scan list (SSID dedupe, stronger sighting, sort, lock flag,
+bound) and every machine transition, both timeouts and millis wrap; the password field's 63-byte
+limit, printable-ASCII filter, no accents/emoji, the show/hide key in both keyboard pages and its tap
+rectangle; and that `wifi status|scan|on|off` parse while `wifi`, `wifi bogus`, `wifi on extra` and
+`wifi connect` are refused (no word can ask for a password).
+
+**Exact `tools/cmd.py` steps for Claude** (one reader on the port; `OM_PORT=/dev/ttyACM0`; shot with
+`tools/shot.py docs/shots/<name>.png` after each screen step):
+1. Flash `firmware.bin` (2,130,288 B). Boot must print
+   `[wifi] off at boot: heap=N psram=N saved=0 switch=off` (or the saved count) and the first
+   `[hb] ... wifi=off`. The radio is not initialised at boot.
+2. `tools/cmd.py status` -> note `heap`, `hist_worst_us`, `loop_stack_free`.
+3. `tools/cmd.py wifi status` -> `switch=off state=off saved=0 scan=0 ... heap=... psram=...
+   service_us_max=0 mesh_serial=N`.
+4. `tools/cmd.py wifi on` -> the serial prints
+   `[wifi] driver up in N ms: heap A -> B (+/-X B), PSRAM ...` and
+   `[wifi] link check: SX1262 on SPI2, display SPI3, card SPI2; Wi-Fi uses no SPI bus`; the answer
+   is `switch=on state=idle` (or `failed` with the reason if the driver could not allocate). One
+   more `wifi status` -> `state=idle`, `service_us_max` a few dozen us.
+5. `tools/cmd.py wifi scan` -> `[cmd] ok wifi scan 0 state=scanning`. Wait 6 s (the driver's own
+   scan timeout is 6 s), then `tools/cmd.py wifi scan` again -> one `[wifi] ssid="..." rssi=-NN
+   secured=0|1` per network, strongest first, and `[cmd] ok wifi scan N`. If the first call is
+   repeated too early it still answers `state=scanning`, no block.
+6. Settings by touch: `tap 307 13` (gear) -> `tap 32 38` (General tab); the General page opens at
+   scroll 0. Wi-Fi is under CONNECTIONS, below Channels: drag the body up (`drag 160 210 160 110
+   300`) and tap the Wi-Fi row (with that drag it sits near y=167; read the row from the shot if the
+   scroll snapped differently). Shot `2026-11-10-est354-wifi-page`: switch OFF, State "Off", note
+   "Turn Wi-Fi on to scan for networks"; the networks and Saved rows are not drawn while off.
+7. Still on that page: tap the Wi-Fi toggle (y=87 at scroll 0) -> shot: ON, State "On, not
+   connected", `Scan networks ›`, the note; the status bar now shows the dim Wi-Fi icon. Tap
+   `Scan networks` (y=147) -> "scanning" in the row; after a few seconds the loop redraws to the
+   NETWORKS list, strongest first, with a lock mark on secured rows; the first network row is at
+   y=219 while the page is at scroll 0. Shot `2026-11-10-est354-wifi-scan`.
+8. **Filip enters the secret** (Claude cannot and must not): tap the home network (first row,
+   `tap 160 219`), the password
+   sheet opens with the SSID in the title, dots only; Filip types the passphrase on the glass (the
+   `show` key reveals it, `hide` covers it), taps `Connect`. Claude can then read
+   `tools/cmd.py wifi status`: `state=connecting` then `state=connected ssid="..." ip=... rssi=-NN`;
+   serial: `[wifi] connected to "..." ip=... rssi=-NN` and, once the reply arrives,
+   `[wifi] NTP <epoch> s: applied, source Wi-Fi` (or `kept (a higher source holds the clock)` when
+   GPS has already set the clock in the last 6 h; that is the ranking). Shot
+   `2026-11-10-est354-wifi-connected`: Network + IP + Signal rows, status bar icon in ink.
+9. NTP check: `tools/cmd.py status` -> `clock=Wi-Fi` and the status bar shows HH:MM; with a GPS fix
+   already applied the log says `kept`, and `clock=GPS` is correct. Every NTP line is one per
+   connection, no other traffic.
+10. Auto-connect: `tools/cmd.py wifi off` -> shots/answers `switch=off`; `tools/cmd.py wifi on` ->
+    `state=connecting` with the saved SSID within a second and `connected` again; no password entry.
+11. Saved list: tap `Saved networks ›` -> five rows at most, each with a `Forget` key; one tap says
+    "Tap Forget again", the second removes it and the count drops. Shot
+    `2026-11-10-est354-wifi-saved`. Forget the test network only if Filip wants it gone; the list is
+    his.
+12. Mesh while Wi-Fi is on: note `mesh_serial` from `wifi status`, send a channel message from the
+    other node and run `tools/cmd.py msgs 3` and `wifi status` again; `mesh_serial` must grow and the
+    message must be there. `[hb]` must still print `mesh=up` and `wifi=connected`, and
+    `loop_stack_free` must stay at the EST-350 level (Wi-Fi adds no loop-task stack use; its tasks
+    are its own).
+13. Password privacy: while the sheet is open, capture the serial and search for the passphrase
+    Filip typed; it must not appear. `wifi status` and `wifi scan` show SSIDs, never a password.
+
+**Could not check** (no device, no card, no serial): the measured driver-up duration and heap/PSRAM
+delta on the L2 (the numbers printed by step 4 are the real answer), actual scan results and RSSI,
+a real association and the NTP reply (the linker accepted the weak `sntp_sync_time` replacement, its
+runtime path is unproven), auto-connect on Filip's home AP, the glass (dots, lock mark, icon
+colours, the password keys under a finger, the page's scroll), and whether the ESP32-S3's Wi-Fi
+buffer allocation behaves with this board's octal PSRAM. If `WiFi.mode(WIFI_STA)` fails the switch
+turns itself back off and `[wifi] driver init FAILED` prints the heap, so that failure is not silent.
+
+**Next step:** flash, run steps 1-13, and report the driver-up numbers, the scan list and the NTP
+line; then EST-355 (Bluetooth) can reuse the same switch/NVS/status pattern.
+
+## 2026-11-10 17:00 (Claude): EST-354 on the device
+- Built in the sandbox (exit 0, RAM 197,456 B = 60.3 %, flash 2,129,921 B, +421 KB for the Wi-Fi stack), tests exit 0, reviewed binary flashed (2,130,288 B). Checked: no log line prints a password (only `s_pendingPass` is set from it).
+- By USB: `wifi status` off by default; `wifi on`: heap 128,668 -> 90,872 B (Wi-Fi driver up). **The first scan right after switching on fails** (`state=failed reason="scan failed"`); a second scan: `scan done: 12 visible, 12 rows`. Mesh stayed up. Connecting needs Filip's home password, typed by him on the device.

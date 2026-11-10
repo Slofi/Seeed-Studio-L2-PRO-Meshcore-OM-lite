@@ -16,12 +16,15 @@
 namespace om {
 namespace ui {
 
-// The two text pages use the SAME keyboard sheet as the chat composer (EST-352): letters, 123, Del,
+// The text pages use the SAME keyboard sheet as the chat composer (EST-352): letters, 123, Del,
 // the s/c/z long press, no emoji. The old 10x4 letter grid and 13x5 base64 alphabet are gone.
-enum class SettingsEditor : uint8_t { None = 0, Letters, Base64 };
+// EST-354 adds the Wi-Fi password: the same sheet with printable ASCII, 63 bytes, dots on the
+// draft line, and a show/hide key (Reveal) in the emoji key's place.
+enum class SettingsEditor : uint8_t { None = 0, Letters, Base64, WifiPass };
 
-// The sheet field one editor means: a name (MeshCore's allowed characters and 31-byte limit) or a
-// channel key (base64 alphabet, 24 bytes = a 16-byte secret with its "==" padding).
+// The sheet field one editor means: a name (MeshCore's allowed characters and 31-byte limit), a
+// channel key (base64 alphabet, 24 bytes = a 16-byte secret with its "==" padding) or a Wi-Fi
+// passphrase (printable ASCII, 63 bytes).
 KeyboardField settingsEditorField(SettingsEditor editor);
 
 struct SettingsView {
@@ -39,6 +42,7 @@ struct SettingsView {
   const char* okLabel = "OK";
   bool editNums = false;         // the sheet's page: letters or 123
   bool editShift = false;
+  bool editReveal = false;       // EST-354: the password sheet's show/hide key
   int accentRow = -1;            // the held s/c/z key while its preview is up
   int accentCol = -1;
   uint32_t accentCp = 0;

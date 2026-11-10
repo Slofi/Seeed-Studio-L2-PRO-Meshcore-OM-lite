@@ -71,7 +71,8 @@ constexpr bool settingsTabFits(SettingsTab t, int16_t width) {
 enum class SetPage : uint8_t {
   GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
   Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
-  Sound, SoundPicker, Wifi, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash, Count,
+  Sound, SoundPicker, Wifi, WifiSaved, WifiPass, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash,
+  Count,
 };
 constexpr int kSetPageCount = (int)SetPage::Count;
 

@@ -24,6 +24,7 @@ enum class Kind : uint8_t {
   Tap,      // tap <x> <y>
   Drag,     // drag <x0> <y0> <x1> <y1> <ms>
   KeyWake,  // key wake
+  Wifi,     // wifi status | scan | on | off   (EST-354; never a password)
 };
 
 // A parsed command. `target` and `text` point into the line given to parseCommand(), which is

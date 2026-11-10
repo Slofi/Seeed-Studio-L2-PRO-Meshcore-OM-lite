@@ -28,6 +28,7 @@
 #include "usb_cmd_logic.h"
 #include "usb_frames.h"
 #include "usb_touch.h"
+#include "wifi_link.h"
 #include "fonts.h"
 #include "ui/age.h"
 #include "ui/compose_text.h"
@@ -124,13 +125,15 @@ static const char* g_setOkLabel = "OK";
 // held s/c/z key whose accented letter the release enters.
 static bool g_setEditNums = false;
 static bool g_setEditShift = false;
+static bool g_setEditReveal = false;   // EST-354: the password sheet is showing its text
 static int g_setAccentRow = -1;
 static int g_setAccentCol = -1;
 static uint32_t g_setAccentCp = 0;
 static bool g_setAccentPreview = false;
 static int g_chanPage = 0;           // the channel whose page is open
 static bool g_deleteArmed = false;   // Delete needs a second tap, as today
-static char g_editBuf[kNameBufBytes];  // the name editor's text: MeshCore's 31 bytes + terminator
+// The shared editor buffer: a MeshCore name is 31 bytes, a Wi-Fi passphrase 63 (EST-354).
+static char g_editBuf[64];
 static bool g_editNew = false;       // the name editor is naming a NEW channel
 static int g_editCh = 0;             // the channel the name editor renames
 static int g_addKind = 0;            // 1 create private, 2 join private, 3 join #tag
@@ -152,6 +155,8 @@ static bool g_setSelOpen = false;    // the chat selector is dropped down over t
 static int g_setSelScroll = 0;       // the selector list's scroll, px
 static int g_setSelScroll0 = 0;      // its value when the finger went down
 static int g_setSelMaxScroll = 0;    // the last build's clamp
+// EST-354: the SSID whose password the sheet is asking for (never the password itself).
+static char g_wifiPassSsid[om::wifi::kSsidBytes + 1] = "";
 
 static void drawSettings();
 static void openSettings(int mainTab, om::ui::SettingsTab tab);
@@ -624,11 +629,14 @@ static void buildStatus(om::ui::StatusModel& s) {
   s.gpsHeard = g_gps.heardTotal;  // the one GPS number on the glass
   s.gpsTalked = g_gps.sentences > 0;
   s.batteryPct = batteryPercent(g_battMv);
-  // The status icons that appear only when they are on. Bluetooth and Wi-Fi have no settings yet
-  // (later tickets), so their slots stay empty; DND is the existing sound setting.
+  // The status icons that appear only when they are on. Wi-Fi (EST-354): present when the switch is
+  // on, ink once the station has an IP and dim while it does not. Bluetooth is still a later ticket.
   s.dnd = g_dnd;
   s.bt = false;
-  s.wifi = false;
+  s.wifi = om::wifiIsEnabled();
+  const om::wifi::Status& wst = om::wifiStatus();
+  s.wifiConnected = wst.phase == om::wifi::Phase::Connected ||
+                    (wst.phase == om::wifi::Phase::Scanning && wst.ssid[0] != 0);
   s.fault = om::radioFaultState().reason();
   // Data honesty: show HH:MM only after a real source (GPS today) has set the clock since boot.
   // Before that the time is only the floor (max saved, build time), which is not a real time.
@@ -1159,6 +1167,8 @@ static void chatKey(const om::ui::ChatHitResult& hit) {
     case om::ui::KeyKind::Send:
       chatSendDraft();
       break;
+    case om::ui::KeyKind::Reveal:
+      break;   // a chat draft has no secret to reveal
     case om::ui::KeyKind::Char: {
       char one[2] = {hit.keyCh, 0};
       if (g_kb.shift && !g_kb.nums() && one[0] >= 'a' && one[0] <= 'z') one[0] = (char)(one[0] - 32);
@@ -1523,7 +1533,7 @@ static void drawRptrTab() {
 // the action id in a row.
 enum SetAct : uint16_t {
   A_None = 0,
-  A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_Bt, A_Sound,
+  A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
   A_Apply, A_Cancel,
   A_MapRecentre, A_MapClear, A_RptrForget,
@@ -1540,6 +1550,8 @@ enum SetAct : uint16_t {
   A_PickBase = 140,        // 140.. the chimes, then Off
   A_ChanBase = 200,        // 200..207 one row per channel
   A_TimeFieldBase = 220,   // 220..224 year / month / day / hour / minute
+  A_WifiNetBase = 240,     // 240..247 the scan rows on the Wi-Fi page (strongest first)
+  A_WifiForgetBase = 250,  // 250..254 the saved rows on the Saved networks page
 };
 
 // EST-350: where a page came from is the navigation history (ui/settings_layout.h SettingsNav), not a
@@ -1580,10 +1592,13 @@ static void setGo(SetPage p) {
   g_setSelOpen = false;
   g_deleteArmed = false;
   // EST-352: every door into a text editor opens the shared sheet on the letters page with shift
-  // off, exactly the chat sheet's rule; the accented-letter hold starts clean.
-  if (p == SetPage::NameEdit || p == SetPage::ChanKey) {
+  // off, exactly the chat sheet's rule; the accented-letter hold starts clean. EST-354: the Wi-Fi
+  // password also starts hidden and empty.
+  if (p == SetPage::NameEdit || p == SetPage::ChanKey || p == SetPage::WifiPass) {
     g_setEditNums = false;
     g_setEditShift = false;
+    g_setEditReveal = false;
+    if (p == SetPage::WifiPass) g_editBuf[0] = 0;
     g_setAccentRow = -1;
     g_setAccentCol = -1;
     g_setAccentCp = 0;
@@ -1709,7 +1724,11 @@ static void buildSettingsRows() {
       setAdd(om::ui::SetRowKind::Chevron, A_Channels, "Channels", v);
 
       setSection("CONNECTIONS");
-      setAdd(om::ui::SetRowKind::Chevron, A_Wifi, "Wi-Fi", "");
+      // EST-354: the row says what the radio is doing, so the page is one tap away from an answer.
+      if (!om::wifiIsEnabled()) snprintf(v, sizeof(v), "off");
+      else if (om::wifiStatus().phase == om::wifi::Phase::Connected) snprintf(v, sizeof(v), "connected");
+      else snprintf(v, sizeof(v), "on");
+      setAdd(om::ui::SetRowKind::Chevron, A_Wifi, "Wi-Fi", v);
       setAdd(om::ui::SetRowKind::Chevron, A_Bt, "Bluetooth", "");
 
       setSection("SOUND");
@@ -1998,8 +2017,80 @@ static void buildSettingsRows() {
     }
 
     case SetPage::Wifi: {
+      char v[48];
       snprintf(g_setTitle, sizeof(g_setTitle), "Wi-Fi");
-      setAdd(om::ui::SetRowKind::Note, A_None, "Not built yet.");
+      const om::wifi::Status& wst = om::wifiStatus();
+      setSection("WI-FI");
+      setAdd(om::ui::SetRowKind::Toggle, A_WifiToggle, "Wi-Fi", "ON", om::wifiIsEnabled());
+      om::wifi::stateLine(wst, v, sizeof(v));
+      setAdd(om::ui::SetRowKind::Value, A_None, "State", v);
+      if (wst.phase == om::wifi::Phase::Connecting || wst.phase == om::wifi::Phase::Connected) {
+        setAdd(om::ui::SetRowKind::Value, A_None, "Network", wst.ssid);
+      }
+      if (wst.phase == om::wifi::Phase::Connected) {
+        setAdd(om::ui::SetRowKind::Value, A_None, "IP", wst.ip);
+        snprintf(v, sizeof(v), "%d dBm", (int)wst.rssi);
+        setAdd(om::ui::SetRowKind::Value, A_None, "Signal", v);
+      }
+      if (om::wifiIsEnabled()) {
+        const bool scanning = om::wifiIsScanning();
+        snprintf(v, sizeof(v), "%s", scanning ? "scanning" : "");
+        setAdd(om::ui::SetRowKind::Chevron, A_WifiScan, "Scan networks", v);
+        const int found = om::wifiScanCount();
+        if (found > 0) {
+          setSection("NETWORKS");
+          const int shown = found < 8 ? found : 8;
+          for (int i = 0; i < shown; ++i) {
+            const om::wifi::ScanResult* n = om::wifiScanAt(i);
+            if (n == nullptr) continue;
+            snprintf(v, sizeof(v), "%d dBm", (int)n->rssi);
+            setAdd(om::ui::SetRowKind::Chevron, (uint16_t)(A_WifiNetBase + i), n->ssid, v,
+                   n->secured);
+          }
+          if (found > shown) {
+            snprintf(v, sizeof(v), "%d more, strongest first", found - shown);
+            setAdd(om::ui::SetRowKind::Note, A_None, v);
+          }
+        } else {
+          setAdd(om::ui::SetRowKind::Note, A_None,
+                 scanning ? "Scanning, this takes a few seconds."
+                          : "Tap Scan networks to look around.");
+        }
+        setSection("SAVED");
+        snprintf(v, sizeof(v), "%d of %d", om::wifiSavedCount(), om::wifi::kMaxSaved);
+        setAdd(om::ui::SetRowKind::Chevron, A_WifiSaved, "Saved networks", v);
+      } else {
+        setAdd(om::ui::SetRowKind::Note, A_None, "Turn Wi-Fi on to scan for networks.");
+      }
+      break;
+    }
+
+    case SetPage::WifiSaved: {
+      char v[24];
+      snprintf(g_setTitle, sizeof(g_setTitle), "Saved networks");
+      setSection("SAVED");
+      if (om::wifiSavedCount() == 0) {
+        setAdd(om::ui::SetRowKind::Note, A_None,
+               "No saved networks yet. Connect once and it is saved here.");
+      } else {
+        for (int i = 0; i < om::wifiSavedCount(); ++i) {
+          const om::wifi::SavedNetwork* n = om::wifiSavedAt(i);
+          if (n == nullptr) continue;
+          setAdd(om::ui::SetRowKind::Value, A_None, n->ssid, "saved");
+          setAdd(om::ui::SetRowKind::Button, (uint16_t)(A_WifiForgetBase + i), "Forget", "",
+                 false, true);
+        }
+        snprintf(v, sizeof(v), "%d of %d", om::wifiSavedCount(), om::wifi::kMaxSaved);
+        setAdd(om::ui::SetRowKind::Note, A_None, v);
+      }
+      break;
+    }
+
+    case SetPage::WifiPass: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Wi-Fi: %s", g_wifiPassSsid);
+      g_setEditor = om::ui::SettingsEditor::WifiPass;
+      g_setOkLabel = "Connect";
+      snprintf(g_setEditText, sizeof(g_setEditText), "%s", g_editBuf);
       break;
     }
     case SetPage::Bt: {
@@ -2076,6 +2167,7 @@ static om::ui::SettingsView settingsView() {
   v.okLabel = g_setOkLabel;
   v.editNums = g_setEditNums;
   v.editShift = g_setEditShift;
+  v.editReveal = g_setEditReveal;
   v.accentRow = g_setAccentPreview ? g_setAccentRow : -1;
   v.accentCol = g_setAccentPreview ? g_setAccentCol : -1;
   v.accentCp = g_setAccentPreview ? g_setAccentCp : 0;
@@ -2171,6 +2263,12 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
 }
 
 static void settingsBack() {
+  // EST-354: Back out of the password sheet wipes the typed secret; it is not needed after leaving.
+  if (g_setPage == SetPage::WifiPass) {
+    memset(g_editBuf, 0, sizeof(g_editBuf));
+    g_setEditText[0] = 0;
+    g_setEditReveal = false;
+  }
   // EST-350: Back is one step of the history setGo() builds, so it needs no table per page: the page
   // it returns to is the one the user came from, at the scroll it was left at. An empty history means
   // this is a root page: Back leaves Settings for the screen the gear was pressed on.
@@ -2230,6 +2328,20 @@ static void handleSettingsRow(uint16_t id) {
       break;
     case A_Channels: setGo(SetPage::Channels); break;
     case A_Wifi:     setGo(SetPage::Wifi); break;
+    case A_WifiToggle: {
+      const bool on = !om::wifiIsEnabled();
+      om::wifiSetEnabled(on);
+      showToast(on ? "Wi-Fi on" : "Wi-Fi off");
+      break;
+    }
+    case A_WifiScan:
+      if (!om::wifiIsEnabled()) {
+        showToast("Wi-Fi is off");
+      } else {
+        om::wifiStartScan();
+      }
+      break;
+    case A_WifiSaved: setGo(SetPage::WifiSaved); break;
     case A_Bt:       setGo(SetPage::Bt); break;
     case A_Sound:    setGo(SetPage::Sound); break;
     case A_Time:     setGo(SetPage::Time); break;
@@ -2437,7 +2549,33 @@ static void handleSettingsRow(uint16_t id) {
       break;
 
     default:
-      if (id >= A_PresetBase && id < A_PresetBase + om::ui::kRadioPresetCount) {
+      if (id >= A_WifiNetBase && id < A_WifiNetBase + 8) {
+        const int at = (int)(id - A_WifiNetBase);
+        const om::wifi::ScanResult* n = om::wifiScanAt(at);
+        if (n != nullptr) {
+          const int saved = om::wifiSavedIndexFor(n->ssid);
+          if (saved >= 0) {
+            if (om::wifiConnectSaved(saved)) showToast("Wi-Fi: connecting");
+            else showToast("Wi-Fi: not started");
+          } else if (!n->secured) {
+            if (om::wifiConnect(n->ssid, "")) showToast("Wi-Fi: connecting");
+            else showToast("Wi-Fi: not started");
+          } else {
+            snprintf(g_wifiPassSsid, sizeof(g_wifiPassSsid), "%s", n->ssid);
+            setGo(SetPage::WifiPass);
+          }
+        }
+      } else if (id >= A_WifiForgetBase && id < A_WifiForgetBase + om::wifi::kMaxSaved) {
+        const int at = (int)(id - A_WifiForgetBase);
+        if (!g_deleteArmed) {
+          g_deleteArmed = true;
+          showToast("Tap Forget again");
+        } else {
+          g_deleteArmed = false;
+          om::wifiForget(at);
+          showToast("Network forgotten");
+        }
+      } else if (id >= A_PresetBase && id < A_PresetBase + om::ui::kRadioPresetCount) {
         g_setPresetPending = (int)(id - A_PresetBase);
         setGo(SetPage::ConfirmPreset);
       } else if (id >= A_HashBase && id < A_HashBase + 3) {
@@ -2534,6 +2672,27 @@ static void handleSettingsStep(uint16_t id, int dir) {
 }
 
 static void settingsEditorOk() {
+  if (g_setPage == SetPage::WifiPass) {
+    char ssid[om::wifi::kSsidBytes + 1];
+    snprintf(ssid, sizeof(ssid), "%s", g_wifiPassSsid);
+    const char* toast = "Wi-Fi: not started";
+    if (!om::wifiIsEnabled()) {
+      toast = "Wi-Fi is off";
+    } else if (ssid[0] == 0) {
+      toast = "No network chosen";
+    } else if (om::wifiConnect(ssid, g_editBuf)) {
+      toast = "Wi-Fi: connecting";
+    }
+    // The passphrase is never needed by the screen after this point; the saved copy is what
+    // auto-connect uses. Wipe both the working buffer and the display copy, then leave the sheet
+    // BEFORE the toast redraws, so the page behind it is the one that appears.
+    memset(g_editBuf, 0, sizeof(g_editBuf));
+    g_setEditText[0] = 0;
+    setBack();
+    showToast(toast);
+    return;
+  }
+
   if (g_setPage == SetPage::TimeEdit) {
     uint32_t epoch = 0;
     const bool made = om::localEpochFromCivil(g_setTime.year, g_setTime.month, g_setTime.day,
@@ -2653,6 +2812,9 @@ static void handleSettingsTap(int x, int y) {
         break;
       case om::ui::KeyKind::Del:
         om::ui::composeBackspace(settingsEditBuf());   // one whole code point, never half an accent
+        break;
+      case om::ui::KeyKind::Reveal:
+        g_setEditReveal = !g_setEditReveal;   // EST-354: show/hide the passphrase
         break;
       case om::ui::KeyKind::Send:
         settingsEditorOk();   // draws its own frame
@@ -2779,6 +2941,9 @@ void setup() {
   if (g_setBrightness < 20) g_setBrightness = 20;
   om::boardSetBrightness(g_setBrightness);
   g_fade.reset(g_setBrightness);
+  // EST-354: the Wi-Fi switch and its five saved networks. Default off; the radio is not touched
+  // until the switch is on (or a saved "on" is applied by the first loop pass).
+  om::wifiBegin();
   Serial.printf("[prefs] sound=%d vol=%u msg=%u dm=%u men=%u new=%u dnd=%d tsnd=%d tone=%u emoji_rec=%u\n",
                 g_soundOn, g_volume, g_sndMsg, g_sndDm, g_sndMen, g_sndNew, g_dnd, g_touchSnd,
                 g_touchIdx, (unsigned)g_emojiRecent.count);
@@ -3188,6 +3353,10 @@ void loop() {
   // MeshCore callback or a USB command only enqueues a record; the card is touched here and nowhere
   // else. One (two under pressure) record per pass: a card write never sits in the packet path.
   om::history::loop();
+  // EST-354: Wi-Fi is polled, never waited on: the driver's scan and the supplicant's connect are
+  // serviced here, and the model's timeouts are checked on the same pass. The status bar, a packet
+  // and the history flush keep their own cadence.
+  om::wifiLoop();
   static uint32_t lastBeat = 0;
   static bool screenOn = true;
   static bool sleepPending = false;   // the backlight is fading out; the panel is still awake
@@ -3361,7 +3530,7 @@ void loop() {
     lastBeat = millis();
     // EST-350: `stack` is the loop task's least free stack in bytes since boot (FreeRTOS high-water
     // mark). The USB command path was the deepest one; this number is how the fix is checked.
-    Serial.printf("[hb] uptime=%lus heap=%u stack=%u board=%s mesh=%s tab=%d settings=%d vol=%u snd=%d dnd=%d\n",
+    Serial.printf("[hb] uptime=%lus heap=%u stack=%u board=%s mesh=%s tab=%d settings=%d vol=%u snd=%d dnd=%d wifi=%s\n",
                   (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(),
                   (unsigned)uxTaskGetStackHighWaterMark(nullptr),
                   g_boardOk ? "ok" : "FAIL",
@@ -3370,7 +3539,8 @@ void loop() {
 #else
                   "n/a",
 #endif
-                  g_tab, g_settings, g_volume, g_soundOn, g_dnd);
+                  g_tab, g_settings, g_volume, g_soundOn, g_dnd,
+                  om::wifi::phaseToken(om::wifiStatus().phase));
     // GPS diagnostics on the same beat: a module that talks and a module that hears nothing look
     // identical in GGA's "0 used", so bytes, sentences, the checksum failures and the GSV counts are
     // the evidence. expected=g/l/b/a is what the almanac lists per constellation, heard=g/l/b/a is
@@ -3413,6 +3583,17 @@ void loop() {
   // reader's call chain (see docs/PROGRESS.md: 1,136 B otaPoll + 304 B frame handler + the command's
   // own 1,632 B, on an 8,192 B loop-task stack).
   om::otaCommandPoll();
+  // EST-354: one redraw when the Wi-Fi state a screen draws has changed (the status icon, the
+  // Settings page, a finished scan). Never while the password sheet is open: a background frame
+  // must not move the keys under the finger.
+  {
+    static uint32_t seenWifi = 0;
+    const uint32_t ws = om::wifiSerial();
+    if (ws != seenWifi) {
+      seenWifi = ws;
+      if (screenOn && g_setEditor == om::ui::SettingsEditor::None) redrawCurrentScreen();
+    }
+  }
 #if defined(OM_ENABLE_MESH)
   om::meshLinkLoop();
 
@@ -4268,6 +4449,61 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
                        (uint16_t)cmd.nums[3], (uint32_t)cmd.nums[4]);
       snprintf(reply, cap, "[cmd] ok drag %d %d %d %d %d", cmd.nums[0], cmd.nums[1], cmd.nums[2],
                cmd.nums[3], cmd.nums[4]);
+      return;
+    }
+
+    case om::usb::Kind::Wifi: {
+      // EST-354. Read and switch only: no word here carries an SSID or a password, and no path
+      // prints one. `wifi scan` starts an asynchronous scan and answers at once; once the page (or
+      // a second call) sees the finished list, the same command prints one [wifi] line per network.
+      const char* sub = cmd.target;
+      if (sub == nullptr) {
+        cmdError(reply, cap, "args");
+        return;
+      }
+      if (strcmp(sub, "on") == 0 || strcmp(sub, "off") == 0) {
+        const bool on = strcmp(sub, "on") == 0;
+        om::wifiSetEnabled(on);
+        snprintf(reply, cap, "[cmd] ok wifi switch=%s state=%s heap=%u psram=%u",
+                 on ? "on" : "off", om::wifi::phaseToken(om::wifiStatus().phase),
+                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+        return;
+      }
+      if (strcmp(sub, "scan") == 0) {
+        const int count = om::wifiScanCount();
+        if (count > 0) {
+          for (int i = 0; i < count; ++i) {
+            const om::wifi::ScanResult* r = om::wifiScanAt(i);
+            if (r == nullptr) continue;
+            char ssid[96];
+            cmdSafe(ssid, sizeof(ssid), r->ssid);
+            Serial.printf("[wifi] ssid=\"%s\" rssi=%d secured=%d\n", ssid, (int)r->rssi,
+                          r->secured ? 1 : 0);
+          }
+          snprintf(reply, cap, "[cmd] ok wifi scan %d", count);
+          return;
+        }
+        if (!om::wifiIsEnabled()) {
+          cmdError(reply, cap, "wifi off");
+          return;
+        }
+        if (!om::wifiIsScanning()) om::wifiStartScan();
+        // The loop keeps running while the driver scans. Call `wifi scan` again in a few seconds to
+        // print the list; this line says so instead of blocking on the radio.
+        snprintf(reply, cap, "[cmd] ok wifi scan 0 state=scanning");
+        return;
+      }
+      const om::wifi::Status& st = om::wifiStatus();
+      char ssid[96];
+      cmdSafe(ssid, sizeof(ssid), st.ssid);
+      snprintf(reply, cap,
+               "[cmd] ok wifi switch=%s state=%s ssid=\"%s\" ip=%s rssi=%d reason=\"%s\" "
+               "saved=%d scan=%d source=%s heap=%u psram=%u service_us_max=%lu mesh_serial=%lu",
+               om::wifiIsEnabled() ? "on" : "off", om::wifi::phaseToken(st.phase), ssid,
+               st.ip[0] ? st.ip : "-", (int)st.rssi, st.reason, om::wifiSavedCount(),
+               om::wifiScanCount(), om::timeSourceName(om::timeKeeper().source()),
+               (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram(),
+               (unsigned long)om::wifiServiceWorstUs(), (unsigned long)om::meshMsgSerial());
       return;
     }
 

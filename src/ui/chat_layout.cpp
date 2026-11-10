@@ -64,6 +64,10 @@ bool keyboardAllowsChar(KeyboardField field, char c) {
         case '[': case ']': case '\\': case ':': case ',': case '?': case '*': return false;
         default: return true;
       }
+    case KeyboardField::WifiPassword:
+      // A passphrase is any printable ASCII, space included; no control character can be typed on
+      // this sheet anyway.
+      return u >= 0x20 && u < 0x7F;
     case KeyboardField::Chat:
     default:
       return true;   // the chat's own key table is already the set it offers
@@ -74,6 +78,7 @@ int keyboardMaxBytes(KeyboardField field) {
   switch (field) {
     case KeyboardField::NodeName: return kKeyboardNameMaxBytes;
     case KeyboardField::Base64Key: return kKeyboardBase64MaxBytes;
+    case KeyboardField::WifiPassword: return kKeyboardWifiPassMaxBytes;
     default: return 0;   // chat: the draft budget is composeAllowance()
   }
 }
@@ -85,7 +90,11 @@ bool keyboardAcceptsBytes(KeyboardField field, int usedBytes, int addBytes) {
   return cap == 0 || usedBytes + addBytes <= cap;
 }
 
-bool keyboardAccents(KeyboardField field) { return field != KeyboardField::Base64Key; }
+bool keyboardAccents(KeyboardField field) {
+  // A password is taken literally: the accented s/c/z long press would enter bytes the network's
+  // passphrase did not ask for.
+  return field != KeyboardField::Base64Key && field != KeyboardField::WifiPassword;
+}
 bool keyboardEmoji(KeyboardField field) { return field == KeyboardField::Chat; }
 
 // EST-346: the three keys with a long-press accent. Slovenian: s -> š (U+0161), c -> č (U+010D),
@@ -116,12 +125,39 @@ int keyRow(bool nums, int row, KeyDef* out, KeyboardField field) {
         return n;
       default:
         // Filip, 2026-11-10: "where are the dot and comma?" The bottom row is
-        // 123, emoji, comma, space, dot, Send. The smiley opens the emoji page.
+        // 123, emoji, comma, space, dot, Send. The smiley opens the emoji page; the password field
+        // puts its show/hide key in the smiley's place (EST-354).
         put(out[n++], "123", kKeyUnitWide, KeyKind::Mode);
-        if (keyboardEmoji(field)) put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
+        if (field == KeyboardField::WifiPassword) {
+          put(out[n++], "show", kKeyUnitWide, KeyKind::Reveal);
+        } else if (keyboardEmoji(field)) {
+          put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
+        }
         putChar(field, out, n, ",", kKeyUnit, KeyKind::Char);
         putChar(field, out, n, "space", kKeyUnitSpace, KeyKind::Space);
         putChar(field, out, n, ".", kKeyUnit, KeyKind::Char);
+        put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
+        return n;
+    }
+  }
+  // A passphrase takes the common symbol set on its 123 page (the chat keyboard's own rows are
+  // tuned for prose). Letters, digits, space, comma and dot stay where they are; these two rows add
+  // the punctuation a home router password usually has.
+  if (field == KeyboardField::WifiPassword) {
+    switch (row) {
+      case 0: return addChars(field, out, 0, kNumbers0);
+      case 1: return addChars(field, out, 0, "@#$%^&*()");
+      case 2:
+        put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
+        n = addChars(field, out, n, "-+=_/'\"~");
+        put(out[n++], "", kKeyUnitWide, KeyKind::Del);
+        return n;
+      default:
+        put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
+        put(out[n++], "show", kKeyUnitWide, KeyKind::Reveal);
+        put(out[n++], "space", kKeyUnitSpace, KeyKind::Space);
+        put(out[n++], ",", kKeyUnit, KeyKind::Char);
+        put(out[n++], ".", kKeyUnit, KeyKind::Char);
         put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
         return n;
     }
@@ -156,9 +192,13 @@ int keyRow(bool nums, int row, KeyDef* out, KeyboardField field) {
       put(out[n++], "", kKeyUnitWide, KeyKind::Del);
       return n;
     default:
-      // The dot and the comma stay on the 123 page too, and the smiley is always one key away.
+      // The dot and the comma stay on the 123 page too, and the smiley is always one key away (the
+      // password field's show/hide key takes that slot).
       put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
-      if (keyboardEmoji(field)) put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
+      if (field == KeyboardField::WifiPassword) {
+        put(out[n++], "show", kKeyUnitWide, KeyKind::Reveal);
+      }
+      else if (keyboardEmoji(field)) put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
       putChar(field, out, n, "space", kKeyUnitSpace, KeyKind::Space);
       putChar(field, out, n, ",", kKeyUnit, KeyKind::Char);
       putChar(field, out, n, ".", kKeyUnit, KeyKind::Char);

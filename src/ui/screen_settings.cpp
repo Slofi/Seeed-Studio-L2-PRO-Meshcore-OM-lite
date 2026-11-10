@@ -14,7 +14,11 @@ namespace om {
 namespace ui {
 
 KeyboardField settingsEditorField(SettingsEditor e) {
-  return e == SettingsEditor::Base64 ? KeyboardField::Base64Key : KeyboardField::NodeName;
+  switch (e) {
+    case SettingsEditor::Base64: return KeyboardField::Base64Key;
+    case SettingsEditor::WifiPass: return KeyboardField::WifiPassword;
+    default: return KeyboardField::NodeName;
+  }
 }
 
 namespace {
@@ -36,6 +40,16 @@ void drawChevron(lgfx::LovyanGFX* d, int right, int cy, uint16_t col) {
   // Two 1 px lines, 4 px each: no glyph, so no missing-glyph box at any face.
   d->drawLine((int16_t)(right - 4), (int16_t)(cy - 3), (int16_t)right, (int16_t)cy, col);
   d->drawLine((int16_t)right, (int16_t)cy, (int16_t)(right - 4), (int16_t)(cy + 3), col);
+}
+
+// EST-354: the lock mark on a secured network row. Drawn as vectors (the faces carry no padlock
+// glyph): a 7 x 5 body with a three-line shackle above it, one pixel wide.
+void drawLock(lgfx::LovyanGFX* d, int right, int cy, uint16_t col) {
+  const int x = right - 7;
+  d->drawRoundRect((int16_t)x, (int16_t)cy, 7, 5, 1, col);
+  d->drawLine((int16_t)(x + 2), (int16_t)cy, (int16_t)(x + 2), (int16_t)(cy - 2), col);
+  d->drawLine((int16_t)(x + 2), (int16_t)(cy - 2), (int16_t)(x + 4), (int16_t)(cy - 2), col);
+  d->drawLine((int16_t)(x + 4), (int16_t)(cy - 2), (int16_t)(x + 4), (int16_t)cy, col);
 }
 
 // The chat selector's chevron: down closed, up open. The same two 4 px lines the Chat tab's header
@@ -204,13 +218,20 @@ void drawRow(lgfx::LovyanGFX* d, const SettingRow& row, const Rect& r) {
       break;
     }
     case SetRowKind::Chevron: {
-      drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, labelX, cy, r.w - 2 * kSetPadX - 94,
-                       row.label);
-      if (row.value[0]) {
-        drawTextRight(d, FontRole::MonoMeta, kDim, kScreen, r.right() - kSetPadX - 12, cy,
-                      row.value);
+      // `on` is the secured flag on a scanned network row (EST-354): a lock sits between the value
+      // (RSSI) and the chevron. Other chevron rows leave it false.
+      const int right = (int)(r.right() - kSetPadX);
+      drawChevron(d, right, cy, kDimmer);
+      int valueRight = right - 12;
+      if (row.on) {
+        drawLock(d, valueRight, cy + 1, kDimmer);
+        valueRight -= 11;
       }
-      drawChevron(d, (int)(r.right() - kSetPadX), cy, kDimmer);
+      drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, labelX, cy,
+                       r.w - 2 * kSetPadX - (row.on ? 112 : 100), row.label);
+      if (row.value[0]) {
+        drawTextRight(d, FontRole::MonoMeta, kDim, kScreen, valueRight, cy, row.value);
+      }
       break;
     }
     case SetRowKind::Value:
@@ -234,7 +255,9 @@ void drawEditor(lgfx::LovyanGFX* d, const SettingsLayout& L, const SettingsView&
   const ChatLayout g = chatLayoutFor(l2(), true, false, v.editNums, false, field);
   const char* hint = field == KeyboardField::Base64Key
                          ? "Channel key, base64, 24 characters"
-                         : "Name, MeshCore characters, 31 maximum";
+                         : (field == KeyboardField::WifiPassword
+                                ? "Wi-Fi password, 63 characters, dots"
+                                : "Name, MeshCore characters, 31 maximum");
   drawTextLeft(d, FontRole::MonoMeta, kDimmer, kScreen, kSetPadX, L.body.y + 10, hint);
 
   d->fillRoundRect(g.sheet.x, g.sheet.y, g.sheet.w, g.sheet.h + kOskRadius, kOskRadius, kSheet);
@@ -243,9 +266,20 @@ void drawEditor(lgfx::LovyanGFX* d, const SettingsLayout& L, const SettingsView&
   d->fillRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kCodeBg);
   d->drawRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kAcc);
   const bool empty = v.editText == nullptr || v.editText[0] == 0;
+  const bool secret = v.editor == SettingsEditor::WifiPass && !v.editReveal;
   if (empty) {
     drawTextLeft(d, FontRole::MonoMeta, kDimmer, kCodeBg, g.draft.x + kFieldPadX,
                  g.draft.y + g.draft.h / 2, "(type on the keys below)");
+  } else if (secret) {
+    // Never draw the passphrase back after entry: one dot per byte, capped to the field's width.
+    // The string is ASCII by the field's own filter, so a byte is one character.
+    const int cap = (g.draft.w - 2 * kFieldPadX - 40) / 6;
+    int n = (int)strlen(v.editText);
+    if (n > cap) n = cap;
+    const int dy = g.draft.y + g.draft.h / 2;
+    for (int i = 0; i < n; ++i) {
+      d->fillCircle((int16_t)(g.draft.x + kFieldPadX + 3 + i * 6), (int16_t)dy, 2, kInk);
+    }
   } else {
     drawTextEllipsis(d, FontRole::MonoMeta, kInk, kCodeBg, g.draft.x + kFieldPadX,
                      g.draft.y + g.draft.h / 2, g.draft.w - 2 * kFieldPadX - 34, v.editText);
@@ -262,6 +296,8 @@ void drawEditor(lgfx::LovyanGFX* d, const SettingsLayout& L, const SettingsView&
     for (int c = 0; c < n && c < g.keyCount[r]; ++c) {
       if (defs[c].kind == KeyKind::Send) {
         snprintf(defs[c].label, sizeof(defs[c].label), "%s", v.okLabel ? v.okLabel : "OK");
+      } else if (defs[c].kind == KeyKind::Reveal) {
+        snprintf(defs[c].label, sizeof(defs[c].label), "%s", v.editReveal ? "hide" : "show");
       }
       drawKeyCap(d, g.keys[r][c], defs[c], v.editShift);
     }

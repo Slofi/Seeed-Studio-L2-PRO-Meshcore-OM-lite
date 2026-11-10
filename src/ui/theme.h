@@ -106,6 +106,65 @@ constexpr int16_t kBadgeH     = 9;
 constexpr int16_t kBadgePadX  = 2;
 constexpr int16_t kGearSize   = 9;   // mock: the status ⚙ glyph at the status font size (8.5 px)
 
+// Chat (work order item 3). Every number comes from the mock's L2 rules (.chans, .msgs, .compose,
+// .osk) rounded to whole pixels for the panel.
+// Chip strip: .chans padding 4px 6px, chips 4px apart, 1 px bottom line. A chip is mono 8 px text with
+// 2px 5px padding, a 1 px border and a 9 px pill radius at 14 px high -> 16 px high here.
+constexpr int16_t kChipRowH    = 23;
+constexpr int16_t kChipH       = 16;
+constexpr int16_t kChipPadX    = 5;
+constexpr int16_t kChipGap     = 4;
+constexpr int16_t kChipRowPadX = 6;
+constexpr int16_t kChipRadius  = 8;    // pill; the mock's 9 px at 14 px high is half the height
+constexpr int16_t kChipMenuW   = 30;   // the list button at the right end of the strip
+
+// Message band: .msgs padding 5px 7px, 4px between messages, line-height 1.35 at 9 px -> 14 px pitch.
+constexpr int16_t kMsgPadX     = 7;
+constexpr int16_t kMsgPadY     = 5;
+constexpr int16_t kMsgGap      = 4;
+constexpr int16_t kMsgLineH    = 14;
+constexpr int16_t kMsgHdrGap   = 4;    // time -> name -> text gaps on the first line
+
+// Compose line: .compose padding 4px 6px, a .field of mono 8.5 px with 3px 5px padding and 1 px border,
+// buttons at the sans 9 px size. 27 px keeps the field at 20 px and the line 3 px inside the edges.
+constexpr int16_t kComposeH     = 27;   // 1 px top line + 3 px + 20 px field + 3 px
+constexpr int16_t kComposePadX  = 6;
+constexpr int16_t kComposeGap   = 4;
+constexpr int16_t kFieldH       = 20;
+constexpr int16_t kFieldPadX    = 5;
+constexpr int16_t kKbdBtnW      = 26;
+constexpr int16_t kSendW        = 44;
+constexpr int16_t kCaretH       = 9;
+constexpr int16_t kCaretW       = 1;
+
+// Keyboard sheet: .osk padding 4px, a 15 px .draft line, key rows 2 px apart; keys "about 22 px"
+// (the ticket). 4 + 18 + 3 + 4*22 + 3*2 + 4 = 123 px, so the sheet covers the tab bar completely.
+constexpr int16_t kOskPad      = 4;
+constexpr int16_t kOskRadius   = 6;
+constexpr int16_t kOskKeyH     = 22;
+constexpr int16_t kOskKeyGap   = 2;
+constexpr int16_t kOskDraftH   = 18;
+constexpr int16_t kOskDraftGap = 3;
+constexpr int16_t kOskReplyH   = 18;
+constexpr int16_t kKeyRadius   = 3;
+constexpr uint8_t kKeyUnit     = 10;   // a normal key; wide keys are 22 units (the mock's flex 2.2)
+constexpr uint8_t kKeyUnitWide = 22;
+
+// Message menu and INFO panel: old behaviour (tap a message), new layer.
+constexpr int16_t kActionRowH = 24;
+constexpr int16_t kMenuHeadH  = 16;
+constexpr int16_t kMenuW      = 180;
+constexpr int16_t kPanelPad   = 6;
+constexpr int16_t kInfoColX   = 86;   // INFO panel: the value column, measured from the panel's left
+
+// Components the chat needs beyond the shared surfaces. Values are the mock's: the sheet is .osk
+// (#191816, the same value as the map canvas), a key is #232220 with a #31302e edge, and the compose
+// field is .compose .field (#171614, the same value as the bars).
+constexpr uint16_t kSheet     = rgb565(0x191816);
+constexpr uint16_t kKeyBg     = rgb565(0x232220);
+constexpr uint16_t kKeyLine   = rgb565(0x31302e);
+constexpr uint16_t kFieldBg   = rgb565(0x171614);
+
 // Content rectangle: what is left between the two bars.
 constexpr int16_t kContentY   = kStatusH;
 constexpr int16_t kContentH   = kScreenH - kStatusH - kTabH;

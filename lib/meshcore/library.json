@@ -1,6 +1,6 @@
 {
   "name": "meshcore",
-  "version": "1.16.0",
+  "version": "1.18.0",
   "description": "MeshCore core (MIT), firmware mains and platform/CLI/sensor helpers excluded",
   "build": {
     "srcFilter": [

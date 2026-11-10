@@ -12,56 +12,6 @@ namespace om {
 namespace ui {
 namespace {
 
-void applyRole(lgfx::LovyanGFX* d, FontRole role) {
-  const lgfx::IFont* f = fontFor(role);
-  d->setFont(f ? f : &lgfx::fonts::Font0);
-}
-
-void textLeft(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
-              const char* s) {
-  applyRole(d, role);
-  d->setTextDatum(lgfx::textdatum_t::middle_left);
-  d->setTextColor(fg, bg);
-  d->drawString(s, x, y);
-}
-
-int textRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int right, int y,
-              const char* s) {
-  applyRole(d, role);
-  const int w = d->textWidth(s);
-  d->setTextDatum(lgfx::textdatum_t::middle_right);
-  d->setTextColor(fg, bg);
-  d->drawString(s, right, y);
-  return w;
-}
-
-// ASCII only by design (the fonts cover 0x20-0x7E); never draws outside maxW.
-void textEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
-                  int maxW, const char* s) {
-  applyRole(d, role);
-  d->setTextDatum(lgfx::textdatum_t::middle_left);
-  d->setTextColor(fg, bg);
-  if (maxW <= 0) return;
-  if (d->textWidth(s) <= maxW) {
-    d->drawString(s, x, y);
-    return;
-  }
-  const int ellW = d->textWidth("...");
-  char buf[48];
-  int n = 0;
-  int w = 0;
-  for (; s[n] && n < (int)sizeof(buf) - 4; ++n) {
-    buf[n] = s[n];
-    buf[n + 1] = 0;
-    w = d->textWidth(buf);
-    if (w + ellW > maxW) break;
-  }
-  if (n == 0) return;
-  buf[n] = 0;
-  strncat(buf, "...", sizeof(buf) - strlen(buf) - 1);
-  d->drawString(buf, x, y);
-}
-
 uint16_t barsOn(int rssi) {
   if (rssi > -60) return 5;
   if (rssi > -80) return 4;
@@ -139,6 +89,68 @@ void drawTabIcon(lgfx::LovyanGFX* d, Tab t, int cx, int cy, uint16_t col) {
 
 }  // namespace
 
+// Text helpers, public because the screens use the same role fonts and colour pairs. They draw into
+// the surface passed in, exactly like everything else here.
+void setRole(lgfx::LovyanGFX* d, FontRole role) {
+  const lgfx::IFont* f = fontFor(role);
+  d->setFont(f ? f : &lgfx::fonts::Font0);
+}
+
+void drawTextLeft(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
+                  const char* s) {
+  setRole(d, role);
+  d->setTextDatum(lgfx::textdatum_t::middle_left);
+  d->setTextColor(fg, bg);
+  d->drawString(s, x, y);
+}
+
+int drawTextRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int right, int y,
+                  const char* s) {
+  setRole(d, role);
+  const int w = d->textWidth(s);
+  d->setTextDatum(lgfx::textdatum_t::middle_right);
+  d->setTextColor(fg, bg);
+  d->drawString(s, right, y);
+  return w;
+}
+
+// ASCII only by design (the fonts cover 0x20-0x7E); never draws outside maxW.
+void drawTextEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
+                      int maxW, const char* s) {
+  setRole(d, role);
+  d->setTextDatum(lgfx::textdatum_t::middle_left);
+  d->setTextColor(fg, bg);
+  if (maxW <= 0) return;
+  if (d->textWidth(s) <= maxW) {
+    d->drawString(s, x, y);
+    return;
+  }
+  const int ellW = d->textWidth("...");
+  char buf[48];
+  int n = 0;
+  int w = 0;
+  for (; s[n] && n < (int)sizeof(buf) - 4; ++n) {
+    buf[n] = s[n];
+    buf[n + 1] = 0;
+    w = d->textWidth(buf);
+    if (w + ellW > maxW) break;
+  }
+  if (n == 0) return;
+  buf[n] = 0;
+  strncat(buf, "...", sizeof(buf) - strlen(buf) - 1);
+  d->drawString(buf, x, y);
+}
+
+int measureText(lgfx::LovyanGFX* d, FontRole role, const char* s, int len) {
+  if (d == nullptr || s == nullptr || len <= 0) return 0;
+  char buf[128];
+  const int n = len < (int)sizeof(buf) - 1 ? len : (int)sizeof(buf) - 1;
+  memcpy(buf, s, (size_t)n);
+  buf[n] = 0;
+  setRole(d, role);
+  return d->textWidth(buf);
+}
+
 uint16_t typeColour(NodeType t) {
   switch (t) {
     case NodeType::Client:   return kClient;
@@ -150,7 +162,7 @@ uint16_t typeColour(NodeType t) {
 }
 
 int textWidth(lgfx::LovyanGFX* d, FontRole role, const char* text) {
-  applyRole(d, role);
+  setRole(d, role);
   return d->textWidth(text);
 }
 
@@ -168,19 +180,19 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   // carries that glyph (tools/mkvlw.py --extra 0xb7), so the UTF-8 bytes below draw at x-height.
   snprintf(left, sizeof(left), "%s \xC2\xB7 %s \xC2\xB7 %s", m.protocol, m.region, m.hash);
   const int leftX = r.x + kStatusPadX + kStatusDot + kStatusGap;
-  textLeft(d, FontRole::MonoStatus, kDim, kBar, leftX, cy, left);
+  drawTextLeft(d, FontRole::MonoStatus, kDim, kBar, leftX, cy, left);
 
   // Right-hand group, laid out from the gear leftwards with the same measurements that draw it.
   const Rect gear = L.gear();
   drawGear(d, gear, kDim, kBar);
   int rx = gear.x - kStatusGap;
 
-  rx -= textRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, m.clock) + kStatusGap;
+  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, m.clock) + kStatusGap;
 
   char pct[8];
   if (m.batteryPct < 0) snprintf(pct, sizeof(pct), "--");
   else snprintf(pct, sizeof(pct), "%d%%", m.batteryPct);
-  const int pctW = textRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, pct);
+  const int pctW = drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, pct);
   rx -= pctW + kBattGap;   // mock .bits gap: the icon no longer touches "97%"
   drawBattery(d, rx - kBattW, cy, m.batteryPct);
   rx -= kBattW + kStatusGap;
@@ -188,11 +200,11 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   char gps[12];
   if (m.gpsValid) snprintf(gps, sizeof(gps), "GPS %d", m.gpsSats);
   else snprintf(gps, sizeof(gps), "GPS --");
-  rx -= textRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, gps) + kStatusGap;
+  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, gps) + kStatusGap;
 
   char nodes[16];
   snprintf(nodes, sizeof(nodes), "%d %s", m.nodes, m.nodes == 1 ? "node" : "nodes");
-  textRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, nodes);
+  drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, nodes);
 }
 
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {
@@ -214,7 +226,7 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {
     const uint16_t col = on ? kAcc : kDimmer;
     drawTabIcon(d, t, cx, iconCy, col);
 
-    applyRole(d, FontRole::SansTab);
+    setRole(d, FontRole::SansTab);
     d->setTextDatum(lgfx::textdatum_t::middle_center);
     d->setTextColor(col, on ? kSelBg : kBar);
     d->drawString(tabLabel(t), cx, labelCy);
@@ -229,7 +241,7 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {
     const int bx = chat.x + chat.w / 2 + 7;
     const int by = chat.y + 2;
     d->fillRoundRect(bx, by, bw, kBadgeH, kRadius, kBad);
-    applyRole(d, FontRole::SansTab);
+    setRole(d, FontRole::SansTab);
     d->setTextDatum(lgfx::textdatum_t::middle_center);
     d->setTextColor(kWhite, kBad);
     d->drawString(b, bx + bw / 2, by + kBadgeH / 2);
@@ -260,17 +272,17 @@ void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RowModel& row) {
 
   const int nameX = r.x + kRowPadX + kTypeDot + kRowGap;
   const int nameMaxW = cursor - nameX;
-  textEllipsis(d, FontRole::SansBody, kInk, row.selected ? kSelBg : kScreen, nameX, cy,
+  drawTextEllipsis(d, FontRole::SansBody, kInk, row.selected ? kSelBg : kScreen, nameX, cy,
                nameMaxW, row.name);
 
   if (row.note && row.note[0]) {
-    textRight(d, FontRole::MonoMeta, kDimmer, row.selected ? kSelBg : kScreen, noteRight, cy,
+    drawTextRight(d, FontRole::MonoMeta, kDimmer, row.selected ? kSelBg : kScreen, noteRight, cy,
               row.note);
   }
   if (row.rssi != kNoRssi) {
     drawSignalBars(d, barsX, r.y + r.h - kRowPadY, row.rssi);
   }
-  textRight(d, FontRole::MonoMeta, kDim, row.selected ? kSelBg : kScreen, ageX + ageW, cy,
+  drawTextRight(d, FontRole::MonoMeta, kDim, row.selected ? kSelBg : kScreen, ageX + ageW, cy,
             row.age);
 
   const int lineY = r.bottom() - 1;
@@ -280,7 +292,7 @@ void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RowModel& row) {
 void drawEmptyState(lgfx::LovyanGFX* d, const Rect& area, const char* title, const char* sub) {
   const int cx = area.x + area.w / 2;
   const int cy = area.y + area.h / 2;
-  applyRole(d, FontRole::SansBody);
+  setRole(d, FontRole::SansBody);
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(kInk, kScreen);
   d->drawString(title, cx, cy - 9);

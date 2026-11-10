@@ -183,3 +183,91 @@
 
 ## 2026-11-10 07:18 (Claude) — EST-329 checked on the device
 - Screenshot `docs/shots/2026-11-10-0718-nodes-grey.png`: middle dots, battery gap, a gear that reads as one, grey palette. Contact save/load reviewed (temp file + rename, CRC, rate-limited); not yet proven across a reboot with real contacts (0 heard since the last reboot).
+## 2026-11-10 (DS, EST-330, Chat tab on the new layer)
+
+- **What this ticket is**: work order item 3. The old chat screens (channel list -> messages ->
+  composer, with bubbles, its own 34 px keyboard and a second copy of every coordinate) are gone from
+  `main.cpp`; the Chat tab is now the mock's chat: a chip row, a flat message list, a compose line and
+  a keyboard sheet that covers the tab bar. The channel list and its pages (add, #tag, private key,
+  mute, rename, delete, the base64 key view) are unchanged and still reachable: the three-line button
+  at the right end of the chip row opens them, and so does the status gear (the old SET did the same).
+- **New files** (all inside `src/ui/`):
+  - `text_wrap.h/.cpp` (118 lines): greedy word wrap. The width of a byte range comes from a callback
+    (`MeasureFn`), so the device measures with the real VLW face and test/host measures with 6 px per
+    character. Every line is a byte range of the source, so the draw renders exactly what the wrapper
+    measured. A word wider than the whole line is split between characters, nothing is truncated.
+  - `chat_layout.h/.cpp` (347 lines): every rectangle of the screen, from `theme.h` numbers only. Chip
+    strip (scroll area + fixed list button), message band, compose line (field / keyboard button /
+    Send), the sheet (reply bar, draft line, four key rows) and the two overlays. The keyboard rows
+    are split from integer weights (10 = normal, 22 = wide) using cumulative boundaries, so rounding
+    never accumulates: keys come out 29/30 px wide with clean 2 px gaps and each row ends exactly on
+    the 4 px pad.
+  - `screen_chat.h/.cpp` (598 lines): draws into the off-screen frame (`omFrameBegin/End`) and answers
+    taps with the same rectangles (`chatScreenHit`). The shell only reacts to what was hit.
+- **Screen, in numbers**: chips row 26..49 (23 px, chip 16 px high, pill radius 8, selected = dark gold
+  fill + 1 px gold outline, unread count in red at the right inside the chip); message band 49..188
+  (139 px); compose line 188..215 (field 230x20, keyboard button 26, Send 44); tab bar 215..240. The
+  sheet is 123 px tall (4 pad + 18 draft + 3 + 4x22 keys + 3x2 gaps + 4 pad) and starts at y=117, so
+  it covers the whole tab bar, which is not drawn while it is open (mock `.kb-open`). With a reply bar
+  it is 144 px and starts at y=96. The compose field is hidden while the sheet is open; the draft line
+  rides on top of the keys, with a solid 1x9 gold caret after the text (the mock blinks it; a blink
+  needs a redraw timer, so it is steady for now).
+- **Messages** follow the mock: no bubbles. Time in mono dim, sender in mono (gold for others, green
+  for ours), text in sans 11 px, wrapped, 14 px line pitch, 4 px between messages, newest at the
+  bottom, one clip rect for the band. The time is an elapsed time ("now"/"2m"), not a clock: there is
+  no RTC on this board.
+- **Scroll**: the old finger formula is kept (`scroll = scroll0 - dy`, px up from the newest). The
+  rubber band is kept (10 px of give, snapped back on release). A new message moves the view only when
+  the reader is at the bottom (scroll 0); otherwise the scroll grows by the content growth, so the
+  text being read holds still. While the sheet is open the live update is skipped, so the draft cannot
+  jump under a finger.
+- **Behaviour kept**: send on the selected channel; a reply goes on the wire as `@Name text` (MeshCore
+  has no reply field); tap a message -> REPLY / INFO / COPY; INFO shows sender, channel, age, hops and
+  SNR (hops -1 = local echo, SNR 0 = unknown); unread cleared when a chip is opened and on live
+  traffic; mute still silences the chime (a muted chip's label is drawn dimmer); the channel list and
+  its settings as before. One deliberate change: Send with an empty draft does nothing now (it used
+  to put an empty message on the air).
+- **DM chips**: the model has them (`ChatChip::dm`, label "DM: name") and the chip strip draws whatever
+  the view lists, but nothing produces DM traffic yet: `mesh_link.cpp`'s `onMessageRecv` is still an
+  empty override, so there is no DM store and no DM unread count. Work order item 5 adds DMs; the
+  screen will not need a change then. No DM chip is invented in the meantime.
+- **Old code deleted**: `drawChannelsTab`, `openChannels`, `drawComposer`, `drawChatMessages`,
+  `drawBubbleMenu`, `drawBubbleInfo`, `drawKbIcon`, `kbKey`, `wrapLines`, `fmtAge`, the composer branch
+  of `handleTap`, the composer case inside the name editor (it was unreachable), the channel-list tap
+  branch and 19 globals/constants. `main.cpp`: **2,068 -> 1,741 lines, 327 fewer** (605 lines removed,
+  278 added for the new shell: chip/message view building, one draw path, the tap switch and the send).
+- **Widgets**: the three text helpers (`setRole`, `drawTextLeft/Right/Ellipsis`) moved out of
+  `widgets.cpp`'s anonymous namespace into `widgets.h`, and `measureText` was added, so the chat screen
+  does not grow a second copy of them (item 4 will want the same).
+- **Build** (`pio run -e om_lite_l2`, the command from REBUILD.md): exit 0, SUCCESS, 18.80 s
+  (incremental after the final `chat_layout` edit; the first full build of this ticket was 78.08 s).
+  RAM 77,340 B of 327,680 (23.6%), flash 834,813 B of 6,553,600 (12.7%). Previous run 76,300 B /
+  829,549 B, so this ticket added **+1,040 B RAM and +5,264 B flash** (no new font bytes: the four VLW
+  blobs are unchanged).
+- **Tests**: `test/host/run.sh` exit 0. The 9 Python screenshot tests and the layout and contact-store
+  tests still pass, and the new `test/host/test_chat.cpp` (g++, `-Wall -Wextra -Werror`) passes:
+  wrapping exactly at the width, the first line narrower than the rest, a long word split by
+  characters, leading/repeated spaces, a realistic 80-character message (every line within its width,
+  all bytes consumed), the empty draft, a cut at maxLines, and the bad-argument paths; the chip strip
+  (widths with and without an unread count, strip width, overflow, max scroll, chip edges in and out of
+  the gaps, scrolling a chip into view, clamping at both ends); the closed screen (chips/band/compose
+  tile the content, field/kbd/Send in order with exactly the gap between them); the sheet (bottom edge
+  on the screen floor, covers the tab bar, compose gone, draft and rows exactly where the numbers say,
+  every key row tiling with 2 px gaps and flush edges, 10/9/9/3 and 10/10/10/2 keys, reply bar above
+  the draft); the key definitions (QWERTZ letters, shift/mode/space/del/send); and the message band
+  (content height, max scroll, bottom anchoring, spans, edge taps in the gaps and the pads, a full
+  20-message ring clamped to its top and bottom, and the smaller band while the sheet is open).
+- **Could not check** (no device in the sandbox): how any of this looks on the panel; that the VLW
+  text at 11 px reads well inside 139 px of band; that the chips row scrolls to the selected chip
+  under a real finger; the sheet over the tab bar; the caret; a real send and reply round trip; the
+  "new message while scrolled up" rule against live traffic. To check: send from a second node while
+  the list is scrolled up (the view must not jump) and while it is at the bottom (it must show the new
+  message), open the sheet (tab bar disappears, keys 22 px, tap outside closes, shift/123/space/del),
+  and open the channel list from the three-line button.
+- **Next step**: Claude flashes, screenshots the Chat tab with and without the keyboard sheet, and
+  compares the chip row, the message lines and the sheet with the mock. Then work order item 4 (map
+  chrome, RPTR, Settings on the new layer, `main.cpp` down to setup + loop + dispatch).
+
+## 2026-11-10 07:36 (Claude): EST-330 checked
+- Built in the sandbox (exit 0, RAM 77,340 B, flash 834,813 B), host tests exit 0, OTA ok (835,184 B), boots to Nodes (screenshot `docs/shots/2026-11-10-0736-boot.png`). The Chat screen itself is not yet seen on the panel (needs a finger on the tab).
+- Review finding, to fix in the next ticket: `g_replyTo`, `g_bubMenu` and `g_bubInfo` are indexes into the per-channel view rebuilt from the shared 32-message ring. Once the ring is full, every new message drops the oldest and shifts the indexes, so a reply typed while a message arrives can go to the wrong sender, and an open menu/INFO can switch to another message. Hold the message's sequence number (and copy the reply name at the moment REPLY is tapped) instead of an index.

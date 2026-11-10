@@ -63,7 +63,31 @@ spacing. Check the size cost of fonts in flash and say it.
 6. WadaMesh is GPL-3.0: read it for what it does, write our own code, copy nothing. OverMesh is ours.
 7. No em dashes in any text on the screen: commas, colons, full stops.
 
+## MeshCore core: upgradeable (Filip, 2026-11-10: "we still need to be able to update the MC core version")
+
+- `lib/meshcore` is MeshCore **v1.18.0** (tag companion-v1.18.0, commit 81dbae5), byte-identical to upstream
+  (161/161 files, checked 2026-11-10; the old "1.16.0" label was wrong). **Never edit a file in `lib/meshcore`
+  or, once it exists, `lib/meshcore_companion`.** If something seems to need an edit there, stop and write it
+  in PROGRESS.md: Claude decides.
+- The phone link and the node's settings come from upstream's own companion code (examples/companion_radio,
+  MIT), built unmodified, with our board glue in `src/target.*` and our screens behind the `mesh_link.h`
+  facade. Then a MeshCore release is: `tools/update_meshcore.py <tag>` (Claude runs it), read the printed
+  upstream diff, adjust `src/target.*` and the facade, build, test, flash. Our code only uses public APIs.
+- `reference/meshcore-companion-v1.18.0/` is that upstream code for reading; it is not built.
+
+## Bluetooth and Wi-Fi (Filip, 2026-11-10)
+
+Both are toggles in Settings, **default OFF**. Bluetooth makes the L2 a normal MeshCore companion node for
+the phone app, including channel and radio changes from the phone. Wi-Fi is for time (NTP) first.
+Time comes from GPS first, then Wi-Fi, then the phone, then set by hand.
+
 ## Work order (one ticket each, small enough for one 30-minute run)
+
+Revised 2026-11-10 07:40 (Claude): after 1-3 below are done, the order is: clock + icons (gear) ->
+core on upstream companion code (upgradeable) -> Settings in the mock style (runtime radio settings) ->
+everything else restyled (map, RPTR, overlays; no old-style screen left) -> Wi-Fi -> Bluetooth ->
+MeshCore features -> sounds. The list below is the original plan, kept for its detail.
+
 
 1. Screenshot over USB: the device sends its frame on request, a host tool writes a PNG. Claude runs it.
 2. Theme, fonts, layout, widgets; status bar + tab bar + the Nodes list on the new layer.

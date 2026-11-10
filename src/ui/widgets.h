@@ -50,5 +50,18 @@ void drawEmptyState(lgfx::LovyanGFX* d, const Rect& area, const char* title, con
 uint16_t typeColour(NodeType t);
 int textWidth(lgfx::LovyanGFX* d, FontRole role, const char* text);
 
+// --- text helpers -----------------------------------------------------------------------------
+// The chat screen needs the same three primitives the widgets use (a role font, a colour pair, and a
+// measure that works on a byte range for the wrapper). Public so no screen grows a second copy.
+void setRole(lgfx::LovyanGFX* d, FontRole role);
+void drawTextLeft(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
+                  const char* s);
+int drawTextRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int right, int y,
+                  const char* s);
+void drawTextEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
+                      int maxW, const char* s);
+// Width of the first `len` bytes of s (copied into a small buffer: the VLW face measures a C string).
+int measureText(lgfx::LovyanGFX* d, FontRole role, const char* s, int len);
+
 }  // namespace ui
 }  // namespace om

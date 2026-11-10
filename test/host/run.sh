@@ -12,7 +12,9 @@ BIN="$(mktemp /tmp/om-lite-layout.XXXXXX)"
 BIN2="$(mktemp /tmp/om-lite-contacts.XXXXXX)"
 BIN3="$(mktemp /tmp/om-lite-chat.XXXXXX)"
 BIN4="$(mktemp /tmp/om-lite-time.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4"' EXIT
+BIN5="$(mktemp /tmp/om-lite-gate.XXXXXX)"
+BIN6="$(mktemp /tmp/om-lite-age.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_contact_store.cpp -o "$BIN2"
@@ -22,8 +24,17 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_contact_store.cpp -o 
 # message must not move a reply target).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_chat.cpp \
   ../../src/ui/chat_layout.cpp ../../src/ui/text_wrap.cpp -o "$BIN3"
-# Time: NMEA RMC/ZDA, the source ranking, the floor and the Ljubljana DST clock.
+# Time: NMEA RMC/ZDA (including the ZDA build-year gate), the source ranking, the floor and the
+# Ljubljana DST clock.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_timekeeper.cpp \
   ../../src/timekeeper.cpp -o "$BIN4"
+# Wake touch gate: a finger held through the wake is ignored, a new press after 300 ms counts.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_touch_gate.cpp \
+  ../../src/touch_gate.cpp -o "$BIN5"
+# "Last heard" text (a stamp older than the build says "--") and the status bar's GPS cell widths.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_age.cpp \
+  ../../src/ui/age.cpp -o "$BIN6"
 "$BIN3"
 "$BIN4"
+"$BIN5"
+"$BIN6"

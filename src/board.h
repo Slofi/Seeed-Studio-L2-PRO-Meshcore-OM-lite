@@ -64,7 +64,20 @@ void boardSetBrightness(uint8_t brightness);
 // The Wake button (expander input 0, active low). Returns false if the expander is not readable.
 bool wakePressed(bool& pressed);
 
-// Screen off: backlight 0 + panel sleep. Screen on: panel wake + backlight.
+// Screen brightness used wherever a screen is switched on (backlight PWM, 0..255).
+constexpr uint8_t kScreenBrightness = 160;
+
+// The panel's sleep-out takes this long before it accepts pixels again (LovyanGFX's Panel_NV3031B
+// CMD_SLPOUT_DELAY = 120 ms; wakeup() sends SLPOUT but does not wait). A caller that wants a fresh
+// frame must wake the panel, wait this long, draw, and only then light the backlight, otherwise the
+// first thing the user sees is the stale frame or nothing.
+constexpr uint32_t kPanelWakeOutMs = 120;
+
+// Panel sleep/wake only: the backlight is left alone, so a caller can wake, redraw, then light it.
+void panelPower(bool on);
+
+// Screen off: backlight 0 + panel sleep. Screen on: panel wake + backlight, with no redraw; use it
+// only where the panel's content is still valid. The wake button uses panelPower() and redraws.
 void screenPower(bool on);
 
 // SD_MMC 1-bit (CLK 2 / CMD 3 / D0 1), card power on expander bit 14, detect on bit 2.
@@ -76,15 +89,33 @@ void sdUnmount();
 uint16_t batteryMilliVolts();
 
 // L76K GNSS: UART1, RX 18 / TX 17 at 9600. gpsPoll() chews whatever has arrived and returns the
-// latest GGA state; it never blocks.
+// latest GGA/GSV state; it never blocks. gpsBegin() sends the L76K's constellation mode once the
+// module's power and reset sequence is done (see board.cpp).
+//
+// GSV talkers map to these; GGA's satellite count is the "used" one and cannot tell "hears nothing"
+// from "hears plenty, too weakly", which is exactly what the in-view counts are for.
+enum GpsConstellation : uint8_t {
+  kGpsUs = 0,        // GPGSV
+  kGpsGlonass,       // GLGSV
+  kGpsBeiDou,        // BDGSV / GBGSV
+  kGpsGalileo,       // GAGSV
+  kGpsOther,         // GQGSV (QZSS), GNGSV (combined), anything else
+  kGpsConstellationCount
+};
+
 struct GpsState {
   bool valid = false;      // fix quality > 0
-  uint8_t sats = 0;
+  uint8_t sats = 0;        // satellites USED in the fix (GGA field 7)
   double lat = 0.0;
   double lon = 0.0;
   uint32_t bytes = 0;      // bytes received on the UART (0 = the module is not talking to us)
   uint32_t sentences = 0;  // complete NMEA lines
+  uint32_t checksumBad = 0;  // lines whose '*' checksum did not match (skipped, never parsed)
   uint32_t timeEpoch = 0;  // latest UTC time from RMC/ZDA, 0 = none yet
+  // GSV: satellites in view per constellation, and the best C/N0 of the current GSV cycle in dB-Hz.
+  uint8_t inView[kGpsConstellationCount] = {0, 0, 0, 0, 0};
+  uint8_t inViewTotal = 0;   // sum of the named constellations, or GN's own count when only GN talks
+  uint8_t bestSnr = 0;       // 0 = no SNR reported yet
 };
 void gpsBegin(bool swapPins = false);
 void gpsPoll(GpsState& out);

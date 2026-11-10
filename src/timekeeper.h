@@ -75,9 +75,19 @@ struct ParsedTime {
 };
 
 // Parses one complete $..RMC or $..ZDA sentence (checksum included). RMC needs status A AND a sane
-// date; ZDA needs a sane date. A void RMC or the module's default date before a satellite is
-// rejected. Returns ok=false for a bad checksum, a split/truncated line, or an impossible date.
+// date; ZDA needs a sane date AND a year the build can vouch for (see kZdaYearsAhead). A void RMC
+// or the module's default date before a satellite is rejected. Returns ok=false for a bad checksum,
+// a split/truncated line, or an impossible date.
 ParsedTime parseNmeaTime(const char* sentence);
+
+// The year this firmware was compiled in, taken from this file's __DATE__. 0 if it cannot be read.
+int buildYear();
+
+// ZDA carries no validity field, so a receiver that has never seen a satellite can still send its
+// default date and there is nothing in the sentence to say so. A ZDA year outside
+// build year .. build year + 1 is therefore refused (a device flashed in December is still running
+// in January, hence the one year of slack).
+constexpr int kZdaYearsAhead = 1;
 
 // NMEA time hhmmss(.sss) -> seconds since midnight.
 bool parseNmeaClock(const char* field, int& hour, int& minute, int& second);

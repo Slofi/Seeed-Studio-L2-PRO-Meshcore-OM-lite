@@ -445,3 +445,102 @@
 - **GPS:** the UART works and the module has real time, but GGA says 0 satellites used and no fix (indoors now; 15 min on a balcony with half the sky also gave no fix, old firmware). The time came from ZDA (RMC was void), i.e. from the module's own clock.
 - Gear 13 px reads as a gear (`docs/shots/2026-11-10-0820-nodes-clock.png`).
 - Found: both stored contacts show `30d+`: their `lastmod` was written by the old 2024 clock. Filip found: the wake button turns the screen on black until a touch, and that touch can press something.
+
+## 2026-11-10 (DS, EST-333, wake button, GPS diagnostics, ZDA gate, stale last heard)
+
+- **What this ticket is**: the four small things Filip and Claude found on the device at 08:20: the
+  wake button comes back to a black screen until a touch (and that touch presses something), the GPS
+  reports 0 satellites with no way to tell "hears nothing" from "hears plenty, too weak", ZDA has no
+  validity field and can carry a module default date, and the two flash-loaded contacts show `30d+`
+  because their `lastmod` was stamped by the old 2024 clock.
+- **1. Wake button.** `screenPower()` did `wakeup() + brightness` and nothing drew, so the panel
+  stayed black until some other code pushed a frame, and the touch that caused it was handled as a
+  tap. Now:
+  - `board` grew `panelPower(bool)` (panel sleep/wake only, backlight untouched), a named
+    `kScreenBrightness` (160, was a literal) and `kPanelWakeOutMs = 120`. The 120 ms is the panel's
+    own sleep-out time: LovyanGFX's `Panel_NV3031B` sets `CMD_SLPOUT_DELAY = 120`, and `wakeup()`
+    only sends SLPOUT, it does not wait, so the app has to wait before the first frame.
+  - The loop's wake order is now: panel wake, wait 120 ms, redraw the screen, then backlight on. No
+    stale frame is ever lit.
+  - One redraw entry point, `redrawCurrentScreen()`, covers every screen the app can be showing:
+    all four tabs (Nodes, Chat with its selector / keyboard sheet / bubble menu, Map, RPTR) and
+    every settings page (sound list, chime and click pickers, channel list, channel page, add
+    sheet, name editor, base64 key entry, map and repeater settings). The once-a-minute clock
+    repaint uses it too, so a settings page or an open keyboard now survives the minute rollover
+    instead of being skipped.
+  - `src/touch_gate.{h,cpp}`: new, plain C++. `onWake(now, downAtWake)` arms a 300 ms window; a
+    finger already down at the wake, or a press that BEGINS inside the window, is ignored until it
+    lifts (so a held finger cannot become a tap the moment the window ends); the first new press
+    after the window passes counts and ends the gate. The loop feeds every sample through it and
+    reads the panel only while the screen is on.
+  - Sleeping now drops any gesture in flight (`g_down`/`g_drag`/`g_acted` cleared), so the finger
+    that was on the glass when the screen went dark cannot tap on release. The gesture statics moved
+    to the top of `loop()` for that. A comment in `touch_gate.h` says any future auto-sleep must come
+    through the same sleep/wake path.
+- **2. GPS diagnostics.**
+  - (a) `gpsPoll()` now parses `$..GSV` as well as GGA: satellites in view per constellation
+    (`GpsState::inView[]` for GPS / GLONASS / BeiDou / Galileo / other, GN and GQ land in "other"),
+    the best C/N0 of the current GSV cycle (`s_gsvBestSnr[]`, reset when a constellation's message 1
+    arrives) and a total (`inViewTotal`: the sum of the named constellations, or GN's own count when
+    only GNGSV talks, never both). GGA's count stays the "used" one. Every line now passes an XOR
+    checksum check first; a bad line is counted in `checksumBad` and never parsed (before, GGA/GSV
+    were parsed unverified).
+  - (b) The 2 s heartbeat gains a second line: `[hb] gps bytes=... nmea=... bad=... view=N(g l b a)
+    used=N snr=N fix=0/1`, and the `[gps]` change line now says `used=/view=/snr=`.
+  - (c) Status bar: with a fix the cell stays `GPS 7`; while searching it is `GPS 0/5`
+    (used/in view); `GPS --` only when the module has not sent a single sentence. The row is
+    measured before it is drawn (`ui/status_cells.h`): if the full cell would push the node count
+    into the left group, the short form (`0/5`) is drawn instead. Widths: the 10 px mono face
+    advances 6 px per glyph (checked against the VLW blob: all 96 glyphs = 6), so `GPS 0/5` is
+    42 px; the normal row (2 nodes, 93 %, 08:20) leaves 8 px of slack, the tight row (12 nodes,
+    100 %, `GPS 0/24`) does not fit and falls back to `0/24`.
+  - (d) Boot: `gpsBegin()` sends `$PCAS04,7` (GPS + BeiDou + GLONASS) after the board's power/reset
+    sequence and with the UART up, exactly in MeshCore's `configureL76K()` order (delay 250 ms,
+    the sentence with its XOR checksum, delay 250 ms), and also on the swapped-pin retry. For 300 ms
+    afterwards every byte the module sends is logged as `[gps] reply: ...`, so the boot log will say
+    whether the L76K acknowledged (a `$PCAS...` line) or at least whether its GSV talkers changed.
+    **Not verifiable in the sandbox**: the device log has to answer this one.
+  - (e) GNSS power at a soft reboot: `board.cpp` sets expander bit 13 (GNSS power) high in
+    `expanderBegin()` and **never brings it low anywhere**, so a soft reboot leaves the module
+    powered (the PCA9554 keeps its latched outputs while the SoC restarts). What a reboot does do is
+    pulse the GNSS reset line low for 40 ms at every boot, which restarts the module; its almanac
+    lives in its own flash and survives that. Left as it is, with a comment saying why not to "fix"
+    it by cycling the rail.
+- **3. ZDA gate.** `parseNmeaTime()` now refuses a ZDA whose year is outside
+  `buildYear() .. buildYear() + 1` (`kZdaYearsAhead`), on top of the checksum, the impossible-date
+  and the sane-epoch checks. `buildYear()` reads `__DATE__` in `timekeeper.cpp`. RMC is unchanged
+  (it carries a validity field). Host test: ZDA 2080 and 1980 refused, the build year and the year
+  after it accepted, two years ahead refused.
+- **4. Stale "last heard".** `ageText` moved to `ui/age.{h,cpp}` (plain C++) and takes the build
+  epoch: a stored `lastmod` older than the build cannot be real (it was written by the previous
+  session's 2024 clock), so the row says `--` instead of `30d+`. `main.cpp` keeps the build epoch
+  from `parseBuildTimestamp(__DATE__, __TIME__)` in `g_buildEpoch` and passes it in. Nothing else
+  changed: the next advert from that node overwrites `lastmod` with the now-real clock, and the row
+  then shows a real age. Host test covers the 2023/2024 stamp, one second before the build, a
+  future stamp, `--` with no clock, the whole `now`/`5m`/`3h`/`12d`/`30d+` ladder and the case
+  where the build epoch is unknown.
+- **Build** (`pio run -e om_lite_l2`, the command from REBUILD.md): exit 0, SUCCESS, 11.8 s.
+  RAM 78,676 B of 327,680 (24.0%), flash 854,993 B of 6,553,600 (13.0%). Previous run 78,644 B /
+  852,737 B, so this ticket added **+32 B RAM and +2,256 B flash** (the GSV parser, the PCAS writer,
+  the touch gate and the two text helpers; no new fonts).
+- **Tests**: `test/host/run.sh` exit 0. New `test_touch_gate.cpp` (press held through the wake
+  ignored until it lifts, press begun inside the window never becomes a tap, a new press at exactly
+  300 ms accepted, second wake re-arms, reset) and `test_age.cpp` (the age rules above, the GPS cell
+  strings for fix / searching / silent / two digits / clamped at 99, and the status row widths with
+  the real mono advance). `test_timekeeper.cpp` gained the ZDA gate cases and now builds its valid
+  ZDA from `buildYear()` instead of a fixed 2026. The other host tests still pass.
+- **Could not check** (no device in the sandbox): that the wake frame is actually fully drawn 120 ms
+  after SLPOUT on this panel (the driver's number, not a measurement); the gate's feel at 300 ms
+  under a real finger; whether the L76K answers `$PCAS04,7` and whether GSV talkers change (the boot
+  log now prints `[gps] sent ...` and `[gps] reply: ...`); whether the real GSV lines parse (unit
+  tested only through the protocol, the parser itself is device code); the real in-view counts and
+  SNRs at the balcony spot; the `GPS 0/5` cell on the panel and the short-form fallback with a full
+  battery and 10+ nodes; a ZDA carrying a real date near the build year; `--` on the two stored
+  contacts.
+- **Next step**: Claude flashes and reads the boot log first: `[gps] sent $PCAS04,7*..` and whatever
+  `[gps] reply:` lines follow, then `[hb] gps ... view=N snr=N` after a minute outdoors. Screenshot
+  the status bar while searching (`GPS 0/N`) and the Nodes list (both contacts should now show `--`),
+  then press Wake twice with a finger resting on the glass and confirm nothing is pressed.
+
+## 2026-11-10 09:00 (Claude): EST-333 checked
+- Built in the sandbox (exit 0, RAM 78,676 B, flash 854,993 B), host tests exit 0, wake path read (panel wake, 120 ms, redraw, backlight, touch gate). Not flashed alone: goes to the device with EST-334 (one interruption for Filip). Unverified claim in the entry above: that the L76K keeps its almanac "in its own flash" across the boot reset pulse; the boot log after the flash and the time to a fix will tell.

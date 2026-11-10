@@ -23,7 +23,9 @@ struct StatusModel {
   const char* hash = "2B";
   int nodes = 0;
   bool gpsValid = false;
-  int gpsSats = 0;
+  int gpsSats = 0;          // satellites USED in the fix (GGA)
+  int gpsInView = 0;        // satellites in view (GSV, all constellations)
+  bool gpsTalked = false;   // the module has sent at least one NMEA sentence
   int batteryPct = -1;      // -1 = unknown
   const char* clock = "--:--";
 };

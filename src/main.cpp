@@ -19,7 +19,9 @@
 #include "ota.h"
 #include "radio.h"
 #include "timekeeper.h"
+#include "touch_gate.h"
 #include "fonts.h"
+#include "ui/age.h"
 #include "ui/fonts.h"
 #include "ui/layout.h"
 #include "ui/screen_chat.h"
@@ -117,6 +119,11 @@ static bool g_sdOk = false;
 static uint16_t g_packMb = 0;
 static uint16_t g_battMv = 0;
 static om::GpsState g_gps;
+// This firmware's build time (UTC). A stored contact timestamp older than this cannot be real, and
+// the Nodes list says "--" for it instead of an invented age (see ui/age.h).
+static uint32_t g_buildEpoch = 0;
+// The wake button woke the screen: touches are gated for 300 ms and a held finger never counts.
+static om::TouchGate g_touchGate;
 
 // Nodes tab state. The rows are copied out of mesh_link's contact table, never sample data.
 static om::ui::NodeItem g_nodes[64];
@@ -516,21 +523,6 @@ static int unreadTotal() {
   return n;
 }
 
-static void ageText(char* out, size_t cap, uint32_t lastmod, uint32_t now) {
-  if (now == 0 || lastmod == 0 || lastmod > now) {
-    snprintf(out, cap, "--");
-    return;
-  }
-  const uint32_t s = now - lastmod;
-  // Contacts saved before the clock had a real source carry an old-boot timestamp. Never print
-  // "730d": beyond a month the honest answer is only "older than that".
-  if (s >= 30UL * 86400UL) snprintf(out, cap, "30d+");
-  else if (s < 60) snprintf(out, cap, "now");
-  else if (s < 3600) snprintf(out, cap, "%lum", (unsigned long)(s / 60));
-  else if (s < 86400) snprintf(out, cap, "%luh", (unsigned long)(s / 3600));
-  else snprintf(out, cap, "%lud", (unsigned long)(s / 86400));
-}
-
 static void refreshNodes() {
   // Static, not stack: 64 x ContactInfo-sized copies would eat ~3 KB of the loop task's stack.
   static om::MeshContact list[64];
@@ -552,7 +544,7 @@ static void refreshNodes() {
     if (list[i].path_len == 0) snprintf(it.note, sizeof(it.note), "direct");
     else if (list[i].path_len == 0xFF) snprintf(it.note, sizeof(it.note), "path --");
     else snprintf(it.note, sizeof(it.note), "path %uB", (unsigned)list[i].path_len);
-    ageText(it.age, sizeof(it.age), list[i].lastmod, now);
+    om::ui::ageText(it.age, sizeof(it.age), list[i].lastmod, now, g_buildEpoch);
   }
   if (g_nodeSel >= n) g_nodeSel = n - 1;
   const int maxScroll = om::ui::l2().maxScroll(n);
@@ -566,6 +558,8 @@ static void buildStatus(om::ui::StatusModel& s) {
   s.nodes = g_nodeCount;
   s.gpsValid = g_gps.valid;
   s.gpsSats = g_gps.sats;
+  s.gpsInView = g_gps.inViewTotal;
+  s.gpsTalked = g_gps.sentences > 0;
   s.batteryPct = batteryPercent(g_battMv);
   // Data honesty: show HH:MM only after a real source (GPS today) has set the clock since boot.
   // Before that the time is only the floor (max saved, build time), which is not a real time.
@@ -1067,6 +1061,7 @@ void setup() {
   {
     uint32_t buildEpoch = 0;
     om::parseBuildTimestamp(__DATE__, __TIME__, buildEpoch);
+    g_buildEpoch = buildEpoch;
     const uint32_t savedFloor = g_prefs.getUInt("tfloor", 0);
     om::timeKeeper().begin(savedFloor, buildEpoch, millis() / 1000);
     Serial.printf("[time] floor %lu s (saved %lu, build %lu), waiting for a real source\n",
@@ -1634,18 +1629,79 @@ static void handleTap(int x, int y, bool longPress) {
   }
 }
 
+// Draw whatever the user is looking at, right now. The wake path needs it: the panel comes back
+// black and stays black until something draws, and the old code only drew when a touch happened to
+// arrive, which also made that touch a tap. Every screen the app can be showing must be in here.
+// The once-a-minute clock repaint uses it too, so a tab, a settings page, the picker, the keyboard
+// sheet and the chat selector all survive a wake with their own content.
+static void redrawCurrentScreen() {
+  if (g_settings) {
+    switch (g_settingsScreen) {
+      case 1: drawPicker(); break;
+      case 2: drawChannelSettings(); break;
+      case 3: drawNameEditor(); break;
+      case 4: drawMapSettings(); break;
+      case 5: drawRptrSettings(); break;
+      case 6: drawChannelPage(); break;
+      case 7: drawAddSheet(); break;
+      case 8: drawKeyEntry(); break;
+      default: drawSettings(); break;
+    }
+    return;
+  }
+  if (g_tab == 0) drawHome();
+  else if (g_tab == 1) drawChat();
+  else if (g_tab == 2) drawMapTab();
+  else drawRptrTab();
+}
+
 void loop() {
   static uint32_t lastBeat = 0;
   static bool screenOn = true;
   static bool wakePrev = false;
   static uint32_t lastTap = 0;
+  // Gesture state lives here, not down in the touch section, because switching the screen off must
+  // be able to drop a gesture in flight (see the wake button below).
+  static bool g_down = false;
+  static int g_sx = 0, g_sy = 0, g_scroll0 = 0, g_setScroll0 = 0, g_lastX = 0, g_lastY = 0;
+  static int g_upX = 0, g_upY = 0;
+  static bool g_drag = false;
+  static bool g_acted = false;
+  static uint32_t g_lastRender = 0, g_upMs = 0, g_downMs = 0;
+  (void)g_setScroll0;
 
   bool pressed = false;
   if (om::wakePressed(pressed)) {
     if (pressed && !wakePrev) {
-      screenOn = !screenOn;
-      om::screenPower(screenOn);
-      Serial.printf("[wake] screen %s\n", screenOn ? "on" : "off");
+      if (screenOn) {
+        // Sleep: light off first, then the panel. Any gesture in flight is dropped, so the finger
+        // that was on the glass cannot turn into a tap when it lifts in the dark.
+        screenOn = false;
+        g_down = false;
+        g_drag = false;
+        g_acted = false;
+        om::screenPower(false);
+        Serial.printf("[wake] screen off\n");
+      } else {
+        // Wake. The order matters: panel out of sleep, wait its sleep-out time, draw the current
+        // screen, and only then light the backlight, so no stale frame is ever shown. A finger
+        // already down (or one that lands during the gate) is swallowed by g_touchGate.
+        screenOn = true;
+        uint16_t tx = 0, ty = 0;
+        const bool downAtWake = om::omTouch(tx, ty);
+        g_down = false;
+        g_drag = false;
+        g_acted = false;
+        const uint32_t wakeMs = millis();
+        om::panelPower(true);
+        delay(om::kPanelWakeOutMs);
+        redrawCurrentScreen();
+        om::boardSetBrightness(om::kScreenBrightness);
+        g_touchGate.onWake(wakeMs, downAtWake);
+        Serial.printf("[wake] screen on (%s at wake), %lums masked\n",
+                      downAtWake ? "finger held" : "no finger",
+                      (unsigned long)om::TouchGate::kGateMs);
+      }
     }
     wakePrev = pressed;
   }
@@ -1694,7 +1750,8 @@ void loop() {
       lastSats = g_gps.sats;
       lastValid = g_gps.valid;
       if (g_tab == 0 && !g_settings && screenOn) drawHome();
-      Serial.printf("[gps] %s sats=%u\n", g_gps.valid ? "fix" : "no-fix", g_gps.sats);
+      Serial.printf("[gps] %s used=%u view=%u snr=%u\n", g_gps.valid ? "fix" : "no-fix",
+                    g_gps.sats, g_gps.inViewTotal, g_gps.bestSnr);
     }
   }
 
@@ -1723,6 +1780,16 @@ void loop() {
                   "n/a",
 #endif
                   g_tab, g_settings, g_volume, g_soundOn, g_dnd);
+    // GPS diagnostics on the same beat: a module that talks and a module that hears nothing look
+    // identical in GGA's "0 used", so bytes, sentences, the checksum failures and the GSV in-view
+    // counts are the evidence. view=g/l/b/a is GPS/GLONASS/BeiDou/Galileo (GN's own count when the
+    // module only speaks GNGSV); snr is the best C/N0 of the current GSV cycle in dB-Hz.
+    Serial.printf("[hb] gps bytes=%lu nmea=%lu bad=%lu view=%u(g%u l%u b%u a%u) used=%u snr=%u fix=%d\n",
+                  (unsigned long)g_gps.bytes, (unsigned long)g_gps.sentences,
+                  (unsigned long)g_gps.checksumBad, g_gps.inViewTotal,
+                  g_gps.inView[om::kGpsUs], g_gps.inView[om::kGpsGlonass],
+                  g_gps.inView[om::kGpsBeiDou], g_gps.inView[om::kGpsGalileo],
+                  g_gps.sats, g_gps.bestSnr, g_gps.valid ? 1 : 0);
   }
 
   // Repaint once a minute so the status bar's HH:MM is live. Before a real source the text stays
@@ -1737,12 +1804,7 @@ void loop() {
     }
     if (strcmp(shownClock, clockText) != 0) {
       snprintf(shownClock, sizeof(shownClock), "%s", clockText);
-      if (screenOn && !g_settings) {
-        if (g_tab == 0) drawHome();
-        else if (g_tab == 1) drawChat();
-        else if (g_tab == 2) drawMapTab();
-        else drawRptrTab();
-      }
+      if (screenOn) redrawCurrentScreen();
     }
   }
 
@@ -1777,14 +1839,10 @@ void loop() {
   }   // a host upload takes over the serial port and reboots when done
 
   uint16_t x = 0, y = 0;
-  static bool g_down = false;
-  static int g_sx = 0, g_sy = 0, g_scroll0 = 0, g_setScroll0 = 0, g_lastX = 0, g_lastY = 0;
-  (void)g_setScroll0;
-  static int g_upX = 0, g_upY = 0;
-  static bool g_drag = false;
-  static bool g_acted = false;
-  static uint32_t g_lastRender = 0, g_upMs = 0, g_downMs = 0;
-  const bool isDown = screenOn && om::omTouch(x, y);
+  // Touch is read only while the screen is on, and the wake gate has the last word: for 300 ms after
+  // a wake, and for any finger that was already down then, accept() returns false, so no tap fires.
+  const bool rawDown = screenOn && om::omTouch(x, y);
+  const bool isDown = g_touchGate.accept(millis(), rawDown);
   if (!isDown) {
     if (g_down) {
       g_down = false;

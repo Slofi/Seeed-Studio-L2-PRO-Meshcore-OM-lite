@@ -8,6 +8,7 @@
 
 #include "ui/fonts.h"
 #include "ui/icons.h"
+#include "ui/status_cells.h"
 #include "ui/text_wrap.h"
 
 namespace om {
@@ -297,13 +298,30 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   drawBattery(d, rx - kBattW, cy, m.batteryPct);
   rx -= kBattW + kStatusGap;
 
-  char gps[12];
-  if (m.gpsValid) snprintf(gps, sizeof(gps), "GPS %d", m.gpsSats);
-  else snprintf(gps, sizeof(gps), "GPS --");
-  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, gps) + kStatusGap;
-
+  // "GPS 7" with a fix, "GPS 0/5" while searching (used/in view), "GPS --" when the module has
+  // never talked. The cell is measured against the row before it is drawn: if the full one would
+  // push the node count into the left group, the short form ("0/5") is used instead.
   char nodes[16];
   snprintf(nodes, sizeof(nodes), "%d %s", m.nodes, m.nodes == 1 ? "node" : "nodes");
+
+  GpsCell cell;
+  cell.valid = m.gpsValid;
+  cell.talked = m.gpsTalked;
+  cell.used = m.gpsSats;
+  cell.inView = m.gpsInView;
+  char gps[kGpsCellMax];
+  gpsCellText(gps, sizeof(gps), cell);
+
+  StatusRightWidths widths;
+  widths.nodes = textWidth(d, FontRole::MonoStatus, nodes);
+  widths.gps = textWidth(d, FontRole::MonoStatus, gps);
+  widths.pct = textWidth(d, FontRole::MonoStatus, pct);
+  widths.clock = textWidth(d, FontRole::MonoStatus, m.clock);
+  if (!statusRowFits(r.w, leftX + textWidth(d, FontRole::MonoStatus, left), widths)) {
+    gpsCellTextShort(gps, sizeof(gps), cell);
+  }
+  rx -= drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, gps) + kStatusGap;
+
   drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, nodes);
 }
 

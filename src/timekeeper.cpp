@@ -155,6 +155,11 @@ ParsedTime parseNmeaTime(const char* sentence) {
     const int year = twoDigits(fields[4]) * 100 + twoDigits(fields[4] + 2);
     if (day < 0 || mon < 0 || year < 0) return out;
     if (!validCivil(year, mon, day, hh, mm, ss)) return out;
+    // ZDA has no validity field, so a module that has never seen a satellite can send its default
+    // date (2080 seen on a bench L76K, 1980 on others) and look perfectly well formed. Only the
+    // build can vouch for a year: this firmware's build year or the one after it.
+    const int built = buildYear();
+    if (built > 0 && (year < built || year > built + kZdaYearsAhead)) return out;
     const uint32_t epoch = makeUtcEpoch(year, mon, day, hh, mm, ss);
     if (!saneEpoch(epoch)) return out;
     out.ok = true;
@@ -164,6 +169,20 @@ ParsedTime parseNmeaTime(const char* sentence) {
   }
 
   return out;
+}
+
+int buildYear() {
+  // __DATE__ is "Mmm dd yyyy" (the day is space padded), e.g. "Nov 10 2026": the year is the four
+  // characters 7..10.
+  static const int year = [] {
+    const char* date = __DATE__;
+    if (strlen(date) < 11) return 0;
+    const int hi = twoDigits(date + 7);
+    const int lo = twoDigits(date + 9);
+    if (hi < 0 || lo < 0) return 0;
+    return hi * 100 + lo;
+  }();
+  return year;
 }
 
 bool localEpochFromCivil(int year, int month, int day, int hour, int minute, int second,

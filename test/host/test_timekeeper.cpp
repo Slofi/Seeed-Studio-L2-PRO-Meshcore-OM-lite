@@ -44,12 +44,37 @@ static void testNmea() {
     CHECK(t.ok);
     CHECK(t.epoch == makeUtcEpoch(2026, 12, 31, 23, 59, 59));
   }
-  // ZDA carries the same time/date and is used when the receiver sends it.
+  // ZDA carries the same time/date and is used when the receiver sends it. The year has to pass the
+  // build's own gate, so the sentence is built from buildYear() instead of a hard-coded year.
   {
-    const std::string s = nmea("GNZDA,123456.00,10,11,2026,00,00");
-    const ParsedTime t = parseNmeaTime(s.c_str());
+    char body[64];
+    snprintf(body, sizeof(body), "GNZDA,123456.00,10,11,%d,00,00", buildYear());
+    const ParsedTime t = parseNmeaTime(nmea(body).c_str());
     CHECK(t.ok);
-    CHECK(t.epoch == makeUtcEpoch(2026, 11, 10, 12, 34, 56));
+    CHECK(t.epoch == makeUtcEpoch(buildYear(), 11, 10, 12, 34, 56));
+  }
+  // ZDA gate (EST-333): ZDA has no validity field, so a receiver that never had a fix can send its
+  // default date. 2080 and 1980 are refused; the build year and the one after it are accepted.
+  {
+    CHECK(buildYear() >= 2024);   // a sanity floor: __DATE__ was read at all
+    const int by = buildYear();
+    char body[64];
+
+    snprintf(body, sizeof(body), "GNZDA,235959.00,31,12,2080,00,00");
+    CHECK(!parseNmeaTime(nmea(body).c_str()).ok);
+    snprintf(body, sizeof(body), "GNZDA,235959.00,31,12,1980,00,00");
+    CHECK(!parseNmeaTime(nmea(body).c_str()).ok);
+
+    // The build year itself, and the one after it (a device flashed in December runs on in January).
+    snprintf(body, sizeof(body), "GNZDA,120000.00,15,06,%d,00,00", by);
+    const ParsedTime inYear = parseNmeaTime(nmea(body).c_str());
+    CHECK(inYear.ok);
+    CHECK(inYear.epoch == makeUtcEpoch(by, 6, 15, 12, 0, 0));
+    snprintf(body, sizeof(body), "GNZDA,120000.00,15,06,%d,00,00", by + kZdaYearsAhead);
+    CHECK(parseNmeaTime(nmea(body).c_str()).ok);
+    // Two years ahead is outside the window even though the date itself is possible.
+    snprintf(body, sizeof(body), "GNZDA,120000.00,15,06,%d,00,00", by + kZdaYearsAhead + 1);
+    CHECK(!parseNmeaTime(nmea(body).c_str()).ok);
   }
   // Void RMC (status V): no fix, so no time.
   {

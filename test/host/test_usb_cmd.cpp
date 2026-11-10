@@ -314,6 +314,23 @@ static void testParseOthers() {
   c = parse(g);
   CHECK(c.error != nullptr && strcmp(c.error, "number") == 0);
 
+  // EST-348: history <chat> [n]; the chat may be quoted, n is optional.
+  char h1[] = "history Public";
+  c = parse(h1);
+  CHECK(c.error == nullptr && c.kind == om::usb::Kind::History);
+  CHECK(strcmp(c.target, "Public") == 0 && c.count == -1);
+  char h2[] = "history \"Don't Panic\" 12";
+  c = parse(h2);
+  CHECK(c.error == nullptr && c.kind == om::usb::Kind::History);
+  CHECK(strcmp(c.target, "Don't Panic") == 0 && c.count == 12);
+  char h3[] = "history";
+  CHECK(parse(h3).error != nullptr);
+  char h4[] = "history Public x";
+  c = parse(h4);
+  CHECK(c.error != nullptr && strcmp(c.error, "number") == 0);
+  char h5[] = "history Public 5 extra";
+  CHECK(parse(h5).error != nullptr);
+
   char h[] = "tap 12 34";
   c = parse(h);
   CHECK(c.error == nullptr && c.kind == om::usb::Kind::Tap && c.numCount == 2);

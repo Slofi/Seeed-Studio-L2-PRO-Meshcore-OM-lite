@@ -20,6 +20,7 @@ enum class Kind : uint8_t {
   Status,   // status
   Nodes,    // nodes
   Msgs,     // msgs [n]
+  History,  // history <chat> [n]   (EST-348: the stored log on the card)
   Tap,      // tap <x> <y>
   Drag,     // drag <x0> <y0> <x1> <y1> <ms>
   KeyWake,  // key wake

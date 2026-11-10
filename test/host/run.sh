@@ -36,7 +36,8 @@ BIN15="$(mktemp /tmp/om-lite-est344.XXXXXX)"
 BIN16="$(mktemp /tmp/om-lite-emoji.XXXXXX)"
 BIN17="$(mktemp /tmp/om-lite-est346.XXXXXX)"
 BIN18="$(mktemp /tmp/om-lite-settings.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18"' EXIT
+BIN19="$(mktemp /tmp/om-lite-history.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -108,6 +109,10 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est346.cpp \
 # chosen per screen), the row rectangles and scroll clamp, the stepper keys, the manual-time stepper
 # (month lengths, leap years, wraps) and the radio prefs store (seed, ranges, round trip).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_settings.cpp -o "$BIN18"
+# EST-348: the on-card chat history over an in-memory volume: record encode/decode and CRC, a torn
+# last record (detected and repaired), update records applied on load, backwards paging, rotation to
+# .old, unread/seen across a reload, the SPIFFS fallback and the chat ids.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_history.cpp -o "$BIN19"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -124,3 +129,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_settings.cpp -o "$BIN
 "$BIN16"
 "$BIN17"
 "$BIN18"
+"$BIN19"

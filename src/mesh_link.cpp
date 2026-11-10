@@ -38,6 +38,7 @@
 #include "audio.h"
 #include "channels.h"
 #include "crash_report.h"
+#include "history_store.h"
 #include "mesh_migration.h"
 #include "mesh_path.h"
 #include "mesh_text.h"
@@ -97,6 +98,7 @@ struct Msg {
   uint32_t wall;     // system-clock seconds at that moment (0 = unknown)
   uint8_t wallReal;  // the clock was a real source then
   uint32_t seq;      // stable message id across ring shifts
+  uint32_t logId;    // EST-348: the on-card history id (0 = not stored yet)
   char name[kMeshNameCap];
   char text[kMeshTextCap];
   uint8_t path[MAX_PATH_SIZE];
@@ -109,6 +111,38 @@ Msg s_msgs[kMsgRing];
 SeqRing<kMsgRing> s_msgRing;
 uint8_t s_unread[8] = {0};
 uint32_t s_storeSerial = 0;   // changes on every stored message (channel or DM)
+
+// --- EST-348: the on-card history ----------------------------------------------------------------
+// The RAM rings above are the view; the card is the truth across a reboot. Every stored message
+// carries its history id (`logId`), and the update records name that id.
+history::Msg histFromChannel(const Msg& m) {
+  history::Msg h;
+  h.seq = m.seq;
+  h.uptime = m.ts;
+  h.wall = m.wall;
+  h.setWallReal(m.wallReal != 0);
+  h.setMine(m.mine != 0);
+  h.setDm(false);
+  h.delivery = 0;
+  h.hops = m.hops;
+  h.snr4 = m.snr4;
+  h.repeats = m.repeats;
+  history::msgSetPath(h, m.path, m.pathHashSize, m.pathCount);
+  history::msgSetText(h, m.name, m.text);
+  return h;
+}
+
+// The history slot of a channel, creating it (no file yet) on first use.
+int histChannelSlot(int ch) {
+  if (ch < 0 || ch >= mcChannelCount()) return -1;
+  return history::store().ensureChannel(mcChannelName(ch), mcChannel(ch).hash);
+}
+
+// The unread count a received channel message leaves behind, capped at the RAM field's 8 bits.
+uint16_t histNextUnread8(int ch) {
+  if (ch < 0 || ch >= 8) return 0;
+  return s_unread[ch] < 255 ? (uint16_t)(s_unread[ch] + 1) : 255;
+}
 
 // --- favourites (EST-342) ------------------------------------------------------------------------
 // MeshCore's ContactInfo has a favourite FLAG but no public setter (addContact() allocates a new
@@ -262,6 +296,15 @@ class OmMeshTables : public SimpleMeshTables {
         const int slot = SeqRing<kMsgRing>::slotOf(s_own[i].seq);
         if (s_msgs[slot].seq == s_own[i].seq && s_msgs[slot].repeats < 255) {
           ++s_msgs[slot].repeats;
+          // EST-348: the repeat count is one more small update record, applied on the next load.
+          if (s_msgs[slot].logId != 0) {
+            history::Update u;
+            u.logId = s_msgs[slot].logId;
+            u.kind = history::kUpdateRepeats;
+            u.repeats = s_msgs[slot].repeats;
+            const int ch = (int)s_msgs[slot].ch;
+            history::store().appendUpdate(histChannelSlot(ch), u);
+          }
         }
         break;
       }
@@ -293,6 +336,38 @@ om::ui::DmRing s_dmRing;
 // what decides "not confirmed", and the same 4-byte hash proves "delivered".
 om::ui::DmDeliveryTable s_dmDelivery;
 
+// --- EST-348: a DM's history record ---------------------------------------------------------------
+history::Msg histFromDm(const DmMsg& m) {
+  history::Msg h;
+  h.seq = m.seq;
+  h.uptime = m.ts;
+  h.wall = m.wall;
+  h.setWallReal(m.wallReal != 0);
+  h.setAckReal(m.ackReal != 0);
+  h.setMine(m.mine != 0);
+  h.setDm(true);
+  h.delivery = m.state;
+  h.ackWall = m.ackWall;
+  h.hops = m.hops;
+  h.snr4 = m.snr4;
+  history::msgSetPath(h, m.path, m.pathHashSize, m.pathCount);
+  history::msgSetText(h, m.name, m.text);
+  return h;
+}
+
+// The history slot of a DM, by the contact's public key (the ticket's chat id).
+int histDmSlot(int thread) {
+  const om::ui::DmThread* t = s_dmRing.thread(thread);
+  if (t == nullptr || !t->used) return -1;
+  return history::store().ensureDm(t->key, t->name);
+}
+
+// Unread after one more received DM (the thread field is 16-bit).
+uint16_t histNextUnreadDm(int thread) {
+  const int n = s_dmRing.unread(thread);
+  return n < 0xFFFF ? (uint16_t)(n + 1) : 0xFFFF;
+}
+
 int ensureDmThread(const ContactInfo& from) {
   return s_dmRing.ensureThread(from.id.pub_key, from.name);
 }
@@ -314,8 +389,17 @@ bool contactForThread(int thread, ContactInfo* out) {
 }
 
 void setDmState(uint32_t seq, om::ui::DmState state) {
+  DmMsg* m = s_dmRing.find(seq);
   if (!s_dmRing.setState(seq, (uint8_t)state)) return;
   Serial.printf("[mc] DM seq %lu: %s\n", (unsigned long)seq, om::ui::dmStateToken(state));
+  // EST-348: the delivery state outlives the reboot as a small update record.
+  if (m != nullptr && m->logId != 0) {
+    history::Update u;
+    u.logId = m->logId;
+    u.kind = history::kUpdateState;
+    u.delivery = (uint8_t)state;
+    history::store().appendUpdate(histDmSlot(m->thread), u);
+  }
 }
 
 void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
@@ -341,6 +425,9 @@ void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
   }
   snprintf(m.name, sizeof(m.name), "%s", from.name);
   snprintf(m.text, sizeof(m.text), "%s", text ? text : "");
+  // EST-348: store it before the unread count changes, so the Meta record carries the new count.
+  m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m),
+                                       thread >= 0 ? histNextUnreadDm(thread) : 0);
   s_dmRing.bumpRecvSerial();
   if (thread >= 0) s_dmRing.noteReceived(thread, from.name, m.wall);
   Serial.printf("[mc] DM from %s: %s (hops %d snr %.2f)\n", from.name, text ? text : "",
@@ -468,7 +555,21 @@ class OmListener : public MyMesh::Listener {
     uint32_t rtt = 0;
     if (!s_dmDelivery.ack(ack_crc, millis(), &seq, &rtt)) return;
     // The ACK update goes through the ring too: same seq -> slot rule as the list (EST-344).
-    s_dmRing.markDelivered(seq, timeKeeper().now(), timeKeeper().realSinceBoot());
+    const uint32_t ackWall = timeKeeper().now();
+    const bool ackReal = timeKeeper().realSinceBoot();
+    s_dmRing.markDelivered(seq, ackWall, ackReal);
+    // EST-348: append the ACK as an update record so the thread still says "delivered" after a
+    // reboot, with the same wall clock.
+    DmMsg* dm = s_dmRing.find(seq);
+    if (dm != nullptr && dm->logId != 0) {
+      history::Update u;
+      u.logId = dm->logId;
+      u.kind = history::kUpdateState;
+      u.delivery = (uint8_t)om::ui::DmState::Delivered;
+      u.ackWall = ackWall;
+      u.ackReal = ackReal;
+      history::store().appendUpdate(histDmSlot(dm->thread), u);
+    }
     Serial.printf("[mc] DM seq %lu delivered in %lu ms\n", (unsigned long)seq, (unsigned long)rtt);
   }
 
@@ -593,6 +694,10 @@ class OmListener : public MyMesh::Listener {
       snprintf(m.name, sizeof(m.name), "?");
     }
     snprintf(m.text, sizeof(m.text), "%s", body);
+    // EST-348: the message goes to the card before the RAM unread count changes, so the Meta
+    // record written with it already carries the new count.
+    m.logId = history::store().appendMsg(histChannelSlot(channelIdx), histFromChannel(m),
+                                         histNextUnread8(channelIdx));
     ++s_storeSerial;
     if (channelIdx < 8) ++s_unread[channelIdx];
     const bool muted = mcChannelMuted(channelIdx);
@@ -1137,6 +1242,8 @@ bool meshLinkBegin() {
 }
 
 void meshLinkLoop() {
+  // EST-349: history flushing moved to loop() in main.cpp, before otaPoll(): ONE owner, on the loop
+  // task, outside the mesh and USB call paths and outside any lock. This function never touches SD.
   if (!s_ready) return;
   the_mesh.loop();
 
@@ -1221,6 +1328,11 @@ uint32_t meshMsgSeq(int idx) {
   return s_msgs[slotFor(idx)].seq;
 }
 
+uint32_t meshMsgLogId(int idx) {
+  if (idx < 0 || idx >= s_msgRing.count()) return 0;
+  return s_msgs[slotFor(idx)].logId;
+}
+
 int meshMsgHops(int idx) {
   if (idx < 0 || idx >= s_msgRing.count()) return -1;
   return s_msgs[slotFor(idx)].hops;
@@ -1253,7 +1365,11 @@ int meshUnread(int channelIdx) {
 }
 
 void meshClearUnread(int channelIdx) {
-  if (channelIdx >= 0 && channelIdx < 8) s_unread[channelIdx] = 0;
+  if (channelIdx >= 0 && channelIdx < 8) {
+    s_unread[channelIdx] = 0;
+    // EST-348: the seen point moves with it, so a reboot does not resurrect the badge.
+    history::store().markSeen(histChannelSlot(channelIdx));
+  }
 }
 
 // --- direct messages -----------------------------------------------------------------------------
@@ -1272,7 +1388,10 @@ uint32_t meshDmSerial() { return s_dmRing.serial(); }
 
 uint32_t meshDmRecvSerial() { return s_dmRing.recvSerial(); }
 
-void meshDmClearUnread(int thread) { s_dmRing.clearUnread(thread); }
+void meshDmClearUnread(int thread) {
+  s_dmRing.clearUnread(thread);
+  history::store().markSeen(histDmSlot(thread));
+}
 
 int meshDmList(int thread, MeshDm* out, int max) {
   // The ring walks its own live sequence range (firstSeq..newest) and reads slot seq % ring, so the
@@ -1331,15 +1450,181 @@ bool meshDmSend(int thread, const char* text) {
     // Not a radio fault: MeshCore refused to compose (packet pool / tables). An unanswered DM is
     // also not a fault; only the radio's own failures set the mark.
     m.state = (uint8_t)om::ui::DmState::Failed;
+    m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m), 0);
     Serial.println("[mc] DM send: sendMessage failed");
     return false;
   }
+  // EST-348: the sent DM is on the card as "sending"; the ACK later appends its update record.
+  m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m), 0);
   s_dmDelivery.begin(seq, ack, est, millis());
   s_dmRing.clearUnread(thread);
   Serial.printf("[mc] DM to %s (%d B) -> %s, ack %08lx, timeout %lu ms\n", ci.name, len,
                 rc == MSG_SEND_SENT_FLOOD ? "flood" : "direct", (unsigned long)ack,
                 (unsigned long)est);
   return true;
+}
+
+// --- EST-348: boot restore, paging and the USB dump ----------------------------------------------
+// A DM log stores the contact's name as it was when the thread started. The contact table is the
+// current truth, so a renamed contact gets its new name back at boot.
+bool contactNameByKey(const uint8_t* key, char* out, size_t cap) {
+  if (key == nullptr || out == nullptr || cap == 0) return false;
+  const int total = the_mesh.getTotalContactSlots();
+  for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
+    ContactInfo ci;
+    if (!the_mesh.getContactByIdx((uint32_t)idx, ci)) continue;
+    if (ci.type == ADV_TYPE_NONE || ci.name[0] == 0) continue;
+    if (memcmp(ci.id.pub_key, key, PUB_KEY_SIZE) != 0) continue;
+    snprintf(out, cap, "%s", ci.name);
+    return true;
+  }
+  return false;
+}
+
+bool meshHistoryBegin(bool sdOk) {
+  if (!history::begin(sdOk)) return false;
+  history::HistoryStore& hs = history::store();
+  int channelMsgs = 0;
+  int dmMsgs = 0;
+
+  for (int i = 0; i < mcChannelCount() && i < 8; ++i) {
+    const int slot = histChannelSlot(i);
+    if (slot < 0) continue;
+    const int n = hs.loadNewest(slot, kMsgRing);
+    for (int j = 0; j < n; ++j) {
+      const history::Msg& h = hs.scanMsg(j);
+      const uint32_t seq = s_msgRing.alloc();
+      Msg& m = s_msgs[SeqRing<kMsgRing>::slotOf(seq)];
+      memset(&m, 0, sizeof(m));
+      m.seq = seq;
+      m.logId = h.logId;
+      m.ch = (uint8_t)i;
+      m.mine = h.mine() ? 1 : 0;
+      m.ts = h.uptime;
+      m.wall = h.wall;
+      m.wallReal = h.wallReal() ? 1 : 0;
+      m.hops = h.hops;
+      m.snr4 = h.snr4;
+      m.repeats = h.repeats;
+      m.pathHashSize = h.pathHashSize;
+      m.pathCount = h.pathCount;
+      if (h.pathLen > 0) memcpy(m.path, h.path, h.pathLen);
+      snprintf(m.name, sizeof(m.name), "%s", h.name);
+      snprintf(m.text, sizeof(m.text), "%s", h.text);
+      ++channelMsgs;
+    }
+    const uint16_t unread = hs.scanUnread();
+    s_unread[i] = unread > 255 ? 255 : (uint8_t)unread;
+  }
+
+  // Every dm-*.log on the card becomes a thread again, with its contact key and name from the Chat
+  // record (the file name only carries the public-key prefix, as the ticket specifies).
+  for (int k = 0; k < hs.dmSlotCount(); ++k) {
+    const int slot = hs.dmSlotAt(k);
+    const uint8_t* key = nullptr;
+    if (slot < 0 || !hs.slotKey(slot, &key)) continue;
+    char threadName[kMeshNameCap];
+    snprintf(threadName, sizeof(threadName), "%s", hs.slotName(slot));
+    contactNameByKey(key, threadName, sizeof(threadName));
+    const int thread = s_dmRing.ensureThread(key, threadName);
+    if (thread < 0) continue;
+    const int n = hs.loadNewest(slot, om::ui::kDmRing);
+    uint32_t newestWall = 0;
+    for (int j = 0; j < n; ++j) {
+      const history::Msg& h = hs.scanMsg(j);
+      const bool mine = h.mine();
+      DmMsg& m = *s_dmRing.alloc((uint8_t)thread, mine);
+      m.logId = h.logId;
+      m.ts = h.uptime;
+      m.wall = h.wall;
+      m.wallReal = h.wallReal() ? 1 : 0;
+      m.ackWall = h.ackWall;
+      m.ackReal = h.ackReal() ? 1 : 0;
+      m.state = h.delivery;
+      m.hops = h.hops;
+      m.snr4 = h.snr4;
+      m.pathHashSize = h.pathHashSize;
+      m.pathCount = h.pathCount;
+      if (h.pathLen > 0) memcpy(m.path, h.path, h.pathLen);
+      snprintf(m.name, sizeof(m.name), "%s", h.name);
+      snprintf(m.text, sizeof(m.text), "%s", h.text);
+      newestWall = h.wall;
+      ++dmMsgs;
+    }
+    om::ui::DmThread* t = s_dmRing.thread(thread);
+    if (t != nullptr) {
+      t->unread = hs.scanUnread();
+      if (newestWall != 0) t->lastWall = newestWall;
+    }
+  }
+
+  ++s_storeSerial;
+  s_dmRing.bumpSerial();
+  Serial.printf("[hist] restored %d channel message(s), %d DM message(s) from %s\n", channelMsgs,
+                dmMsgs, history::status().sd ? "the card" : "SPIFFS");
+  return true;
+}
+
+int meshHistoryOlder(int channelIdx, int thread, uint32_t beforeLogId, history::Msg* out, int cap) {
+  if (out == nullptr || cap <= 0) return -1;
+  history::HistoryStore& hs = history::store();
+  int slot = -1;
+  if (thread >= 0) slot = histDmSlot(thread);
+  else if (channelIdx >= 0) slot = histChannelSlot(channelIdx);
+  if (slot < 0) return -1;
+  const int n = hs.loadOlder(slot, beforeLogId, cap);
+  for (int i = 0; i < n; ++i) out[i] = hs.scanMsg(i);
+  return n;
+}
+
+int meshHistoryDump(const char* chat, int n) {
+  if (chat == nullptr || *chat == 0) return -1;
+  history::HistoryStore& hs = history::store();
+  int slot = -1;
+  history::ChatKind kind = history::ChatKind::Channel;
+  for (int i = 0; i < mcChannelCount(); ++i) {
+    if (strcmp(mcChannelName(i), chat) != 0) continue;
+    slot = histChannelSlot(i);
+    kind = history::ChatKind::Channel;
+    break;
+  }
+  if (slot < 0) {
+    slot = hs.dmSlotByNameOrKey(chat);
+    kind = history::ChatKind::Dm;
+  }
+  if (slot < 0) return -1;
+  if (n < 1) n = 20;
+  if (n > history::kScanRing) n = history::kScanRing;
+  const int count = hs.loadNewest(slot, n);
+  for (int i = 0; i < count; ++i) {
+    const history::Msg& m = hs.scanMsg(i);
+    char from[64];
+    char text[192];
+    int w = 0;
+    for (const char* p = m.name; *p != 0 && w < (int)sizeof(from) - 1; ++p) {
+      from[w++] = *p == '"' ? '\'' : *p;
+    }
+    from[w] = 0;
+    w = 0;
+    for (const char* p = m.text; *p != 0 && w < (int)sizeof(text) - 1; ++p) {
+      text[w++] = *p == '"' ? '\'' : *p;
+    }
+    text[w] = 0;
+    const char* state = "recv";
+    if (m.mine()) {
+      state = kind == history::ChatKind::Dm ? om::ui::dmStateToken((om::ui::DmState)m.delivery) : "sent";
+    }
+    char when[24];
+    if (m.wallReal() && m.wall != 0) snprintf(when, sizeof(when), "%lu", (unsigned long)m.wall);
+    else snprintf(when, sizeof(when), "-");
+    Serial.printf(
+        "[hist] id=%lu seq=%lu up=%lu wall=%s real=%u from=\"%s\" hops=%d snr=%.2f state=%s "
+        "repeats=%u text=\"%s\"\n",
+        (unsigned long)m.logId, (unsigned long)m.seq, (unsigned long)m.uptime, when,
+        m.wallReal() ? 1u : 0u, from, (int)m.hops, (double)m.snr4 / 4.0, state,
+        (unsigned)m.repeats, text);
+  }
+  return count;
 }
 
 // --- node DB -------------------------------------------------------------------------------------
@@ -1680,6 +1965,8 @@ bool meshLinkSend(int channelIdx, const char* text) {
     m.hops = -1;
     snprintf(m.name, sizeof(m.name), "%s", the_mesh.getNodeName());
     snprintf(m.text, sizeof(m.text), "%s", text);
+    // EST-348: our own message is stored too (mine, no unread Meta).
+    m.logId = history::store().appendMsg(histChannelSlot(channelIdx), histFromChannel(m), 0);
     ++s_storeSerial;
   }
   return ok;

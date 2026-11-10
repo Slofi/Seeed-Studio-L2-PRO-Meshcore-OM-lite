@@ -1,0 +1,123 @@
+[hb] uptime=123s heap=153204 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=69569 nmea=1726 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=31 maxheard=2 fix=0
+[cmd] > send 'Don't Panic' 'est348 history test 3'
+[mc] send ch2 ready=1
+[mc] sendGroupMessage -> 1
+[124538][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-d7-Don_t_Panic.log does not exist, no permits for creation
+[124544][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-d7-Don_t_Panic.old does not exist, no permits for creation
+
+======================================
+ OM Lite - L2 Pro P2
+======================================
+build: Nov 10 2026 14:26:02
+[crash] previous boot ended in panic; last checkpoint "[om] history" (seq 21)
+[crash] reset reason: 4 (panic)
+[crash] stored core dump: task loopTask, PC 0x4037e844, exc cause 65 (unknown), vaddr 0x00000000, backtrace 0x4037e844 0x4037d81d 0x4037c7b1 0x4204ccf9 0x4204d68d 0x42099f13 0x42069919 0x42069b6d 0x4205db1b 0x4205dbf6 0x4205d9ea 0x4205aa35 0x4205c76e 0x4205e66b 0x42057699 0x42086fed
+[crash] core dump app sha256: c6184c0ddff1dc19
+[crash] core dump erased
+[i2c] found: 14 18 21 22 2C 34 48 5D (8 devices)
+[om] expander ready out=77/21 cfg=07/00
+[om] expander: ok
+[om] expander inputs: 73/21 (wake bit high)
+[i2c] found: 14 18 21 22 2C 34 48 5D (8 devices)
+[om] backlight: ok
+[  2402][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[om] display 320x240
+[om] board: ok
+[om] frame buffer 320x240 (150 KB)
+[om] frame probe 89ed (native gold ed89) -> push swap ON
+[ui] font sans11: ok (28164 bytes)
+[ui] font sans14: ok (40044 bytes)
+[ui] font sans9: ok (22760 bytes)
+[ui] font mono10: ok (23886 bytes)
+[time] floor 1794317446 s (saved 1794317446, build 1794317162), waiting for a real source
+[  2424][E][Preferences.cpp:503] getBytesLength(): nvs_get_blob len fail: erec NOT_FOUND
+[prefs] sound=1 vol=70 msg=9 dm=1 men=2 new=16 dnd=0 tsnd=0 tone=0 emoji_rec=0
+[emoji] table ok, 1416 cells
+[audio] codec probe: ack (err=0)
+[codec] write 44=08 failed err=2
+[audio] codec init: ok (1/18 writes failed)
+[audio] codec start: ok (1/37 writes failed)
+[audio] ok
+[radio] begin: 0 (ok)
+[radio] 869.618 MHz bw 62 sf 8 cr 8 pwr 22 dBm
+[radio] ok status=0
+[mc] favourites: 0 from NVS
+[mc] 1 spiffs
+[mc] migrate /contacts: /contacts3 already valid (1520 B, 12 in /contacts), kept
+[mc] 2 radio
+[  3251][E][esp32-hal-cpu.c:110] addApbChangeCallback(): duplicate func=0x4203ccb8 arg=0x3fc9fbe4
+[mc] 3 store + mesh begin
+[mc] known contacts: 2 for the new-node notice
+[mc] identity 564f7689850aa060
+[mc] identity same as before
+[mc] migration: complete (prefs, channels and contacts read back)
+[mc] store: /identity/_main.id 96 B
+[mc] store: /prefs.json 433 B
+[mc] store: /channels2 544 B
+[mc] store: /contacts3 1520 B
+[mc] store: /contacts 1836 B
+[mc] up: 869.6 MHz SF8, path hash 2B, name "OM Lite"
+[mc] mesh: up
+[batt] 4174 mV
+[sd] present: yes
+[sd] mount: ok
+[sd] tiles.pack 945 MB
+[map] overlay z16 opened: 225792 tiles
+[map] index 75986 tiles (1823664 bytes), cache 8 x 128 KB
+[hist] store sd, 2048 KB/chat, 65536 KB total, 0 chats, 0 KB used
+[  5155][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-11-Public.log does not exist, no permits for creation
+[  5161][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-11-Public.old does not exist, no permits for creation
+[  5177][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-ec-_slovenija.log does not exist, no permits for creation
+[  5183][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-ec-_slovenija.old does not exist, no permits for creation
+[  5199][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-d7-Don_t_Panic.log does not exist, no permits for creation
+[  5206][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-d7-Don_t_Panic.old does not exist, no permits for creation
+[  5222][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-d9-_test.log does not exist, no permits for creation
+[  5228][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-d9-_test.old does not exist, no permits for creation
+[  5244][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-95-_slovenia.log does not exist, no permits for creation
+[  5250][E][vfs_api.cpp:105] open(): /sdcard/omlite/history/ch-95-_slovenia.old does not exist, no permits for creation
+[hist] restored 0 channel message(s), 0 DM message(s) from the card
+[gps] mode 7 sent
+[time] GPS -> 1794317568 s, floor 1794317568 s (GPS)
+[gps] no-fix used=0 expected=13 heard=0 best=0 maxheard=0
+[hb] uptime=5s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=815 nmea=19 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=7s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=2017 nmea=49 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=9s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=3219 nmea=79 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=11s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=4421 nmea=109 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[gps] no-fix used=0 expected=13 heard=1 best=3 maxheard=1
+[hb] uptime=13s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=5627 nmea=139 bad=1 expected=13(g13 l0 b0 a0) heard=1(g1 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[hb] uptime=15s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=6833 nmea=169 bad=1 expected=13(g13 l0 b0 a0) heard=1(g1 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[hb] uptime=17s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=8039 nmea=199 bad=1 expected=13(g13 l0 b0 a0) heard=1(g1 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[hb] uptime=19s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=9243 nmea=229 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[gps] no-fix used=0 expected=13 heard=0 best=3 maxheard=1
+[hb] uptime=22s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=10445 nmea=259 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[hb] uptime=24s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=11647 nmea=289 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[hb] uptime=26s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=12849 nmea=319 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[hb] uptime=28s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=14051 nmea=349 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[hb] uptime=30s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=15253 nmea=379 bad=1 expected=13(g13 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=3 maxheard=1 fix=0
+[gps] no-fix used=0 expected=14 heard=1 best=32 maxheard=1
+[hb] uptime=32s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=16471 nmea=409 bad=1 expected=14(g13 l1 b0 a0) heard=1(g0 l1 b0 a0) used=0 best=32 maxheard=1 fix=0
+[hb] uptime=34s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=17689 nmea=439 bad=1 expected=14(g13 l1 b0 a0) heard=1(g0 l1 b0 a0) used=0 best=32 maxheard=1 fix=0
+[hb] uptime=36s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=18907 nmea=469 bad=1 expected=14(g13 l1 b0 a0) heard=1(g0 l1 b0 a0) used=0 best=32 maxheard=1 fix=0
+[hb] uptime=38s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=20113 nmea=499 bad=1 expected=13(g13 l0 b0 a0) heard=1(g1 l0 b0 a0) used=0 best=32 maxheard=2 fix=0
+[hb] uptime=40s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=21319 nmea=529 bad=1 expected=13(g13 l0 b0 a0) heard=1(g1 l0 b0 a0) used=0 best=32 maxheard=2 fix=0
+[hb] uptime=42s heap=153224 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=22525 nmea=559 bad=1 expected=13(g13 l0 b0 a0) heard=1(g1 l0 b0 a0) used=0 best=32 maxheard=2 fix=0

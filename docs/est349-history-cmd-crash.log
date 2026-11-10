@@ -1,0 +1,87 @@
+[hb] uptime=29s heap=178580 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=12217 nmea=297 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=31 maxheard=1 fix=0
+[cmd] > history 'ERA-3 (SI)' 5
+[crash] stored core dump: task loopTask, PC 0x4037b989, exc cause 65 (unknown), vaddr 0x00000000, backtrace 0x4037b989 0x403792e6 0x4037c7ce 0x4204d041 0x4204d9d5 0x4209a28f 0x42069c61 0x42069eb5 0x4205de63 0x4205df3e 0x4205dd32 0x4205ad7d 0x4205cab6 0x4205e9b3 0x420579e1 0x42087335
+[crash] core dump app sha256: e20b4cc90d73e57e
+[crash] core dump erased
+[i2c] found: 14 18 21 22 2C 34 48 5D (8 devices)
+[om] expander ready out=77/21 cfg=07/00
+[om] expander: ok
+[om] expander inputs: 73/21 (wake bit high)
+[i2c] found: 14 18 21 22 2C 34 48 5D (8 devices)
+[om] backlight: ok
+[  2388][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[om] display 320x240
+[om] board: ok
+[om] frame buffer 320x240 (150 KB)
+[om] frame probe 89ed (native gold ed89) -> push swap ON
+[ui] font sans11: ok (28164 bytes)
+[ui] font sans14: ok (40044 bytes)
+[ui] font sans9: ok (22760 bytes)
+[ui] font mono10: ok (23886 bytes)
+[time] floor 1794318833 s (saved 1794318833, build 1794318488), waiting for a real source
+[  2410][E][Preferences.cpp:503] getBytesLength(): nvs_get_blob len fail: erec NOT_FOUND
+[prefs] sound=1 vol=70 msg=9 dm=1 men=2 new=16 dnd=0 tsnd=0 tone=0 emoji_rec=0
+[emoji] table ok, 1416 cells
+[audio] codec probe: ack (err=0)
+[codec] write 44=08 failed err=2
+[audio] codec init: ok (1/18 writes failed)
+[audio] codec start: ok (1/37 writes failed)
+[audio] ok
+[radio] begin: 0 (ok)
+[radio] 869.618 MHz bw 62 sf 8 cr 8 pwr 22 dBm
+[radio] ok status=0
+[mc] favourites: 0 from NVS
+[mc] 1 spiffs
+[mc] migrate /contacts: /contacts3 already valid (1520 B, 12 in /contacts), kept
+[mc] 2 radio
+[  3237][E][esp32-hal-cpu.c:110] addApbChangeCallback(): duplicate func=0x4203cfd8 arg=0x3fc9989c
+[mc] 3 store + mesh begin
+[mc] known contacts: 2 for the new-node notice
+[mc] identity 564f7689850aa060
+[mc] identity same as before
+[mc] migration: complete (prefs, channels and contacts read back)
+[mc] store: /identity/_main.id 96 B
+[mc] store: /prefs.json 433 B
+[mc] store: /channels2 544 B
+[mc] store: /contacts3 1520 B
+[mc] store: /contacts 1836 B
+[mc] up: 869.6 MHz SF8, path hash 2B, name "OM Lite"
+[mc] mesh: up
+[batt] 4174 mV
+[sd] present: yes
+[sd] mount: ok
+[sd] tiles.pack 945 MB
+[map] overlay z16 opened: 225792 tiles
+[map] index 75986 tiles (1823664 bytes), cache 8 x 128 KB
+[hist] page buffer 32 x 288 B in PSRAM
+[hist] working memory 18656 B in PSRAM (queue 4832, window 4096, scan 9216, offs 512)
+[hist] store sd, 2048 KB/chat, 65536 KB total, 2 chats, 0 KB used
+[hist] restored 1 channel message(s), 2 DM message(s) from the card
+[gps] mode 7 sent
+[time] GPS -> 1794318860 s, floor 1794318860 s (GPS)
+[gps] no-fix used=0 expected=12 heard=0 best=0 maxheard=0
+[hb] uptime=5s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=753 nmea=17 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=7s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=1893 nmea=45 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=9s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=3033 nmea=73 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=11s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=4173 nmea=101 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=13s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=5313 nmea=129 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=15s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=6453 nmea=157 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=17s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=7593 nmea=185 bad=1 expected=12(g12 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[hb] uptime=19s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=8711 nmea=213 bad=1 expected=11(g11 l0 b0 a0) heard=0(g0 l0 b0 a0) used=0 best=0 maxheard=0 fix=0
+[gps] no-fix used=0 expected=12 heard=1 best=30 maxheard=1
+[hb] uptime=21s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=9845 nmea=241 bad=1 expected=12(g11 l1 b0 a0) heard=1(g0 l1 b0 a0) used=0 best=30 maxheard=1 fix=0
+[hb] uptime=23s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=10979 nmea=269 bad=1 expected=12(g11 l1 b0 a0) heard=1(g0 l1 b0 a0) used=0 best=30 maxheard=1 fix=0
+[hb] uptime=25s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0
+[hb] gps bytes=12113 nmea=297 bad=1 expected=12(g11 l1 b0 a0) heard=1(g0 l1 b0 a0) used=0 best=30 maxheard=1 fix=0
+[hb] uptime=27s heap=178600 board=ok mesh=up tab=0 settings=0 vol=70 snd=1 dnd=0

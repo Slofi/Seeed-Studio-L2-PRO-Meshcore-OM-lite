@@ -8,6 +8,7 @@
 #include <LovyanGFX.hpp>
 #include <Preferences.h>
 #include <SD_MMC.h>
+#include <esp32-hal-psram.h>
 
 #include "audio.h"
 #include "board.h"
@@ -16,6 +17,7 @@
 #include "mesh_link.h"
 #include "channels.h"
 #include "fade.h"
+#include "history_store.h"
 #include "ota.h"
 #include "radio.h"
 #include "radio_fault.h"
@@ -171,7 +173,17 @@ static om::ui::ChatEntry g_chats[om::ui::kMaxChats];
 static int g_chatCount = 0;
 static int g_channelCount = 0;
 static int g_dmCount = 0;
-static om::ui::ChatMsgView g_chatMsgs[om::ui::kMaxChatMsgs];
+// EST-348: the paging window. The newest 32 messages come from the RAM ring; up to 32 older ones
+// (in pages of 16) from the card. EST-349: the window itself is PSRAM (allocHistoryPage at boot), so
+// no ~9 KB of it is static RAM.
+constexpr int kHistPageLoad = 16;
+constexpr int kHistWindow = 32;
+static om::history::Msg* g_histPage = nullptr;
+static bool g_histPageOk = false;
+static int g_histPageCount = 0;   // messages in g_histPage, oldest first
+static bool g_histMore = true;    // an older page may exist
+static int g_histChat = -1;       // the chat the buffer belongs to
+static om::ui::ChatMsgView g_chatMsgs[om::ui::kMaxChatMsgs + kHistWindow];
 static int g_chatMsgCount = 0;
 // One copy buffer for the DM ring, shared by refreshChats() and refreshChatMessages(): they run one
 // after the other inside buildChatView(), never nested, so one copy of the ring is enough. Two
@@ -771,10 +783,116 @@ static int chatThread(int chat) {
   return g_chats[chat].thread;
 }
 
+// EST-349: the paging window is PSRAM, allocated once at boot (setup, before the first chat draw).
+// Without PSRAM paging is simply off: the RAM ring still shows the newest 32 messages.
+static void allocHistoryPage() {
+  if (g_histPage != nullptr) return;
+  g_histPage = (om::history::Msg*)ps_malloc(sizeof(om::history::Msg) * (size_t)kHistWindow);
+  if (g_histPage == nullptr) {
+    g_histPageOk = false;
+    g_histMore = false;
+    Serial.println("[hist] page buffer: no PSRAM, paging is off");
+    return;
+  }
+  memset(g_histPage, 0, sizeof(om::history::Msg) * (size_t)kHistWindow);
+  g_histPageOk = true;
+  Serial.printf("[hist] page buffer %d x %u B in PSRAM\n", kHistWindow,
+                (unsigned)sizeof(om::history::Msg));
+}
+
+// EST-348: pull one page of older messages from the card into the fixed window. Called when the
+// finger pulls past the oldest message in RAM; the caller redraws and clamps afterwards. The
+// window is 32 messages in pages of 16, so the chat can be read 32 messages further back than the
+// RAM ring (64 in total) without any RAM that grows with the log.
+static void loadOlderHistoryPage() {
+  if (!g_histPageOk || g_histPage == nullptr) {
+    g_histMore = false;
+    return;
+  }
+  if (!g_histMore || g_histPageCount >= kHistWindow) {
+    g_histMore = false;
+    return;
+  }
+  const int chan = chatChannel(g_chatSel);
+  const int thread = chatThread(g_chatSel);
+  if (chan < 0 && thread < 0) return;
+  uint32_t before = 0;
+  if (g_histPageCount > 0) {
+    before = g_histPage[0].logId;
+  } else {
+    // The RAM ring's oldest is the first RAM entry of the view built by refreshChatMessages().
+    if (g_chatMsgCount <= g_histPageCount) return;
+    before = g_chatMsgs[g_histPageCount].logId;
+  }
+  if (before == 0) return;
+  int want = kHistPageLoad;
+  if (g_histPageCount + want > kHistWindow) want = kHistWindow - g_histPageCount;
+  if (want <= 0) {
+    g_histMore = false;
+    return;
+  }
+  // The current page moves to the back; the older page lands in front of it.
+  memmove(g_histPage + want, g_histPage, (size_t)g_histPageCount * sizeof(g_histPage[0]));
+  const int n = om::meshHistoryOlder(chan, thread, before, g_histPage, want);
+  if (n <= 0) {
+    memmove(g_histPage, g_histPage + want, (size_t)g_histPageCount * sizeof(g_histPage[0]));
+    g_histMore = false;
+    Serial.printf("[hist] %s: no older messages\n", thread >= 0 ? "DM" : om::mcChannelName(chan));
+    return;
+  }
+  if (n < want) {
+    memmove(g_histPage + n, g_histPage + want, (size_t)g_histPageCount * sizeof(g_histPage[0]));
+  }
+  g_histPageCount += n;
+  g_histMore = n == want && g_histPageCount < kHistWindow;
+  Serial.printf("[hist] page: %d older message(s), %d in the window\n", n, g_histPageCount);
+}
+
 static void refreshChatMessages() {
+  // The page buffer belongs to one chat. A switch (or a closed chat) drops it: its messages are
+  // older than that chat's RAM ring and would be wrong for another chat.
+  if (g_histChat != g_chatSel) {
+    g_histChat = g_chatSel;
+    g_histPageCount = 0;
+    g_histMore = true;
+  }
   g_chatMsgCount = 0;
   const int chan = chatChannel(g_chatSel);
   const int thread = chatThread(g_chatSel);
+
+  // EST-348: page messages first (oldest), then the RAM ring. A paged message gets a synthetic seq
+  // with the top bit set: the log id is stable across reboots and cannot collide with this boot's
+  // per-ring sequence numbers, so REPLY / the message sheet still resolve to the tapped message.
+  for (int i = 0; i < g_histPageCount && g_chatMsgCount < (int)(sizeof(g_chatMsgs) / sizeof(g_chatMsgs[0])); ++i) {
+    const om::history::Msg& h = g_histPage[i];
+    om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
+    m.seq = 0x80000000u | (h.logId & 0x7FFFFFFFu);
+    m.logId = h.logId;
+    m.name = h.name;
+    m.text = h.text;
+    m.chanName = thread >= 0 ? "DM" : om::mcChannelName(chan);
+    m.ts = h.uptime;
+    m.wall = h.wall;
+    m.wallReal = h.wallReal();
+    m.hops = h.hops;
+    m.snrq = h.snr4;
+    m.mine = h.mine();
+    m.dm = thread >= 0;
+    m.delivery = h.delivery;
+    m.ackWall = h.ackWall;
+    m.ackReal = h.ackReal();
+    // Clear first: the view entry is reused, and a stale path would name the wrong repeaters.
+    m.path = nullptr;
+    m.pathHashSize = 1;
+    m.pathHashCount = 0;
+    if (h.pathLen > 0) {
+      m.path = h.path;
+      m.pathHashSize = h.pathHashSize;
+      m.pathHashCount = h.pathCount;
+    }
+    m.repeats = h.repeats;
+  }
+
   if (thread >= 0) {
     // One thread: the facade copies the ring into the shared buffer, and the view points into it
     // (stable for this draw: the mesh is not pumped between buildChatView and chatScreenDraw).
@@ -783,6 +901,7 @@ static void refreshChatMessages() {
       const om::MeshDm& dm = g_dmScratch[i];
       om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
       m.seq = dm.seq;
+      m.logId = dm.logId;
       m.name = dm.name;
       m.text = dm.text;
       m.chanName = "DM";
@@ -796,6 +915,10 @@ static void refreshChatMessages() {
       m.delivery = dm.state;
       m.ackWall = dm.ackWall;
       m.ackReal = dm.ackReal;
+      m.path = nullptr;
+      m.pathHashSize = 1;
+      m.pathHashCount = 0;
+      m.repeats = 0;
       if (dm.pathCount > 0) {
         m.path = dm.path;
         m.pathHashSize = dm.pathHashSize;
@@ -805,10 +928,11 @@ static void refreshChatMessages() {
     return;
   }
   if (chan < 0) return;
-  for (int i = 0; i < om::meshMsgCount() && g_chatMsgCount < om::ui::kMaxChatMsgs; ++i) {
+  for (int i = 0; i < om::meshMsgCount() && g_chatMsgCount < (int)(sizeof(g_chatMsgs) / sizeof(g_chatMsgs[0])); ++i) {
     if (om::meshMsgChannel(i) != chan) continue;
     om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
     m.seq = om::meshMsgSeq(i);
+    m.logId = om::meshMsgLogId(i);
     m.name = om::meshMsgName(i);
     m.text = om::meshMsgText(i);
     m.chanName = om::mcChannelName(chan);
@@ -923,6 +1047,10 @@ static void chatSelectChat(int chat) {
   if (thread >= 0) om::meshDmClearUnread(thread);   // EST-342: reading a DM clears its count
   g_chatScroll = 0;
   g_selScroll = 0;
+  // EST-348: a new chat starts with no paged history in the buffer.
+  g_histChat = chat;
+  g_histPageCount = 0;
+  g_histMore = true;
   g_selector = false;
   g_kb.showLetters();   // leaving a page does not follow the next open (which resets anyway)
   g_emojiScroll = 0;
@@ -2550,6 +2678,15 @@ void setup() {
       om::mapBegin();
     }
   }
+#if defined(OM_ENABLE_MESH)
+  // EST-348: the chat history begins after the card is mounted (meshLinkBegin ran earlier, before
+  // the SD pins were powered) and restores the newest messages into the RAM rings. No packets are
+  // pumped between meshLinkBegin and here, so nothing is missed. EST-349: the page window is
+  // allocated in PSRAM before the first chat can be drawn.
+  om::crashCheckpoint("[om] history");
+  allocHistoryPage();
+  if (!om::meshHistoryBegin(g_sdOk)) Serial.println("[hist] store not ready (no SD, no SPIFFS)");
+#endif
   drawHome();
 }
 
@@ -2853,6 +2990,10 @@ static void redrawCurrentScreen() {
 }
 
 void loop() {
+  // EST-349: the ONE history flush point, on the loop task and outside every other path. A send, a
+  // MeshCore callback or a USB command only enqueues a record; the card is touched here and nowhere
+  // else. One (two under pressure) record per pass: a card write never sits in the packet path.
+  om::history::loop();
   static uint32_t lastBeat = 0;
   static bool screenOn = true;
   static bool sleepPending = false;   // the backlight is fading out; the panel is still awake
@@ -3235,6 +3376,14 @@ void loop() {
         } else if (!g_drag && !g_acted) {
           handleTap(g_sx, g_sy, false);
         }
+        // EST-348: a pull PAST the oldest message in RAM asks the card for the next page. The clamp
+        // below then runs against the taller content; the scroll is measured from the bottom, so the
+        // page's newest messages appear where the finger already is (no jump).
+        if (g_tab == 1 && !g_settings && !g_kb.open && !g_selector &&
+            g_chatScroll > g_chatMaxScroll) {
+          loadOlderHistoryPage();
+          drawChat();
+        }
         // A rubber band needs a spring: clamp the chat back into range when the finger lifts. The
         // selector list and the emoji grid have their own scroll and only move while they are open.
         if (g_tab == 1 && !g_settings) {
@@ -3261,6 +3410,12 @@ void loop() {
                                                                   : g_chatScroll);
               if (clamped != g_chatScroll) {
                 g_chatScroll = clamped;
+                redraw = true;
+              }
+              // Back at the newest message: the paged window is no longer needed.
+              if (clamped == 0 && g_histPageCount > 0) {
+                g_histPageCount = 0;
+                g_histMore = true;
                 redraw = true;
               }
             }
@@ -3775,12 +3930,18 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       char name[64];
       cmdSafe(name, sizeof(name), om::meshLinkReady() ? om::meshNodeName() : "");
       const char* path = om::meshLinkReady() ? om::meshPathHashLabel() : "?";
+      // EST-348: the history store's own line (sd / spiffs, bytes, worst flush).
+      const om::history::HistoryStatus& hs = om::history::status();
       snprintf(reply, cap,
                "[cmd] ok status mesh=%s name=\"%s\" path=%s channels=%d contacts=%d dm=%d "
-               "unread=%d clock=%s",
+               "unread=%d clock=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
+               "hist_worst_us=%lu hist_dropped=%lu",
                om::meshLinkReady() ? "up" : "down", name, path, om::mcChannelCount(), g_nodeCount,
                om::meshDmCount(), unreadTotal(),
-               om::timeSourceName(om::timeKeeper().source()));
+               om::timeSourceName(om::timeKeeper().source()),
+               !hs.ready ? "off" : (hs.sd ? "sd" : "spiffs"), (unsigned long)hs.bytes, hs.slots,
+               (unsigned long)hs.records, (unsigned long)hs.worstFlushUs,
+               (unsigned long)hs.dropped);
       return;
     }
 
@@ -3794,6 +3955,19 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
     case om::usb::Kind::Msgs: {
       const int count = cmdPrintMsgs(cmd.count);
       snprintf(reply, cap, "[cmd] ok msgs %d", count);
+      return;
+    }
+
+    case om::usb::Kind::History: {
+      // The data lines are the stored log itself; the answer line terminates them for cmd.py.
+      const int count = om::meshHistoryDump(cmd.target, cmd.count);
+      if (count < 0) {
+        cmdError(reply, cap, "no such chat");
+        return;
+      }
+      char chat[64];
+      cmdSafe(chat, sizeof(chat), cmd.target);
+      snprintf(reply, cap, "[cmd] ok history %d chat=\"%s\"", count, chat);
       return;
     }
 

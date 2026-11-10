@@ -20,6 +20,7 @@ constexpr int kChatNameCap = kMeshNameCap + (int)sizeof("DM: ") - 1;
 
 struct ChatMsgView {
   uint32_t seq = 0;         // mesh_link's monotonic message id; stable when the ring shifts
+  uint32_t logId = 0;       // EST-348: the on-card history id, the paging boundary
   const char* name = "";
   const char* text = "";
   const char* chanName = "";

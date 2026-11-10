@@ -213,6 +213,25 @@ Command parseCommand(char* line) {
     }
     return c;
   }
+  if (strcmp(verb, "history") == 0) {
+    c.kind = Kind::History;
+    c.target = cur.next();
+    if (cur.bad() || c.target == nullptr || c.target[0] == 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    const char* word = cur.next();
+    if (word != nullptr) {
+      if (!toInt(word, &c.count)) {
+        c.error = "number";
+        return c;
+      }
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    } else if (cur.bad()) {
+      c.error = "quote";
+    }
+    return c;
+  }
   if (strcmp(verb, "tap") == 0) {
     c.kind = Kind::Tap;
     const char* error = nullptr;

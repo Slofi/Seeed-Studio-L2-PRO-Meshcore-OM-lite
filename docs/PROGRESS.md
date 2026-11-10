@@ -1608,3 +1608,268 @@ them" rule), and moves on to the remaining MeshCore features and the sounds from
 - Reviewed the radio path (NodePrefs + savePrefs + radio setParams/setTxPower, upstream's limits). Built in the sandbox (exit 0, RAM 157,464 B, flash 1,676,981 B), tests exit 0, reviewed binary flashed (1,677,344 B). `status`: contacts=2 (one node rediscovered since the clean-up).
 - By USB: the gear from Chat opens Settings on the Chat tab ("This chat: Public": open, enabled, sound, rename, key); the General tab shows Radio & mesh (preset EU 868 (SLO), TX 22 dBm stepper, 2B, Node, 5 channels) (`docs/shots/2026-11-10-1401-settings-*.png`).
 - Note for the restyle ticket: main.cpp is 3,830 lines (905 removed, the new shell added); the target remains setup + loop + dispatch.
+
+## 2026-11-10 14:22 (DeepSeek): EST-348 chat history that survives a reboot (the card)
+
+Built on `69c6881`. Nothing in `lib/` touched, `.git` untouched, nothing committed. Read REBUILD.md,
+the end of this log, MeshCore's channel/DM paths and the board's SD mount first.
+
+**Why the history was gone.** Both rings are RAM only: 32 channel messages (`s_msgs`, `mesh_link.cpp`)
+and 32 DMs (`s_dmRing`, `ui/dm_ring.h`). A reboot and a flash empty them. They are now a *view*: every
+stored message is also appended to a per-chat log on the card, and at boot the newest messages come
+back into the same rings.
+
+**1. The log and its record format** (`src/history/history_log.h`, plain C++, no Arduino)
+- One append-only file per chat. SD: `/omlite/history/<chat id>.log`, rotation `<chat id>.old`.
+  SPIFFS: `/h/<chat id>.log` (SPIFFS names are at most 31 bytes).
+- Chat id exactly as the ticket says: `ch-<hash 2 hex>-<sanitised name>` for a channel (name bytes
+  outside `[A-Za-z0-9_-]` become `_`, 14 chars max, so the whole id is 20), `dm-<pubkey[0..3] 8 hex>`
+  for a DM. The DM file also carries the full 32-byte public key and the contact name in a `Chat`
+  record, because the file name only has the prefix.
+- Record: 10-byte little-endian header `[magic 0x4F][version 1][type][flags][payload len u16][CRC-32 u32]`
+  then the payload. The CRC is over `[version..len]` + payload (CRC-32/ISO-HDLC, the polynomial the
+  EST-329 contacts file already used). Max payload 288 B, max record 298 B.
+- Four record types: `Chat` (identity: kind, name, key), `Msg` (logId, seq, uptime, wall, wallReal,
+  ackWall, ackReal, mine, dm, delivery state, hops, SNR, path hash size/count + 64 B path, name,
+  text), `Update` (logId + kind + delivery/ackWall/ackReal/repeats, 24 B) and `Meta` (seenLogId u32 +
+  unread u16, 16 B).
+- `logId` is the history's own monotonic id per chat. The RAM rings keep it next to their per-boot
+  `seq`; update records name it. `seq` is also stored for the `msgs` dump.
+- **Torn write:** the length prefix and the CRC make a half-written last record identifiable. The
+  reader stops at the first record that does not validate and keeps everything before it. Before the
+  next write the store repairs the tail (copies the valid prefix to `.tmp`, removes the `.log`,
+  renames). One log line: `[hist] repaired a torn last record: the rest of the log is intact`.
+  Proven by `test_history.cpp` (a half record after three messages: the three survive, the repair
+  makes the file validate whole, the next message is id 4).
+
+**2. Boot load, updates, paging**
+- `meshHistoryBegin(sdOk)` runs in `setup()` **after** the SD mount (meshLinkBegin runs before the SD
+  pins are powered; no packets are pumped in between, so nothing is missed). For every channel and
+  every `dm-*.log` it reads the newest 32 messages and fills the RAM rings; a DM log recreates its
+  thread (key + current contact name) and its unread count. Boot log:
+  `[hist] restored N channel message(s), M DM message(s) from the card`.
+- The reader walks the file **backwards in 4 KB windows** (a window start is found by validating a
+  candidate magic to the known boundary), so a boot reads ~4-16 KB per chat, not the whole log. The
+  store owns ONE 32-message scan ring: boot load and paging use it, no second copy.
+- Update records are applied in file order. Because the walk is backwards, updates are collected as
+  they are met and applied when their message comes into the window. Delivery state, ACK wall time and
+  the heard-repeat counter therefore survive: `onACKRecv`, `setDmState` and `OmMeshTables::wasSeen`
+  append them.
+- **Seen/unread:** a received message appends `Msg` + `Meta{seen, unread+1}`; reading a chat appends
+  `Meta{seen = newest logId, unread = 0}` (`meshClearUnread` / `meshDmClearUnread`). Last Meta wins on
+  load, so badges and the seen point survive. Only the current `.log`'s Meta is trusted (the `.old`
+  may be from before the last read).
+- **Paging:** pulling past the oldest message in RAM asks for one page of 16 (a fixed 32-message
+  window in `main.cpp`, so up to **32 older than the 32 in RAM = 64 per chat**, then it stops). The
+  scroll is measured from the newest, so the page's newest messages appear where the finger already
+  is; no jump. A paged message gets a synthetic seq (`0x80000000 | logId`) so REPLY/the message sheet
+  still resolve to it. Back at scroll 0 the window is dropped.
+
+**3. Limits and timing**
+- SD: **2 MB per chat**, rotate to `.old`; **64 MB total**; at most 32 chat slots (8 channels + 16 DM
+  threads + room for orphaned logs). Rotation happens BEFORE the total-cap check, so a full store can
+  make room. Over the caps a record is dropped and `full` is set (`status hist_dropped=`), never a
+  half write.
+- SPIFFS fallback (missing/failed card): **48 KB per chat, 512 KB total**, logged once
+  (`[hist] SD card absent or not mountable: history on SPIFFS ...`); a card that mounts but fails a
+  write switches the whole store to SPIFFS with one line (`[hist] SD write failed: switched to the
+  SPIFFS fallback`).
+- Writes are **buffered**: `appendMsg` encodes into a RAM queue of 8 records (2.4 KB); the mesh loop
+  flushes **one record per pass** (`history::loop()` -> `flushStep(1)`), one open + one write + flush +
+  close. Every flush is timed with `micros()` and the worst is kept: `status hist_worst_us=` (and
+  `hist_records=`). The SD number has to come from the device; the sandbox cannot write a card.
+
+**4. USB**
+- `history <chat> [n]` (new `Kind::History`): channel name, or DM contact name / 8-hex public-key
+  prefix; n defaults to 20, clamped to 32. Prints `[hist] id= seq= up= wall= real= from= hops= snr=
+  state= repeats= text=` per line, then `[cmd] ok history <count>`. Unknown chat ->
+  `[cmd] error no such chat`.
+- `status` now ends with `history=sd|spiffs|off hist_bytes=<all logs> hist_chats=<slots>
+  hist_records=<since boot> hist_worst_us=<worst flush> hist_dropped=<refused>`.
+- The parser is tested in `test_usb_cmd.cpp`: plain and quoted chat names, the optional n, and
+  `history` / `history Public x` / `history Public 5 extra` refused.
+
+**Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS. RAM **189,488 B** of
+327,680 (57.8 %, previous 157,464, **+32,024 B**), flash **1,724,589 B** of 6,553,600 (26.3 %,
+previous 1,676,981, **+47,608 B**), `firmware.bin` **1,724,960 B** (previous 1,677,344, **+47,616 B**).
+Only the two pre-existing RadioLib warnings. The RAM is the store (`sizeof(HistoryStore)` = 20,232 B:
+the 32-message scan ring, the 4 KB window, the 8-record queue, 32 slots) plus the page window
+(32 x 288 B) and 32 more `ChatMsgView`s.
+
+**Tests**: `test/host/run.sh` exit 0 (19 C++ binaries + 5 Python checks). New `test_history.cpp`
+drives the SAME `HistoryStore` over an in-memory volume:
+record encode/decode round trip (all fields, UTF-8 text, path), a corrupted record refused, CRC over
+header+payload; a torn last record: 3 messages survive, the file validates after the repair, the next
+append is id 4; update records (delivery + ACK wall + repeats) applied on load; a `dm-*.log` restores
+its key, name and unread; paging 100 messages in 16s with no gaps or duplicates; rotation to `.old`
+with every id still reachable across both files, and unread/seen after rotation; unread/seen across
+two reloads; the SPIFFS fallback (status flags, per-chat cap) and the total cap refusing records with
+`full` set; 60 messages with five records each (the 256-offset window); chat ids. `test_usb_cmd.cpp`
+gained the `history` command.
+
+**Could not check** (no device, no card, no radio in the sandbox): the glass and the card. Claude/Filip
+need to check: the boot restore line and `status history=sd`, a message still on screen after a
+reboot, `history` after the reboot, the DM delivery state after the ACK and after a reboot, unread
+surviving a reboot, paging with a finger (the log line `[hist] page: 16 older...`), an absent card
+(`history=spiffs`), and the real worst flush time from `status hist_worst_us`. The host test proves
+the format and the rules, not SD timing.
+
+**Exact USB steps for Claude** (from the firmware folder; `tools/cmd.py`, `tools/shot.py`):
+1. `tools/cmd.py status` -> `history=sd hist_bytes=...` (the card must be in).
+2. `tools/cmd.py send Public "est348 before reboot"`, `tools/cmd.py msgs 3` -> the message (note its
+   `seq`; `seq` is per boot, `history`'s `id` is the stable one).
+3. Reboot by OTA of the SAME image (Claude's usual flash). Boot log must show `[hist] store sd, ...`
+   and `[hist] restored N channel message(s), M DM message(s) from the card`.
+4. `tools/cmd.py msgs 3` -> the same text is still in the ring; `tools/cmd.py history Public 5` ->
+   the same message with `wall`/`real`/`id`, and the `[cmd] ok history N` line.
+5. DM: `tools/cmd.py dm "ERA-3 (SI)" "est348 dm"`, wait for the PONG and the ACK, then
+   `tools/cmd.py history "ERA-3 (SI)" 5` -> our message `state=delivered` with its ACK wall, then the
+   reply. OTA the same image again and repeat `history "ERA-3 (SI)" 5` and `msgs 5`.
+6. Unread: leave the Chat on Nodes, send a channel message from another node (or a DM), confirm
+   `status unread=1`, OTA the same image, `status` must still say `unread=1`; open the chat and the
+   badge clears.
+7. Paging: Chat tab, drag up until the log prints `[hist] page: 16 older message(s), 16 in the
+   window`, then `tools/shot.py docs/shots/2026-11-10-est348-paging.png`. Drag up twice more to reach
+   32 older (the window stops there).
+8. Card out: power off, remove the card, boot. The log prints
+   `[hist] SD card absent or not mountable: history on SPIFFS ...`; `status` says `history=spiffs`.
+   Reboot once more without the card and `history Public 5` still shows what was written there.
+
+**Known limits, said plainly:** a renamed channel gets a NEW chat id, so its old log is orphaned (it
+still counts toward 64 MB and one of the 32 slots, never loaded); a DM log is keyed by the first 4
+bytes of the public key (a collision is possible but 1 in 4 billion); the paging window stops 32
+messages beyond the RAM ring; a DM received with no thread (thread table full) is stored without a
+chat id; the SPIFFS fallback is 512 KB total, not the card's room.
+
+**Next step**: Claude flashes this image, runs the steps above and commits. If the on-device
+`hist_worst_us` is above a few ms, the flush chunk is the knob (one record is at most 298 B).
+
+## 2026-11-10 14:35 (Claude): EST-348 panics on the first send; rolled back to EST-347
+- Built in the sandbox (exit 0, RAM 189,488 B = 57.8 %, flash 1,724,589 B), tests exit 0, flashed 14:16 (1,724,960 B). `status`: history=sd, 5 chats, 0 records.
+- `send "Don't Panic" ...` crashed the device twice (USB dropped). Captured with ONE reader (`docs/est348-crash-boot.log`; a first attempt with two readers on the port shredded the log, the known two-readers trap): vfs open() errors on /sdcard/omlite/history/... ("does not exist, no permits for creation"), then a panic; next boot: last checkpoint "[om] history", core dump PC 0x4037e844, exc cause 65, app sha c6184c0ddff1dc19 = the EST-348 ELF. Decoded by Claude: a spinlock timeout in xQueueReceive inside the SD driver (sdmmc_host_wait_for_event <- sdmmc_get_status <- ff_sdmmc_card_available <- ff_sdmmc_status). The backtrace line was cut at 10 frames by the device's line limit.
+- Rolled back to the EST-347 binary 14:34: send to Don't Panic OK. EST-348's tree stays uncommitted; fix ticket with the evidence.
+
+## 2026-11-10 14:46 (DeepSeek): EST-349 the first send no longer touches the card (history is enqueue-only)
+
+Built on `9e43002` + the uncommitted EST-348 tree. Nothing in `lib/` touched, `.git` untouched, nothing
+committed. Read the end of this log, `docs/est348-crash-boot.log` and REBUILD.md first.
+
+**1. The core dump in full.** The next boot stored 16 frames (Claude's first read cut at 10). Decoded
+against the EST-348 ELF (`firmware.bin` 1,724,960 B, build 14:26:02, saved in
+`paperclip-pilot/sweep/est349/est348-crash/`), frames top to bottom:
+
+```
+ 1 0x4037e844 compare_and_set_native / spinlock_acquire / xPortEnterCriticalTimeout (port.c:301)
+ 2 0x4037d81d vPortEnterCritical -> xTaskCheckForTimeOut (tasks.c:3927)
+ 3 0x4037c7b1 xQueueReceive (queue.c:1472)
+ 4 0x4204ccf9 sdmmc_host_wait_for_event (sdmmc_host.c:537)
+ 5 0x4204d68d handle_event -> sdmmc_host_do_transaction (sdmmc_transaction.c:255/157)
+ 6 0x42099f13 sdmmc_send_cmd (sdmmc_cmd.c:23)
+ 7 0x42069919 sdmmc_send_cmd_send_status (sdmmc_cmd.c:374)
+ 8 0x42069b6d sdmmc_get_status (sdmmc_cmd.c:536)
+ 9 0x4205db1b ff_sdmmc_card_available (diskio_sdmmc.c:23)
+10 0x4205dbf6 ff_sdmmc_status
+11 0x4205d9ea ff_disk_status (diskio.c:66)
+12 0x4205aa35 find_volume (ff.c:3244)
+13 0x4205c76e f_stat (ff.c:4610)
+14 0x4205e66b vfs_fat_stat (vfs_fat.c:597)
+15 0x42057699 esp_vfs_stat (vfs.c:580)
+16 0x42086fed stat (newlib sysstat.c:11)
+```
+
+So the crash is a **stat()** (a `fs_.exists()`, and the `stat` inside `VFSImpl::open`), not a read or a
+write of a record. The CPU was spinning to take a FreeRTOS spinlock inside `xQueueReceive` (the SD
+driver's event wait) with interrupts/scheduler already off: an SDMMC transaction ran in a context where
+blocking is not allowed. The two `[E][vfs_api.cpp:105]` lines just before it are the same mistake one
+step earlier.
+
+**2. The caller chain (from our code to that stat).** `tools/cmd.py send` -> `OMCMD1` frame ->
+`om::otaPoll()` (loopTask) -> `handleCommandFrame` -> `om::usbCommandExecute` (`Kind::Send`) ->
+`om::meshLinkSend` -> `the_mesh.sendGroupMessage(...)` returns -> the append expression
+`history::store().appendMsg(histChannelSlot(chan), histFromChannel(m), 0)`:
+- `histChannelSlot` -> `HistoryStore::ensureChannel` -> `ensureSlot` (EST-348) called
+  `vol_->size(".log")` and `.old` -> `fs_.open(FILE_READ)` -> `VFSImpl::open` -> `stat()`: the **two vfs
+  error lines**, then `readChatHeader` -> `vol_->exists(".log")` -> `fs_.exists()` -> `VFSFileImpl` ->
+  `stat()`: **the crash**. `appendMsg` would then also have called `scanTail()`/`repairTail()` (a read
+  and, with a torn tail, a create/write/rename) from the same send path. Same in the MeshCore
+  `wasSeen` callback: `appendUpdate -> histChannelSlot -> ensureChannel` reached the card.
+- This is a *read-only `stat`* in the send path, on the same task as the loop but nested inside the
+  USB frame handling and immediately after a radio TX. Neither the send nor a callback may do this.
+
+**3. The fix (one owner, RAM first).**
+- `appendMsg`, `appendUpdate`, `markSeen` are now **RAM only**: no `size`, no `exists`, no open, no scan,
+  no repair. `ensureSlot` no longer looks at the volume at all. A full queue **drops** the record
+  (`dropped_++`); it never calls `flushOne()` (EST-348 did that: a write from the send path).
+- `HistoryStore::begin()` reads the directory **and every known log's tail once**, on the loop task in
+  `setup()` (`scanAllTails`), so `maxLogId`, seen and unread are RAM truth before the first append. A
+  slot created later is empty by definition (`scanDirectory` listed everything) and starts at id 1.
+- `flushOne()` is the only writer. `history::loop()` moved out of `meshLinkLoop()` to the **top of
+  `loop()` in main.cpp, before `otaPoll()`**: one record per pass, two when the queue is above 4. No
+  code path reaches the card from a callback, an ISR or a critical section. A late scan safety net in
+  `flushOne` drops a record whose id the volume already has instead of rewriting it.
+- `switchToFallback()` re-lists and re-scans SPIFFS on the spot; it drops the queued records (their ids
+  were assigned against the card's counters) and says so in one line.
+- The queue is 16 records now (was 8): 4,832 B, in PSRAM.
+
+**4. Directories and probes (no vfs error lines at boot).** `SdVolume::mount()` checks
+`SD_MMC.totalBytes()`, then `exists("/omlite")` before `mkdir("/omlite")` (same for `/omlite/history`),
+and verifies both exist; a failure prints `[hist] could not create /omlite/history on the card`. The
+same for SPIFFS `/h`. `FsVolume::size()` and `openRead()` probe with `exists()` first, so a missing log
+is never opened in read mode just to find out: the old `open()` line cannot appear. The first write
+opens with `FILE_APPEND` ("a") and makes the file, which the Arduino FS does without an error line.
+
+**5. Other SD users.** `rg` over `src/`: `SD_MMC` appears only in `board.cpp` (mount), `main.cpp`
+(mount + the tiles.pack probe in setup), `map.cpp` (`mapBegin` and the tile/overlay reads in
+`mapRender`) and `history_store.cpp`. There is no `xTaskCreate` in `src/` (only the vendored nrf52
+Ethernet helper); nothing SD runs in an ISR or a timer. So every SD user is already on loopTask; what
+was missing was that the history *write* also happened inside the send/USB call stack. Now history
+writes happen once at the top of the pass and map reads later in the same pass, never nested.
+
+**6. RAM and flash.** Build (`pio run -e om_lite_l2`, REBUILD.md command): exit 0, SUCCESS. RAM
+**164,112 B** of 327,680 (50.1 %, previous 189,488, **-25,376 B**), flash **1,700,273 B** of 6,553,600
+(25.9 %, previous 1,724,589, **-24,316 B**), `firmware.bin` **1,700,640 B** (previous 1,724,960,
+**-24,320 B**). Only the two pre-existing RadioLib warnings. Moved to PSRAM: the page window (32 x 288 =
+**9,216 B**, `ps_malloc` at setup, paging off with a log line if PSRAM is gone) and the store scratch
+(queue 4,832 + window 4,096 + scan ring 9,216 + offsets 512 = **18,656 B**, `ps_malloc` with an internal
+heap fallback). 27,872 B left .bss; static RAM fell 25,376 because the queue doubled from 8 to 16
+records (+2,416) and the scratch now carries its pointers. `.bss` holds the 32 slots, the 32 extra
+`ChatMsgView`s and counters only.
+
+**Tests**: `test/host/run.sh` exit 0 (19 C++ binaries + 5 Python checks). New
+`testEnqueueNeverTouchesTheVolume()`: after boot it poisons the in-memory volume (every entry point
+fails and counts), then creates a new channel slot, appends a burst, an update and a seen mark, and
+overflows the queue: **`vol.ops == 0`**, the overflow drops; then an unpoisoned `flushStep` writes with
+`vol.ops > 0`. `FakeVolume` now counts every exists/size/open/remove/rename/list call. The existing
+torn-record, paging, rotation, unread and fallback tests now flush between messages the way the loop
+does (the caller no longer writes). One test bug fixed on the way: a 5-byte string literal was passed
+as a 32-byte public key (g++ 14 only started to see it; now a real 32-byte array).
+
+**Could not check** (no device, no card in the sandbox): the glass, the card and the panic itself. The
+host test proves the API contract, not SD timing.
+
+**Exact USB steps for Claude** (same image, one reader on the port):
+1. Flash this `firmware.bin` (1,700,640 B). Boot log must show `[hist] page buffer 32 x 288 B in PSRAM`,
+   `[hist] working memory 18656 B in PSRAM`, `[hist] store sd, ...` and `[hist] restored ...`, and **no**
+   `[E][vfs_api.cpp:105]` line.
+2. `tools/cmd.py status` -> `history=sd`, `hist_records=` and `hist_worst_us=`; note the counters.
+3. Right after boot: `tools/cmd.py send "Don't Panic" "est349 first send"` -> `[cmd] ok send ...`, no
+   reboot, `hist_records` +1 on the next `status`.
+4. `tools/cmd.py dm "ERA-3 (SI)" "est349 dm ping"`, wait for the PONG/ACK, `tools/cmd.py msgs 5` ->
+   the DM `sending -> delivered`.
+5. Under load: send 10-15 messages back to back (`send`, `dm`), then `tools/cmd.py status` ->
+   `hist_dropped=0` (or say the number) and a bounded `hist_worst_us`.
+6. Reboot by OTA of the SAME image; `tools/cmd.py history "Don't Panic" 5` and
+   `tools/cmd.py history "ERA-3 (SI)" 5` -> the messages with `id`, `wall`, `real`, and the DM
+   `state=delivered`; `msgs 5` still shows them.
+7. Paging with a finger should still print `[hist] page: 16 older message(s), 16 in the window`.
+
+**Next step**: Claude flashes, runs the steps, and if `hist_worst_us` is above a few ms the flush chunk
+(one record is at most 298 B) is the knob. If the first send still panics, the remaining suspect is a
+`stat()` inside the Arduino FS `exists()` itself; then the next ticket replaces `exists()` with an
+`open("a")`-only probe or `SD_MMC` at a lower frequency.
+
+## 2026-11-10 14:58 (Claude): EST-349 on the device: history survives a reboot; the `history` USB command still panics
+- Built in the sandbox (exit 0, RAM 164,112 B, flash 1,700,273 B), tests exit 0, reviewed binary flashed (1,700,640 B).
+- `send "Don't Panic" ...` right after boot (captured with one reader): ok, no crash. DM ping to ERA-3: delivered + PONG. `status`: history=sd, 6 records written, worst flush 53,455 us (53 ms of loop time per record: noticeable, watch it), 0 dropped.
+- Reboot by reflashing the same image: `[hist] restored 1 channel message(s), 2 DM message(s) from the card`; `msgs` lists the same three, unread=1 kept. **History survives a reboot.**
+- `history "ERA-3 (SI)" 5` panics (twice): the same class as EST-348, a FatFs stat from inside the USB command handler (core dump in `docs/est349-history-cmd-crash.log`, PC 0x4037b989, sha e20b4cc90d73e57e). Both panics so far came from SD access nested inside `otaPoll()`'s command handling; the screen's own send path (enqueue only, flush at the top of loop) works. Fix next: USB commands queued by the frame handler and executed after otaPoll() returns, and find what in otaPoll() makes SD access unsafe there.

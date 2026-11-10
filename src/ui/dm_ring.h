@@ -38,6 +38,7 @@ struct DmMsg {
   uint8_t pathHashSize;
   uint8_t pathCount;
   uint32_t seq;
+  uint32_t logId;    // EST-348: the on-card history id (0 = not stored yet)
   uint32_t ts;       // uptime seconds when stored
   uint32_t wall;     // system-clock seconds then
   uint32_t ackWall;  // system-clock seconds when the ACK arrived

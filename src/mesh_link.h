@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 
+#include "history/history_log.h"
 #include "ui/dm_ring.h"   // the DM store itself (plain C++, host-tested): EST-344
 
 #if defined(OM_ENABLE_MESH)
@@ -17,6 +18,18 @@ bool meshLinkSend(int channelIdx, const char* text);
 // Re-apply the channel table to the running mesh (after an add, remove or rename). Safe to call any
 // time after meshLinkBegin(); unused slots are emptied so a removed channel stops matching.
 bool meshLinkReloadChannels();
+
+// --- EST-348: the on-card chat history -------------------------------------------------------------
+// Called from setup() after the SD card has been tried. Restores the newest messages of every
+// channel and of every DM log into the RAM rings, and the unread counts from the last Meta record.
+// `sdOk` false (or a card that fails to mount) selects the bounded SPIFFS fallback.
+bool meshHistoryBegin(bool sdOk);
+// Older messages than `beforeLogId` for the open chat: a channel (thread < 0) or a DM thread.
+// `out` must hold `cap`; the messages are oldest first, at most kScanRing (32).
+int meshHistoryOlder(int channelIdx, int thread, uint32_t beforeLogId, history::Msg* out, int cap);
+// USB `history <chat> [n]`: channel name or DM contact name / public-key prefix. Returns how many
+// [hist] lines were printed, or -1 when no such chat exists.
+int meshHistoryDump(const char* chat, int n);
 
 // Recent channel traffic for the UI (oldest first).
 int meshMsgCount();
@@ -40,6 +53,8 @@ int meshMsgHeardRepeats(int idx);
 // Monotonic sequence number of a stored message (1, 2, 3...). Stable across ring shifts: the UI holds
 // this instead of an index, so REPLY / INFO / an open menu cannot move to another message.
 uint32_t meshMsgSeq(int idx);
+// EST-348: the on-card history id of a stored message (0 = not stored).
+uint32_t meshMsgLogId(int idx);
 int meshUnread(int channelIdx);
 void meshClearUnread(int channelIdx);
 

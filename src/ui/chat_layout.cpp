@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "rptr_model.h"   // EST-360: the region-name rule is one function, shared with the model
+
 namespace om {
 namespace ui {
 namespace {
@@ -72,6 +74,10 @@ bool keyboardAllowsChar(KeyboardField field, char c) {
     case KeyboardField::RptrPosition:
       // EST-358: the position editor takes only what a coordinate pair is made of.
       return (u >= '0' && u <= '9') || u == '.' || u == '-' || u == ',' || u == ' ';
+    case KeyboardField::RptrRegion:
+      // EST-360: MeshCore's own region-name rule, shared with rptr_model.cpp (RegionMap::is_name_char
+      // accepts '-', '$', '#', digits and every byte at or above 'A'; a space or '*' is not a name).
+      return om::rptr::regionNameChar(c);
     case KeyboardField::Chat:
     default:
       return true;   // the chat's own key table is already the set it offers
@@ -85,6 +91,7 @@ int keyboardMaxBytes(KeyboardField field) {
     case KeyboardField::WifiPassword: return kKeyboardWifiPassMaxBytes;
     case KeyboardField::RptrPassword: return kKeyboardRptrPassMaxBytes;
     case KeyboardField::RptrPosition: return kKeyboardRptrPosMaxBytes;
+    case KeyboardField::RptrRegion: return om::rptr::kRegionNameMax;
     default: return 0;   // chat: the draft budget is composeAllowance()
   }
 }
@@ -98,9 +105,11 @@ bool keyboardAcceptsBytes(KeyboardField field, int usedBytes, int addBytes) {
 
 bool keyboardAccents(KeyboardField field) {
   // A password is taken literally: the accented s/c/z long press would enter bytes the network's
-  // passphrase did not ask for.
+  // passphrase did not ask for. A region name goes to MeshCore's name rule and the repeater's own
+  // ASCII names, so it is typed plainly too.
   return field != KeyboardField::Base64Key && field != KeyboardField::WifiPassword &&
-         field != KeyboardField::RptrPassword && field != KeyboardField::RptrPosition;
+         field != KeyboardField::RptrPassword && field != KeyboardField::RptrPosition &&
+         field != KeyboardField::RptrRegion;
 }
 bool keyboardEmoji(KeyboardField field) { return field == KeyboardField::Chat; }
 
@@ -184,6 +193,23 @@ int keyRow(bool nums, int row, KeyDef* out, KeyboardField field) {
         put(out[n++], "+", kKeyUnit, KeyKind::Char);
         put(out[n++], "/", kKeyUnit, KeyKind::Char);
         put(out[n++], "=", kKeyUnit, KeyKind::Char);
+        put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
+        return n;
+    }
+  }
+  // EST-360: a region name's 123 page is digits plus the only three symbols MeshCore's name rule
+  // allows ('#', '$', '-'), so nothing is offered that putRegion() would refuse.
+  if (field == KeyboardField::RptrRegion) {
+    switch (row) {
+      case 0: return addChars(field, out, 0, kNumbers0);
+      case 1: return addChars(field, out, 0, "#$-");
+      case 2:
+        put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
+        put(out[n++], "", kKeyUnitWide, KeyKind::Del);
+        return n;
+      default:
+        put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
+        put(out[n++], "-", kKeyUnit, KeyKind::Char);
         put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
         return n;
     }

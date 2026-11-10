@@ -84,10 +84,10 @@ void drawAdminRow(lgfx::LovyanGFX* d, const RptrAdminLayout& a, const rptr::Admi
   if (r.body.y >= a.body.bottom() || r.body.bottom() <= a.body.y) return;
   const bool danger = row.danger;
   if (danger) d->fillRect(r.body.x, r.body.y, r.body.w, r.body.h, kDangerBg);
-  // A toggle's or region's state colours its value, the mock's green/red .meta.
+  // A toggle's or a region's state colours its value, the mock's green/red .meta.
   uint16_t valueInk = kDim;
   if (row.kind == rptr::RowKind::Toggle) valueInk = row.on ? kGreen : kBad;
-  if (row.kind == rptr::RowKind::Region) valueInk = row.on ? kGreen : kBad;
+  if (row.kind == rptr::RowKind::Open) valueInk = row.on ? kGreen : kBad;
   if (row.kind == rptr::RowKind::Fact) valueInk = kInk;
   drawTextEllipsis(d, FontRole::SansBody, danger ? kDangerInk : kInk, danger ? kDangerBg : kScreen,
                    r.label.x, r.label.y + 8, r.label.w, row.label);
@@ -96,12 +96,12 @@ void drawAdminRow(lgfx::LovyanGFX* d, const RptrAdminLayout& a, const rptr::Admi
                      r.value.y + 6, r.value.w, row.value);
   }
   if (row.keys >= 1) {
-    const char* aText = row.kind == rptr::RowKind::Region ? "H" : "-";
+    // A region row's one key opens its page; a stepper's first key is "-".
+    const char* aText = row.kind == rptr::RowKind::Open ? ">" : "-";
     smallKey(d, r.keyA, aText, false);
   }
   if (row.keys >= 2) {
-    const char* bText = row.kind == rptr::RowKind::Region ? "D" : "+";
-    smallKey(d, r.keyB, bText, false);
+    smallKey(d, r.keyB, "+", false);
   }
   d->drawFastHLine(r.body.x, r.body.bottom() - 1, r.body.w, kRowLine);
 }
@@ -170,6 +170,8 @@ void drawListStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrLayout& r) {
   drawTextLeft(d, FontRole::MonoMeta, kDimmer, kPanel, 8, r.head.y + r.head.h / 2, "REPEATERS");
   drawTextLeft(d, FontRole::MonoMeta, kAcc, kPanel, 76, r.head.y + r.head.h / 2, v.state);
   chip(d, r.scan, v.scanning ? "Scanning" : "Scan", v.scanning);
+  // EST-360: the anonymous nearby-region read, its own labelled chip (no login and no password).
+  chip(d, r.regions, v.regionsBusy ? "Reading" : "Regions", v.regionsBusy);
 
   if (v.count <= 0) {
     // Never an empty list without a word: the window is open or it closed with no answer.
@@ -240,13 +242,15 @@ void drawLoginStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrLayout& r) 
 }
 
 void drawAdminStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrAdminLayout& a) {
-  drawBack(d, a.back, "< list");
+  drawBack(d, a.back, v.backLabel);
   drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen, a.title.x, a.title.y + 11, a.title.w,
                    v.name);
   drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, a.title.x, a.title.y + 21, a.title.w,
                    v.sub);
   for (int i = 0; i < kRptrViewCount; ++i) {
-    chip(d, a.chips[i], kRptrViewLabel[i], i == v.view);
+    // A region's page (view 6) is a child of the Regions chip, so Regions stays lit there.
+    const bool on = (i == v.view) || (v.view == 6 && i == 2);
+    chip(d, a.chips[i], kRptrViewLabel[i], on);
   }
 
   d->setClipRect(a.body.x, a.body.y, a.body.w, a.body.h);
@@ -257,7 +261,7 @@ void drawAdminStage(lgfx::LovyanGFX* d, const RptrView& v, const RptrAdminLayout
   d->fillRect(a.answer.x, a.answer.y, a.answer.w, a.answer.h, kPanel);
   d->drawFastHLine(a.answer.x, a.answer.y, a.answer.w, kLine);
   if (v.lastCmd[0]) {
-    char line[60];
+    char line[96];
     snprintf(line, sizeof(line), "> %s", v.lastCmd);
     drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, 8, a.answer.y + 9, a.answer.w - 16,
                      line);

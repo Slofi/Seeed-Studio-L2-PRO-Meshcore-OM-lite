@@ -30,6 +30,7 @@ constexpr int16_t kRptrAnswerH = 34;   // the last command and its answer, above
 struct RptrLayout {
   Rect head;        // "REPEATERS"
   Rect scan;        // the Scan chip at the header's right
+  Rect regions;     // the Regions chip left of Scan: the anonymous nearby-region read
   Rect list;        // the scrolling list body
   Rect empty;       // the empty state's area
   Rect back;        // detail page: the back key
@@ -74,7 +75,7 @@ constexpr int rptrMaxScroll(const RptrLayout& r, int count) {
 }
 
 enum class RptrHit : uint8_t {
-  None = 0, Scan, Row, Back, LoginField, LoginButton, Forget
+  None = 0, Scan, Regions, Row, Back, LoginField, LoginButton, Forget
 };
 
 struct RptrHitResult {
@@ -112,7 +113,8 @@ struct RptrRowRects {
   Rect keyA;
   Rect keyB;
 };
-// `keys` is 0 (none), 1 (one key at the right) or 2 (a -/+ or H/D pair).
+// `keys` is 0 (none), 1 (one key at the right: ">" for a region page, "-" elsewhere) or 2 (a -/+
+// stepper pair).
 RptrRowRects rptrRowRects(const RptrAdminLayout& a, int keys, int index, int scroll);
 int rptrAdminMaxScroll(const RptrAdminLayout& a, int rowCount);
 

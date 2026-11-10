@@ -39,6 +39,7 @@ struct RptrView {
   RptrItem items[kRptrMaxItems];
   int scroll = 0;
   bool scanning = false;
+  bool regionsBusy = false;  // the anonymous nearby-regions read is running
   char state[40] = "";     // "listening, 2 found" / "3 found" / "none answered"
 
   // --- the login page
@@ -70,10 +71,11 @@ struct RptrView {
   rptr::AdminRow rows[kRptrAdminRows];
   int rowCount = 0;
   int aScroll = 0;
-  char lastCmd[48] = "";
+  char lastCmd[80] = "";
   char lastAnswer[120] = "";
   bool answerBad = false;
   bool answerPending = false;
+  char backLabel[12] = "< list";   // "< regions" on one region's page
 };
 
 void rptrScreenDraw(const RptrView& v);

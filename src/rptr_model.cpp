@@ -50,6 +50,32 @@ int passwordFilter(const char* src, char* out, size_t cap) {
   return n;
 }
 
+// ------------------------------------------------------------------------------------------ regions
+// The character rule itself is constexpr in the header (so the keyboard and every host test share
+// it); these are the string forms built on it.
+bool regionNameValid(const char* name) {
+  if (name == nullptr || name[0] == 0) return false;
+  int n = 0;
+  for (const char* p = name; *p; ++p, ++n) {
+    if (n >= kRegionNameMax) return false;
+    if (!regionNameChar(*p)) return false;
+  }
+  return n > 0;
+}
+
+int regionNameFilter(const char* src, char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return 0;
+  out[0] = 0;
+  if (src == nullptr) return 0;
+  int n = 0;
+  for (const char* p = src; *p && n < kRegionNameMax && (size_t)n + 1 < cap; ++p) {
+    if (!regionNameChar(*p)) continue;
+    out[n++] = *p;
+  }
+  out[n] = 0;
+  return n;
+}
+
 // ------------------------------------------------------------------------------------------- found
 void FoundList::begin(uint32_t tagSeed, uint32_t nowMs) {
   count = 0;
@@ -67,15 +93,16 @@ int FoundList::indexOf(const uint8_t* prefix6) const {
   return -1;
 }
 
-int FoundList::addAnswer(const uint8_t* prefix6, const char* name, bool inContacts, bool hasIn,
-                         int8_t in4, bool hasOut, int8_t out4, uint8_t hops, uint32_t nowMs) {
-  if (prefix6 == nullptr) return -1;
-  int at = indexOf(prefix6);
+int FoundList::addAnswer(const uint8_t* key, int keyLen, const char* name, bool inContacts,
+                         bool hasIn, int8_t in4, bool hasOut, int8_t out4, uint8_t hops,
+                         uint32_t nowMs) {
+  if (key == nullptr || keyLen <= 0) return -1;
+  int at = indexOf(key);   // compares the first six bytes, whatever the key length
   if (at < 0) {
     if (count >= kMaxFound) return -1;
     at = count++;
     rows[at] = Found();
-    memcpy(rows[at].prefix, prefix6, 6);
+    memcpy(rows[at].prefix, key, 6);
   }
   Found& f = rows[at];
   // The name and the contact flag are ours (the answer carries only the key); a later answer for the
@@ -83,6 +110,15 @@ int FoundList::addAnswer(const uint8_t* prefix6, const char* name, bool inContac
   if (name != nullptr && name[0]) {
     snprintf(f.name, sizeof(f.name), "%s", name);
     f.inContacts = inContacts;
+  }
+  // Keep the whole key when the answer carried one: the anonymous regions request needs it for the
+  // shared secret, and a prefix-only answer (6 or 8 bytes) cannot be asked.
+  if (keyLen >= kPubKeyBytes) {
+    memcpy(f.key, key, kPubKeyBytes);
+    f.keyLen = (uint8_t)kPubKeyBytes;
+  } else if (keyLen > (int)f.keyLen) {
+    memcpy(f.key, key, (size_t)keyLen);
+    f.keyLen = (uint8_t)keyLen;
   }
   f.hasSnrIn = hasIn;
   if (hasIn) f.snrIn4 = in4;
@@ -92,6 +128,15 @@ int FoundList::addAnswer(const uint8_t* prefix6, const char* name, bool inContac
   f.heardMs = nowMs;
   ++serial;
   return at;
+}
+
+bool FoundList::setRegions(int index, const AnonRegions& a) {
+  if (index < 0 || index >= count) return false;
+  rows[index].anon = a;
+  rows[index].anon.valid = true;   // only a parsed answer is ever stored here
+  rows[index].regionsAsked = true;
+  ++serial;
+  return true;
 }
 
 void FoundList::tick(uint32_t nowMs) {
@@ -196,9 +241,11 @@ void LoginMachine::reset() {
 // ------------------------------------------------------------------------------------------- status
 bool statusParse(const uint8_t* buf, int len, Status* out) {
   if (buf == nullptr || out == nullptr) return false;
-  // The reply is [tag 4][stats 56]; the caller passes the whole reply.
-  if (len < 4 + kRepeaterStatsBytes) return false;
-  const uint8_t* p = buf + 4;
+  // MyMesh::onContactResponse already stripped the 4-byte tag: `buf` starts at batt_milli_volts.
+  // EST-360: the old code skipped 4 more, so every field read the one four bytes after it (battery
+  // was the noise floor). A newer firmware's longer RepeaterStats is accepted; we read the known head.
+  if (len < kRepeaterStatsBytes) return false;
+  const uint8_t* p = buf;
   Status s;
   auto u16 = [&](int off) {
     uint16_t v;
@@ -229,6 +276,86 @@ bool statusParse(const uint8_t* buf, int len, Status* out) {
   s.rxCrcErrors = u32(52);
   s.valid = true;
   *out = s;
+  return true;
+}
+
+// ------------------------------------------------------------------------------------- anon regions
+bool anonRegionsParse(const uint8_t* buf, int len, AnonRegions* out) {
+  if (buf == nullptr || out == nullptr) return false;
+  *out = AnonRegions();
+  // Clock first, little-endian (the repeater copies its uint32_t straight into the packet).
+  if (len < 4) return false;
+  memcpy(&out->clock, buf, 4);
+  out->clockValid = out->clock >= kClockRealSince;
+  const int bodyLen = len - 4;
+  if (bodyLen <= 0) {
+    out->valid = true;   // a real answer with no names (the repeater has an empty region map)
+    return true;
+  }
+  // The length is the whole list; newer/older notes differ on a NUL terminator, so both work.
+  int end = bodyLen;
+  for (int i = 0; i < bodyLen; ++i) {
+    if (buf[4 + i] == 0) {
+      end = i;
+      break;
+    }
+  }
+  char joined[sizeof(out->text)] = "";
+  size_t used = 0;
+  int count = 0;
+  int at = 0;
+  while (at < end) {
+    int comma = at;
+    while (comma < end && buf[4 + comma] != ',') ++comma;
+    int tokenLen = comma - at;
+    // Trim spaces around a token; a name itself can never contain one.
+    while (tokenLen > 0 && (buf[4 + at] == ' ' || buf[4 + at] == '\t')) {
+      ++at;
+      --tokenLen;
+    }
+    while (tokenLen > 0 && (buf[4 + at + tokenLen - 1] == ' ' ||
+                            buf[4 + at + tokenLen - 1] == '\t')) {
+      --tokenLen;
+    }
+    if (tokenLen > 0) {
+      char name[kRegionNameMax + 2] = "";
+      const bool star = tokenLen == 1 && buf[4 + at] == '*';
+      if (star || tokenLen <= kRegionNameMax) {
+        // A star or a legal name. Anything else (header residue, a mangled byte) is dropped and the
+        // answer is marked not clean, so the caller can log it without showing it as a region.
+        bool ok = star;
+        if (!ok) {
+          ok = true;
+          for (int i = 0; i < tokenLen; ++i) {
+            if (!regionNameChar((char)buf[4 + at + i])) {
+              ok = false;
+              break;
+            }
+          }
+        }
+        if (ok && count < kMaxRegions) {
+          snprintf(name, sizeof(name), "%.*s", tokenLen, (const char*)&buf[4 + at]);
+          const int w = snprintf(joined + used, sizeof(joined) - used, "%s%s", count ? ", " : "",
+                                 name);
+          if (w > 0 && used + (size_t)w < sizeof(joined)) {
+            used += (size_t)w;
+            ++count;
+          } else {
+            out->clean = false;   // the display buffer is full; the list was longer
+          }
+        } else if (ok) {
+          out->clean = false;     // more names than the card keeps
+        }
+        if (!ok) out->clean = false;
+      } else {
+        out->clean = false;
+      }
+    }
+    at = comma + 1;
+  }
+  out->count = count;
+  snprintf(out->text, sizeof(out->text), "%s", joined);
+  out->valid = true;
   return true;
 }
 
@@ -627,10 +754,206 @@ int cliRegionDefault(char* out, size_t cap, const char* name) {
   return n > 0 && (size_t)n < cap ? n : 0;
 }
 
-const char* const kSiPreset[kSiPresetCount] = {
-    "region put si",    "region allowf si", "region put lj si", "region allowf lj",
-    "region home si",   "region default si", "region save",
-};
+int cliRegionPut(char* out, size_t cap, const char* name, const char* parent) {
+  if (out == nullptr || cap == 0) return 0;
+  out[0] = 0;
+  if (!regionNameValid(name)) return 0;
+  int n;
+  if (parent != nullptr && parent[0]) {
+    // A parent must be a legal name too; "*" is the wildcard and needs no parent word.
+    if (!regionNameValid(parent) && strcmp(parent, "*") != 0) return 0;
+    n = snprintf(out, cap, "region put %s %s", name, parent);
+  } else {
+    n = snprintf(out, cap, "region put %s", name);
+  }
+  if (n <= 0 || (size_t)n >= cap) {
+    out[0] = 0;
+    return 0;
+  }
+  return n;
+}
+
+int cliRegionRemove(char* out, size_t cap, const char* name) {
+  if (out == nullptr || cap == 0) return 0;
+  out[0] = 0;
+  if (name == nullptr || name[0] == 0) return 0;
+  const int n = snprintf(out, cap, "region remove %s", name);
+  if (n <= 0 || (size_t)n >= cap) {
+    out[0] = 0;
+    return 0;
+  }
+  return n;
+}
+
+int cliRegionHomeNone(char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return 0;
+  // CommonCLI: `region home *` -> RegionMap::findByNamePrefix("*") is the wildcard, whose id is 0,
+  // so setHomeRegion() stores home_id = 0 and `region home` then answers "*". This IS the clean
+  // "no home" (home = the unscoped wildcard), checked in CommonCLI.cpp and RegionMap.cpp.
+  const int n = snprintf(out, cap, "region home *");
+  return n > 0 && (size_t)n < cap ? n : 0;
+}
+
+int cliRegionDefaultNone(char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return 0;
+  // CommonCLI accepts the literal <null> and clears the default scope in one atomic save.
+  const int n = snprintf(out, cap, "region default <null>");
+  return n > 0 && (size_t)n < cap ? n : 0;
+}
+
+int cliTime(char* out, size_t cap, uint32_t epoch) {
+  if (out == nullptr || cap == 0) return 0;
+  const int n = snprintf(out, cap, "time %lu", (unsigned long)epoch);
+  return n > 0 && (size_t)n < cap ? n : 0;
+}
+
+// ----------------------------------------------------------------------------------- reply parsing
+bool regionHomeReplyParse(const char* text, char* name, size_t cap) {
+  if (name == nullptr || cap == 0) return false;
+  name[0] = 0;
+  if (text == nullptr) return false;
+  const char* p = strstr(text, "home is ");
+  if (p == nullptr) return false;
+  p += 8;
+  while (*p == ' ') ++p;
+  size_t n = strlen(p);
+  while (n > 0 && (p[n - 1] == '\r' || p[n - 1] == '\n' || p[n - 1] == ' ')) --n;
+  if (n == 0) return false;
+  if (n == 1 && p[0] == '*') {
+    snprintf(name, cap, "*");
+    return true;
+  }
+  if (n > (size_t)kRegionNameMax) return false;
+  for (size_t i = 0; i < n; ++i) {
+    if (!regionNameChar(p[i])) return false;
+  }
+  snprintf(name, cap, "%.*s", (int)n, p);
+  return true;
+}
+
+bool regionDefaultReplyParse(const char* text, char* name, size_t cap) {
+  if (name == nullptr || cap == 0) return false;
+  name[0] = 0;
+  if (text == nullptr) return false;
+  const char* p = strstr(text, "default scope is ");
+  if (p == nullptr) return false;
+  p += 17;
+  while (*p == ' ') ++p;
+  size_t n = strlen(p);
+  while (n > 0 && (p[n - 1] == '\r' || p[n - 1] == '\n' || p[n - 1] == ' ')) --n;
+  if (n == 0) return false;
+  if (n == 6 && memcmp(p, "<null>", 6) == 0) {
+    name[0] = 0;   // a real answer: no default scope
+    return true;
+  }
+  if (n == 1 && p[0] == '*') {
+    snprintf(name, cap, "*");
+    return true;
+  }
+  if (n > (size_t)kRegionNameMax) return false;
+  for (size_t i = 0; i < n; ++i) {
+    if (!regionNameChar(p[i])) return false;
+  }
+  snprintf(name, cap, "%.*s", (int)n, p);
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------- clock sync
+TimeVerdict timeSyncCheck(uint32_t ourEpoch, bool ourReal, bool rptrKnown, uint32_t rptrEpoch) {
+  if (!ourReal || ourEpoch < kClockRealSince) return TimeVerdict::OurClockNotSet;
+  if (rptrKnown && rptrEpoch >= kClockRealSince) {
+    const int64_t ahead = (int64_t)ourEpoch - (int64_t)rptrEpoch;
+    if (ahead > (int64_t)kTimeMaxAheadSecs) return TimeVerdict::TooFarAhead;
+    if (-ahead > (int64_t)kTimeMinBehindSecs) return TimeVerdict::RepeaterAhead;
+  }
+  return TimeVerdict::Ok;
+}
+
+const char* timeVerdictText(TimeVerdict v) {
+  switch (v) {
+    case TimeVerdict::Ok: return "sync is safe";
+    case TimeVerdict::OurClockNotSet: return "our clock is not set";
+    case TimeVerdict::TooFarAhead: return "more than a day ahead: refused";
+    case TimeVerdict::RepeaterAhead: return "repeater's clock is ahead: refused";
+    default: return "";
+  }
+}
+
+int clockAgoText(char* out, size_t cap, int32_t deltaSecs) {
+  if (out == nullptr || cap == 0) return 0;
+  int32_t d = deltaSecs;
+  if (d < 0) d = -d;
+  if (d < 2) {
+    snprintf(out, cap, "in sync");
+    return (int)strlen(out);
+  }
+  char span[20];
+  const uint32_t secs = (uint32_t)d;
+  if (secs >= 86400u) {
+    snprintf(span, sizeof(span), "%lud %02luh", (unsigned long)(secs / 86400u),
+             (unsigned long)((secs / 3600u) % 24u));
+  } else if (secs >= 3600u) {
+    snprintf(span, sizeof(span), "%luh %02lum", (unsigned long)(secs / 3600u),
+             (unsigned long)((secs / 60u) % 60u));
+  } else if (secs >= 60u) {
+    snprintf(span, sizeof(span), "%lum %02lus", (unsigned long)(secs / 60u),
+             (unsigned long)(secs % 60u));
+  } else {
+    snprintf(span, sizeof(span), "%lus", (unsigned long)secs);
+  }
+  snprintf(out, cap, "%s %s", span, deltaSecs > 0 ? "behind" : "ahead");
+  return (int)strlen(out);
+}
+
+namespace {
+// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm), UTC only.
+int64_t daysFromCivil(int y, int m, int d) {
+  y -= m <= 2 ? 1 : 0;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return (int64_t)era * 146097 + (int64_t)doe - 719468;
+}
+}  // namespace
+
+bool clockReplyParse(const char* text, uint32_t* epoch) {
+  if (text == nullptr || epoch == nullptr) return false;
+  // CommonCLI's `clock`: "%02d:%02d - %d/%d/%d UTC" (UTC, so no zone work).
+  int hh = 0, mm = 0, dd = 0, mo = 0, yy = 0;
+  char tail[8] = "";
+  if (sscanf(text, "%d:%d - %d/%d/%d %7s", &hh, &mm, &dd, &mo, &yy, tail) != 6) return false;
+  if (strcmp(tail, "UTC") != 0) return false;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || dd < 1 || dd > 31 || mo < 1 || mo > 12 ||
+      yy < 2020 || yy > 2100) {
+    return false;
+  }
+  const int64_t days = daysFromCivil(yy, mo, dd);
+  *epoch = (uint32_t)(days * 86400 + hh * 3600 + mm * 60);
+  return true;
+}
+
+// ----------------------------------------------------------------------------------------- battery
+bool batteryPlausible(uint16_t milliVolts) {
+  return milliVolts >= kBatteryMinMv && milliVolts <= kBatteryMaxMv;
+}
+
+int batteryVoltsText(char* out, size_t cap, uint16_t milliVolts) {
+  if (out == nullptr || cap == 0) return 0;
+  if (!batteryPlausible(milliVolts)) {
+    snprintf(out, cap, "n/a");
+    return (int)strlen(out);
+  }
+  const int n = snprintf(out, cap, "%u.%02u V", (unsigned)(milliVolts / 1000),
+                         (unsigned)((milliVolts % 1000) / 10));
+  return n > 0 ? n : 0;
+}
+
+int batteryRawText(char* out, size_t cap, uint16_t milliVolts) {
+  if (out == nullptr || cap == 0) return 0;
+  const int n = snprintf(out, cap, "%u mV", (unsigned)milliVolts);
+  return n > 0 ? n : 0;
+}
 
 const char* const kSilent[kSilentCount] = {
     "set repeat off", "set advert.interval 0", "set flood.advert.interval 0", "gps advert none",
@@ -696,13 +1019,14 @@ const char* viewName(int view) {
     case 3: return "Mesh";
     case 4: return "Neigh.";
     case 5: return "Actions";
+    case 6: return "Region";
     default: return "";
   }
 }
 
 int clockText(char* out, size_t cap, uint32_t epoch) {
   if (out == nullptr || cap == 0) return 0;
-  if (epoch < 1600000000u) {   // before 2020: the repeater's clock is not set
+  if (epoch < kClockRealSince) {   // before 2020: the repeater's clock is not set
     snprintf(out, cap, "not set");
     return (int)strlen(out);
   }
@@ -737,13 +1061,22 @@ AdminRow makeRow(RowId id, const char* label, const char* value, RowKind kind) {
 
 int adminRows(int view, const AdminValues& v, const Status& status, uint8_t fwLevel,
               const char* repeaterName, const RegionList& regions, const NeighbourList& neighbours,
+              const char* home, const char* defaultScope, int regionSel, const char* pendingLine,
               AdminRow* out, int cap) {
   if (out == nullptr || cap <= 0) return 0;
   int n = 0;
-  char buf[48];
+  char buf[96];
   auto push = [&](const AdminRow& r) {
     if (n < cap) out[n++] = r;
   };
+
+  // EST-360: the one-step confirm. Every CLI line that changes the repeater is armed first; these
+  // two rows show the EXACT line and let the finger send it (or cancel) with one more tap.
+  if (pendingLine != nullptr && pendingLine[0]) {
+    AdminRow send = makeRow(RowId::PendingSend, "Send now", pendingLine, RowKind::Action);
+    push(send);
+    push(makeRow(RowId::PendingCancel, "Cancel", "", RowKind::Action));
+  }
 
   switch (view) {
     case 0: {   // Overview: what the status reply says, plus the login answer's firmware and clock
@@ -756,12 +1089,17 @@ int adminRows(int view, const AdminValues& v, const Status& status, uint8_t fwLe
       uptimeText(buf, sizeof(buf), status.uptimeSec);
       push(makeRow(RowId::StatusUptime, "uptime", buf, RowKind::Fact));
       {
+        // EST-360: volts with two decimals. Outside 2.5..30 V (or 0) the primary value is "n/a"; the
+        // raw mV is on this row's detail line only, so a wrong decode cannot look like a voltage.
+        char volts[16];
+        batteryVoltsText(volts, sizeof(volts), status.battMv);
         const int pct = batteryPercent(status.battMv);
-        if (pct >= 0) {
-          snprintf(buf, sizeof(buf), "%u.%02u V, %d%%", (unsigned)(status.battMv / 1000),
-                   (unsigned)((status.battMv % 1000) / 10), pct);
+        if (!batteryPlausible(status.battMv)) {
+          snprintf(buf, sizeof(buf), "%s (%u mV)", volts, (unsigned)status.battMv);
+        } else if (pct >= 0) {
+          snprintf(buf, sizeof(buf), "%s, %d%%", volts, pct);
         } else {
-          snprintf(buf, sizeof(buf), "%u mV", (unsigned)status.battMv);
+          snprintf(buf, sizeof(buf), "%s", volts);
         }
         push(makeRow(RowId::StatusBattery, "battery", buf, RowKind::Fact));
       }
@@ -808,24 +1146,38 @@ int adminRows(int view, const AdminValues& v, const Status& status, uint8_t fwLe
       push(makeRow(RowId::RadioApply, "Apply to repeater", "reboot", RowKind::Action));
       return n;
     }
-    case 2: {   // Regions: read, per-region allow/deny (keys H and D), save, SI preset
-      push(makeRow(RowId::RegionRead, "Read regions", "region", RowKind::Action));
+    case 2: {   // Regions: read, add, save, home and default as words, then one row per region
+      push(makeRow(RowId::RegionRead, "Read regions", kCliRegionList, RowKind::Action));
+      push(makeRow(RowId::RegionAdd, "Add region", "region put", RowKind::Action));
+      push(makeRow(RowId::RegionSave, "Save to repeater", "makes changes permanent",
+                   RowKind::Action));
+      // The repeater's own answers, not what this device remembers.
+      if (home == nullptr) snprintf(buf, sizeof(buf), "not read");
+      else if (strcmp(home, "*") == 0) snprintf(buf, sizeof(buf), "* (no region)");
+      else snprintf(buf, sizeof(buf), "%s", home);
+      push(makeRow(RowId::RegionHomeFact, "Home", buf, RowKind::Fact));
+      if (defaultScope == nullptr) snprintf(buf, sizeof(buf), "not read");
+      else if (defaultScope[0] == 0) snprintf(buf, sizeof(buf), "none");
+      else snprintf(buf, sizeof(buf), "%s", defaultScope);
+      push(makeRow(RowId::RegionDefaultFact, "Default scope", buf, RowKind::Fact));
+      push(makeRow(RowId::RegionSetHomeNone, "Home: * (no region)", "region home *",
+                   RowKind::Action));
+      push(makeRow(RowId::RegionDefaultNone, "Default scope: none", "region default <null>",
+                   RowKind::Action));
       if (!regions.valid || regions.count == 0) {
         push(makeRow(RowId::None, "regions", "none read yet", RowKind::Fact));
       } else {
         for (int i = 0; i < regions.count && n < cap; ++i) {
           const Region& rg = regions.rows[i];
-          AdminRow r = makeRow(RowId::RegionRow, rg.name[0] ? rg.name : "*", "", RowKind::Region);
-          snprintf(r.value, sizeof(r.value), "%s%s", rg.allow ? "allow" : "deny",
-                   rg.home ? ", home" : "");
-          r.keys = 2;
+          AdminRow r = makeRow(RowId::RegionRow, rg.name[0] ? rg.name : "*", "", RowKind::Open);
+          snprintf(r.value, sizeof(r.value), "%s%s", rg.home ? "^ home, " : "",
+                   rg.allow ? "allow" : "deny");
+          r.keys = 1;
           r.on = rg.allow;
           r.index = (uint8_t)i;
           push(r);
         }
       }
-      push(makeRow(RowId::RegionSave, "Save regions", "persist", RowKind::Action));
-      push(makeRow(RowId::SiPreset, "SI preset", "7 commands", RowKind::Action));
       return n;
     }
     case 3: {   // Mesh: path hash, loop detect, adverts, flood, repeat, power save, position, identity
@@ -905,11 +1257,52 @@ int adminRows(int view, const AdminValues& v, const Status& status, uint8_t fwLe
     case 5: {   // Actions
       push(makeRow(RowId::AdvertLocalOnce, "Local advert", "advert.zerohop", RowKind::Action));
       push(makeRow(RowId::AdvertFloodOnce, "Flood advert", "advert", RowKind::Action));
-      push(makeRow(RowId::ClockSync, "Clock sync", "clock sync", RowKind::Action));
+      // The clock rows' values are filled by the shell from timeKeeper() and the last `clock` reply
+      // (this table is pure text and has no clock).
+      push(makeRow(RowId::ClockSync, "Sync clock", "", RowKind::Action));
+      push(makeRow(RowId::ClockBefore, "clock before", "", RowKind::Fact));
+      push(makeRow(RowId::ClockAfter, "clock after", "", RowKind::Fact));
       push(makeRow(RowId::Silent, "Silent mode", "4 commands", RowKind::Action));
       push(makeRow(RowId::Resume, "Resume", "4 commands", RowKind::Action));
       {
         AdminRow r = makeRow(RowId::Reboot, "Reboot", "tap twice", RowKind::Action);
+        r.danger = true;
+        push(r);
+      }
+      return n;
+    }
+    case 6: {   // One region's page: every action is a word with the exact CLI line beside it
+      if (regionSel < 0 || regionSel >= regions.count) {
+        push(makeRow(RowId::None, "region", "none selected", RowKind::Fact));
+        return n;
+      }
+      const Region& rg = regions.rows[regionSel];
+      const char* name = rg.name[0] ? rg.name : "*";
+      const bool wildcard = rg.wildcard || strcmp(name, "*") == 0;
+      if (wildcard) snprintf(buf, sizeof(buf), "* (no region)%s", rg.home ? ", the home" : "");
+      else snprintf(buf, sizeof(buf), "%s%s", name, rg.home ? ", the home region" : "");
+      push(makeRow(RowId::RegionNameFact, "Region", buf, RowKind::Fact));
+      if (!wildcard) {
+        snprintf(buf, sizeof(buf), "region put <new> %s", name);
+        push(makeRow(RowId::RegionAddChild, "Add child region", buf, RowKind::Action));
+      } else {
+        push(makeRow(RowId::RegionAddChild, "Add region", "region put", RowKind::Action));
+      }
+      cliRegionFlood(buf, sizeof(buf), name, true);
+      push(makeRow(RowId::RegionAllow, "Allow flood", buf, RowKind::Action));
+      cliRegionFlood(buf, sizeof(buf), name, false);
+      push(makeRow(RowId::RegionDeny, "Deny flood", buf, RowKind::Action));
+      if (wildcard) {
+        push(makeRow(RowId::RegionHome, "Set as home: none", "region home *", RowKind::Action));
+      } else {
+        cliRegionHome(buf, sizeof(buf), name);
+        push(makeRow(RowId::RegionHome, "Set as home", buf, RowKind::Action));
+      }
+      if (!wildcard) {
+        cliRegionDefault(buf, sizeof(buf), name);
+        push(makeRow(RowId::RegionDefault, "Set as default scope", buf, RowKind::Action));
+        cliRegionRemove(buf, sizeof(buf), name);
+        AdminRow r = makeRow(RowId::RegionRemove, "Remove region", buf, RowKind::Action);
         r.danger = true;
         push(r);
       }

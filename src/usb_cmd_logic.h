@@ -28,7 +28,7 @@ enum class Kind : uint8_t {
   KeyWake,  // key wake
   Wifi,     // wifi status | scan | on | off   (EST-354; never a password)
   Ble,      // ble status | on | off   (EST-356; never the pairing PIN)
-  Rptr,     // rptr scan | rptr status <name>   (EST-358; never a repeater password)
+  Rptr,     // rptr scan | rptr status <name> | rptr regions [name]  (never a password)
   Play,     // play <event> [variant]   (EST-359: hear the device's own sound bank)
 };
 

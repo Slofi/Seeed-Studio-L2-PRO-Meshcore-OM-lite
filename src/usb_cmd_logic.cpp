@@ -295,8 +295,8 @@ Command parseCommand(char* line) {
     return c;
   }
 
-  // EST-358: the repeater tab from the host. Two forms only, and deliberately no word that could
-  // read a stored repeater password back.
+  // EST-358: the repeater tab from the host. EST-360 adds the anonymous nearby-regions read. The
+  // forms are deliberately narrow, and no word can read a stored repeater password back.
   if (strcmp(verb, "rptr") == 0) {
     c.kind = Kind::Rptr;
     const char* sub = cur.next();
@@ -317,6 +317,15 @@ Command parseCommand(char* line) {
         return c;
       }
       if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "regions") == 0) {
+      // `rptr regions` asks every direct responder of the last scan; `rptr regions <name>` asks one
+      // and prints the stored answer when it has one.
+      c.target = sub;
+      c.text = cur.next();
+      if (c.text != nullptr && c.text[0] == 0) c.text = nullptr;
+      if (cur.bad() || cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
       return c;
     }
     c.error = cur.bad() ? "quote" : "args";

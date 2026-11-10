@@ -45,6 +45,19 @@ uint32_t s_statusTag = 0;
 bool s_statusPending = false;
 uint32_t s_statusSentMs = 0;
 uint32_t s_statusDeadlineMs = 0;
+bool s_statusLogged = false;   // EST-360: the raw status bytes are logged once for Claude
+
+// --- the anonymous nearby-regions read (EST-360) -------------------------------------------------
+// One query on the air at a time. The response is matched by the sender's full key and the first
+// parseable reply wins; the Sent-ack tag is deliberately not used (OverMesh's firmware quirk).
+bool s_regionsPending = false;
+uint8_t s_regionsKey[PUB_KEY_SIZE] = {};
+int s_regionsRow = -1;
+uint32_t s_regionsSentMs = 0;
+uint32_t s_regionsDeadlineMs = 0;
+int s_regionsQueue[kMaxFound] = {};
+int s_regionsQueueLen = 0;
+int s_regionsQueuePos = 0;
 
 char s_pendingPassword[kPasswordMax + 1] = "";   // held only until the answer, never logged
 char s_currentName[kNameMax + 1] = "";
@@ -58,12 +71,12 @@ RptrReply s_replies[kReplyQueue];
 int s_replyHead = 0;
 int s_replyCount = 0;
 uint32_t s_replySerial = 0;
-char s_lastCmd[48] = "";
+char s_lastCmd[80] = "";
 // The CLI reply carries no tag, so the only link to the command is ORDER: every line sent is kept
-// here and the answer takes the oldest one. A multi-line action (SI preset, silent, apply) then
-// names the right line for each reply instead of always the last one sent.
+// here and the answer takes the oldest one. A multi-line action (silent mode, apply, or a region
+// change plus its follow-up read) then names the right line for each reply.
 constexpr int kPendingCmds = 8;
-char s_pending[kPendingCmds][48];
+char s_pending[kPendingCmds][80];
 int s_pendingHead = 0;
 int s_pendingCount = 0;
 
@@ -198,6 +211,76 @@ bool fromCurrent(const ContactInfo& from) {
   return s_haveCurrent && memcmp(from.id.pub_key, s_currentKey, PUB_KEY_SIZE) == 0;
 }
 
+bool fromRegionsTarget(const ContactInfo& from) {
+  return s_regionsPending && memcmp(from.id.pub_key, s_regionsKey, PUB_KEY_SIZE) == 0;
+}
+
+// Start one anonymous regions query on `idx` of the last scan. Only a 0-hop answer can be asked: the
+// request travels DIRECT with an empty path, and the repeater's reply (reply-path-len 0 in the
+// request payload) is a zero-hop DIRECT back to us. That is exactly why OverMesh queries only the
+// 0-hop responders. The contact record is needed so MeshCore can match and decrypt the response; a
+// repeater that is not in our table gets MeshCore's own temporary anon slot, as the companion's
+// CMD_SEND_ANON_REQ handler does.
+bool regionsStartOne(int idx) {
+  if (s_regionsPending || idx < 0 || idx >= s_found.count) return false;
+  if (!meshLinkReady()) return false;
+  if (s_login.busy() || s_login.loggedIn()) return false;   // the answer must not be mistaken for a login
+  const Found& f = s_found.rows[idx];
+  if (f.keyLen < kPubKeyBytes || f.hops != 0) return false;
+
+  ContactInfo ci;
+  ContactInfo* known = rptrMesh().lookupContactByPubKey(f.key, PUB_KEY_SIZE);
+  if (known != nullptr) {
+    ci = *known;
+  } else {
+    memset(&ci, 0, sizeof(ci));
+    memcpy(ci.id.pub_key, f.key, PUB_KEY_SIZE);
+    ci.type = ADV_TYPE_NONE;      // the transient/anon kind
+    ci.lastmod = rptrMesh().getRTCClock()->getCurrentTime();
+    if (!rptrMesh().addContact(ci)) {
+      Serial.printf("[rptr] regions: no contact slot for %s\n", f.name[0] ? f.name : "?");
+      return false;
+    }
+    ci.out_path_len = 0;
+  }
+  // Always a zero-hop direct: a stored multi-hop out_path would carry the request there but the
+  // repeater would answer with a zero-hop reply (reply-path-len 0), which would never come back.
+  ci.out_path_len = 0;
+  memset(ci.out_path, 0, sizeof(ci.out_path));
+
+  // ANON_REQ payload: type 0x01 (ANON_REQ_TYPE_REGIONS, simple_repeater MyMesh.cpp) + reply path
+  // length 0. sendAnonReq() prefixes its own 4-byte tag.
+  uint8_t data[2] = {0x01, 0x00};
+  uint32_t tag = 0;
+  uint32_t est = 0;
+  const int rc = rptrMesh().sendAnonReq(ci, data, sizeof(data), tag, est);
+  if (rc == MSG_SEND_FAILED) {
+    Serial.printf("[rptr] regions: send failed to %s\n", f.name[0] ? f.name : "?");
+    return false;
+  }
+  memcpy(s_regionsKey, f.key, PUB_KEY_SIZE);
+  s_regionsRow = idx;
+  s_regionsSentMs = millis();
+  s_regionsDeadlineMs = s_regionsSentMs + est + kRegionsExtraMs;
+  s_regionsPending = true;
+  s_found.rows[idx].regionsAsked = true;
+  ++s_found.serial;
+  char hex[16];
+  hexPrefix(f.prefix, 6, hex, sizeof(hex));
+  Serial.printf("[rptr] regions -> %s (%s): 0-hop anon request sent, deadline %lu ms\n",
+                f.name[0] ? f.name : hex, hex, (unsigned long)(est + kRegionsExtraMs));
+  return true;
+}
+
+void regionsNext() {
+  while (s_regionsQueuePos < s_regionsQueueLen) {
+    const int idx = s_regionsQueue[s_regionsQueuePos++];
+    if (regionsStartOne(idx)) return;
+  }
+  s_regionsQueueLen = 0;
+  s_regionsQueuePos = 0;
+}
+
 }  // namespace
 
 bool rptrLinkBegin() {
@@ -229,6 +312,20 @@ void rptrLinkLoop() {
     queueReply((uint8_t)RptrReplyKind::Error, "status", "no answer", now);
     Serial.printf("[rptr] status from %s: no answer\n", s_currentName);
   }
+  if (s_regionsPending && (int32_t)(now - s_regionsDeadlineMs) >= 0) {
+    const int idx = s_regionsRow;
+    s_regionsPending = false;
+    s_regionsRow = -1;
+    if (idx >= 0 && idx < s_found.count) {
+      char hex[16];
+      hexPrefix(s_found.rows[idx].prefix, 6, hex, sizeof(hex));
+      Serial.printf("[rptr] regions <- %s (%s): no answer within %lu ms\n",
+                    s_found.rows[idx].name[0] ? s_found.rows[idx].name : hex, hex,
+                    (unsigned long)(now - s_regionsSentMs));
+    }
+    ++s_found.serial;   // the "Reading" chip goes back to "Regions" on the glass
+    regionsNext();      // ask the next queued repeater
+  }
 }
 
 // ----------------------------------------------------------------------------------------------- scan
@@ -249,6 +346,11 @@ bool rptrScanStart() {
   }
   rptrMesh().sendZeroHop(pkt);
   s_found.begin(tag, millis());
+  // A new scan invalidates the old rows, so any regions query in flight (or queued) is dropped.
+  s_regionsPending = false;
+  s_regionsRow = -1;
+  s_regionsQueueLen = 0;
+  s_regionsQueuePos = 0;
   Serial.printf("[rptr] scan: discover request tag %08lx, listening %lu ms\n", (unsigned long)tag,
                 (unsigned long)kScanWindowMs);
   return true;
@@ -256,6 +358,34 @@ bool rptrScanStart() {
 
 const FoundList& rptrScan() { return s_found; }
 uint32_t rptrScanSerial() { return s_found.serial; }
+
+bool rptrRegionsBusy() {
+  return s_regionsPending || s_regionsQueuePos < s_regionsQueueLen;
+}
+
+int rptrRegionsQueryAll() {
+  if (s_regionsPending || s_regionsQueuePos < s_regionsQueueLen) return 0;
+  int len = 0;
+  for (int i = 0; i < s_found.count && len < kMaxFound; ++i) {
+    const Found& f = s_found.rows[i];
+    if (f.keyLen < kPubKeyBytes || f.hops != 0) continue;   // only a direct responder can answer
+    s_regionsQueue[len++] = i;
+  }
+  if (len == 0) return 0;
+  s_regionsQueueLen = len;
+  s_regionsQueuePos = 0;
+  regionsNext();
+  Serial.printf("[rptr] regions: asking %d direct repeater(s), one at a time\n", len);
+  return len;
+}
+
+bool rptrRegionsQuery(int foundIndex) {
+  if (rptrRegionsBusy()) return false;
+  if (foundIndex < 0 || foundIndex >= s_found.count) return false;
+  s_regionsQueueLen = 0;
+  s_regionsQueuePos = 0;
+  return regionsStartOne(foundIndex);
+}
 
 bool rptrOnControlData(const mesh::Packet* pkt) {
   if (pkt == nullptr || pkt->payload_len < 6) return false;
@@ -278,8 +408,8 @@ bool rptrOnControlData(const mesh::Packet* pkt) {
   const int8_t snrOut4 = (int8_t)lroundf(pkt->getSNR() * 4.0f);
   uint8_t hops = 0;
   if (pkt->getPathHashCount() > 0) hops = pkt->getPathHashCount();
-  const int at = s_found.addAnswer(key, name, inContacts, hasIn, snrIn4, hasOut, snrOut4, hops,
-                                   millis());
+  const int at = s_found.addAnswer(key, keyLen, name, inContacts, hasIn, snrIn4, hasOut, snrOut4,
+                                   hops, millis());
   if (at >= 0) {
     s_found.rows[at].heardWall = timeKeeper().now();
     s_found.rows[at].heardReal = timeKeeper().realSinceBoot();
@@ -287,8 +417,9 @@ bool rptrOnControlData(const mesh::Packet* pkt) {
   char hex[16];
   hexPrefix(key, usable, hex, sizeof(hex));
   if (at >= 0) {
-    Serial.printf("[rptr] answer %s (%s): snr in %d/4 out %d/4, %d found\n",
-                  name[0] ? name : hex, hex, (int)snrIn4, (int)snrOut4, s_found.count);
+    Serial.printf("[rptr] answer %s (%s): snr in %d/4 out %d/4, key %u B, %d found\n",
+                  name[0] ? name : hex, hex, (int)snrIn4, (int)snrOut4, (unsigned)keyLen,
+                  s_found.count);
   } else {
     Serial.printf("[rptr] answer %s dropped: the list is full\n", name[0] ? name : hex);
   }
@@ -313,6 +444,12 @@ bool rptrLoginStart(const char* name, const char* password) {
     queueReply((uint8_t)RptrReplyKind::Error, "login", "send failed (packet pool full)", millis());
     return false;
   }
+  // A login cancels any anonymous regions read: the login answer's first four bytes are a clock, so
+  // a stale regions reply must never be mistaken for it (and vice versa).
+  s_regionsPending = false;
+  s_regionsRow = -1;
+  s_regionsQueueLen = 0;
+  s_regionsQueuePos = 0;
   snprintf(s_currentName, sizeof(s_currentName), "%s", ci.name);
   snprintf(s_pendingPassword, sizeof(s_pendingPassword), "%s", password);
   memcpy(s_currentKey, ci.id.pub_key, PUB_KEY_SIZE);
@@ -470,9 +607,11 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
     }
   }
 
-  // The status reply. sendRequest() gives us a tag; a response whose first four bytes are that
-  // timestamp and whose payload is a RepeaterStats is ours.
-  if (s_statusPending && tag == s_statusTag && fromCurrent(from) && len >= 4 + kRepeaterStatsBytes) {
+  // The status reply. sendRequest() gives us a tag; the repeater echoes it as the response's first
+  // four bytes (simple_repeater onContactRequest prefixes reply with sender_timestamp), MyMesh strips
+  // that tag, and the listener hands us the RepeaterStats alone. EST-360: the length check is the
+  // stats size, not 4 + stats (the old double skip); a longer newer reply is fine.
+  if (s_statusPending && tag == s_statusTag && fromCurrent(from) && len >= kRepeaterStatsBytes) {
     Status st;
     if (statusParse(data, (int)len, &st)) {
       st.atMs = millis();
@@ -484,9 +623,18 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
       s_status = st;
       s_statusPending = false;
       ++s_statusSerial;
+      if (!s_statusLogged) {
+        // Once, for the reviewer: exactly the bytes the Listener handed over (no tag). EST-360's
+        // offset bug was only visible by comparing these with the RepeaterStats struct.
+        s_statusLogged = true;
+        Serial.printf("[rptr] status raw (%u B):", (unsigned)len);
+        for (int i = 0; i < len; ++i) Serial.printf(" %02x", data[i]);
+        Serial.println();
+      }
       char text[64];
-      snprintf(text, sizeof(text), "up %lu s, %u mV", (unsigned long)st.uptimeSec,
-               (unsigned)st.battMv);
+      char volts[16];
+      batteryVoltsText(volts, sizeof(volts), st.battMv);
+      snprintf(text, sizeof(text), "up %lu s, %s", (unsigned long)st.uptimeSec, volts);
       queueReply((uint8_t)RptrReplyKind::Status, "status", text, st.atMs);
       Serial.printf("[rptr] status %s: up %lu s, batt %u mV, air %lu s, rx %lu tx %lu, noise %d\n",
                     s_currentName, (unsigned long)st.uptimeSec, (unsigned)st.battMv,
@@ -495,6 +643,37 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
       if (handled) *handled = true;
       return;
     }
+  }
+
+  // The anonymous regions answer. No tag match: OverMesh's firmware quirk is that the Sent-ack tag
+  // does not match the BINARY_RESPONSE tag, so this takes the first parseable answer from the
+  // repeater we asked. `data` starts at the repeater's clock (MyMesh stripped the tag).
+  if (fromRegionsTarget(from)) {
+    AnonRegions ar;
+    // "First parseable answer": a regions reply is clock + a clean name list, or exactly 4 bytes for a
+    // real "none". A stray status/login reply that happens to be >= 4 bytes is not clean, and an
+    // empty body of any other length is not this answer, so it is skipped and the wait continues.
+    const bool shape = anonRegionsParse(data, (int)len, &ar) && ar.clean &&
+                       (ar.count > 0 || len == 4);
+    if (shape) {
+      const int idx = s_regionsRow;
+      if (idx >= 0 && idx < s_found.count) {
+        s_found.setRegions(idx, ar);
+        char hex[16];
+        hexPrefix(s_found.rows[idx].prefix, 6, hex, sizeof(hex));
+        Serial.printf(
+            "[rptr] regions <- %s (%s): clock=%lu (%s) regions=\"%s\" count=%d clean=%d\n",
+            s_found.rows[idx].name[0] ? s_found.rows[idx].name : hex, hex,
+            (unsigned long)ar.clock, ar.clockValid ? "real" : "not set", ar.text, ar.count,
+            ar.clean ? 1 : 0);
+      }
+      s_regionsPending = false;
+      s_regionsRow = -1;
+      if (handled) *handled = true;
+      regionsNext();
+      return;
+    }
+    // Not this answer (too short to be a regions reply): keep waiting for the first parseable one.
   }
 }
 

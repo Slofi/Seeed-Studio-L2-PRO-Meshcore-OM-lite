@@ -26,7 +26,7 @@ namespace om {
 // when it was sent, so an answer always names its own control).
 struct RptrReply {
   uint8_t kind = 0;
-  char cmd[48] = "";
+  char cmd[80] = "";
   char text[160] = "";
   uint32_t atMs = 0;
 };
@@ -60,6 +60,18 @@ void rptrLoginResultText(char* out, size_t cap);
 bool rptrStatusRequest();
 const rptr::Status& rptrStatus();
 uint32_t rptrStatusSerial();
+
+// --- nearby regions, anonymous, no login (EST-360) -----------------------------------------------
+// The phone app's mechanism (OverMesh mesh_mc.py _mc_query_responder_regions): after the 0-hop
+// discovery sweep, send an ANON_REQ "regions" request over the DIRECT route to each responder and
+// read the reply, which is the repeater's clock (4 B LE) + a comma-separated name list ('*' = the
+// unscoped wildcard). One query at a time, because the response is matched by sender and the first
+// parseable binary answer after Sent wins (OverMesh's firmware quirk: the Sent-ack tag does not
+// match the BINARY_RESPONSE tag, so a tag-based wait would time out). `rptrRegionsQuery` asks one
+// row of the last scan; `rptrRegionsQueryAll` queues every direct one and returns how many.
+bool rptrRegionsQuery(int foundIndex);
+int rptrRegionsQueryAll();
+bool rptrRegionsBusy();
 
 // --- the repeater CLI ---------------------------------------------------------------------------
 // One line, sent through upstream's CLI path (sendCommandData, TXT_TYPE_CLI_DATA). `tag` comes back

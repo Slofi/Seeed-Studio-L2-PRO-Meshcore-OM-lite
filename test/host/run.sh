@@ -43,7 +43,8 @@ BIN22="$(mktemp /tmp/om-lite-est355.XXXXXX)"
 BIN23="$(mktemp /tmp/om-lite-est356.XXXXXX)"
 BIN24="$(mktemp /tmp/om-lite-est358.XXXXXX)"
 BIN25="$(mktemp /tmp/om-lite-est359.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25"' EXIT
+BIN26="$(mktemp /tmp/om-lite-est360.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -181,3 +182,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est358.cpp \
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est359.cpp \
   ../../src/sound_synth.cpp ../../src/usb_cmd_logic.cpp -o "$BIN25"
 "$BIN25"
+
+# EST-360: the region/clock rework. The region-name rule and its filter, every region CLI line
+# (put with/without parent, remove, home/default including the * / <null> choices, time), the
+# anonymous nearby-regions reply (clock + '*', list, a real empty answer, garbage, short), the time
+# guard (our clock unset refused, the one-day ceiling, the repeater ahead), the clock reply parser,
+# battery volts, and the keyboard's RptrRegion field (it calls the same rule as the model).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est360.cpp \
+  ../../src/rptr_model.cpp ../../src/ui/chat_layout.cpp -o "$BIN26"
+"$BIN26"

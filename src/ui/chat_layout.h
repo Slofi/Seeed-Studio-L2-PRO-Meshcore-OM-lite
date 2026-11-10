@@ -71,7 +71,7 @@ uint32_t accentCodePoint(char key, bool shift);
 // accented s/c/z long press and the emoji page belong to it. The key rows are still the same sheet
 // (letters, 123, Del, Send); a field only filters the character keys it cannot accept.
 enum class KeyboardField : uint8_t { Chat = 0, NodeName, Base64Key, WifiPassword,
-                                     RptrPassword, RptrPosition };   // EST-358
+                                     RptrPassword, RptrPosition, RptrRegion };   // EST-358/360
 
 // MeshCore's names: node_name[32] and ChannelDetails::name[32], so 31 bytes. AdvertDataParser::
 // isValidName rejects exactly [ ] \ : , ? * and accepts the rest of printable ASCII.
@@ -86,6 +86,9 @@ constexpr int kKeyboardWifiPassMaxBytes = 63;
 constexpr int kKeyboardRptrPassMaxBytes = 15;
 // "46.25000, 14.40000" with room to spare while typing.
 constexpr int kKeyboardRptrPosMaxBytes = 24;
+// EST-360: RegionEntry::name[31], so 30 characters; the sheet offers only the bytes MeshCore's
+// region-name rule accepts (see om::rptr::regionNameChar).
+constexpr int kKeyboardRegionMaxBytes = 30;
 
 bool keyboardAllowsChar(KeyboardField field, char c);
 int keyboardMaxBytes(KeyboardField field);           // 0 for Chat (its own draft budget applies)

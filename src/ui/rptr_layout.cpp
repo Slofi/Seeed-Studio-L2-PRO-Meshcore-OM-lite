@@ -46,6 +46,9 @@ RptrLayout rptrLayoutFor(const Layout& L, bool detail) {
   const int16_t top = L.status.bottom();
   r.head = Rect{0, top, L.width, kRptrHeadH};
   r.scan = Rect{(int16_t)(L.width - 8 - 58), (int16_t)(top + 4), 58, 18};
+  // EST-360: "Regions" sits left of Scan (7 mono chars * 6 + 10 = 52, rounded to 60). The state
+  // line starts at x=76; 190 px is enough for "2 found, listening" at the mono advance.
+  r.regions = Rect{(int16_t)(r.scan.x - 4 - 60), (int16_t)(top + 4), 60, 18};
   r.list = Rect{0, (int16_t)(top + kRptrHeadH), L.width,
                 (int16_t)(L.tabbar.y - top - kRptrHeadH)};
   r.empty = r.list;
@@ -96,6 +99,7 @@ RptrHitResult rptrHitAt(const RptrLayout& r, bool detail, int count, int scroll,
     return out;
   }
   if (r.scan.contains(x, y)) { out.kind = RptrHit::Scan; return out; }
+  if (r.regions.contains(x, y)) { out.kind = RptrHit::Regions; return out; }
   const int row = rptrRowAt(r, count, scroll, x, y);
   if (row >= 0) { out.kind = RptrHit::Row; out.row = row; }
   return out;

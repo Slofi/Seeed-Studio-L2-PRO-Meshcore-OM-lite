@@ -2911,3 +2911,112 @@ if a voice is thin or a phrase is too long, the one place to change is `src/soun
 ## 2026-11-10 19:35 (Claude): EST-359 on the device
 - WAVs checked first (27 files, docs/sounds): 30..380 ms, peaks 1,733..17,062 of 32,767, 0 clipped samples, every file starts and ends at 0 (no clicks), DC offset within 10 LSB.
 - Built in the sandbox (exit 0, RAM 143,952 B, flash 2,738,545 B), tests exit 0, reviewed binary flashed (2,738,912 B). `play message`: played (Chime, 240 ms). How they sound on the L2's speaker: Filip.
+
+## 2026-11-10 19:30 (DeepSeek): EST-360 regions, nearby reads, clock sync, status offset, volts
+
+**The two field bugs first.** The status card was reading every field four bytes late because of two
+strips, not one: `MyMesh::onContactResponse` already hands the Listener `&data[4], len - 4` (the 4
+bytes are the tag/timestamp), and `statusParse()` skipped another 4. Battery therefore read the noise
+floor (`0xFF88` = -120 dBm shows as 65416 "mV"), noise read the low half of `n_packets_recv`, and so
+on. `statusParse()` now starts at `buf[0]` (batt_milli_volts), requires `len >= 56` and accepts longer
+replies from newer firmware. The listener's length check became `len >= 56`, not `4 + 56`. The login
+answer path was checked too: it was already correct (`buf[0] == RESP_SERVER_LOGIN_OK`, the clock is
+the separate `tag`); a host case now feeds a buffer that still has a tag in front and proves it is not
+parsed as a login. The first status reply after boot is logged once as
+`[rptr] status raw (56 B): ..hex..` for Claude to compare with the upstream struct.
+
+**The SI preset is gone.** Button, `RowId`, `kSiPreset`, its seven strings and its tests were removed.
+Nothing sends a hard-coded sub-region any more.
+
+**Regions are manual, one labelled action each, with one confirm step.** The Regions view now has:
+Read regions (`region`, then `region home`, then `region default`), Add region (the shared keyboard,
+`RptrRegion` field, MeshCore's own rule), Save to repeater (value "makes changes permanent", sends
+`region save`), Home and Default scope fact rows, "Home: * (no region)" (`region home *`) and
+"Default scope: none" (`region default <null>`), then one row per region (label, the `^ home` marker,
+allow/deny, a `>` key). A region row opens its own page: Add child region (`region put <new> <name>`),
+Allow flood (`region allowf <name>`), Deny flood (`region denyf <name>`), Set as home
+(`region home <name>`), Set as default scope (`region default <name>`), Remove region
+(`region remove <name>`, red). No H/D letters anywhere. Every one of those taps only ARMS the line:
+the top of the view becomes "Send now" with the exact CLI line (80-byte row) and Cancel; the second
+tap sends it. After a home change the device reads `region home` back (and refreshes the tree), after
+a default change it reads `region default` back, after add/remove/allow/deny it reads `region`.
+The screen now shows the repeater's own answer, not what this device remembers. Checked in CommonCLI:
+no-argument `region home` answers " home is X", no-argument `region default` answers " default scope is
+X" or "<null>", `region default <null>` clears it, `region home *` sets the wildcard (home_id 0, the
+clean "no home"), and `region remove` exists (`findByName`, exact). The region-name rule is
+`RegionMap::is_name_char`: '-' '$' '#' digits or any byte >= 'A' (so '['..'`', lowercase and '_' are
+legal, while space, '.', '/', ':' and '@' are not); the keyboard calls the same constexpr function, so
+it cannot offer a byte the repeater refuses.
+
+**Nearby regions, anonymous, no login.** A new "Regions" chip in the scan header asks every direct
+responder of the last scan, one at a time. The mechanism is the phone app's (OverMesh
+`_mc_query_responder_regions`): after the 0-hop discovery, a raw ANON_REQ with payload
+`[0x01 (ANON_REQ_TYPE_REGIONS), 0x00 (reply path length)]` over a zero-hop DIRECT route; the repeater
+answers `clock(4 LE) + comma-separated names` ('*' = unscoped). Only a 0-hop responder is asked,
+because the reply is a zero-hop direct back (reply-path-len 0). The response is matched by the
+sender's full key and the first clean reply wins; the Sent-ack tag is deliberately not used (OverMesh's
+firmware quirk: it does not match the BINARY_RESPONSE tag). A repeater not in our contact table gets
+MeshCore's own temporary anon slot so the mesh can decrypt the reply. The scan row's second line
+becomes `regions si, lj · clock 14:02 UTC` (`none` is a real empty answer). A login cancels any query
+in flight, so a stale regions reply can never be mistaken for a login answer. Note the repeater's own
+`anon_limiter` allows 4 anonymous requests per 3 minutes; more than four repeaters in the sweep means
+the rest wait for the next round.
+
+**Clock sync.** Actions > "Sync clock" sends `time <our epoch>` (never `clock sync`: OverMesh found
+that clock sync cannot move a repeater whose clock is 0, while `time` can, and both refuse to go
+backwards). The row shows the exact line it will send. The guard refuses when our clock is not real
+(`timeKeeper().realSinceBoot()` false or epoch before 2020), when our clock is more than 86400 s ahead
+of the repeater's known clock, and when the repeater is more than 60 s ahead of ours (a backwards
+`time` is refused by the repeater anyway). If the repeater's clock is 0/unknown, the guard allows the
+send, which is the case it exists to fix. The Actions view has "clock before" and "clock after" rows:
+before is the last known repeater clock (login answer or an earlier `clock`), the send is followed by
+`clock`, whose reply text ("14:02 - 10/11/2026 UTC") is parsed back to UTC and shown with the
+difference to ours ("3s behind", "in sync").
+
+**Battery in volts.** The repeater's battery row and our own (Settings > About) show "4.12 V". A value
+outside 2.5..30 V or 0 shows "n/a"; for the repeater the row's detail line adds the raw mV ("n/a
+(65416 mV)"). The raw mV for our own cell stays on the serial `[batt] N mV` line. The status bar still
+shows its icon + percent (the mock's layout); the numeric displays are the two V rows.
+
+**Build and tests.** Sandbox build exit 0: RAM **148,368 B** (45.3%), flash **2,752,545 B** (42.0%),
+`firmware.bin` **2,752,912 B** (was 143,952 / 2,738,545). `test/host/run.sh` exit 0. New
+`test/host/test_est360.cpp` proves: the region-name rule and filter (every ASCII byte checked against
+the model rule), every new CLI line verbatim (`region put` with and without parent, refused bad
+names, allowf/denyf, home, default, remove, `region home *`, `region default <null>`, `time <epoch>`),
+the anonymous reply parser (clock + list, '*', a real empty 4-byte answer, NUL-terminated, garbage
+dropped, short refused, 12-name cap), the time guard (our clock unset refused, exactly 86400 s ahead
+allowed and 86401 refused, the repeater-ahead rule), `clockReplyParse` against real epochs,
+`batteryVoltsText`/`batteryRawText`, and the keyboard field (same rule as the model, 30-byte cap, no
+space/emoji/accent, `#`, `$`, '-' on the 123 page). `test_est358.cpp` was updated: the status test now
+feeds exactly the bytes the Listener hands over, built from upstream's `RepeaterStats` struct with
+`static_assert(sizeof == 56)` and offset checks (battery 4120 mV, noise -112, packets 290 ...); a
+longer reply is accepted, a 55-byte one refused; the admin-row table, the `>` Open key and the Regions
+chip are covered.
+
+**Could not check** (no device in the sandbox): the anonymous read on the air (does a real repeater
+answer our zero-hop ANON_REQ, how long it takes, the 4-per-3-minutes limiter, and whether MeshCore
+resolves the response sender without a named contact); the actual bytes of a real status reply against
+the logged hex; `time <epoch>` on Argus and its `clock` read-back; the `region default` no-argument
+reply on a real firmware build; the touch feel of the new region page and the confirm rows; and
+whether `region put` with a long parent line fits the CLI frame.
+
+**Next step for Claude (USB):**
+1. `tools/cmd.py status` still parses; watch the boot log for `[rptr] ready`.
+2. On the RPTR tab tap Scan, wait for the 20 s window. Then `tools/cmd.py rptr scan` prints one
+   `[rptr] row ...` line per responder (name, key, key_bytes, hops, regions "?", clock 0).
+3. Tap the new Regions chip (or `tools/cmd.py rptr regions`). Watch the serial for
+   `[rptr] regions -> ...` and `[rptr] regions <- ...: clock=... regions="si, lj" count=... clean=...`.
+   Then `tools/cmd.py rptr regions Argus` (or the 3-byte hex shown in `rptr scan`) prints the stored
+   answer: `[cmd] ok rptr regions name="..." clock=... regions="..."`.
+4. Log in to Argus, open Overview and confirm the battery is about 4.1 V (not 65416 mV) and the noise
+   floor about -120 dBm; send the one-time `[rptr] status raw (56 B)` line with the hex.
+5. Regions page: Read regions (Home and Default scope should show the repeater's answers), then tap
+   Set as home on a region and check "Send now: region home <name>" and the read-back toast; Add
+   region, Save to repeater; the Actions page Sync clock should show `time ...`, then before/after and
+   the `clock` reply.
+
+
+## 2026-11-10 19:58 (Claude): EST-360 on the device
+- Built in the sandbox (exit 0, RAM 148,368 B, flash 2,752,545 B), tests exit 0, reviewed binary flashed (2,752,912 B).
+- `rptr scan`: Argus answered (Trnovo II did not this time). `rptr regions "Argus mobile RPTR"` (anonymous, no login): `clock=1715779092 (real) regions="*, si, lj"`. **Argus's clock reads 2024-05-15 11:58 UTC**: it is the MeshCore 2024 restart clock, so "Sync clock" is needed there. Small defect: the reply was labelled "(real)" although a 2024 stamp is below the 2025-01-01 cut-off; use the same kMinSaneEpoch rule.
+- The status card in volts, login and clock sync need Filip's repeater password: Filip.

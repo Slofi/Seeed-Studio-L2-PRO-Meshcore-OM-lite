@@ -4,6 +4,7 @@
 // password filter, the status decode, the neighbour and region reply parsers, the two-step confirm,
 // the admin row table and the USB `rptr` command.
 #include <stdio.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "rptr_model.h"
@@ -93,14 +94,8 @@ static void testCliLines() {
   cliRegionDefault(line, sizeof(line), "si");
   CHECK_TEXT(line, "region default si");
   CHECK_TEXT(kCliRegionSave, "region save");
-  CHECK(kSiPresetCount == 7);
-  CHECK_TEXT(kSiPreset[0], "region put si");
-  CHECK_TEXT(kSiPreset[1], "region allowf si");
-  CHECK_TEXT(kSiPreset[2], "region put lj si");
-  CHECK_TEXT(kSiPreset[3], "region allowf lj");
-  CHECK_TEXT(kSiPreset[4], "region home si");
-  CHECK_TEXT(kSiPreset[5], "region default si");
-  CHECK_TEXT(kSiPreset[6], "region save");
+  // EST-360: the hard-coded SI preset is gone; every region change is its own word and line. These
+  // builders are proved in test_est360.cpp (the whole set), the old preset constants must not exist.
 
   // Identity.
   cliName(line, sizeof(line), "rptr");
@@ -183,7 +178,9 @@ static void testCliLines() {
   CHECK_TEXT(kResume[3], "gps advert prefs");
   CHECK_TEXT(kCliAdvertLocal, "advert.zerohop");
   CHECK_TEXT(kCliAdvertFlood, "advert");
-  CHECK_TEXT(kCliClockSync, "clock sync");
+  // EST-360: `clock sync` is replaced by `time <epoch>` from our clock (test_est360).
+  CHECK_TEXT(kCliRegionHomeRead, "region home");
+  CHECK_TEXT(kCliRegionDefaultRead, "region default");
   CHECK_TEXT(kCliNeighboursDiscover, "discover.neighbors");
   CHECK_TEXT(kCliNeighboursRead, "neighbors");
   CHECK_TEXT(kCliReboot, "reboot");
@@ -227,20 +224,42 @@ static void testFoundList() {
 
   const uint8_t k1[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t k2[6] = {9, 9, 9, 9, 9, 9};
-  CHECK(f.addAnswer(k1, "SLO-RPTR-1", true, true, 30, true, -34, 0, 1100) == 0);
+  CHECK(f.addAnswer(k1, 6, "SLO-RPTR-1", true, true, 30, true, -34, 0, 1100) == 0);
   f.stateText(text, sizeof(text));
   CHECK_TEXT(text, "1 found, listening");
-  CHECK(f.addAnswer(k2, "", false, true, 10, false, 0, 2, 1200) == 1);
+  CHECK(f.addAnswer(k2, 6, "", false, true, 10, false, 0, 2, 1200) == 1);
   // A repeater that answers twice stays ONE row, with the newer SNR/time.
-  CHECK(f.addAnswer(k1, "SLO-RPTR-1", true, true, 31, true, -35, 0, 1300) == 0);
+  CHECK(f.addAnswer(k1, 6, "SLO-RPTR-1", true, true, 31, true, -35, 0, 1300) == 0);
   CHECK(f.count == 2);
   CHECK(f.rows[0].hasSnrIn && f.rows[0].snrIn4 == 31);
   CHECK(f.rows[0].snrOut4 == -35);
   CHECK(f.rows[0].inContacts);
   CHECK(f.rows[0].heardMs == 1300);
+  CHECK(f.rows[0].keyLen == 6);   // a 6-byte answer cannot be asked for regions
   CHECK(!f.rows[1].inContacts);
   CHECK(f.rows[1].name[0] == 0);
   CHECK(f.rows[1].hops == 2);
+
+  // EST-360: a full-key answer keeps all 32 bytes (the anonymous regions request needs them), and
+  // the row's regions answer lands on the right row with a serial bump.
+  uint8_t full[32];
+  for (int i = 0; i < 32; ++i) full[i] = (uint8_t)(0x40 + i);
+  const uint32_t s0 = f.serial;
+  const int fi = f.addAnswer(full, 32, "Argus", true, true, 12, true, 20, 0, 1400);
+  CHECK(fi == 2);
+  CHECK(f.rows[fi].keyLen == 32);
+  CHECK(memcmp(f.rows[fi].key, full, 32) == 0);
+  AnonRegions ar;
+  ar.clock = 1762790400u;
+  ar.clockValid = true;
+  ar.count = 2;
+  snprintf(ar.text, sizeof(ar.text), "si, lj");
+  CHECK(f.setRegions(fi, ar));
+  CHECK(f.serial > s0);
+  CHECK(f.rows[fi].anon.valid);   // setRegions stores a parsed answer
+  CHECK(f.rows[fi].regionsAsked);
+  CHECK_TEXT(f.rows[fi].anon.text, "si, lj");
+  CHECK(!f.setRegions(99, ar));
 
   // The window closes after kScanWindowMs, and one serial bump follows.
   const uint32_t before = f.serial;
@@ -250,7 +269,7 @@ static void testFoundList() {
   CHECK(!f.listening);
   CHECK(f.serial == before + 1);
   f.stateText(text, sizeof(text));
-  CHECK_TEXT(text, "2 found");
+  CHECK_TEXT(text, "3 found");
   const uint32_t after = f.serial;
   f.tick(60000);
   CHECK(f.serial == after);   // no repeated bumps once it is closed
@@ -261,10 +280,10 @@ static void testFoundList() {
   uint8_t key[6] = {0, 0, 0, 0, 0, 0};
   for (int i = 0; i < kMaxFound; ++i) {
     key[0] = (uint8_t)i;
-    CHECK(f.addAnswer(key, "R", true, true, 0, false, 0, 0, 2000) == i);
+    CHECK(f.addAnswer(key, 6, "R", true, true, 0, false, 0, 0, 2000) == i);
   }
   key[0] = 200;
-  CHECK(f.addAnswer(key, "R", true, true, 0, false, 0, 0, 2000) == -1);
+  CHECK(f.addAnswer(key, 6, "R", true, true, 0, false, 0, 0, 2000) == -1);
   CHECK(f.count == kMaxFound);
   f.begin(1, 0);
   f.tick(kScanWindowMs);
@@ -274,16 +293,22 @@ static void testFoundList() {
 
 // --- login --------------------------------------------------------------------------------------
 static void testLogin() {
-  // A current MeshCore answer: OK, keep-alive/16 = 0, admin = 1, permissions 1, fw level 4.
-  const uint8_t ok[13] = {0, 0, 1, 1, 0, 0, 0, 0, 4, 0, 0, 0, 0};
+  // A current MeshCore answer as the Listener receives it: OK, keep-alive/16 = 0, admin = 1,
+  // permissions 1, random, fw level 4. Nine bytes: the 4-byte timestamp is gone (it is the `tag`).
+  const uint8_t ok[9] = {0, 0, 1, 1, 0, 0, 0, 0, 4};
   LoginAnswer a;
   CHECK(loginParse(ok, sizeof(ok), &a));
   CHECK(a.ok && a.admin && !a.legacy);
   CHECK(a.permissions == 1);
   CHECK(a.fwLevel == 4);
+  // EST-360: the listener's buffer has ALREADY lost the 4-byte timestamp. A buffer that still has
+  // the tag in front (the old mistake) must not parse as a login.
+  const uint8_t tagged[13] = {0x11, 0x22, 0x33, 0x44, 0, 0, 1, 1, 0, 0, 0, 0, 4};
+  CHECK(loginParse(tagged, sizeof(tagged), &a));
+  CHECK(!a.ok);
 
   // A guest: is_admin 0.
-  const uint8_t guest[13] = {0, 0, 0, 2, 0, 0, 0, 0, 4, 0, 0, 0, 0};
+  const uint8_t guest[9] = {0, 0, 0, 2, 0, 0, 0, 0, 4};
   CHECK(loginParse(guest, sizeof(guest), &a));
   CHECK(a.ok && !a.admin);
 
@@ -344,39 +369,82 @@ static void testLogin() {
 }
 
 // --- status -------------------------------------------------------------------------------------
+// EST-360: exactly the struct simple_repeater sends (examples/simple_repeater/MyMesh.h), so the test
+// cannot pass with a shape the receiver never sees. sizeof is asserted and the offsets the parser
+// reads are checked below.
+struct TestRepeaterStats {
+  uint16_t batt_milli_volts;
+  uint16_t curr_tx_queue_len;
+  int16_t noise_floor;
+  int16_t last_rssi;
+  uint32_t n_packets_recv;
+  uint32_t n_packets_sent;
+  uint32_t total_air_time_secs;
+  uint32_t total_up_time_secs;
+  uint32_t n_sent_flood, n_sent_direct;
+  uint32_t n_recv_flood, n_recv_direct;
+  uint16_t err_events;
+  int16_t last_snr;   // x 4
+  uint16_t n_direct_dups, n_flood_dups;
+  uint32_t total_rx_air_time_secs;
+  uint32_t n_recv_errors;
+};
+static_assert(sizeof(TestRepeaterStats) == kRepeaterStatsBytes, "RepeaterStats must be 56 B");
+static_assert(offsetof(TestRepeaterStats, noise_floor) == 4, "noise floor offset");
+static_assert(offsetof(TestRepeaterStats, n_packets_recv) == 8, "packets offset");
+static_assert(offsetof(TestRepeaterStats, err_events) == 40, "err_events offset");
+static_assert(offsetof(TestRepeaterStats, total_rx_air_time_secs) == 48, "rx airtime offset");
+static_assert(offsetof(TestRepeaterStats, n_recv_errors) == 52, "errors offset");
+
 static void testStatus() {
-  uint8_t buf[4 + kRepeaterStatsBytes] = {};
-  // [tag 4][stats]
-  const uint16_t batt = 3950, queue = 2;
-  const int16_t noise = -95, rssi = -70, snr4 = 25;
-  const uint32_t rx = 1200, tx = 340, air = 4000, up = 90061, rxA = 3900, err = 3;
-  memcpy(&buf[4 + 0], &batt, 2);
-  memcpy(&buf[4 + 2], &queue, 2);
-  memcpy(&buf[4 + 4], &noise, 2);
-  memcpy(&buf[4 + 6], &rssi, 2);
-  memcpy(&buf[4 + 8], &rx, 4);
-  memcpy(&buf[4 + 12], &tx, 4);
-  memcpy(&buf[4 + 16], &air, 4);
-  memcpy(&buf[4 + 20], &up, 4);
-  memcpy(&buf[4 + 42], &snr4, 2);
-  memcpy(&buf[4 + 48], &rxA, 4);
-  memcpy(&buf[4 + 52], &err, 4);
+  // The Listener hands statusParse() the RepeaterStats ALONE (MyMesh::onContactResponse already
+  // dropped the 4-byte timestamp). These are the ticket's known values.
+  TestRepeaterStats st{};
+  st.batt_milli_volts = 4120;
+  st.curr_tx_queue_len = 2;
+  st.noise_floor = -112;
+  st.last_rssi = -70;
+  st.n_packets_recv = 290;
+  st.n_packets_sent = 91;
+  st.total_air_time_secs = 4000;
+  st.total_up_time_secs = 90061;
+  st.n_sent_flood = 40;
+  st.n_sent_direct = 51;
+  st.n_recv_flood = 200;
+  st.n_recv_direct = 90;
+  st.err_events = 3;
+  st.last_snr = 25;
+  st.n_direct_dups = 7;
+  st.n_flood_dups = 9;
+  st.total_rx_air_time_secs = 3900;
+  st.n_recv_errors = 11;
+
   Status s;
-  CHECK(statusParse(buf, sizeof(buf), &s));
+  CHECK(statusParse((const uint8_t*)&st, sizeof(st), &s));
   CHECK(s.valid);
-  CHECK(s.battMv == 3950);
-  CHECK(s.noiseFloor == -95);
+  CHECK(s.battMv == 4120);         // NOT the noise floor: 0xFF90 would have read as 65424
+  CHECK(s.txQueue == 2);
+  CHECK(s.noiseFloor == -112);
   CHECK(s.lastRssi == -70);
-  CHECK(s.rxPackets == 1200);
-  CHECK(s.txPackets == 340);
+  CHECK(s.rxPackets == 290);
+  CHECK(s.txPackets == 91);
   CHECK(s.airtimeSec == 4000);
   CHECK(s.uptimeSec == 90061);
   CHECK(s.lastSnr4 == 25);
+  CHECK(s.errEvents == 3);
   CHECK(s.rxAirtimeSec == 3900);
-  CHECK(s.rxCrcErrors == 3);
+  CHECK(s.rxCrcErrors == 11);
+
+  // A newer firmware's longer reply is accepted; the known fields keep their offsets.
+  uint8_t longer[kRepeaterStatsBytes + 8] = {};
+  memcpy(longer, &st, sizeof(st));
+  Status sl;
+  CHECK(statusParse(longer, sizeof(longer), &sl));
+  CHECK(sl.battMv == 4120 && sl.rxCrcErrors == 11);
+
   // A short buffer is refused whole: no half-filled card.
   Status s2;
-  CHECK(!statusParse(buf, sizeof(buf) - 1, &s2));
+  CHECK(!statusParse((const uint8_t*)&st, sizeof(st) - 1, &s2));
   CHECK(!s2.valid);
 
   char t[24];
@@ -468,29 +536,33 @@ static void testAdminRows() {
   neigh.rows[0].named = true;
   snprintf(neigh.rows[0].name, sizeof(neigh.rows[0].name), "Bohinj-RPTR");
 
+  // EST-360's adminRows signature: the repeater's own home/default answers, the region selected for
+  // view 6, and the armed line (nullptr when nothing is waiting for its confirmation).
+  auto build = [&](int view, const char* home, const char* def, int sel, const char* pending) {
+    return adminRows(view, v, st, 4, "SLO-RPTR-1", regions, neigh, home, def, sel, pending, rows,
+                     kAdminRowCap);
+  };
+
   // Overview before a status read: the refresh row and one honest row, no invented number.
-  int n = adminRows(0, v, st, 0, "SLO-RPTR-1", regions, neigh, rows, kAdminRowCap);
+  int n = build(0, nullptr, nullptr, 0, nullptr);
   CHECK(n == 2);
   CHECK(rows[0].id == RowId::StatusRefresh && rows[0].kind == RowKind::Action);
   CHECK_TEXT(rows[0].label, "Read all");
   CHECK_TEXT(rows[1].value, "not read yet, tap Read");
 
   // Overview after it: uptime, battery, airtime, packets, noise, SNR, firmware, clock.
-  uint8_t buf[4 + kRepeaterStatsBytes] = {};
-  const uint16_t batt = 3950;
-  const int16_t noise = -95, snr4 = 25;
-  const uint32_t rx = 1200, tx = 340, air = 4000, up = 90061;
-  memcpy(&buf[4], &batt, 2);
-  memcpy(&buf[4 + 4], &noise, 2);
-  memcpy(&buf[4 + 8], &rx, 4);
-  memcpy(&buf[4 + 12], &tx, 4);
-  memcpy(&buf[4 + 16], &air, 4);
-  memcpy(&buf[4 + 20], &up, 4);
-  memcpy(&buf[4 + 42], &snr4, 2);
-  CHECK(statusParse(buf, sizeof(buf), &st));
+  TestRepeaterStats stats{};
+  stats.batt_milli_volts = 3950;
+  stats.noise_floor = -95;
+  stats.last_snr = 25;
+  stats.n_packets_recv = 1200;
+  stats.n_packets_sent = 340;
+  stats.total_air_time_secs = 4000;
+  stats.total_up_time_secs = 90061;
+  CHECK(statusParse((const uint8_t*)&stats, sizeof(stats), &st));
   st.clock = 1700000000u;
   st.clockValid = true;
-  n = adminRows(0, v, st, 4, "SLO-RPTR-1", regions, neigh, rows, kAdminRowCap);
+  n = build(0, nullptr, nullptr, 0, nullptr);
   CHECK(n == 9);
   CHECK_TEXT(rows[1].label, "uptime");
   CHECK_TEXT(rows[1].value, "1d 01:01");
@@ -504,9 +576,13 @@ static void testAdminRows() {
   CHECK_TEXT(rows[7].value, "level 4");
   CHECK_TEXT(rows[8].value, "22:13 UTC");
   for (int i = 1; i < n; ++i) CHECK(rows[i].kind == RowKind::Fact);
+  // EST-360: an implausible battery is "n/a" and only the detail line shows its raw mV.
+  st.battMv = 65416;
+  n = build(0, nullptr, nullptr, 0, nullptr);
+  CHECK_TEXT(rows[2].value, "n/a (65416 mV)");
 
   // Radio: five steppers and Apply, in the mock's order.
-  n = adminRows(1, v, st, 4, "SLO-RPTR-1", regions, neigh, rows, kAdminRowCap);
+  n = build(1, nullptr, nullptr, 0, nullptr);
   CHECK(n == 6);
   CHECK(rows[0].id == RowId::RadioFreq && rows[0].kind == RowKind::Stepper && rows[0].keys == 2);
   CHECK_TEXT(rows[0].value, "869.525 MHz");
@@ -516,23 +592,77 @@ static void testAdminRows() {
   CHECK_TEXT(rows[4].value, "14 dBm");
   CHECK(rows[5].id == RowId::RadioApply && rows[5].kind == RowKind::Action);
 
-  // Regions: Read, one row per scope, Save, SI preset. The region rows carry H/D keys.
-  n = adminRows(2, v, st, 4, "SLO-RPTR-1", regions, neigh, rows, kAdminRowCap);
-  CHECK(n >= 6);
+  // Regions (EST-360): Read, Add, Save (plainly permanent), the repeater's own home and default,
+  // the two explicit "* / none" choices, then one Open row per region with the "^" marker.
+  n = build(2, "si", "", 0, nullptr);
+  CHECK(n == 10);
   CHECK(rows[0].id == RowId::RegionRead);
-  CHECK(rows[1].id == RowId::RegionRow);
-  CHECK_TEXT(rows[1].label, "*");
-  CHECK_TEXT(rows[1].value, "deny");
-  CHECK(rows[1].keys == 2);
-  CHECK_TEXT(rows[2].label, "si");
-  CHECK_TEXT(rows[2].value, "allow, home");
-  CHECK(rows[2].on);
-  CHECK_TEXT(rows[3].label, "lj");
-  CHECK(rows[4].id == RowId::RegionSave);
-  CHECK(rows[5].id == RowId::SiPreset);
+  CHECK_TEXT(rows[0].value, "region");
+  CHECK(rows[1].id == RowId::RegionAdd);
+  CHECK_TEXT(rows[1].value, "region put");
+  CHECK(rows[2].id == RowId::RegionSave);
+  CHECK_TEXT(rows[2].label, "Save to repeater");
+  CHECK_TEXT(rows[2].value, "makes changes permanent");
+  CHECK(rows[3].id == RowId::RegionHomeFact && rows[3].kind == RowKind::Fact);
+  CHECK_TEXT(rows[3].value, "si");
+  CHECK(rows[4].id == RowId::RegionDefaultFact);
+  CHECK_TEXT(rows[4].value, "none");
+  CHECK(rows[5].id == RowId::RegionSetHomeNone);
+  CHECK_TEXT(rows[5].label, "Home: * (no region)");
+  CHECK_TEXT(rows[5].value, "region home *");
+  CHECK(rows[6].id == RowId::RegionDefaultNone);
+  CHECK_TEXT(rows[6].label, "Default scope: none");
+  CHECK_TEXT(rows[6].value, "region default <null>");
+  CHECK(rows[7].id == RowId::RegionRow && rows[7].kind == RowKind::Open && rows[7].keys == 1);
+  CHECK_TEXT(rows[7].label, "*");
+  CHECK_TEXT(rows[7].value, "deny");
+  CHECK_TEXT(rows[8].label, "si");
+  CHECK_TEXT(rows[8].value, "^ home, allow");
+  CHECK(rows[8].on);
+  CHECK_TEXT(rows[9].label, "lj");
+  CHECK_TEXT(rows[9].value, "allow");
+  // The one-step confirm prepends the exact line and Cancel to whatever view is open.
+  n = build(2, "si", "", 0, "region put new si");
+  CHECK(n == 12);
+  CHECK(rows[0].id == RowId::PendingSend && rows[0].kind == RowKind::Action);
+  CHECK_TEXT(rows[0].label, "Send now");
+  CHECK_TEXT(rows[0].value, "region put new si");
+  CHECK(rows[1].id == RowId::PendingCancel);
+  CHECK(rows[2].id == RowId::RegionRead);
+
+  // One region's page: every control is a word with the exact CLI line beside it.
+  n = build(6, "si", "", 1, nullptr);   // "si"
+  CHECK(n == 7);
+  CHECK(rows[0].id == RowId::RegionNameFact);
+  CHECK(rows[0].kind == RowKind::Fact);
+  CHECK(rows[1].id == RowId::RegionAddChild);
+  CHECK_TEXT(rows[1].value, "region put <new> si");
+  CHECK(rows[2].id == RowId::RegionAllow);
+  CHECK_TEXT(rows[2].label, "Allow flood");
+  CHECK_TEXT(rows[2].value, "region allowf si");
+  CHECK(rows[3].id == RowId::RegionDeny);
+  CHECK_TEXT(rows[3].label, "Deny flood");
+  CHECK_TEXT(rows[3].value, "region denyf si");
+  CHECK(rows[4].id == RowId::RegionHome);
+  CHECK_TEXT(rows[4].label, "Set as home");
+  CHECK_TEXT(rows[4].value, "region home si");
+  CHECK(rows[5].id == RowId::RegionDefault);
+  CHECK_TEXT(rows[5].label, "Set as default scope");
+  CHECK_TEXT(rows[5].value, "region default si");
+  CHECK(rows[6].id == RowId::RegionRemove);
+  CHECK(rows[6].danger);
+  CHECK_TEXT(rows[6].value, "region remove si");
+  // The wildcard row: no default and no remove (it always exists), home = the clean "no home".
+  n = build(6, "*", "", 0, nullptr);
+  CHECK(n == 5);
+  CHECK(rows[1].id == RowId::RegionAddChild);
+  CHECK_TEXT(rows[1].label, "Add region");
+  CHECK(rows[4].id == RowId::RegionHome);
+  CHECK_TEXT(rows[4].label, "Set as home: none");
+  CHECK_TEXT(rows[4].value, "region home *");
 
   // Mesh: the three path-hash values, four loop modes, adverts, flood, toggles and identity.
-  n = adminRows(3, v, st, 4, "SLO-RPTR-1", regions, neigh, rows, kAdminRowCap);
+  n = build(3, nullptr, nullptr, 0, nullptr);
   CHECK(n == 12);
   CHECK(rows[0].id == RowId::PathHash);
   CHECK_TEXT(rows[0].value, "2B");
@@ -550,7 +680,7 @@ static void testAdminRows() {
   CHECK(rows[11].id == RowId::UseGpsPos);
 
   // Neighbours: discover, read, then the rows the reply produced.
-  n = adminRows(4, v, st, 4, "SLO-RPTR-1", regions, neigh, rows, kAdminRowCap);
+  n = build(4, nullptr, nullptr, 0, nullptr);
   CHECK(n == 3);
   CHECK(rows[0].id == RowId::NeighDiscover);
   CHECK(rows[1].id == RowId::NeighRead);
@@ -559,23 +689,28 @@ static void testAdminRows() {
   CHECK_TEXT(rows[2].value, "SNR -8.50 dB");
   NeighbourList none;
   none.valid = true;
-  n = adminRows(4, v, st, 4, "SLO-RPTR-1", regions, none, rows, kAdminRowCap);
+  n = adminRows(4, v, st, 4, "SLO-RPTR-1", regions, none, nullptr, nullptr, 0, nullptr, rows,
+                kAdminRowCap);
   CHECK(n == 3);
   CHECK_TEXT(rows[2].value, "none read yet");
 
-  // Actions: the three adverts/clock, silent, resume and the dangerous reboot.
-  n = adminRows(5, v, st, 4, "SLO-RPTR-1", regions, neigh, rows, kAdminRowCap);
-  CHECK(n == 6);
+  // Actions: two adverts, Sync clock, the before/after clock facts, silent, resume and reboot.
+  n = build(5, nullptr, nullptr, 0, nullptr);
+  CHECK(n == 8);
   CHECK(rows[0].id == RowId::AdvertLocalOnce);
   CHECK_TEXT(rows[0].value, "advert.zerohop");
   CHECK_TEXT(rows[1].value, "advert");
-  CHECK_TEXT(rows[2].value, "clock sync");
-  CHECK(rows[3].id == RowId::Silent);
-  CHECK(rows[4].id == RowId::Resume);
-  CHECK(rows[5].id == RowId::Reboot && rows[5].danger);
+  CHECK(rows[2].id == RowId::ClockSync);
+  CHECK_TEXT(rows[2].label, "Sync clock");
+  CHECK(rows[3].id == RowId::ClockBefore && rows[3].kind == RowKind::Fact);
+  CHECK(rows[4].id == RowId::ClockAfter && rows[4].kind == RowKind::Fact);
+  CHECK(rows[5].id == RowId::Silent);
+  CHECK(rows[6].id == RowId::Resume);
+  CHECK(rows[7].id == RowId::Reboot && rows[7].danger);
 
   CHECK_TEXT(viewName(0), "Overview");
   CHECK_TEXT(viewName(5), "Actions");
+  CHECK_TEXT(viewName(6), "Region");
 }
 
 // --- the layout the rows are drawn and hit in ---------------------------------------------------
@@ -595,7 +730,18 @@ static void testAdminLayout() {
   CHECK(om::ui::rptrAdminChipAt(a, a.chips[2].x + 2, a.chips[2].y + 2) == 2);
   CHECK(om::ui::rptrAdminChipAt(a, a.chips[2].x + 2, a.chips[2].y - 4) == -1);
 
-  // A row's two keys answer -/+ (or H/D) and the rest of the row answers as the body.
+  // EST-360: the scan header has its own "Regions" chip left of Scan, and the two never overlap.
+  const om::ui::RptrLayout rl = om::ui::rptrLayoutFor(L, false);
+  CHECK(rl.regions.right() <= rl.scan.x);
+  CHECK(!rl.regions.overlaps(rl.scan));
+  CHECK(rl.regions.y == rl.scan.y && rl.regions.h == rl.scan.h);
+  CHECK(rl.regions.x > 76);   // the state line keeps its room
+  CHECK(om::ui::rptrHitAt(rl, false, 0, 0, rl.regions.x + 2, rl.regions.y + 2).kind ==
+        om::ui::RptrHit::Regions);
+  CHECK(om::ui::rptrHitAt(rl, false, 0, 0, rl.scan.x + 2, rl.scan.y + 2).kind ==
+        om::ui::RptrHit::Scan);
+
+  // A row's two keys answer -/+ and the rest of the row answers as the body.
   const uint8_t keys[4] = {2, 2, 0, 1};
   const om::ui::RptrRowRects r0 = om::ui::rptrRowRects(a, 2, 0, 0);
   CHECK(om::ui::rptrAdminRowAt(a, keys, 4, 0, r0.body.x + 5, r0.body.y + 5).part == 0);
@@ -643,6 +789,21 @@ static void testUsb() {
   CHECK(c.kind == om::usb::Kind::Rptr && c.error != nullptr);   // no word reads a secret back
 
   snprintf(line, sizeof(line), "rptr scan extra");
+  c = om::usb::parseCommand(line);
+  CHECK(c.kind == om::usb::Kind::Rptr && c.error != nullptr);
+
+  // EST-360: the anonymous regions read, whole scan or one repeater.
+  snprintf(line, sizeof(line), "rptr regions");
+  c = om::usb::parseCommand(line);
+  CHECK(c.kind == om::usb::Kind::Rptr && c.error == nullptr);
+  CHECK_TEXT(c.target, "regions");
+  CHECK(c.text == nullptr);
+  snprintf(line, sizeof(line), "rptr regions Argus");
+  c = om::usb::parseCommand(line);
+  CHECK(c.kind == om::usb::Kind::Rptr && c.error == nullptr);
+  CHECK_TEXT(c.target, "regions");
+  CHECK_TEXT(c.text, "Argus");
+  snprintf(line, sizeof(line), "rptr regions Argus extra");
   c = om::usb::parseCommand(line);
   CHECK(c.kind == om::usb::Kind::Rptr && c.error != nullptr);
 

@@ -2,7 +2,8 @@
 // OM Lite UI theme: every colour, every size, every font role. Nothing else in src/ui may hold one.
 //
 // Source of truth: /home/slofi/Projects/pocket-mesh/ui-mock/index.html (CSS custom properties and the
-// .dev-l2 rules). Warm palette + OM gold accent, Filip 2026-11-10.
+// .dev-l2 rules). NEUTRAL GREY palette (Filip, 2026-11-10: the warm browns were the "too warm" try)
+// with the OM gold accent. Tokens: docs/REBUILD.md.
 //
 // This header is plain C++ (no Arduino, no LovyanGFX) so test/host can compile the layout with the
 // system g++. The smooth font blobs are declared in ui/fonts.h; their pixel sizes live here.
@@ -21,14 +22,14 @@ constexpr uint16_t rgb565(uint32_t rgb) {
                     ((rgb & 0xFF) >> 3));
 }
 
-// Surfaces
-constexpr uint16_t kBg        = rgb565(0x15110f);  // app background (--bg)
-constexpr uint16_t kScreen    = rgb565(0x130e0b);  // screen / detail fill
-constexpr uint16_t kPanel     = rgb565(0x211a16);  // --panel
-constexpr uint16_t kPanel2    = rgb565(0x2c231d);  // --panel2, toast, keys
-constexpr uint16_t kBar       = rgb565(0x1d1611);  // status bar and tab bar
-constexpr uint16_t kLine      = rgb565(0x40322a);  // --line, 1 px separators
-constexpr uint16_t kRowLine   = rgb565(0x251d17);  // list row bottom line
+// Surfaces (grey tokens, REBUILD.md; brightness kept, tint almost none)
+constexpr uint16_t kBg        = rgb565(0x131210);  // app background (--bg)
+constexpr uint16_t kScreen    = rgb565(0x100f0d);  // screen / detail fill (mock .screen)
+constexpr uint16_t kPanel     = rgb565(0x1c1b19);  // --panel
+constexpr uint16_t kPanel2    = rgb565(0x242321);  // --panel2, toast, keys
+constexpr uint16_t kBar       = rgb565(0x171614);  // status bar and tab bar
+constexpr uint16_t kLine      = rgb565(0x333230);  // --line, 1 px separators
+constexpr uint16_t kRowLine   = rgb565(0x1e1d1b);  // list row bottom line
 
 // Ink
 constexpr uint16_t kInk       = rgb565(0xe8edf5);  // --ink
@@ -49,13 +50,15 @@ constexpr uint16_t kWarn      = rgb565(0xffb020);  // room dot, warning
 constexpr uint16_t kBad       = rgb565(0xff5c5c);  // unread badge, error
 
 // Components the later screens already need (chat, map, RPTR) so a second palette cannot appear.
-constexpr uint16_t kCodeBg    = rgb565(0x18120d);
+// Values follow the mock: a code field / draft sits on --bg, the reply bar and tag stay blue (they
+// mark a quote, not a selection), the map canvas is .mapwrap and its side rail .map-side.
+constexpr uint16_t kCodeBg    = rgb565(0x131210);  // mock code / .draft field
 constexpr uint16_t kReplyBg   = rgb565(0x12293c);
 constexpr uint16_t kReplyLine = rgb565(0x24425c);
 constexpr uint16_t kReplyInk  = rgb565(0xbcd8f0);
 constexpr uint16_t kTagInk    = rgb565(0x9ad7ff);
-constexpr uint16_t kMapBg     = rgb565(0x161a10);
-constexpr uint16_t kMapSide   = rgb565(0x16100b);
+constexpr uint16_t kMapBg     = rgb565(0x191816);  // mock .mapwrap
+constexpr uint16_t kMapSide   = rgb565(0x11100e);  // mock .map-side
 constexpr uint16_t kWarnBg    = rgb565(0x2a1e10);
 constexpr uint16_t kWarnLine  = rgb565(0x5c4320);
 constexpr uint16_t kWarnInk   = rgb565(0xffd08a);
@@ -89,6 +92,7 @@ constexpr int16_t kTabPadY    = 3;   // icon top: 2 px selected line + 1 px; lea
 
 constexpr int16_t kBattW      = 16;
 constexpr int16_t kBattH      = 7;
+constexpr int16_t kBattGap    = 8;   // mock .status .bits gap: icon -> "97%"
 constexpr int16_t kBarsW      = 2;
 constexpr int16_t kBarsGap    = 1;
 constexpr int16_t kBarsH      = 7;
@@ -100,7 +104,7 @@ constexpr int16_t kRadiusLg   = 6;
 
 constexpr int16_t kBadgeH     = 9;
 constexpr int16_t kBadgePadX  = 2;
-constexpr int16_t kGearSize   = 11;
+constexpr int16_t kGearSize   = 9;   // mock: the status ⚙ glyph at the status font size (8.5 px)
 
 // Content rectangle: what is left between the two bars.
 constexpr int16_t kContentY   = kStatusH;
@@ -112,8 +116,11 @@ constexpr int16_t kTabY       = kScreenH - kTabH;
 // status line. Generated from DejaVu Sans / DejaVu Sans Mono as anti-aliased VLW blobs (8-bit
 // coverage) by tools/mkvlw.py; the blobs themselves are in src/ui/font_*.cpp.
 // Sizes are whole pixels. The mock's 7.5/8/8.5/10 px were rounded up for the device panel, except
-// the status line: 11 px (the brief) made "MC . EU868 . 2B" collide with the node count at 320 px,
+// the status line: 11 px (the brief) made "MC · EU868 · 2B" collide with the node count at 320 px,
 // so the status uses the same 10 px mono as the row metadata.
+// One glyph outside ASCII: mono carries U+00B7 MIDDLE DOT, the mock's status separator, added by
+// tools/mkvlw.py --extra 0xb7. The settings cog stays a vector (drawGear) so the sans9 metrics and
+// the tab labels do not move.
 enum class FontRole : uint8_t {
   SansBody = 0,    // list names, empty state              (11 px, mock 10 px)
   SansTitle,       // detail heading                       (14 px, mock 13 px)

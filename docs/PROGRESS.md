@@ -104,3 +104,82 @@
 ## 2026-11-10 07:02 (Claude) — EST-328 checked on the device
 - Flashed over USB OTA, screenshot `docs/shots/2026-11-10-0702-nodes-first.png`: smooth fonts, status bar, tab bar with icons, gold selected tab, honest empty state. Committed.
 - Against the mock: status separators print "." on the baseline (mock: middle dot); battery icon touches "97%"; the gear reads as a crosshair; still the warm palette (switch to the grey tokens in REBUILD.md); contacts are gone after a reboot (0 nodes), so they are not persisted.
+
+## 2026-11-10 (DS, EST-329, grey palette, status-bar fixes, contact persistence)
+- **Grey palette.** Every surface in `src/ui/theme.h` is now a REBUILD.md token: bg `#131210`,
+  screen `#100f0d` (the mock's `.screen`, also used for a full-screen detail), panel `#1c1b19`,
+  panel2 `#242321`, bars `#171614`, line `#333230`, row line `#1e1d1b`. The colours the later screens
+  already use follow the mock as well: code/draft field `#131210`, map canvas `#191816`
+  (`.mapwrap`), map side rail `#11100e` (`.map-side`). Gold accent, ink/dim/dimmer and the node-type
+  colours are the mock's values and did not change (the reply bar and tag stay blue: they mark a
+  quote, not a selection). No warm value is left anywhere in `src/ui`. The old screens in `main.cpp`
+  still hold their own two colours; they are not on the new layer and were not touched.
+- **Middle dot.** `tools/mkvlw.py` gained `--extra` (comma-separated code points, decimal or 0x hex;
+  records stay sorted because LovyanGFX looks glyphs up by binary search). mono10 was regenerated
+  with U+00B7: 96 glyphs, 6,567 B, **+52 B**. The status line now formats `MC · EU868 · 2B` as UTF-8
+  (`\xC2\xB7`); the dot is 6x4 px at x-height and has the same 6 px advance as the period, so the
+  string is the same width and still fits beside the node count at 320 px. sans9 was regenerated
+  without an extra glyph and came out byte-identical, so the tab labels cannot move.
+- **Battery gap.** New constant `kBattGap = 8` (the mock's `.status .bits` gap) between the percent
+  text and the icon; it was 2 px. The status layout arithmetic was re-checked on the real rects:
+  battery right edge to "97%" left edge = 8 px, "97%" right edge to the clock left edge = 6 px
+  (kStatusGap, unchanged), clock right edge to the gear left edge = 6 px.
+- **Settings icon.** `kGearSize` 11 -> 9 (the mock draws its ⚙ at the status font size, 8.5 px) and
+  `drawGear()` is now a filled cog: a 7 px body, eight 2x2 teeth and a 1 px hub punched back to the
+  bar colour. I rendered both candidates at 1:1 and 26x before choosing: DejaVu's U+2699 at 9 px
+  breaks up into a ring with faint spikes and reads like the old crosshair, the silhouette reads as
+  a cog. Vector also keeps the sans9 font metrics untouched, so no tab label shifts by a pixel.
+- **Contacts survive a reboot.** New `src/contact_store.h` (plain C++, no Arduino) plus the wiring in
+  `mesh_link.cpp`. After `BaseChatMesh::begin()` and the identity store, `/contacts` in SPIFFS is
+  read; if there is no file the node starts empty (`[mc] contacts: none stored`). Format: 12-byte
+  header ("OMC1", u16 version, u16 count, CRC32 of the payload) then fixed 152-byte records with
+  pub key, name, type, flags, out path + length, advert timestamp, lastmod, lat/lon, sync_since.
+  Any mismatch (size, magic, version, count > 32, a field a save can never write, CRC) rejects the
+  whole file and the node starts empty with a log line; a header-only 0-record file is valid.
+  Restore uses MeshCore's public `addContact()` (no MeshCore code is copied; the field names follow
+  `ContactInfo.h`, MIT), then `bootstrapRTCfromContacts()`, MeshCore's own hook for contacts brought
+  back from storage, so lastmod values from the previous boot are not "in the future".
+  Saving: `onDiscoveredContact`, `onContactPathUpdated` and `onContactOverwrite` mark the table dirty;
+  `meshLinkLoop()` then writes at most once per 60 s (`ContactSaveScheduler`). The first change after
+  boot is written immediately, every later one waits for the interval (successful or failed), and a
+  failed write stays dirty and retries after the interval rather than in a tight loop. Writes go to
+  `/contacts.tmp`; the old file is removed and the temp renamed over it. A power cut mid-write leaves
+  the old file (before the swap) or no file (between remove and rename), and the next boot then starts
+  empty with a log line, which is the documented fallback.
+  RAM: two buffers (4,892 B file image + 4,880 B record array) are static and shared by load and
+  save; they would not fit the loop task's stack, and the first build had one copy of each inside
+  each function, which wasted 9.8 KB.
+- **Build** (`pio run -e om_lite_l2`, the command from REBUILD.md): exit 0, SUCCESS in 20.04 s
+  (incremental). RAM 76,300 B of 327,680 (23.3%), flash 829,549 B of 6,553,600 (12.7%). Previous
+  run 66,556 B / 826,569 B, so this ticket added **+9,744 B RAM** (9,772 B of contact buffers minus
+  alignment) and **+2,980 B flash** (52 B of that is the extra mono glyph; the rest is the contact
+  store, the cog and the theme). A first build failed to link because `mkvlw.py` was called with a
+  lowercase `--name`, producing `ksans9Data` while `ui/fonts.h` declares `kSans9Data`; regenerated
+  with `--name Sans9/Mono10`, and the usage note now says the name becomes the identifier.
+- **Tests**: `test/host/run.sh` exit 0. The 9 Python screenshot tests still pass and `test_layout.cpp`
+  is unchanged. New `test/host/test_contact_store.cpp` (g++, `-Wall -Wextra -Werror`) proves:
+  0/1/32-record round trips with both signed lat/lon and all 0xFF/0x00 byte values; the header bytes
+  on disk are "OMC1", version 1, count 32; encode refuses >32 records, a negative count, a 1-byte-short
+  buffer and a null pointer; decode refuses every truncation (17-byte steps through the whole file),
+  one byte of trailing junk, bad magic, a future version, a count over the table, fewer output slots
+  than records, one flipped payload bit (CRC), a non-zero reserved byte, type NONE, an empty name, a
+  32-byte name with no terminator, and out_path_len 65 (0xFF is allowed as MeshCore's "unknown").
+  Save policy: not dirty never saves; the first dirty change is due at once; after a successful save
+  nothing is due until exactly 60,000 ms; a failed save stays dirty and retries after the interval,
+  not immediately; repeated `markDirty` calls do not postpone a pending save; the interval works
+  across the 32-bit `millis()` wrap; a zero interval saves on every change.
+- **Could not check** (no device in the sandbox): the grey palette, the middle dot, the cog and the
+  8 px battery gap as they actually look on the panel; that SPIFFS `rename`/`remove` behave as
+  expected on this partition; that a real reboot brings the Nodes list back. To check the feature on
+  the device: let it hear adverts, watch the log for `[mc] contacts: saved N (x bytes)`, reboot, and
+  look for `[mc] contacts: loaded N of M from flash` before the Nodes list is drawn. A corrupted-file
+  test can be done by writing junk to `/contacts` over the serial shell if one exists; otherwise it
+  stays a host-tested path. Also worth confirming that a contact saved just after boot (the
+  immediate first save) is there after the reboot, and that the 60 s timer does not delay the first
+  one.
+- **Next step**: Claude flashes, screenshots the Nodes screen after a reboot with contacts, and
+  compares the status bar and palette with the mock. Then work order item 3, Chat on the new layer.
+
+
+## 2026-11-10 07:18 (Claude) — EST-329 checked on the device
+- Screenshot `docs/shots/2026-11-10-0718-nodes-grey.png`: middle dots, battery gap, a gear that reads as one, grey palette. Contact save/load reviewed (temp file + rename, CRC, rate-limited); not yet proven across a reboot with real contacts (0 heard since the last reboot).

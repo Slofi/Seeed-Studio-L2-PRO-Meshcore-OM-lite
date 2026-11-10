@@ -91,16 +91,17 @@ void drawBattery(lgfx::LovyanGFX* d, int x, int cy, int pct) {
   d->fillRect(x + 1, y + 1, fill, kBattH - 2, c);
 }
 
-void drawGear(lgfx::LovyanGFX* d, const Rect& r, uint16_t col) {
+// A cog, not a crosshair: a filled body with eight teeth and a punched-out centre. Vector rather
+// than the mock's U+2699 glyph because at 9 px the glyph's thin stroke breaks up into a ring
+// (checked at 26x zoom before flashing); the teeth are what says "gear". bg punches the hub hole.
+void drawGear(lgfx::LovyanGFX* d, const Rect& r, uint16_t col, uint16_t bg) {
   const int cx = r.x + r.w / 2;
   const int cy = r.y + r.h / 2;
-  d->drawCircle(cx, cy, 3, col);
-  d->fillCircle(cx, cy, 1, col);
-  static const int8_t dx[8] = {3, 2, 0, -2, -3, -2, 0, 2};
-  static const int8_t dy[8] = {0, 2, 3, 2, 0, -2, -3, -2};
-  for (int i = 0; i < 8; ++i) {
-    d->drawLine(cx + dx[i], cy + dy[i], cx + dx[i] * 5 / 3, cy + dy[i] * 5 / 3, col);
-  }
+  d->fillCircle(cx, cy, 3, col);
+  static const int8_t ox[8] = {3, 2, 0, -2, -3, -2, 0, 2};
+  static const int8_t oy[8] = {0, 2, 3, 2, 0, -2, -3, -2};
+  for (int i = 0; i < 8; ++i) d->fillRect(cx + ox[i] - 1, cy + oy[i] - 1, 2, 2, col);
+  d->fillCircle(cx, cy, 1, bg);
 }
 
 // Four 11x11 icons, drawn with primitives so there is no missing glyph and no icon font in flash.
@@ -163,13 +164,15 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   d->fillCircle(dotCx, cy, kStatusDot / 2, m.meshReady ? kGreen : kDimmer);
 
   char left[40];
-  snprintf(left, sizeof(left), "%s . %s . %s", m.protocol, m.region, m.hash);
+  // The mock separates with U+00B7 MIDDLE DOT, not an ASCII period on the baseline. The mono blob
+  // carries that glyph (tools/mkvlw.py --extra 0xb7), so the UTF-8 bytes below draw at x-height.
+  snprintf(left, sizeof(left), "%s \xC2\xB7 %s \xC2\xB7 %s", m.protocol, m.region, m.hash);
   const int leftX = r.x + kStatusPadX + kStatusDot + kStatusGap;
   textLeft(d, FontRole::MonoStatus, kDim, kBar, leftX, cy, left);
 
   // Right-hand group, laid out from the gear leftwards with the same measurements that draw it.
   const Rect gear = L.gear();
-  drawGear(d, gear, kDim);
+  drawGear(d, gear, kDim, kBar);
   int rx = gear.x - kStatusGap;
 
   rx -= textRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, m.clock) + kStatusGap;
@@ -178,7 +181,7 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   if (m.batteryPct < 0) snprintf(pct, sizeof(pct), "--");
   else snprintf(pct, sizeof(pct), "%d%%", m.batteryPct);
   const int pctW = textRight(d, FontRole::MonoStatus, kDim, kBar, rx, cy, pct);
-  rx -= pctW + 2;
+  rx -= pctW + kBattGap;   // mock .bits gap: the icon no longer touches "97%"
   drawBattery(d, rx - kBattW, cy, m.batteryPct);
   rx -= kBattW + kStatusGap;
 

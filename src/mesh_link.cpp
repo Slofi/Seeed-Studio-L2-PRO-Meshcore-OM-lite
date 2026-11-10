@@ -22,6 +22,7 @@
 
 #include "audio.h"
 #include "channels.h"
+#include "contact_store.h"
 #include "mc_board.h"
 #include "target.h"
 
@@ -31,6 +32,21 @@ namespace {
 char s_lastText[96];
 int s_lastChannel = -1;
 bool s_ready = false;
+
+// Contact persistence (see contact_store.h). The scheduler lives here so the callbacks below only
+// mark it dirty; the actual SPIFFS write happens at most once per interval, from meshLinkLoop().
+// static_assert ties the file format's record capacity to MeshCore's contact table.
+static_assert(kMaxContactRecords >= MAX_CONTACTS, "contact file must hold every real contact");
+static_assert(kContactKeySize == PUB_KEY_SIZE, "key size");
+static_assert(kContactPathSize == MAX_PATH_SIZE, "path size");
+
+constexpr const char* kContactsPath = "/contacts";
+constexpr const char* kContactsTmpPath = "/contacts.tmp";
+ContactSaveScheduler s_contactSaver;
+// Shared by load and save, never both at once: 4.9 KB + 4.9 KB would not fit the loop task stack
+// and two copies of each would waste 9.8 KB of static RAM.
+uint8_t s_contactFileBuf[kContactMaxFileSize];
+StoredContact s_contactRecs[kMaxContactRecords];
 
 struct Msg {
   uint8_t ch;
@@ -77,6 +93,124 @@ public:
       Serial.println("[mc] 6c new identity");
       store.save("_main", self_id);
     }
+    Serial.println("[mc] 6e contacts");
+    loadContacts();
+    return true;
+  }
+
+  // --- contact persistence ---------------------------------------------------------------------
+  // The table is read and written only through BaseChatMesh's public API (getContactByIdx,
+  // addContact, getTotalContactSlots). The file format itself is ours (src/contact_store.h).
+  bool loadContacts() {
+    if (!SPIFFS.exists(kContactsPath)) {
+      Serial.println("[mc] contacts: none stored, starting empty");
+      return true;
+    }
+    File f = SPIFFS.open(kContactsPath, "r");
+    if (!f) {
+      Serial.println("[mc] contacts: open failed, starting empty");
+      return false;
+    }
+    const size_t len = (size_t)f.size();
+    if (len < kContactHeaderSize || len > kContactMaxFileSize) {
+      Serial.printf("[mc] contacts: corrupt file (%u bytes), starting empty\n", (unsigned)len);
+      f.close();
+      return false;
+    }
+    // File-scope buffer, not stack: 4.9 KB would not fit the loop task's stack.
+    const size_t got = (size_t)f.read(s_contactFileBuf, len);
+    f.close();
+    if (got != len) {
+      Serial.printf("[mc] contacts: short read %u of %u, starting empty\n", (unsigned)got,
+                    (unsigned)len);
+      return false;
+    }
+
+    const int n = contactDecode(s_contactFileBuf, len, s_contactRecs, kMaxContactRecords);
+    if (n < 0) {
+      Serial.println("[mc] contacts: corrupt file (magic/version/size/CRC), starting empty");
+      return false;
+    }
+    const int total = getTotalContactSlots();
+    if (total + n > MAX_ANON_CONTACTS + MAX_CONTACTS) {
+      Serial.printf("[mc] contacts: %d stored but the table has %d free slots, starting empty\n", n,
+                    MAX_ANON_CONTACTS + MAX_CONTACTS - total);
+      return false;
+    }
+
+    int added = 0;
+    for (int i = 0; i < n; ++i) {
+      ContactInfo ci{};
+      memcpy(ci.id.pub_key, s_contactRecs[i].pub_key, sizeof(ci.id.pub_key));
+      snprintf(ci.name, sizeof(ci.name), "%s", s_contactRecs[i].name);
+      ci.type = s_contactRecs[i].type;
+      ci.flags = s_contactRecs[i].flags;
+      ci.out_path_len = s_contactRecs[i].out_path_len;
+      memcpy(ci.out_path, s_contactRecs[i].out_path, sizeof(ci.out_path));
+      ci.last_advert_timestamp = s_contactRecs[i].last_advert_ts;
+      ci.lastmod = s_contactRecs[i].lastmod;
+      ci.gps_lat = s_contactRecs[i].gps_lat;
+      ci.gps_lon = s_contactRecs[i].gps_lon;
+      ci.sync_since = s_contactRecs[i].sync_since;
+      if (addContact(ci)) ++added;
+    }
+    // MeshCore's clock restarts from its built-in epoch on every boot, so restored timestamps would
+    // look like the future. MeshCore has the same hook for contacts restored from storage.
+    bootstrapRTCfromContacts();
+    Serial.printf("[mc] contacts: loaded %d of %d from flash\n", added, n);
+    return added == n;
+  }
+
+  bool saveContacts() {
+    int n = 0;
+    const int total = getTotalContactSlots();
+    for (int idx = MAX_ANON_CONTACTS; idx < total && n < kMaxContactRecords; ++idx) {
+      ContactInfo ci;
+      if (!getContactByIdx((uint32_t)idx, ci)) continue;
+      if (ci.type == ADV_TYPE_NONE || ci.name[0] == 0) continue;
+      StoredContact& r = s_contactRecs[n++];
+      memset(&r, 0, sizeof(r));
+      memcpy(r.pub_key, ci.id.pub_key, sizeof(r.pub_key));
+      snprintf(r.name, sizeof(r.name), "%s", ci.name);
+      r.type = ci.type;
+      r.flags = ci.flags;
+      r.out_path_len = ci.out_path_len;
+      memcpy(r.out_path, ci.out_path, sizeof(r.out_path));
+      r.last_advert_ts = ci.last_advert_timestamp;
+      r.lastmod = ci.lastmod;
+      r.gps_lat = ci.gps_lat;
+      r.gps_lon = ci.gps_lon;
+      r.sync_since = ci.sync_since;
+    }
+
+    const size_t len = contactEncode(s_contactRecs, n, s_contactFileBuf, sizeof(s_contactFileBuf));
+    if (len == 0) {
+      Serial.println("[mc] contacts: encode failed, not saved");
+      return false;
+    }
+    // Write a temp file and swap it in: a power cut mid-write leaves the previous file intact
+    // instead of a half table. A cut between remove and rename leaves no file, and the next boot
+    // starts empty (logged), which is the documented fallback.
+    File f = SPIFFS.open(kContactsTmpPath, "w");
+    if (!f) {
+      Serial.println("[mc] contacts: cannot open temp file, not saved");
+      return false;
+    }
+    const size_t put = (size_t)f.write(s_contactFileBuf, len);
+    f.close();
+    if (put != len) {
+      Serial.printf("[mc] contacts: short write %u of %u, not saved\n", (unsigned)put,
+                    (unsigned)len);
+      SPIFFS.remove(kContactsTmpPath);
+      return false;
+    }
+    if (SPIFFS.exists(kContactsPath)) SPIFFS.remove(kContactsPath);
+    if (!SPIFFS.rename(kContactsTmpPath, kContactsPath)) {
+      Serial.println("[mc] contacts: rename failed, not saved");
+      SPIFFS.remove(kContactsTmpPath);
+      return false;
+    }
+    Serial.printf("[mc] contacts: saved %d (%u bytes)\n", n, (unsigned)len);
     return true;
   }
 
@@ -85,9 +219,17 @@ public:
     if (pkt) sendPacket(pkt, 0, 800);
   }
 
-  void onDiscoveredContact(ContactInfo&, bool, uint8_t, const uint8_t*) override {}
+  // Any advert that lands in the table, and every learned return path, marks it for a (rate
+  // limited) save. New contacts, name/type/position updates and path updates all come through
+  // onDiscoveredContact; onContactPathUpdated covers a path learned from a later packet.
+  void onDiscoveredContact(ContactInfo&, bool, uint8_t, const uint8_t*) override {
+    s_contactSaver.markDirty(millis());
+  }
   ContactInfo* processAck(const uint8_t*) override { return nullptr; }
-  void onContactPathUpdated(const ContactInfo&) override {}
+  void onContactPathUpdated(const ContactInfo&) override {
+    s_contactSaver.markDirty(millis());
+  }
+  void onContactOverwrite(const uint8_t*) override { s_contactSaver.markDirty(millis()); }
   void onMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
   void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
   void onCLICommandRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*, char*) override {}
@@ -264,8 +406,16 @@ bool meshLinkBegin() {
 }
 
 void meshLinkLoop() {
-  if (s_ready && s_ctx && s_ctx->mesh) s_ctx->mesh->loop();
+  if (!s_ready || !s_ctx || !s_ctx->mesh) return;
+  s_ctx->mesh->loop();
 
+  // Persist the contact table after the mesh has processed this pass, at most once per
+  // kContactSaveMinIntervalMs. A failed write stays dirty and is retried after the interval.
+  const uint32_t now = millis();
+  if (s_contactSaver.due(now)) {
+    if (s_ctx->mesh->saveContacts()) s_contactSaver.onSaveOk(now);
+    else s_contactSaver.onSaveFailed(now);
+  }
 }
 
 bool meshLinkReloadChannels() {

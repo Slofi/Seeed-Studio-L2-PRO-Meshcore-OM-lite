@@ -37,6 +37,12 @@ struct SettingsView {
   int scroll = 0;
   // The title-row back key is always drawn: on the root it leaves Settings for the screen the gear
   // was pressed on, on a sub-page it goes up one level (the mock's L2 back key).
+  // EST-363: a page whose one commit action used to be a row (the sound picker's Use, the time page's
+  // Set, the custom preset's Apply) draws it in this same row, on the right, where it cannot scroll
+  // away. An empty label means the page has no title-row action; `titleActionOn` false draws it dim
+  // (nothing new to commit) and a tap on it does nothing.
+  const char* titleAction = "";
+  bool titleActionOn = false;
   SettingsEditor editor = SettingsEditor::None;
   const char* editText = "";
   const char* okLabel = "OK";
@@ -67,6 +73,9 @@ struct SettingsKeyHit {
 // All hit tests are pure reads of the same layout the drawing used.
 int settingsTabHit(const SettingsView& v, int x, int y);          // 0..4 or -1
 bool settingsBackHit(const SettingsView& v, int x, int y);
+// EST-363: the title row's commit action ("Use", "Set", "Apply"). True only when the page has one and
+// the finger is on it; the caller decides what a dim (titleActionOn == false) tap does, namely nothing.
+bool settingsTitleActionHit(const SettingsView& v, int x, int y);
 int settingsRowHit(const SettingsView& v, int x, int y);          // row index or -1
 int settingsStepperHit(const SettingsView& v, int x, int y);      // -1 / +1 on a stepper, else 0
 // The sheet key under (x, y); pressed=false when the point is not on a key (above the sheet, a gap).

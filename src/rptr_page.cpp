@@ -250,9 +250,30 @@ int listRows(const FoundList& found, const char* const* remembered, int remember
 }
 
 // --------------------------------------------------------------------------------------- the screen
+void ScreenOut::reset() {
+  // EST-363: in place, no temporary. Every member's default is zero or empty, so the bulk clear IS
+  // the whole reset; the list of fields that are NOT zero is deliberately empty and must stay so.
+  // The cast silences -Wclass-memaccess (the type has default member initialisers but is trivially
+  // copyable, which is the property a bulk clear needs).
+  memset(static_cast<void*>(this), 0, sizeof(*this));
+}
+
+// EST-363's size guard. The loop task's stack is 16,384 B (main.cpp kLoopStackSize); this model is a
+// static (RptrView::screen inside g_rptrViewStore) and must never be copied wholesale again. Sizes
+// measured on the EST-362 ELF's DWARF: ScreenOut 3,812 B, UiRow 98 B, ScreenIn 60 B. The caps leave a
+// little room to grow but stop the kind of growth that forces a copy back onto the stack.
+static_assert(sizeof(ScreenOut) <= 4096, "ScreenOut over 4 KB: check the RPTR stack budget (EST-363)");
+static_assert(sizeof(UiRow) <= 128, "UiRow over 128 B: 26 rows would no longer fit ScreenOut");
+static_assert(sizeof(ScreenIn) <= 128, "ScreenIn over 128 B: it is passed by reference, keep it small");
+// The row text buffers the drawing reads; a change here is a change to every row's fit.
+static_assert(sizeof(UiRow::label) == 24, "row label buffer changed");
+static_assert(sizeof(UiRow::value) == 64, "row value buffer changed");
+static_assert(sizeof(ScreenOut::title) == 40, "page title buffer changed");
+static_assert(sizeof(ScreenOut::banner) == 120, "page banner buffer changed");
+
 int buildScreen(const ScreenIn& in, ScreenOut* out) {
   if (out == nullptr) return 0;
-  *out = ScreenOut();
+  out->reset();
   out->title[0] = 0;
 
   switch (in.page) {
@@ -289,7 +310,7 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
         copyText(out->bigLabel, sizeof(out->bigLabel), in.busy ? "Logging in..." : "Log in");
         if (in.busy) copyText(out->banner, sizeof(out->banner), "Logging in to the repeater...");
         else if (in.remembered) copyText(out->banner, sizeof(out->banner),
-                                         "The password is remembered, so Log in goes straight in.");
+                                         "Password remembered: Log in is one tap.");
         return out->count;
       }
 

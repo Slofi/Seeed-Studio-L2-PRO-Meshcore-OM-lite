@@ -64,10 +64,12 @@ RptrPageLayout rptrPageLayoutFor(const Layout& L, bool hasCard, bool hasBanner, 
   RptrPageLayout a;
   const int16_t top = L.status.bottom();
   a.back = Rect{8, (int16_t)(top + 3), kRptrBackW, 20};
+  // EST-363: one band per line of the header. The title used to share its band with the subtitle, so
+  // the subtitle was drawn over the bottom half of the title (the 20:08 screenshot).
   a.title = Rect{(int16_t)(a.back.right() + 8), top, (int16_t)(L.width - a.back.right() - 14),
-                 kRptrHeadH};
-  a.sub = Rect{a.title.x, (int16_t)(top + 16), a.title.w, 12};
-  int16_t y = (int16_t)(top + kRptrHeadH + 1);
+                 kRptrTitleH};
+  a.sub = Rect{a.title.x, (int16_t)(top + kRptrTitleH), a.title.w, kRptrSubH};
+  int16_t y = (int16_t)(top + kRptrPageHeadH + 1);
   if (hasCard) {
     a.card = Rect{8, y, (int16_t)(L.width - 16), kRptrCardH};
     a.refresh = Rect{(int16_t)(a.card.right() - 24), (int16_t)(a.card.y + 3), 21, 21};
@@ -75,19 +77,20 @@ RptrPageLayout rptrPageLayoutFor(const Layout& L, bool hasCard, bool hasBanner, 
   }
   if (hasBanner) {
     a.banner = Rect{8, y, (int16_t)(L.width - 16), kRptrBannerH};
-    a.bannerButton = Rect{(int16_t)(a.banner.right() - 76), (int16_t)(a.banner.y + 3), 70, 21};
-    y = (int16_t)(a.banner.bottom() + 3);
+    a.bannerButton = Rect{(int16_t)(a.banner.right() - 76), (int16_t)(a.banner.y + 2), 70, 18};
+    y = (int16_t)(a.banner.bottom() + 2);
   }
   // The bottom: the one Apply button (or the big Log in button) above the tab bar; the console's
   // input line takes the Apply slot instead.
   int16_t bodyBottom = L.tabbar.y;
   if (hasApply) {
-    a.apply = Rect{8, (int16_t)(L.tabbar.y - kRptrApplyH - 4), (int16_t)(L.width - 16),
+    a.apply = Rect{8, (int16_t)(L.tabbar.y - kRptrApplyH - 3), (int16_t)(L.width - 16),
                    kRptrApplyH};
-    bodyBottom = (int16_t)(a.apply.y - 3);
+    bodyBottom = (int16_t)(a.apply.y - kRptrApplyGap);
   } else if (big) {
-    a.big = Rect{8, (int16_t)(L.tabbar.y - kRptrBigH - 8), (int16_t)(L.width - 16), kRptrBigH};
-    bodyBottom = (int16_t)(a.big.y - 3);
+    a.big = Rect{8, (int16_t)(L.tabbar.y - kRptrBigH - kRptrBigGap), (int16_t)(L.width - 16),
+                 kRptrBigH};
+    bodyBottom = (int16_t)(a.big.y - kRptrBigGap);
   } else if (console) {
     a.send = Rect{(int16_t)(L.width - 8 - 50), (int16_t)(L.tabbar.y - 36), 50, 28};
     a.input = Rect{8, (int16_t)(L.tabbar.y - 36), (int16_t)(L.width - 16 - 50 - 6), 28};
@@ -95,6 +98,11 @@ RptrPageLayout rptrPageLayoutFor(const Layout& L, bool hasCard, bool hasBanner, 
   }
   a.body = between(y, bodyBottom, L);
   a.visibleRows = a.body.h / kRptrPageRowH;
+  // EST-363: never end the row area in the middle of a row. In EST-362 the page before login had 85 px
+  // for three 30 px rows, so the Signal row was drawn 5 px into the Log in button and the value
+  // "good 8 dB" was cut in half (the 20:08 screenshot). The body now ends on a row boundary; a row
+  // that does not fit is reached by scrolling above the fixed button, never shown sliced.
+  if (!console && a.visibleRows > 0) a.body.h = (int16_t)(a.visibleRows * kRptrPageRowH);
   return a;
 }
 

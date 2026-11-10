@@ -210,6 +210,11 @@ struct ScreenOut {
   char logLines[kConsoleLines][88];
   int logLineCount = 0;
   char consoleInput[64] = "";
+
+  // EST-363: clear IN PLACE. `*out = ScreenOut()` materialised a 3,812-byte temporary on the loop
+  // task's stack, and that (plus RptrView's 6,204 bytes) is what panicked the L2 Pro when Log in was
+  // tapped in EST-362. A reset that writes only its own fields has no temporary at all.
+  void reset();
 };
 
 // Fills `out` for one page. Everything the screen draws comes from here, so a host test proves the

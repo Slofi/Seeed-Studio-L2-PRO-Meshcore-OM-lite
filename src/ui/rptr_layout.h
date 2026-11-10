@@ -23,9 +23,18 @@ constexpr int16_t kRptrPageRowH = 30;   // a page row: label + value (or one lin
 constexpr int16_t kRptrBackW = 62;
 constexpr int16_t kRptrCardH = 44;      // the status card (2 columns x 3 rows)
 constexpr int16_t kRptrCardRowH = 14;
-constexpr int16_t kRptrBannerH = 27;
+// EST-363: the page's own header is two lines. In EST-362 the title was drawn at the vertical centre
+// of a 26 px band and the subtitle at the centre of a band that started 16 px below the top, so the
+// two glyph rows sat on top of each other (docs/shots/2026-11-10-2008-rptr-page.png). One band per
+// line: 18 px for the title, 14 px for the subtitle underneath it.
+constexpr int16_t kRptrPageHeadH = 32;  // title 18 + subtitle 14
+constexpr int16_t kRptrTitleH = 18;
+constexpr int16_t kRptrSubH = 14;
+constexpr int16_t kRptrBannerH = 22;    // one 11 px line and its padding (a short sentence)
 constexpr int16_t kRptrApplyH = 30;
-constexpr int16_t kRptrBigH = 36;
+constexpr int16_t kRptrBigH = 34;
+constexpr int16_t kRptrApplyGap = 3;    // between the last row and the Apply button
+constexpr int16_t kRptrBigGap = 4;      // between the last row and the big Log in button
 constexpr int16_t kRptrKeyW = 26;       // a row's small key
 constexpr int16_t kRptrKeyH = 24;
 constexpr int16_t kRptrModalW = 288;

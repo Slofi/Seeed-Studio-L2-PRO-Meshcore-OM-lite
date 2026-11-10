@@ -3204,3 +3204,159 @@ the new Name Apply to the same value is harmless on a real repeater.
 - Built in the sandbox (exit 0, RAM 152,272 B, flash 2,764,177 B), tests exit 0, reviewed binary flashed (2,764,544 B).
 - RPTR tab: the auto scan lists Argus (key icon, "good 8 dB") and "unnamed 86a8ee" ("excellent 14 dB") (`docs/shots/2026-11-10-2007-rptr-list.png`). Argus page before login: Regions "*, si, lj", Clock "not set (2024-05-15)", Signal, Log in (`docs/shots/2026-11-10-2008-rptr-page.png`). Layout defects there: the title "Argus mobile RPTR" is overlapped by its subtitle "repeater, not logged in"; the hint "The password is remembered, so Log in goes st..." is cut; the Signal row's value runs under the Log in button.
 - **Tapping Log in panics the device** (twice). Captured with one reader (`docs/est362-login-crash.log`): `[rptr] login sent to Argus mobile RPTR (direct)` then a core dump: task loopTask, PC 0x42158b5c, exc cause 65, sha b9c309a69633ceeb = the EST-362 ELF. Decoded by Claude: __ssprint_r <- _svfprintf_r <- snprintf <- om::rptr::clockStampText (rptr_model.cpp:1096) <- om::rptr::buildScreen (rptr_page.cpp:274) <- buildRptrView (main.cpp:2252/2268) <- drawRptrTab (2288) <- handleTap (2707/4698) <- loop. The buffers passed are fine (clock[40]), so most likely the loop task's stack ran out inside the logged-in page build (exc cause 65 is not an Xtensa exception number; a stack canary/overflow fits): ScreenIn/ScreenOut and the row texts live on the stack.
+
+## 2026-11-10 21:30 (DeepSeek): EST-363 — the Log in panic is the loop stack; the page layout; the picker's Use in the title row
+
+Built in the sandbox with the REBUILD.md command, **exit 0**: RAM **153,464 B** of 327,680 (46.8%,
+previous 152,272, **+1,192 B**), flash **2,765,777 B** of 6,553,600 (42.2%, previous 2,764,177,
+**+1,600 B**), `firmware.bin` **2,766,144 B** (previous 2,764,544, **+1,600 B**). `test/host/run.sh`
+**exit 0** (28 C++ binaries + 5 Python checks). Nothing committed, `.git` untouched, nothing in `lib/`
+touched.
+
+### 1. The cause is the loop task's stack, and it is now measured, not guessed
+
+The core dump's app sha256 `b9c309a69633ceeb` **is** the EST-362 `firmware.elf` (sha256
+`b9c309a69633ceeb…`), so the ELF I disassembled is exactly the binary that panicked. From that ELF
+(`xtensa-esp32s3-elf-nm`/`objdump` for the frames, `readelf --debug-dump=info` for the DWARF sizes):
+
+| what | size |
+|---|---|
+| `sizeof(ScreenIn)` | **60 B** |
+| `sizeof(ScreenOut)` | **3,812 B** (26 `UiRow` x 98 B + 8 log lines x 88 B + the rest) |
+| `sizeof(UiRow)` (label 24, value 64, key 4) | **98 B** |
+| `sizeof(RptrView)` | **6,204 B** |
+| `loop()` frame | **1,456 B** |
+| `handleTap()` frame | **1,696 B** |
+| `drawRptrTab()` frame | 32 B |
+| `buildRptrView()` frame | **7,504 B** = the 6,204 B `RptrView()` temporary + 20 `ListRow` (1,180 B) + locals |
+| `buildScreen()` frame | **4,224 B** = the 3,812 B `ScreenOut()` temporary + locals |
+| `clockStampText()` frame | 80 B |
+
+The path sums to **1,456 + 1,696 + 32 + 7,504 + 4,224 + 80 = 14,992 B** on a **16,384 B** loop stack
+(`kLoopStackSize`), before the ROM's `snprintf`/`_svfprintf_r`/`__ssprint_r` chain (0x42158b5c etc.,
+in ROM, not sizeable from the ELF). The crash log agrees: `[hb] … stack=56` at uptime 61 s, i.e. the
+page before login left **56 bytes free** (5,748 free while the list was showing, 12,196 at boot). The
+next build on the same path had nothing left to spend: `snprintf` inside `clockStampText` overflowed
+the stack, which is what exc cause 65 / vaddr 0 looks like.
+
+**Fix (keeps everything off the stack).** `ScreenOut::reset()` and `RptrView::reset()` clear in place
+(`memset` of their own fields, no temporary), `buildScreen` calls `out->reset()`, `buildRptrView` calls
+`v.reset()`, and `rptrBuildList`'s `ListRow rows[20]` is a function static (only the loop task runs it).
+The page model already lived in `g_rptrViewStore` (a static); now nothing copies it. Frames after the
+fix, same ELF tools: `buildRptrView` **192 B** (was 7,504), `buildScreen` **528 B** (was 4,224),
+`RptrView::reset` 32 B, `drawRptrTab` 48 B, `loop` 1,456, `handleTap` 1,696, `clockStampText` 80 →
+the path is **4,000 B**, **10,992 B less**, about 12 KB of the 16 KB stack still free.
+
+**Guards so it cannot come back:** `static_assert` caps in `rptr_page.cpp` (`ScreenOut` <= 4,096 B,
+`UiRow` <= 128 B, `ScreenIn` <= 128 B, plus the exact text-buffer sizes) and in `screen_rptr.cpp`
+(`RptrView` <= 6,656 B); `test/host/test_est363.cpp` repeats the caps, so a growth stops the build.
+On the device: `[rptr] sizes: ScreenIn 60, ScreenOut 3812, UiRow 98, RptrView 6204, loop stack 16384`
+at boot (next to `[mem] ui buffers`), and `[rptr] build view page=<name> stack_free=N -> M (of 16384)`
+once per RPTR view change, i.e. the loop task's high-water mark **before and after** building that
+page (it only ever falls, so `N == M` means the build added nothing to the deepest path).
+
+### 2. The host test: every RPTR state at its largest, and the size guard
+
+New `test/host/test_est363.cpp` (`test/host/run.sh` exit 0). It builds the list at its maximum (8
+remembered repeaters plus all 16 scan answers into a 20-row page: the row name 32 and signal 24
+buffers, the "unnamed deadbe" fallback, both SNR extremes) and **15 pages x 3 repeater shapes**
+(list, before login, logging in, logged in with a full card, Name, Position, Radio, TX, Repeat,
+Regions, Add region, Home picker, Default picker, Neighbours, Advertising, More, Console) with the
+worst inputs: a 31-character repeater name, 30-character region names, **12 regions (kMaxRegions) and
+12 neighbours (kMaxNeighbours) with every slot filled**, a full status card, the extreme numbers
+(`latE6 = -90,000,000`, `tx = -128`, `snr4 = -128`, `clock = 0xFFFFFFFF` = "2106-02-07 06:28 UTC"),
+a full 8-line console log of 87-character lines, a 63-character command line and a 79-character error.
+Every text buffer (`title`, `subtitle`, `banner`, each row's label/value/key, each cell, each log
+line, `consoleInput`) is checked to be NUL-terminated **inside its own array**, and the whole
+`ScreenOut` is built between guard words (`0xA5C3F00D` x 8 on each side) so a write past the end of the
+struct is caught. It also proves the reset leaves nothing behind (Console then Name: no log lines, no
+cells, no console input) and that the model is stable for the largest input.
+
+### 3. The three layout defects from `docs/shots/2026-11-10-2008-rptr-page.png`
+
+- **Title over subtitle.** The title was drawn at the centre of a 26 px band and the subtitle at the
+  centre of a band starting 16 px below the top, so both glyph rows sat at y ~37-53. The page header
+  is now two bands of its own: title 26..44 (`kRptrTitleH` 18) and subtitle 44..58 (`kRptrSubH` 14),
+  both drawn at their band's centre; `kRptrPageHeadH` = 32. (`kRptrHeadH` stays 26 for the list header.)
+- **The cut hint.** One line cannot hold "The password is remembered, so Log in goes straight in."; it
+  is now **"Password remembered: Log in is one tap."** (228 px at 6 px/glyph worst case in a 292 px
+  banner). The banner itself shrank from 27 to 22 px (one line + padding) and its Set clock key from
+  21 to 18 px.
+- **The Signal value under the Log in button.** The row area used to be 85 px for three 30 px rows and
+  the body was clipped at the button, so the Signal row was drawn 5 px into it and "good 8 dB" was cut.
+  Two changes: the body now **always ends on a row boundary** (`body.h = visibleRows x 30`; a row that
+  does not fit is reached by scrolling above the fixed button, never shown sliced, except on the
+  Console, which draws log lines, not rows), and the pre-login page has room for all three facts
+  without scrolling (body 83..173, three rows, the big Log in 177..211, 4 px gap). The big button is
+  34 px instead of 36 so the facts fit; the Apply slot keeps 30 px with a 3 px gap (`kRptrApplyGap`),
+  which also gives the 4-row pages (Regions, Neighbours) exactly 120 px again.
+
+The test asserts all of it: `title.bottom() <= sub.y`, `sub.bottom() <= banner.y`, `body.h % 30 == 0`,
+`body.bottom() <= big.y`, all three fact rows (and their value boxes) inside the body, the hint fits
+the banner, and at the bottom of the scroll the last row is fully visible on every page.
+
+### 4. The sound picker: "Use" in the title row (the `s494-an-picker` ticket, same run)
+
+- The picker's title row (Back, "Message sound") now carries a **Use** key on the right, drawn like the
+  keyboard's OK key: gold when the candidate differs from the event's stored sound, **dim** when
+  nothing new was picked (then a tap does nothing, and is still spent so it cannot fall through). The
+  old in-list "Use this sound" row and its `CHOOSE` header are gone; the list starts with the family
+  sections. Tapping a sound still plays it and marks it (check dot); Use stores it and returns to the
+  page that opened the picker; Back still leaves without changing the stored value (`choiceFor`).
+- **The same rule on the other two Settings pages whose commit action could scroll away:**
+  `SetPage::TimeEdit` moved its "Set the clock" button (with five steppers above it the 188 px body cut
+  the bottom row) and `SetPage::PresetCustom` its "Apply" into the title row ("Set", "Apply"). Both are
+  always live. `ConfirmPreset`/`ConfirmHash` keep their rows (the page is short enough: Apply and Cancel
+  are visible without scrolling), and the Channel page keeps its Clear/Delete rows: they act on one
+  row's data (and Delete is a two-tap armed action), not a page commit. Wi-Fi's per-network "Forget" is
+  a row action too.
+- One rectangle drives both: `SettingsLayout::titleAction` (empty when the page has none) is drawn by
+  `drawTitleRow` and answered by `settingsTitleActionHitIn`; the title text is ellipsised before the key.
+- Tests in `test_settings.cpp` (`settings: all checks passed`): the rect is inside the title row, on the
+  right, **outside the body** (so it cannot scroll), disjoint from Back, hit exactly on its edges;
+  absent on pages without an action (root and sub-page, 320x240 and 800x480); and
+  `settingsActionEnabled(pending, stored)` — dim when nothing new was picked, gold after a pick, dim
+  again on the same sound, Back keeps the old choice, Use makes it dim again.
+
+### Could not check (no device in the sandbox)
+
+The glass: that the title no longer overlaps the subtitle, that the hint is whole, that the Signal row
+sits fully above the Log in button, the picker's gold/dim Use key at real size, and the title-row Set
+and Apply. The new boot line `[rptr] sizes:` prints the model sizes on the device (60/3812/98/6204 on
+the S3), and `[rptr] build …` prints the loop stack around each page build, which is the runtime proof
+of the fix.
+
+### Next step for Claude (USB, one reader on the port)
+
+1. Flash `firmware.bin` (2,766,144 B). Boot must print
+   `[rptr] sizes: ScreenIn 60, ScreenOut 3812, UiRow 98, RptrView 6204, loop stack 16384`.
+2. `tools/cmd.py tap 280 227` (RPTR tab) → `[rptr] auto scan`, `[rptr] build list page=- stack_free=N -> M`;
+   `tools/cmd.py shot.py` → the list is unchanged.
+3. `tools/cmd.py tap 120 70` (the Argus row; the first row of the list) →
+   `[rptr] build view page=Repeater stack_free=N -> M`. `shot.py`: **title and subtitle on two lines**,
+   hint "Password remembered: Log in is one tap." whole, Regions/Clock/Signal all fully visible.
+4. `tools/cmd.py tap 160 194` (**Log in**, 177..211 with the new layout; the old 189 still lands on it).
+   Expect `[rptr] login sent to Argus mobile RPTR (direct)`, **no panic**, then the logged-in page and
+   its `[rptr] build view page=Repeater …` line with `stack_free` unchanged or barely moved. This is
+   the EST-362 reproduction, so it is the check that matters: repeat it twice.
+5. `cmd.py status` → `loop_stack_free=`. It must be far above the 56 B of the crash log (expect roughly
+   11-12 KB minus whatever the rest of the loop reached). Then the same for the other pages: Regions
+   (`tap` the Regions row), Console (the last row, scroll down), Restart (the pop-up).
+6. Pickers: `tap 307 12` (gear on the Nodes tab opens Settings on General) →
+   `drag 160 210 160 17 400` (scrolls the General page down by 193 px) → `tap 160 92` (the Sound row,
+   now at the top of the body) → the Sound page → `tap 160 202` (Message; body 77..240: section 20,
+   Master, Volume, Boot = 20+4x30) → the picker with **Use** in the title row.
+   `shot.py` with nothing picked: Use is dim. `tap 160 87` (the first sound, under the first family
+   header) → it plays and Use turns gold.
+   `tap 282 64` (Use) → back on the Sound page, the row shows the new sound, the pocket speaker played
+   the preview. Open the picker again, pick nothing, `tap 282 64`: nothing happens (dim). Pick a sound
+   and press `tap 30 64` (Back): the stored sound is unchanged.
+7. The same title-row rule on the other two pages: General (scrolled down) > Time > Set manually shows
+   **Set** in the title row, and General > Region / preset > Custom shows **Apply** there. Neither needs
+   a scroll to be pressed.
+
+## 2026-11-10 21:35 (Claude): EST-363 on the device, Argus tested logged in
+- Built in the sandbox (exit 0, RAM 153,464 B, flash 2,765,777 B), tests exit 0, reviewed binary flashed (2,766,144 B). `[rptr] build view page=Repeater stack_free=11232`: the stack fix holds, no panic.
+- Log in (remembered password): `admin (1424 ms), fw level 2`. The first status request timed out (3.2 s deadline); the refresh answered: raw `fa 0d ...` = 3578 mV (the offset is right now), page "3.57 V 48 %, noise -119 dBm, up 3h 39m, air 3m".
+- Set clock: the pop-up "Set the repeater's clock from not set to 2026-11-10 19:33 UTC?" (`docs/shots/2026-11-10-2033-setclock-popup.png`), confirmed: Argus answered `OK - clock set: 19:33 - 10/11/2026 UTC`. **Argus's clock is fixed.**
+- Defects seen (`docs/shots/2026-11-10-2034-argus-logged-in.png`): after the OK the page still says "Clock not set" / "Clock is wrong" and a red "No answer from the repeater" (the follow-up `clock` read timed out and the OK answer is not used); a timed-out status request is labelled "Refused: no answer"; the refresh icon overlaps the right column's values; Position "14.501452, 0.00000" (looks like the longitude in the latitude field, the latitude lost: another offset/order bug); the status deadline (3.2 s) is too short for the first request. Filip: times must be shown in local time (CET/CEST, he saw "19:33 UTC" when it was 20:33), and the unread badge should show two digits up to 99 instead of "9+".

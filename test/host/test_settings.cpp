@@ -545,6 +545,62 @@ static void testSettingsSelector() {
         "the row under the same finger after the drag is the one drawn there");
 }
 
+// EST-363: the page's commit action lives in the title row (the sound picker's Use), so it never
+// scrolls away: its rectangle is outside the body and does not depend on the scroll at all.
+static void testTitleAction() {
+  const SettingsLayout off = settingsLayoutFor(320, 240, true);
+  check(off.titleAction.empty(), "a page without a commit action draws no key");
+  check(!settingsTitleActionHitIn(off, 300, 40), "and answers no tap on the right of the title");
+
+  const SettingsLayout L = settingsLayoutFor(320, 240, true, false, true);
+  check(!L.titleAction.empty(), "the picker's title row carries the Use key");
+  // Inside the title row, on the right, fully on screen.
+  check(L.titleAction.x >= 0 && L.titleAction.right() <= 320, "Use is on screen");
+  check(L.titleAction.y >= L.title.y && L.titleAction.bottom() <= L.title.bottom(),
+        "Use sits inside the title row");
+  check(L.titleAction.x > 320 / 2, "Use is on the right of the title row");
+  // Disjoint from Back, so a tap can only be one of them.
+  check(!L.titleAction.overlaps(L.backButton), "Use never overlaps Back");
+  // Outside the scrolling body: a drag moves the rows, never this key.
+  check(L.titleAction.bottom() <= L.body.y, "Use is above the body, so it cannot scroll");
+  check(!L.titleAction.overlaps(L.body), "Use is not part of the list");
+  check(settingsTitleActionHitIn(L, L.titleAction.x + 2, L.titleAction.y + 2), "tap lands on Use");
+  check(settingsTitleActionHitIn(L, L.titleAction.right() - 1, L.titleAction.bottom() - 1),
+        "the far corner is still Use");
+  check(!settingsTitleActionHitIn(L, L.titleAction.right(), L.titleAction.y + 2),
+        "one pixel right of Use is not Use");
+  check(!settingsTitleActionHitIn(L, L.backButton.x + 2, L.backButton.y + 2), "Back is not Use");
+  check(!settingsTitleActionHitIn(L, 160, L.body.y + 40), "a row in the body is not Use");
+
+  // The same rectangles on the root page (no tab row) and on the taller 800x480 arrangement.
+  const SettingsLayout root = settingsLayoutFor(320, 240, false, false, true);
+  check(root.titleAction.bottom() <= root.title.bottom(), "root: Use inside the title row");
+  check(!root.titleAction.overlaps(root.backButton), "root: Use never overlaps Back");
+  check(root.titleAction.bottom() <= root.body.y, "root: Use above the body");
+  const SettingsLayout wide = settingsLayoutFor(800, 480, true, false, true);
+  check(wide.titleAction.right() <= 800 && wide.titleAction.x > 400,
+        "800x480: Use also sits on the right of the title row");
+  check(wide.titleAction.bottom() <= wide.body.y, "800x480: Use above the body");
+
+  // Candidate vs stored: "If nothing new was picked, Use is dim". A pick only changes the draft, so
+  // Back leaves the stored choice as it was.
+  int stored = 5;
+  int pending = stored;                     // opening the picker seeds the candidate from the stored sound
+  check(!settingsActionEnabled(pending, stored), "nothing picked yet: Use is dim");
+  pending = 17;                             // a tap on a sound in the list
+  check(settingsActionEnabled(pending, stored), "a pick lights Use up");
+  pending = stored;                         // tap the stored sound again
+  check(!settingsActionEnabled(pending, stored), "back to the stored sound: Use is dim again");
+  pending = 17;
+  // Back: the shell drops the draft, the stored value is untouched.
+  pending = stored;
+  check(stored == 5 && !settingsActionEnabled(pending, stored), "Back keeps the old choice");
+  // Use: the draft becomes the stored value.
+  pending = 17;
+  stored = pending;
+  check(!settingsActionEnabled(pending, stored), "after Use the key is dim again");
+}
+
 int main() {
   testTabs();
   testRows();
@@ -553,6 +609,7 @@ int main() {
   testRadio();
   testNav();
   testSettingsSelector();
+  testTitleAction();
   if (g_fails == 0) printf("settings: all checks passed\n");
   return g_fails == 0 ? 0 : 1;
 }

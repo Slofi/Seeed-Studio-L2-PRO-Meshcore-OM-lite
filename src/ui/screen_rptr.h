@@ -64,6 +64,11 @@ struct RptrView {
   uint8_t accentRow = 255;
   uint8_t accentCol = 255;
   uint32_t accentCp = 0;
+
+  // EST-363: clear IN PLACE. `v = RptrView()` built a 6,204-byte temporary on the loop task's stack
+  // on every redraw of the RPTR tab, which is half of what panicked the L2 Pro when Log in was
+  // tapped (EST-362, exc cause 65). One static instance (g_rptrViewStore) is filled field by field.
+  void reset();
 };
 
 void rptrScreenDraw(const RptrView& v);

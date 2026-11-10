@@ -137,8 +137,8 @@ void drawBanner(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenO
   d->drawRoundRect(a.banner.x, a.banner.y, a.banner.w, a.banner.h, kRadius, kWarnLine);
   const int16_t textW = s.bannerButton ? (int16_t)(a.bannerButton.x - a.banner.x - 8)
                                        : (int16_t)(a.banner.w - 12);
-  drawTextEllipsis(d, FontRole::SansBody, kWarnInk, kWarnBg, a.banner.x + 6, a.banner.y + 9,
-                   textW, s.banner);
+  drawTextEllipsis(d, FontRole::SansBody, kWarnInk, kWarnBg, a.banner.x + 6,
+                   (int16_t)(a.banner.y + a.banner.h / 2), textW, s.banner);
   if (s.bannerButton) {
     d->fillRoundRect(a.bannerButton.x, a.bannerButton.y, a.bannerButton.w, a.bannerButton.h,
                      kRadiusSm, kSelBg2);
@@ -275,8 +275,11 @@ void drawPageStage(lgfx::LovyanGFX* d, const RptrView& v) {
   const RptrPageLayout a =
       rptrPageLayoutFor(l2(), card, banner, s.hasApply, s.bigButton, console);
   drawBack(d, a.back, v.page == rptr::Page::Repeater ? "< list" : "< back");
-  drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen, a.title.x, a.title.y + 11, a.title.w,
-                   s.title);
+  // EST-363: the title sits in its own band, above the subtitle band. drawTextLeft uses a middle-left
+  // datum, so the y is the band's centre, not its top.
+  drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen, a.title.x,
+                   (int16_t)(a.title.y + a.title.h / 2), a.title.w, s.title);
+  const int16_t subCy = (int16_t)(a.sub.y + a.sub.h / 2);
   // The result of the last Apply is the page's second line: a check and "Applied", or the
   // repeater's error in plain words. Nothing else competes for it.
   if (v.result[0]) {
@@ -284,19 +287,17 @@ void drawPageStage(lgfx::LovyanGFX* d, const RptrView& v) {
     int16_t x = a.sub.x;
     if (!v.resultPending && v.resultOk) {
       // The tick is drawn, not typed: the faces carry ASCII only.
-      d->drawLine((int16_t)(x + 2), (int16_t)(a.sub.y + 7), (int16_t)(x + 5), (int16_t)(a.sub.y + 10),
-                  kGreen);
-      d->drawLine((int16_t)(x + 5), (int16_t)(a.sub.y + 10), (int16_t)(x + 10), (int16_t)(a.sub.y + 3),
-                  kGreen);
+      d->drawLine((int16_t)(x + 2), (int16_t)(subCy - 3), (int16_t)(x + 5), subCy, kGreen);
+      d->drawLine((int16_t)(x + 5), subCy, (int16_t)(x + 10), (int16_t)(subCy - 4), kGreen);
       x = (int16_t)(x + 14);
     } else if (!v.resultPending) {
-      drawTextLeft(d, FontRole::MonoMeta, kBad, kScreen, x, a.sub.y + 6, "!");
+      drawTextLeft(d, FontRole::MonoMeta, kBad, kScreen, x, subCy, "!");
       x = (int16_t)(x + 8);
     }
-    drawTextEllipsis(d, FontRole::MonoMeta, ink, kScreen, x, a.sub.y + 1,
+    drawTextEllipsis(d, FontRole::MonoMeta, ink, kScreen, x, subCy,
                      (int16_t)(a.sub.w - (x - a.sub.x)), v.result);
   } else {
-    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, a.sub.x, a.sub.y + 1, a.sub.w,
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kScreen, a.sub.x, subCy, a.sub.w,
                      s.subtitle);
   }
 
@@ -341,6 +342,28 @@ void drawModal(lgfx::LovyanGFX* d, const RptrView& v) {
 }
 
 }  // namespace
+
+// EST-363: the in-place clear. Measured on the EST-362 ELF (DWARF + xtensa objdump): RptrView is
+// 6,204 B, so `v = RptrView()` alone gave buildRptrView a 7,504 B stack frame; with ScreenOut's
+// 4,224 B frame the RPTR path used 14,992 B of the 16,384 B loop stack before the ROM printf chain,
+// which is exactly the panic. This function has no temporary, so the frame is the size of its locals.
+void RptrView::reset() {
+  memset(static_cast<void*>(this), 0, sizeof(*this));
+  // The members whose default is not zero (everything else defaults to 0 / "" / false).
+  list = true;
+  page = rptr::Page::List;
+  okLabel = "OK";
+  accentRow = 255;
+  accentCol = 255;
+  // StatusModel's own defaults, so a reset view is identical to a fresh RptrView() before buildStatus.
+  status.batteryPct = -1;
+  status.clock = "--:--";
+}
+
+// The guard: this model must stay a static. If it grows past the cap, the RPTR redesign has to move it
+// to PSRAM instead of letting it drift back onto the stack.
+static_assert(sizeof(RptrView) <= 6656, "RptrView over 6.5 KB: the RPTR path's stack budget (EST-363)");
+static_assert(sizeof(RptrView) > 0, "RptrView must be a complete type here");
 
 void rptrScreenDraw(const RptrView& v) {
   if (!omFrameBegin()) {

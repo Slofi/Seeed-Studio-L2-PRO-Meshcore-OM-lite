@@ -93,6 +93,13 @@ static int g_setScroll0 = 0;         // its value when the finger went down
 static int g_setMaxScroll = 0;       // the last build's clamp
 static char g_setTitle[40] = "Settings";
 static bool g_setSubPage = false;
+// EST-363: a page's one commit action in the title row (the sound picker's Use, the time page's Set,
+// the custom preset's Apply) instead of a row that scrolls. The id is the SAME action id the row used,
+// so the shell's handler and the picker's candidate logic are unchanged; the label is "" for pages
+// with no such action, and `on` false draws the key dim because there is nothing new to commit.
+static const char* g_setActionLabel = "";
+static uint16_t g_setActionId = 0;
+static bool g_setActionOn = false;
 static constexpr int kNameBufBytes = om::ui::kKeyboardNameMaxBytes + 1;   // 32, MeshCore's own size
 static om::ui::SettingsEditor g_setEditor = om::ui::SettingsEditor::None;
 static char g_setEditText[64] = "";
@@ -287,6 +294,13 @@ static void allocUiBuffers() {
                 (unsigned)total, ok ? "PSRAM" : "INTERNAL (PSRAM refused)",
                 (unsigned)nodesB, (unsigned)chatsB, (unsigned)chatMsgsB, (unsigned)dmB,
                 (unsigned)setB, (unsigned)contactsB);
+  // EST-363: the RPTR page model's sizes, printed once at boot next to the other UI memory. Both
+  // structs live in statics (g_rptrViewStore); copies of them were what the EST-362 stack could not
+  // hold. The numbers are checked against the EST-362 ELF's DWARF in docs/PROGRESS.md.
+  Serial.printf("[rptr] sizes: ScreenIn %u, ScreenOut %u, UiRow %u, RptrView %u, loop stack %u\n",
+                (unsigned)sizeof(om::rptr::ScreenIn), (unsigned)sizeof(om::rptr::ScreenOut),
+                (unsigned)sizeof(om::rptr::UiRow), (unsigned)sizeof(om::ui::RptrView),
+                kLoopStackSize);
 }
 
 // The one-line toast (a tap on the radio fault mark, the new-node notice, a ping result, a trace) is
@@ -2193,7 +2207,9 @@ static void rptrBuildList(om::ui::RptrView& v) {
   int rn = om::rptrRememberedCount();
   if (rn > 8) rn = 8;
   for (int i = 0; i < rn; ++i) remembered[i] = om::rptrRememberedName(i);
-  om::rptr::ListRow rows[om::ui::kRptrMaxItems];
+  // EST-363: the list rows are a static, not 20 x 59 B on the loop stack (rptrBuildView used to be
+  // 7,504 B of frame: this array plus the RptrView temporary). Only the loop task runs this.
+  static om::rptr::ListRow rows[om::ui::kRptrMaxItems];
   const int n = om::rptr::listRows(om::rptrScan(), remembered, rn, rows, om::ui::kRptrMaxItems);
   const uint32_t nowWall = om::timeKeeper().now();
   const uint32_t nowUp = millis() / 1000;
@@ -2256,7 +2272,10 @@ static void rptrBuildPage(om::ui::RptrView& v) {
 }
 
 static void buildRptrView(om::ui::RptrView& v) {
-  v = om::ui::RptrView();
+  // EST-363: reset in place. `v = om::ui::RptrView()` built a 6,204-byte temporary on the loop task's
+  // stack on every RPTR redraw and left 56 bytes free after the page before login (heartbeat in
+  // docs/est362-login-crash.log), which is why the next build panicked.
+  v.reset();
   buildStatus(v.status);
   v.list = g_rptrList;
   v.page = g_rptrPage;
@@ -2285,7 +2304,22 @@ static void buildRptrView(om::ui::RptrView& v) {
 }
 
 static void drawRptrTab() {
+  // EST-363: the loop task's stack at the exact place EST-362 panicked, printed once per view change
+  // so the serial log stays readable. `stack_free` is the FreeRTOS high-water mark in bytes (it only
+  // ever falls), so before == after means this build added nothing to the deepest path so far.
+  static bool tracedList = false;
+  static int8_t tracedPage = -1;
+  const bool trace = g_rptrList != tracedList || (int8_t)g_rptrPage != tracedPage;
+  const unsigned before = uxTaskGetStackHighWaterMark(nullptr);
   buildRptrView(g_rptrViewStore);
+  const unsigned after = uxTaskGetStackHighWaterMark(nullptr);
+  if (trace) {
+    tracedList = g_rptrList;
+    tracedPage = (int8_t)g_rptrPage;
+    Serial.printf("[rptr] build %s page=%s stack_free=%u -> %u (of %u)\n",
+                  g_rptrList ? "list" : "view",
+                  g_rptrList ? "-" : om::rptr::pageName(g_rptrPage), before, after, kLoopStackSize);
+  }
   om::ui::rptrScreenDraw(g_rptrViewStore);
 }
 
@@ -2889,6 +2923,9 @@ static void buildSettingsRows() {
   g_setEditor = om::ui::SettingsEditor::None;
   g_setSubPage = !setRootPage(g_setPage);
   g_setOkLabel = "OK";
+  g_setActionLabel = "";
+  g_setActionId = A_None;
+  g_setActionOn = false;
   snprintf(g_setTitle, sizeof(g_setTitle), "Settings");
 
   switch (g_setPage) {
@@ -3065,7 +3102,10 @@ static void buildSettingsRows() {
       setAdd(om::ui::SetRowKind::Stepper, A_CustomCr, "Coding", v);
       setAdd(om::ui::SetRowKind::Warn, A_None,
              "A node with the wrong preset is deaf: it hears nothing and reports no error.");
-      setAdd(om::ui::SetRowKind::Button, A_CustomApply, "Apply");
+      // EST-363: the page's Apply is in the title row, not a row at the bottom of a page that scrolls.
+      g_setActionLabel = "Apply";
+      g_setActionId = A_CustomApply;
+      g_setActionOn = true;
       break;
     }
 
@@ -3209,9 +3249,12 @@ static void buildSettingsRows() {
       const SoundEvent ev = (SoundEvent)g_setSoundEvent;
       const int count = om::sound::soundCount();
       snprintf(g_setTitle, sizeof(g_setTitle), "%s sound", om::sound::eventLabel(ev));
-      setSection("CHOOSE");
-      // Use sits above the list: the user can tap a sound, hear it, then save without scrolling back.
-      setAdd(om::ui::SetRowKind::Button, A_SoundPickUse, "Use this sound");
+      // EST-363 (Filip): "Use" lives in the title row, always on the glass, so a sound picked 40 rows
+      // down can be saved without scrolling back up. It is dim until the candidate differs from the
+      // event's stored sound (nothing new picked = nothing to save).
+      g_setActionLabel = "Use";
+      g_setActionId = A_SoundPickUse;
+      g_setActionOn = om::ui::settingsActionEnabled(g_setSoundPending, (int)choiceFor(ev));
       // The whole shared library, grouped by family. A sound another event already uses carries its
       // short tag(s) in the dim value; it stays selectable (double duty is allowed).
       char tags[om::ui::kSetValueCap];
@@ -3364,8 +3407,12 @@ static void buildSettingsRows() {
         timeFieldText((om::ui::TimeField)i, v, sizeof(v));
         setAdd(om::ui::SetRowKind::Stepper, (uint16_t)(A_TimeFieldBase + i), labels[i], v);
       }
-      setAdd(om::ui::SetRowKind::Button, A_TimeApply, "Set the clock");
       setAdd(om::ui::SetRowKind::Note, A_None, "The next GPS fix takes over.");
+      // EST-363: same rule as the sound picker: the commit action lives in the title row, because with
+      // five steppers above it the old bottom row needed a scroll on the 188 px body.
+      g_setActionLabel = "Set";
+      g_setActionId = A_TimeApply;
+      g_setActionOn = true;
       break;
     }
 
@@ -3405,6 +3452,9 @@ static om::ui::SettingsView settingsView() {
   v.rows = g_setRows;
   v.rowCount = g_setRowCount;
   v.scroll = g_setScroll;
+  // EST-363: the page's commit action in the title row (dim when there is nothing to commit).
+  v.titleAction = g_setActionLabel;
+  v.titleActionOn = g_setActionOn;
   v.editor = g_setEditor;
   v.editText = g_setEditText;
   v.okLabel = g_setOkLabel;
@@ -4075,6 +4125,14 @@ static void handleSettingsTap(int x, int y) {
 
   if (om::ui::settingsBackHit(v, x, y)) {
     settingsBack();
+    return;
+  }
+
+  // EST-363: the title row's commit action (the picker's Use, the time page's Set, the custom preset's
+  // Apply). It is drawn dim when there is nothing new to commit, and then a tap does nothing at all
+  // but is still spent here, so it can never fall through to a row behind it.
+  if (om::ui::settingsTitleActionHit(v, x, y)) {
+    if (g_setActionOn) handleSettingsRow(g_setActionId);
     return;
   }
 

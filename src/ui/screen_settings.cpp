@@ -73,6 +73,19 @@ void drawBackKey(lgfx::LovyanGFX* d, const Rect& r) {
   drawTextLeft(d, FontRole::SansTab, kDim, kPanel2, r.x + 12, cy + 1, "Back");
 }
 
+// EST-363: the title row's commit action, drawn like the keyboard's OK key (gold when there is
+// something to commit, dim when there is not). It sits outside the scrolling body, so it is always
+// on the glass no matter where the list has been dragged to.
+void drawTitleAction(lgfx::LovyanGFX* d, const Rect& r, const char* label, bool on) {
+  if (r.empty() || label == nullptr || label[0] == 0) return;
+  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, on ? kSelBg2 : kPanel2);
+  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, on ? kAcc : kLine);
+  setRole(d, FontRole::SansTab);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(on ? kAccInk : kDimmer, on ? kSelBg2 : kPanel2);
+  d->drawString(label, r.x + r.w / 2, r.y + r.h / 2 + 1);
+}
+
 void drawTabRow(lgfx::LovyanGFX* d, const SettingsLayout& L, SettingsTab active) {
   if (L.tabrow.empty()) return;
   d->fillRect(L.tabrow.x, L.tabrow.y, L.tabrow.w, L.tabrow.h, kBar);
@@ -93,9 +106,14 @@ void drawTabRow(lgfx::LovyanGFX* d, const SettingsLayout& L, SettingsTab active)
 
 void drawTitleRow(lgfx::LovyanGFX* d, const SettingsLayout& L, const SettingsView& v) {
   drawBackKey(d, L.backButton);
+  // The title's room ends where the action key starts (EST-363), so a long page name is ellipsised
+  // rather than drawn under the key.
+  const int16_t titleRight = L.titleAction.empty() ? (int16_t)L.title.right()
+                                                   : (int16_t)(L.titleAction.x - 6);
   drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen,
                    L.backButton.right() + 8, L.title.y + L.title.h / 2 + 1,
-                   L.title.w - L.backButton.right() - 16, v.title ? v.title : "");
+                   (int16_t)(titleRight - L.backButton.right() - 8), v.title ? v.title : "");
+  drawTitleAction(d, L.titleAction, v.titleAction, v.titleActionOn);
   d->drawFastHLine(L.title.x, L.title.bottom() - 1, L.title.w, kLine);
 }
 
@@ -328,8 +346,8 @@ void settingsScreenDraw(const SettingsView& v) {
     return;
   }
 
-  const SettingsLayout L =
-      settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage, v.selector);
+  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage,
+                                             v.selector, v.titleAction[0] != 0);
   d->fillScreen(kScreen);
   drawTabRow(d, L, v.tab);
   drawTitleRow(d, L, v);
@@ -364,8 +382,18 @@ int settingsTabHit(const SettingsView& v, int x, int y) {
 }
 
 bool settingsBackHit(const SettingsView& v, int x, int y) {
-  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage);
+  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage,
+                                             false, v.titleAction[0] != 0);
   return L.backButton.contains(x, y);
+}
+
+// EST-363: the title row's commit action. Back is on the left of the same row and the action on the
+// right, so the two rectangles are disjoint and one tap can only be one of them.
+bool settingsTitleActionHit(const SettingsView& v, int x, int y) {
+  if (v.titleAction[0] == 0) return false;
+  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage,
+                                             false, true);
+  return settingsTitleActionHitIn(L, x, y);
 }
 
 int settingsRowHit(const SettingsView& v, int x, int y) {
@@ -406,8 +434,8 @@ SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y) {
   SelectorPress none;
   none.kind = SelectorHitKind::Close;   // a press with no dropdown open is not ours
   if (!v.selector) return none;
-  const SettingsLayout L =
-      settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage, v.selector);
+  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage,
+                                             v.selector, v.titleAction[0] != 0);
   return selectorPress(v.sel, L.selPanel, L.selList, L.selManage, x, y);
 }
 

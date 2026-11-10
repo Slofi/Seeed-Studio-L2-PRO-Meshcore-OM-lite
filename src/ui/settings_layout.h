@@ -166,12 +166,20 @@ constexpr int16_t kSetPadX = 7;      // .setrow padding 3px 7px
 constexpr int16_t kSetTitleH = 26;
 constexpr int16_t kSetBackW = 50;
 constexpr int16_t kSetBackH = 18;
+// EST-363 (Filip, 2026-11-10): "The 'Use this sound' button should be in the bar where 'Back' and
+// 'Sound' are, so I don't have to scroll all the way to the top after selecting a sound." A page
+// whose commit action used to be a row gets it in the title row instead, on the right, where it can
+// never scroll away. Same shape as the keyboard's OK key: gold when there is something to commit,
+// dim when there is not.
+constexpr int16_t kSetActionW = 52;
+constexpr int16_t kSetActionH = 18;
 
 struct SettingsLayout {
   Rect status;
   Rect tabrow;
   Rect title;
   Rect backButton;
+  Rect titleAction;    // EST-363: the page's commit action in the title row (empty when the page has none)
   Rect body;
   Rect tabs[kSettingsTabCount];
   bool subPage = false;
@@ -183,7 +191,7 @@ struct SettingsLayout {
 };
 
 constexpr SettingsLayout settingsLayoutFor(int16_t w, int16_t h, bool subPage,
-                                           bool selector = false) {
+                                           bool selector = false, bool titleAction = false) {
   SettingsLayout L;
   L.subPage = subPage;
   L.status = Rect{0, 0, w, kStatusH};
@@ -198,6 +206,13 @@ constexpr SettingsLayout settingsLayoutFor(int16_t w, int16_t h, bool subPage,
   L.title = Rect{0, titleTop, w, kSetTitleH};
   L.backButton = Rect{(int16_t)(kStatusPadX), (int16_t)(titleTop + (kSetTitleH - kSetBackH) / 2),
                       kSetBackW, kSetBackH};
+  // EST-363: the page's commit action, on the right of the same title row (the keyboard's OK slot).
+  // It never scrolls: the title row is outside the body.
+  L.titleAction = titleAction
+                      ? Rect{(int16_t)(w - kSetPadX - kSetActionW),
+                             (int16_t)(titleTop + (kSetTitleH - kSetActionH) / 2), kSetActionW,
+                             kSetActionH}
+                      : Rect{};
   const int16_t bodyTop = (int16_t)(titleTop + kSetTitleH);
   L.body = Rect{0, bodyTop, w, (int16_t)(h - bodyTop)};
   if (selector) {
@@ -220,6 +235,17 @@ constexpr int settingsTabAtIn(const SettingsLayout& L, int x, int y) {
   }
   return -1;
 }
+
+// EST-363: a tap on the title row's commit action. Nothing else in the title row acts except Back,
+// and the two rectangles never overlap (Back is on the left, the action on the right).
+constexpr bool settingsTitleActionHitIn(const SettingsLayout& L, int x, int y) {
+  return !L.titleAction.empty() && L.titleAction.contains(x, y);
+}
+
+// EST-363: the action is live only when the page's draft differs from what is stored (the picker's
+// candidate vs the event's current sound, "If nothing new was picked, Use is dim"). Back never writes
+// the stored value: a pick only changes the draft, so leaving the page leaves the choice as it was.
+constexpr bool settingsActionEnabled(int pending, int stored) { return pending != stored; }
 
 // ------------------------------------------------------------------------------------ list maths
 constexpr int settingsRowTop(const SettingRow* rows, int count, int index) {

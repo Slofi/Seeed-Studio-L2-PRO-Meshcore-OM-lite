@@ -11,9 +11,16 @@
 //   * the manual-time stepper: real month lengths, leap years, and every wrap;
 //   * the radio prefs store: seed from the build values, upstream's validation ranges, the preset
 //     list and a persistence round trip through an injected backend.
+// EST-350 adds two:
+//   * the page history: General (scrolled) > Node > Name > Back > Back returns to General at the
+//     same scroll, a full history drops its oldest step and an empty one means Back leaves Settings;
+//   * the chat selector inside Settings: the Chat tab's own list and hit rule, the dropdown hanging
+//     under its selector row, a pick changing only the chat Settings shows, and a tap outside
+//     closing it and being SPENT.
 #include <stdio.h>
 #include <string.h>
 
+#include "ui/chat_selector.h"
 #include "ui/settings_layout.h"
 #include "ui/settings_prefs.h"
 
@@ -385,12 +392,167 @@ static void testRadio() {
   check(store4.prefs().sf == 7, "the edit is kept in RAM even when the save failed");
 }
 
+
+// --------------------------------------------------------------------------------- EST-350: history
+// The shell's two ends (setGo / setBack in main.cpp) are one push and one pop of this stack; the test
+// drives the same calls in the same order the taps make them.
+static void testNav() {
+  check(kSetPageCount >= 20, "every page has an index");
+  check(settingsRootPage(SetPage::GeneralRoot), "General is a root");
+  check(settingsRootPage(SetPage::NodesRoot) && settingsRootPage(SetPage::ChatRoot) &&
+            settingsRootPage(SetPage::MapRoot) && settingsRootPage(SetPage::RptrRoot),
+        "the five tabs are roots");
+  check(!settingsRootPage(SetPage::Node) && !settingsRootPage(SetPage::NameEdit) &&
+            !settingsRootPage(SetPage::Channel) && !settingsRootPage(SetPage::SoundPicker),
+        "a row's page is not a root");
+
+  SettingsNav nav;
+  SetPage page = SetPage::GeneralRoot;
+  int scroll = 0;
+  check(nav.empty(), "a fresh Settings has no history");
+  check(!nav.pop(&page, &scroll), "Back on a root has no history: it leaves Settings");
+  check(page == SetPage::GeneralRoot && scroll == 0, "a failed pop writes nothing");
+
+  // General, scrolled down 40 px (its list is taller than the body), > Node > Name > Back > Back.
+  int sc = 40;
+  nav.push(page, sc);            // setGo(Node)
+  page = SetPage::Node;
+  sc = 0;
+  check(nav.depth() == 1, "one step away from General");
+  nav.push(page, sc);            // setGo(NameEdit), from the Node page's Name row
+  page = SetPage::NameEdit;
+  check(nav.depth() == 2, "two steps: General > Node > Name");
+  check(nav.pop(&page, &sc), "Back from the name editor has a step");
+  check(page == SetPage::Node && sc == 0, "Back from Name lands on the Node page");
+  check(nav.pop(&page, &sc), "Back from the Node page has a step");
+  check(page == SetPage::GeneralRoot && sc == 40,
+        "Back from Node lands on General at the SAME scroll position");
+  check(nav.empty(), "General is the bottom of the history again");
+
+  // A page can be left and re-entered: every step keeps its own scroll.
+  SettingsNav nav2;
+  nav2.push(SetPage::GeneralRoot, 12);
+  nav2.push(SetPage::Channel, 30);
+  SetPage p2 = SetPage::GeneralRoot;
+  int s2 = 0;
+  check(nav2.pop(&p2, &s2) && p2 == SetPage::Channel && s2 == 30, "the Channel page's scroll");
+  check(nav2.pop(&p2, &s2) && p2 == SetPage::GeneralRoot && s2 == 12, "General's scroll again");
+
+  // Overflow: a long walk keeps the NEWEST steps, so Back still has a way up.
+  SettingsNav deep;
+  for (int i = 0; i < SettingsNav::kMaxDepth + 4; ++i) {
+    deep.push(i % 2 == 0 ? SetPage::GeneralRoot : SetPage::Node, i);
+  }
+  check(deep.depth() == SettingsNav::kMaxDepth, "the history is bounded");
+  SetPage dp = SetPage::GeneralRoot;
+  int ds = 0;
+  check(deep.pop(&dp, &ds), "the newest step survives the overflow");
+  const int newest = SettingsNav::kMaxDepth + 3;
+  check(ds == newest, "the top of the history is the last push");
+
+  nav.reset();
+  check(nav.empty(), "a new door into Settings clears the history");
+}
+
+// ------------------------------------------------------------------------------- EST-350: selector
+// Two channels and one DM, drawn with the Settings layout's rectangles (the Chat tab's list is the
+// same list, and test_chat.cpp proves its geometry).
+static void testSettingsSelector() {
+  const SettingsLayout closed = settingsLayoutFor(320, 240, false);
+  check(closed.selPanel.empty() && closed.selList.empty() && closed.selManage.empty(),
+        "no dropdown rectangles while it is closed");
+
+  const SettingsLayout L = settingsLayoutFor(320, 240, false, true);
+  const int rowH = settingsRowHeight(SetRowKind::Selector);
+  check(rowH >= 30, "the selector row is a list row");
+  check(L.selPanel.empty() == false, "the dropdown has a panel when open");
+  check(L.selPanel.y == L.body.y + rowH, "it hangs under the selector row, which stays visible");
+  check(L.selPanel.w == L.body.w && L.selPanel.x == L.body.x, "the panel spans the body");
+  check(L.selPanel.bottom() == L.body.bottom(), "the panel reaches the body's floor");
+  check(L.selManage.h == kSelManageH, "the pinned row is the chat's own height");
+  check(L.selList.y == L.selPanel.y && L.selList.bottom() == L.selManage.y,
+        "the list is the panel above the pinned row");
+  check(!L.selList.overlaps(L.selManage), "the pinned row is not part of the list");
+  // 320x240: the body is 163 px, the selector row takes 30 and the pinned row 30, so the list is
+  // 103 px: three 30 px chat rows and the two 15 px section labels fit, four rows do not.
+  check(L.selList.h == L.body.h - rowH - kSelManageH, "the list is what the body has left");
+  check(L.selList.h >= 3 * kSelRowH, "on the L2 at least three chats fit without scrolling");
+
+  SelectorModel m;
+  m.chatCount = 3;
+  m.channelCount = 2;
+  m.dmCount = 1;
+  m.selected = 1;   // the chat Settings is showing (the Chat tab is on 0, deliberately different)
+  m.scroll = 0;
+
+  // The content and the clamp are the Chat tab's own arithmetic.
+  check(selContentHeight(2, 1) == kSelSectionH + 2 * kSelRowH + kSelSectionH + kSelRowH,
+        "two channels and one DM");
+  const int maxScroll = selectorMaxScroll(m, L.selList);
+  check(maxScroll == selContentHeight(2, 1) - L.selList.h,
+        "the clamp is the list's content height over its window (the chat's own arithmetic)");
+  check(maxScroll > 0, "two channels and a DM are 17 px taller than the window");
+
+  // Rows answer where they are drawn.
+  const int firstTop = selRowTop(L.selList, 2, 1, 0, 0);
+  const SelectorPress r0 = selectorPress(m, L.selPanel, L.selList, L.selManage, 100,
+                                         firstTop + kSelRowH / 2);
+  check(r0.picks && r0.row == 0 && !r0.consumes, "a tap on a row picks that chat");
+  // The "Channels" section label is not a row: it closes the dropdown and spends the gesture.
+  const SelectorPress lab = selectorPress(m, L.selPanel, L.selList, L.selManage, 100,
+                                          L.selList.y + 2);
+  check(!lab.picks && lab.consumes && lab.kind == SelectorHitKind::Close,
+        "a section label closes the dropdown and is spent");
+
+  // The DM row is the last entry: scroll the list to its floor, as a finger would, then tap it.
+  m.scroll = maxScroll;
+  const int dmTop = selRowTop(L.selList, 2, 1, 2, m.scroll);
+  const SelectorPress r2 = selectorPress(m, L.selPanel, L.selList, L.selManage, 100,
+                                         dmTop + kSelRowH / 2);
+  check(r2.picks && r2.row == 2, "the DM row is entry 2");
+  const SelectorPress man = selectorPress(m, L.selPanel, L.selList, L.selManage, 100,
+                                          L.selManage.y + kSelManageH / 2);
+  check(man.kind == SelectorHitKind::Manage && man.consumes && !man.picks,
+        "the pinned row opens the channel list");
+  const SelectorPress outside = selectorPress(m, L.selPanel, L.selList, L.selManage, 100, 60);
+  check(outside.kind == SelectorHitKind::Close && outside.consumes && !outside.picks,
+        "a tap outside closes it and is consumed (nothing behind is pressed)");
+  const SelectorPress title = selectorPress(m, L.selPanel, L.selList, L.selManage, 25,
+                                            L.title.y + 4);
+  check(title.consumes, "Back while it is open is the same consumed close");
+
+  // The pick changes the chat SETTINGS shows and nothing else.
+  int shown = 1;
+  const int openChat = 0;   // the Chat tab's open chat, a different variable on purpose
+  selectorPickShown(r2, &shown);
+  check(shown == 2, "the picked chat becomes the one Settings shows");
+  check(openChat == 0, "the Chat screen's open chat is untouched by a pick in Settings");
+  selectorPickShown(lab, &shown);
+  check(shown == 2, "a close is not a pick");
+  selectorPickShown(man, &shown);
+  check(shown == 2, "the pinned row is not a pick");
+
+  // The same model scrolls with the finger: the chat's own drag rule.
+  SelectorModel tall;
+  tall.chatCount = 10;
+  tall.channelCount = 10;
+  tall.dmCount = 0;
+  const int tallMax = selectorMaxScroll(tall, L.selList);
+  check(tallMax > 0, "ten channels need scrolling at 320x240");
+  const int dragged = selDragScroll(0, 24, tallMax);
+  check(dragged == 24, "the list follows the finger");
+  check(selRowAt(L.selList, 10, 0, dragged, selRowTop(L.selList, 10, 0, 2, dragged)) == 2,
+        "the row under the same finger after the drag is the one drawn there");
+}
+
 int main() {
   testTabs();
   testRows();
   testStepper();
   testManualTime();
   testRadio();
+  testNav();
+  testSettingsSelector();
   if (g_fails == 0) printf("settings: all checks passed\n");
   return g_fails == 0 ? 0 : 1;
 }

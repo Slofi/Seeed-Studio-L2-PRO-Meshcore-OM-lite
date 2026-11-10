@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 
+#include "ui/chat_selector.h"   // EST-350: the selector inside Settings is the Chat tab's own
 #include "ui/settings_layout.h"
 #include "ui/widgets.h"
 
@@ -33,6 +34,10 @@ struct SettingsView {
   SettingsEditor editor = SettingsEditor::None;
   const char* editText = "";
   const char* okLabel = "OK";
+  // EST-350: the chat selector dropped down over the body. `sel.selected` is the chat whose settings
+  // the page is showing — in Settings that is NOT the chat open on the Chat tab, on purpose.
+  bool selector = false;
+  SelectorModel sel;
 };
 
 void settingsScreenDraw(const SettingsView& v);
@@ -45,6 +50,10 @@ int settingsStepperHit(const SettingsView& v, int x, int y);      // -1 / +1 on 
 int settingsEditorKeyHit(const SettingsView& v, int x, int y);    // index into the editor's chars
 bool settingsEditorDelHit(const SettingsView& v, int x, int y);
 bool settingsEditorOkHit(const SettingsView& v, int x, int y);
+// EST-350: the dropdown's press rule (a row picks, the pinned row opens the channel list, anything
+// else closes it and is spent), from the same rectangles it was drawn in. It is the Chat tab's own
+// rule (chat_selector.h selectorPress): while the dropdown is open nothing behind it can be hit.
+SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y);
 
 // The editor's character set (the same strings the old screens used).
 extern const char* const kSettingsNameChars;

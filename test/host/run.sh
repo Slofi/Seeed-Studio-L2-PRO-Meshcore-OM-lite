@@ -108,7 +108,10 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est346.cpp \
 # EST-347: the settings tab row (five 64 px taps, labels measured with the mono advance, the tab
 # chosen per screen), the row rectangles and scroll clamp, the stepper keys, the manual-time stepper
 # (month lengths, leap years, wraps) and the radio prefs store (seed, ranges, round trip).
-g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_settings.cpp -o "$BIN18"
+# EST-350: the page history Back walks (General > Node > Name > Back > Back at the same scroll) and
+# the chat selector inside Settings, which is the Chat tab's own list arithmetic (chat_layout.cpp).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_settings.cpp \
+  ../../src/ui/chat_layout.cpp -o "$BIN18"
 # EST-348: the on-card chat history over an in-memory volume: record encode/decode and CRC, a torn
 # last record (detected and repaired), update records applied on load, backwards paging, rotation to
 # .old, unread/seen across a reload, the SPIFFS fallback and the chat ids.

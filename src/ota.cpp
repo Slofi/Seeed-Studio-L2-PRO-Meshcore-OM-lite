@@ -14,6 +14,7 @@
 #include "ota.h"
 
 #include <Update.h>
+#include <stdio.h>   // snprintf: the command slot's copy
 
 #include "board.h"
 #include "usb_cmd.h"
@@ -51,11 +52,30 @@ bool feed(Magic& m, char c) { return usb::feedMagic(m, c); }
 // One completed (or failed) OMCMD1 frame. Data lines for `nodes`/`msgs` are printed by the shell
 // before the final "[cmd] ok ..." line. A framing failure still answers with the same shape, so the
 // host never waits for a line that cannot come.
+//
+// EST-350: the handler only COPIES a ready command into the one slot below; it never executes it.
+// Running a command here puts the command's own call stack (usbCommandExecute, the history dump, the
+// FS, FatFs and the SD driver) on top of the reader's: measured on the ELF, the frame chain to the
+// history read was loop() 1,408 B + otaPoll 1,136 + this handler 304 + usbCommandExecute 1,632 +
+// meshHistoryDump 384 + HistoryStore::collect 784 + readWindow 144 = 5,792 B BEFORE FatFs (stat 32,
+// vfs_fat_stat 368, f_stat 624, find_volume 64, the disk-IO 32s, sdmmc 48/80/80/32, xQueueReceive
+// 64, about 1,490 B more) on a loop task whose stack is 8,192 B (cores/esp32/main.cpp). `history
+// "ERA-3 (SI)" 5` is where that ended in a panic twice. loop() runs it after otaPoll() has returned:
+// loop() 1,408 + otaCommandPoll 304 + usbCommandExecute 1,648 + 384 + 784 + 144 = 4,672 B, i.e.
+// 1,120 B of headroom recovered, and the handler's own frame is 32 B instead of 304.
+char s_cmd[usb::kMaxCommandBytes + 1];
+bool s_cmdReady = false;
+
 void handleCommandFrame(usb::CommandFrame& frame) {
   if (frame.event() == usb::CommandFrame::Event::Ready) {
-    char reply[256];
-    om::usbCommandExecute(frame.text(), reply, sizeof(reply));
-    Serial.println(reply);
+    if (s_cmdReady) {
+      // One slot, so a second command cannot overwrite one that has not run yet. The host gets an
+      // answer for it, the same way every other refusal is answered.
+      Serial.println("[cmd] error busy");
+    } else {
+      snprintf(s_cmd, sizeof(s_cmd), "%s", frame.text());
+      s_cmdReady = true;
+    }
   } else {
     Serial.printf("[cmd] error %s\n", frame.error());
   }
@@ -93,6 +113,18 @@ void sendScreenshot() {
 }  // namespace
 
 bool otaActive() { return s_active; }
+
+// EST-350: the command slot's other end. Called by loop() AFTER otaPoll() returns, so everything the
+// command touches (the history store's own loop-owned read path, the SD card, the radio) runs with
+// the reader's frames off the stack.
+void otaCommandPoll() {
+  if (!s_cmdReady) return;
+  s_cmdReady = false;   // freed before running: a command that takes a while must not block the host
+  char reply[256];
+  om::usbCommandExecute(s_cmd, reply, sizeof(reply));
+  Serial.println(reply);
+  s_cmd[0] = 0;
+}
 
 void otaPoll() {
   if (s_active) return;

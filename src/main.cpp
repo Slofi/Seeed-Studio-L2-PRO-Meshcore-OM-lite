@@ -98,15 +98,13 @@ static bool g_boardOk = false;
 static int g_tab = 0;
 // Settings (EST-347) keeps only state; every rectangle comes from ui/settings_layout.h and every
 // pixel is drawn by ui/screen_settings.cpp. A page is a flat list of SettingRow, so one index drives
-// both the drawing and the tap.
-enum class SetPage : uint8_t {
-  GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
-  Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
-  Sound, SoundPicker, Wifi, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash,
-};
+// both the drawing and the tap. EST-350: the pages themselves and the history Back walks live in the
+// header, so the host test proves the same table the shell uses.
+using SetPage = om::ui::SetPage;
 static bool g_settings = false;
 static om::ui::SettingsTab g_setTab = om::ui::SettingsTab::General;
 static SetPage g_setPage = SetPage::GeneralRoot;
+static om::ui::SettingsNav g_setNav;   // where Back goes, with the scroll each page was left at
 static int g_setScroll = 0;          // px scrolled in the body
 static int g_setScroll0 = 0;         // its value when the finger went down
 static int g_setMaxScroll = 0;       // the last build's clamp
@@ -131,9 +129,19 @@ static om::ui::SettingRow g_setRows[28];
 static int g_setRowCount = 0;
 static om::ui::RadioPrefsStore g_radio;
 static om::ui::RadioPrefs g_custom;
+// EST-350: the chat whose settings the Chat tab shows. It starts as the open chat and never writes
+// back to g_chatSel: picking another one in Settings leaves the Chat screen where it was.
+static int g_setChat = 0;
+static bool g_setSelOpen = false;    // the chat selector is dropped down over the Chat page
+static int g_setSelScroll = 0;       // the selector list's scroll, px
+static int g_setSelScroll0 = 0;      // its value when the finger went down
+static int g_setSelMaxScroll = 0;    // the last build's clamp
 
 static void drawSettings();
 static void openSettings(int mainTab, om::ui::SettingsTab tab);
+// EST-350: the page history's two ends (defined with the settings shell below).
+static void setGo(SetPage p);
+static void setBack();
 // --- chat (new UI layer) -----------------------------------------------------------------------
 // The chat screen keeps no geometry of its own: om::ui::screen_chat.cpp owns the rectangles and the
 // hit test, and these are only the state it draws.
@@ -1033,8 +1041,7 @@ static void drawChat() {
 // "Manage channels" in the chat selector is a door into the same Settings page: General > Channels.
 static void openChannelList() {
   openSettings(1, om::ui::SettingsTab::General);
-  g_setPage = SetPage::Channels;
-  g_setScroll = 0;
+  setGo(SetPage::Channels);   // Back from the list returns to General, as it always did
   drawSettings();
 }
 
@@ -1469,11 +1476,11 @@ static void drawRptrTab() {
 // the action id in a row.
 enum SetAct : uint16_t {
   A_None = 0,
-  A_Preset, A_TxPower, A_Hash, A_Node, A_Channels, A_Wifi, A_Bt, A_Sound,
+  A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_Bt, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
   A_Apply, A_Cancel,
   A_MapRecentre, A_MapClear, A_RptrForget,
-  A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
+  A_ChatPick, A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
   A_ChatMsgSound, A_ChatDmSound, A_ChatMenSound,
   A_SoundMaster, A_SoundVolume, A_SoundMsg, A_SoundDm, A_SoundMen, A_SoundNew,
   A_SoundTouch, A_SoundClick, A_SoundDnd, A_SoundWelcome, A_SoundPickUse,
@@ -1488,9 +1495,10 @@ enum SetAct : uint16_t {
   A_TimeFieldBase = 220,   // 220..224 year / month / day / hour / minute
 };
 
-static bool s_setFromChat = false;   // the open Channel page came from the Chat tab
+// EST-350: where a page came from is the navigation history (ui/settings_layout.h SettingsNav), not a
+// flag per page, so Back needs no table and every page returns to the one that opened it. What is left
+// here is only who the name editor is renaming.
 static bool s_setNameNode = false;   // the name editor is renaming the node, not a channel
-static bool s_pickerFromChat = false;   // the sound picker was opened from the Chat tab
 
 static void drawSettings();   // the gear and every settings page reach this
 static void showToast(const char* text);
@@ -1514,9 +1522,32 @@ static void setSection(const char* label) {
   setAdd(om::ui::SetRowKind::Section, A_None, label);
 }
 
-static bool setRootPage(SetPage p) {
-  return p == SetPage::GeneralRoot || p == SetPage::NodesRoot || p == SetPage::ChatRoot ||
-         p == SetPage::MapRoot || p == SetPage::RptrRoot;
+static bool setRootPage(SetPage p) { return om::ui::settingsRootPage(p); }
+
+// EST-350: the ONE way to move to another page. Leaving a page records where it was scrolled to, so
+// Back (settingsBack) returns there; Back itself is the other end of the same record.
+static void setGo(SetPage p) {
+  if (p != g_setPage) g_setNav.push(g_setPage, g_setScroll);
+  g_setPage = p;
+  g_setScroll = 0;
+  g_setSelOpen = false;
+  g_deleteArmed = false;
+}
+
+// Back from an action (Join, Apply, Use, Delete) to the page it was opened from: the same step, run
+// backwards, so that page comes back at the scroll it had.
+static void setBack() {
+  SetPage p = g_setPage;
+  int scroll = 0;
+  if (!g_setNav.pop(&p, &scroll)) {
+    g_setPage = SetPage::GeneralRoot;
+    g_setScroll = 0;
+  } else {
+    g_setPage = p;
+    g_setScroll = scroll;
+  }
+  g_setSelOpen = false;
+  g_deleteArmed = false;
 }
 
 static SetPage setRootForTab(om::ui::SettingsTab t) {
@@ -1529,10 +1560,12 @@ static SetPage setRootForTab(om::ui::SettingsTab t) {
   }
 }
 
-static int openChatChannel() {
-  if (g_chatSel < 0 || g_chatSel >= g_chatCount) return -1;
-  if (g_chats[g_chatSel].dm) return -1;
-  return g_chatSel < g_channelCount ? g_chatSel : -1;
+// The channel the Chat tab's settings page edits: the chat picked IN SETTINGS (g_setChat), which is
+// the open chat until the user picks another one there.
+static int settingsChatChannel() {
+  if (g_setChat < 0 || g_setChat >= g_chatCount) return -1;
+  if (g_chats[g_setChat].dm) return -1;
+  return g_setChat < g_channelCount ? g_setChat : -1;
 }
 
 static void clockLine(char* out, size_t cap) {
@@ -1612,6 +1645,8 @@ static void buildSettingsRows() {
       setAdd(om::ui::SetRowKind::Stepper, A_TxPower, "TX power", v);
       setAdd(om::ui::SetRowKind::Chevron, A_Hash, "Path hash", om::meshPathHashLabel());
       snprintf(name, sizeof(name), "%s", om::meshNodeName());
+      // EST-350: this row opens the NODE PAGE (Name, Public key, Share position); renaming is that
+      // page's own Name row. It used to jump straight into the name editor.
       setAdd(om::ui::SetRowKind::Chevron, A_Node, "Node", name);
       snprintf(v, sizeof(v), "%d channels", om::mcChannelCount());
       setAdd(om::ui::SetRowKind::Chevron, A_Channels, "Channels", v);
@@ -1669,11 +1704,17 @@ static void buildSettingsRows() {
 
     case SetPage::ChatRoot: {
       refreshChats();
-      const int ch = openChatChannel();
+      if (g_setChat >= g_chatCount) g_setChat = g_chatCount > 0 ? g_chatCount - 1 : 0;
+      if (g_setChat < 0) g_setChat = 0;
+      // EST-350: the section header IS the chat selector (the Chat tab's own dropdown), so the chat
+      // whose settings are shown can be picked here without leaving Settings. Its label stays the
+      // section name; its value is the chat on the page, never the Chat tab's open chat.
+      const char* selName = (g_setChat >= 0 && g_setChat < g_chatCount) ? g_chats[g_setChat].name
+                                                                       : "";
+      setAdd(om::ui::SetRowKind::Selector, A_ChatPick, "THIS CHAT", selName, g_setSelOpen);
+      const int ch = settingsChatChannel();
       if (ch >= 0) {
-        char head[48], v[40], k[40];
-        snprintf(head, sizeof(head), "THIS CHAT: %s", om::mcChannelName(ch));
-        setSection(head);
+        char v[40], k[40];
         setAdd(om::ui::SetRowKind::Chevron, A_ChatOpen, "Open channel", om::mcChannelName(ch));
         setAdd(om::ui::SetRowKind::Toggle, A_ChatEnabled, "Enabled", "ON", om::mcChannelEnabled(ch));
         setAdd(om::ui::SetRowKind::Toggle, A_ChatSound, "Sound", "ON", !om::mcChannelMuted(ch));
@@ -1683,11 +1724,9 @@ static void buildSettingsRows() {
         if (g_deleteArmed) setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Tap again to delete",
                                   "", false, true);
         else setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Delete channel", "", false, true);
-      } else if (g_chatCount > 0 && g_chats[g_chatSel].dm) {
-        setSection("THIS CHAT");
+      } else if (g_chatCount > 0 && g_chats[g_setChat].dm) {
         setAdd(om::ui::SetRowKind::Note, A_None, "Direct message settings are not built yet.");
       } else {
-        setSection("THIS CHAT");
         setAdd(om::ui::SetRowKind::Note, A_None, "No chat is open.");
       }
       setSection("CHAT");
@@ -1776,7 +1815,7 @@ static void buildSettingsRows() {
       char key[16];
       snprintf(g_setTitle, sizeof(g_setTitle), "Node");
       setSection("IDENTITY");
-      setAdd(om::ui::SetRowKind::Chevron, A_Node, "Name", om::meshNodeName());
+      setAdd(om::ui::SetRowKind::Chevron, A_NodeName, "Name", om::meshNodeName());
       key[0] = 0;
       om::meshPubKeyShort(key, sizeof(key));
       setAdd(om::ui::SetRowKind::Value, A_None, "Public key", key);
@@ -1816,7 +1855,7 @@ static void buildSettingsRows() {
 
     case SetPage::Channel: {
       if (g_chanPage < 0 || g_chanPage >= om::mcChannelCount()) {
-        g_setPage = SetPage::Channels;
+        setBack();                  // the channel went away: back to the list that opened it
         buildSettingsRows();
         return;
       }
@@ -1978,6 +2017,17 @@ static om::ui::SettingsView settingsView() {
   v.editor = g_setEditor;
   v.editText = g_setEditText;
   v.okLabel = g_setOkLabel;
+  // EST-350: the chat selector. `selected` is g_setChat, not g_chatSel: what this page edits.
+  v.selector = g_setSelOpen;
+  v.sel.chats = g_chats;
+  v.sel.chatCount = g_chatCount;
+  v.sel.channelCount = g_channelCount;
+  v.sel.dmCount = g_chatCount - g_channelCount;
+  v.sel.selected = g_setChat;
+  v.sel.scroll = g_setSelScroll;
+  v.sel.nowSec = millis() / 1000;
+  v.sel.nowWall = om::timeKeeper().now();
+  v.sel.nowReal = om::timeKeeper().realSinceBoot();
   return v;
 }
 
@@ -1991,113 +2041,104 @@ static void redrawMainTab() {
 static void drawSettings() {
   buildSettingsRows();
   const om::ui::SettingsLayout L =
-      om::ui::settingsLayoutFor(om::ui::kScreenW, om::ui::kScreenH, g_setSubPage);
+      om::ui::settingsLayoutFor(om::ui::kScreenW, om::ui::kScreenH, g_setSubPage, g_setSelOpen);
   g_setMaxScroll = om::ui::settingsMaxScroll(L, g_setRows, g_setRowCount);
+  // The dropdown's clamp is the Chat tab's own: same list, same content height (the shared clamp).
+  om::ui::SelectorModel sel;
+  sel.chatCount = g_chatCount;
+  sel.channelCount = g_channelCount;
+  sel.dmCount = g_chatCount - g_channelCount;
+  g_setSelMaxScroll = g_setSelOpen ? om::ui::selectorMaxScroll(sel, L.selList) : 0;
+  if (g_setSelScroll > g_setSelMaxScroll) g_setSelScroll = g_setSelMaxScroll;
+  if (g_setSelScroll < 0) g_setSelScroll = 0;
   const om::ui::SettingsView v = settingsView();
   om::ui::settingsScreenDraw(v);
 }
 
 static void openSettings(int mainTab, om::ui::SettingsTab tab) {
+  (void)mainTab;
   g_settings = true;
   g_setTab = tab;
   g_setPage = setRootForTab(tab);
   g_setScroll = 0;
+  g_setNav.reset();                 // a fresh door into Settings has no history behind it
   g_setEditor = om::ui::SettingsEditor::None;
   g_deleteArmed = false;
-  s_setFromChat = false;
+  g_setSelOpen = false;
+  g_setSelScroll = 0;
+  // EST-350: the settings page starts on the chat that was open when the gear was pressed.
+  g_setChat = g_chatSel;
   if (tab == om::ui::SettingsTab::Chat) refreshChats();
   buildSettingsRows();
   drawSettings();
 }
 
 static void settingsBack() {
-  switch (g_setPage) {
-    case SetPage::GeneralRoot:
-    case SetPage::NodesRoot:
-    case SetPage::ChatRoot:
-    case SetPage::MapRoot:
-    case SetPage::RptrRoot:
-      g_settings = false;
-      g_setEditor = om::ui::SettingsEditor::None;
-      g_deleteArmed = false;
-      redrawMainTab();
-      return;
-    case SetPage::Preset:        g_setPage = SetPage::GeneralRoot; break;
-    case SetPage::PresetCustom:  g_setPage = SetPage::Preset; break;
-    case SetPage::Hash:          g_setPage = SetPage::GeneralRoot; break;
-    case SetPage::Node:          g_setPage = SetPage::GeneralRoot; break;
-    case SetPage::NameEdit:
-      if (s_setNameNode) g_setPage = SetPage::Node;
-      else if (g_editNew) g_setPage = SetPage::ChanAdd;
-      else g_setPage = SetPage::Channel;
-      break;
-    case SetPage::Channels:      g_setPage = SetPage::GeneralRoot; break;
-    case SetPage::Channel:
-      g_setPage = s_setFromChat ? SetPage::ChatRoot : SetPage::Channels;
-      break;
-    case SetPage::ChanAdd:       g_setPage = SetPage::Channels; break;
-    case SetPage::ChanKey:       g_setPage = SetPage::NameEdit; break;
-    case SetPage::Sound:         g_setPage = SetPage::GeneralRoot; break;
-    case SetPage::SoundPicker:
-      g_setPage = s_pickerFromChat ? SetPage::ChatRoot : SetPage::Sound;
-      break;
-    case SetPage::Wifi:
-    case SetPage::Bt:            g_setPage = SetPage::GeneralRoot; break;
-    case SetPage::Time:          g_setPage = SetPage::GeneralRoot; break;
-    case SetPage::TimeEdit:      g_setPage = SetPage::Time; break;
-    case SetPage::ConfirmPreset: g_setPage = SetPage::Preset; break;
-    case SetPage::ConfirmHash:   g_setPage = SetPage::Hash; break;
+  // EST-350: Back is one step of the history setGo() builds, so it needs no table per page: the page
+  // it returns to is the one the user came from, at the scroll it was left at. An empty history means
+  // this is a root page: Back leaves Settings for the screen the gear was pressed on.
+  if (g_setNav.empty()) {
+    g_settings = false;
+    g_setEditor = om::ui::SettingsEditor::None;
+    g_deleteArmed = false;
+    g_setSelOpen = false;
+    redrawMainTab();
+    return;
   }
+  setBack();
   g_setEditor = om::ui::SettingsEditor::None;
-  g_deleteArmed = false;
-  g_setScroll = 0;
   drawSettings();
 }
 
-static void openChannelPage(int idx, bool fromChat) {
+static void openChannelPage(int idx) {
   if (idx < 0 || idx >= om::mcChannelCount()) return;
   g_chanPage = idx;
-  g_deleteArmed = false;
-  s_setFromChat = fromChat;
-  g_setPage = SetPage::Channel;
-  g_setScroll = 0;
+  setGo(SetPage::Channel);
   drawSettings();
 }
 
 static void settingsEditorOk();
 
-static void openSoundPicker(int ev, bool fromChat) {
+static void openSoundPicker(int ev) {
   g_setSoundEvent = ev;
-  s_pickerFromChat = fromChat;
   g_setSoundPending = ev == 4 ? (int)g_touchIdx : (int)patternFor((uint8_t)ev);
-  g_setPage = SetPage::SoundPicker;
-  g_setScroll = 0;
+  setGo(SetPage::SoundPicker);
   drawSettings();
 }
 
 // One row's action. The id is the only thing the shell needs to know about a row.
 static void handleSettingsRow(uint16_t id) {
   if (g_setTab == om::ui::SettingsTab::Chat) refreshChats();
-  const int ch = openChatChannel();
+  const int ch = settingsChatChannel();
   switch (id) {
-    case A_Preset:   g_setPage = SetPage::Preset; g_setScroll = 0; break;
-    case A_Hash:     g_setPage = SetPage::Hash; g_setScroll = 0; break;
-    case A_Node:
+    case A_Preset:   setGo(SetPage::Preset); break;
+    case A_Hash:     setGo(SetPage::Hash); break;
+    // EST-350: the General row named "Node" opens the Node page (Name, Public key, Share position);
+    // the rename is the Node page's own "Name" row (A_NodeName), which is what used to be here.
+    case A_Node:     setGo(SetPage::Node); break;
+    case A_NodeName:
       snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::meshNodeName());
       s_setNameNode = true;
       g_editNew = false;
-      g_setPage = SetPage::NameEdit;
-      g_setScroll = 0;
+      setGo(SetPage::NameEdit);
       break;
-    case A_Channels: g_setPage = SetPage::Channels; g_setScroll = 0; break;
-    case A_Wifi:     g_setPage = SetPage::Wifi; g_setScroll = 0; break;
-    case A_Bt:       g_setPage = SetPage::Bt; g_setScroll = 0; break;
-    case A_Sound:    g_setPage = SetPage::Sound; g_setScroll = 0; break;
-    case A_Time:     g_setPage = SetPage::Time; g_setScroll = 0; break;
+    // EST-350: the "THIS CHAT" header opens the chat selector (setGo would close it, so it is not
+    // used here: the page does not change). Opening it puts the page back at the top, so the header
+    // row is exactly where the dropdown hangs from.
+    case A_ChatPick:
+      g_setSelOpen = !g_setSelOpen;
+      g_setSelScroll = 0;
+      g_setScroll = 0;
+      g_deleteArmed = false;
+      break;
+    case A_Channels: setGo(SetPage::Channels); break;
+    case A_Wifi:     setGo(SetPage::Wifi); break;
+    case A_Bt:       setGo(SetPage::Bt); break;
+    case A_Sound:    setGo(SetPage::Sound); break;
+    case A_Time:     setGo(SetPage::Time); break;
     case A_TimeManual:
       timeInitFromClock();
-      g_setPage = SetPage::TimeEdit;
-      g_setScroll = 0;
+      setGo(SetPage::TimeEdit);
       break;
     case A_AdvertPos: {
       const bool on = !om::meshAdvertPosPolicyGet();
@@ -2121,7 +2162,7 @@ static void handleSettingsRow(uint16_t id) {
 
     // Chat tab: the same channel, reached from the open chat.
     case A_ChatOpen:
-      if (ch >= 0) openChannelPage(ch, true);
+      if (ch >= 0) openChannelPage(ch);
       return;
     case A_ChatEnabled:
       if (ch >= 0) {
@@ -2139,8 +2180,7 @@ static void handleSettingsRow(uint16_t id) {
         g_editNew = false;
         g_editCh = ch;
         snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::mcChannelName(ch));
-        g_setPage = SetPage::NameEdit;
-        g_setScroll = 0;
+        setGo(SetPage::NameEdit);
       }
       break;
     case A_ChatDelete:
@@ -2153,25 +2193,26 @@ static void handleSettingsRow(uint16_t id) {
           om::meshLinkReloadChannels();
           refreshChats();
           showToast("Channel removed");
+          g_setChat = g_chatCount > 0 ? (g_setChat < g_chatCount ? g_setChat : 0) : 0;
           g_setPage = SetPage::ChatRoot;
           g_setScroll = 0;
         }
       }
       break;
-    case A_ChatMsgSound: openSoundPicker(0, true); return;
-    case A_ChatDmSound:  openSoundPicker(1, true); return;
-    case A_ChatMenSound: openSoundPicker(2, true); return;
+    case A_ChatMsgSound: openSoundPicker(0); return;
+    case A_ChatDmSound:  openSoundPicker(1); return;
+    case A_ChatMenSound: openSoundPicker(2); return;
 
     case A_SoundMaster:
       g_soundOn = !g_soundOn;
       savePrefs();
       if (g_soundOn) playPattern(g_sndMsg);
       break;
-    case A_SoundMsg:  openSoundPicker(0, false); return;
-    case A_SoundDm:   openSoundPicker(1, false); return;
-    case A_SoundMen:  openSoundPicker(2, false); return;
-    case A_SoundNew:  openSoundPicker(3, false); return;
-    case A_SoundClick: openSoundPicker(4, false); return;
+    case A_SoundMsg:  openSoundPicker(0); return;
+    case A_SoundDm:   openSoundPicker(1); return;
+    case A_SoundMen:  openSoundPicker(2); return;
+    case A_SoundNew:  openSoundPicker(3); return;
+    case A_SoundClick: openSoundPicker(4); return;
     case A_SoundTouch:
       g_touchSnd = !g_touchSnd;
       savePrefs();
@@ -2193,14 +2234,12 @@ static void handleSettingsRow(uint16_t id) {
         patternFor((uint8_t)g_setSoundEvent) = (uint8_t)g_setSoundPending;
       }
       savePrefs();
-      g_setPage = s_pickerFromChat ? SetPage::ChatRoot : SetPage::Sound;
-      g_setScroll = 0;
+      setBack();                    // the picker's opener: Sound, or the Chat page it came from
       showToast("Sound saved");
       break;
 
     case A_ChanAdd:
-      g_setPage = SetPage::ChanAdd;
-      g_setScroll = 0;
+      setGo(SetPage::ChanAdd);
       break;
     case A_AddCreate:
     case A_AddPrivate:
@@ -2209,14 +2248,13 @@ static void handleSettingsRow(uint16_t id) {
       g_editNew = true;
       s_setNameNode = false;
       g_editBuf[0] = 0;
-      g_setPage = SetPage::NameEdit;
-      g_setScroll = 0;
+      setGo(SetPage::NameEdit);
       break;
     case A_AddPublic: {
       const int slot = om::mcChannelAdd("Public", om::mcPublicPsk());
       if (slot >= 0) {
         om::meshLinkReloadChannels();
-        openChannelPage(slot, false);
+        openChannelPage(slot);
         return;
       }
       showToast("Channel table is full");
@@ -2228,8 +2266,7 @@ static void handleSettingsRow(uint16_t id) {
       g_editNew = false;
       g_editCh = g_chanPage;
       snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::mcChannelName(g_chanPage));
-      g_setPage = SetPage::NameEdit;
-      g_setScroll = 0;
+      setGo(SetPage::NameEdit);
       break;
     case A_ChanEnabled:
       om::mcChannelSetEnabled(g_chanPage, !om::mcChannelEnabled(g_chanPage));
@@ -2249,20 +2286,17 @@ static void handleSettingsRow(uint16_t id) {
         om::meshLinkReloadChannels();
         refreshChats();
         showToast("Channel removed");
-        g_setPage = s_setFromChat ? SetPage::ChatRoot : SetPage::Channels;
-        g_setScroll = 0;
+        setBack();                  // whichever page the channel was opened from
       }
       break;
 
     case A_CustomOpen:
       g_custom = g_radio.prefs();   // the Custom page opens on the live values
-      g_setPage = SetPage::PresetCustom;
-      g_setScroll = 0;
+      setGo(SetPage::PresetCustom);
       break;
     case A_CustomApply:
       g_setPresetPending = om::ui::kRadioCustomPreset;
-      g_setPage = SetPage::ConfirmPreset;
-      g_setScroll = 0;
+      setGo(SetPage::ConfirmPreset);
       break;
     case A_TimeApply: {
       uint32_t epoch = 0;
@@ -2272,7 +2306,7 @@ static void handleSettingsRow(uint16_t id) {
           om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
         saveTimeFloor();
         showToast("Time set");
-        g_setPage = SetPage::Time;
+        setBack();
       } else {
         showToast("Time not set");
       }
@@ -2282,7 +2316,6 @@ static void handleSettingsRow(uint16_t id) {
       if (g_setPage == SetPage::ConfirmHash) {
         if (om::meshPathHashSet((uint8_t)g_setHashPending)) showToast("Path hash saved");
         else showToast("Path hash refused");
-        g_setPage = SetPage::Hash;
       } else if (g_setPresetPending >= 0 &&
                  g_setPresetPending < om::ui::kRadioPresetCount) {
         if (g_radio.setPreset(g_setPresetPending)) {
@@ -2291,7 +2324,6 @@ static void handleSettingsRow(uint16_t id) {
         } else {
           showToast("Preset refused");
         }
-        g_setPage = SetPage::Preset;
       } else {
         if (g_radio.setRadio(g_custom.freqKhz, g_custom.bwHz, g_custom.sf, g_custom.cr)) {
           g_custom = g_radio.prefs();
@@ -2299,25 +2331,21 @@ static void handleSettingsRow(uint16_t id) {
         } else {
           showToast("Preset refused");
         }
-        g_setPage = SetPage::Preset;
       }
-      g_setScroll = 0;
+      setBack();                    // the confirm page's opener: Hash / Preset / Custom preset
       break;
     case A_Cancel:
-      g_setPage = g_setPage == SetPage::ConfirmHash ? SetPage::Hash : SetPage::Preset;
       if (g_setPresetPending == om::ui::kRadioCustomPreset) g_custom = g_radio.prefs();
-      g_setScroll = 0;
+      setBack();
       break;
 
     default:
       if (id >= A_PresetBase && id < A_PresetBase + om::ui::kRadioPresetCount) {
         g_setPresetPending = (int)(id - A_PresetBase);
-        g_setPage = SetPage::ConfirmPreset;
-        g_setScroll = 0;
+        setGo(SetPage::ConfirmPreset);
       } else if (id >= A_HashBase && id < A_HashBase + 3) {
         g_setHashPending = (int)(id - A_HashBase) + 1;
-        g_setPage = SetPage::ConfirmHash;
-        g_setScroll = 0;
+        setGo(SetPage::ConfirmHash);
       } else if (id >= A_PickBase && id < A_ChanBase) {
         const bool click = g_setSoundEvent == 4;
         const int count = click ? kClickCount : kChimeCount + 1;
@@ -2328,7 +2356,7 @@ static void handleSettingsRow(uint16_t id) {
           else if (idx < kChimeCount) playPattern((uint8_t)idx);
         }
       } else if (id >= A_ChanBase && id < A_ChanBase + om::kMaxChannels) {
-        openChannelPage((int)(id - A_ChanBase), false);
+        openChannelPage((int)(id - A_ChanBase));
         return;
       }
       break;
@@ -2417,11 +2445,10 @@ static void settingsEditorOk() {
         om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
       saveTimeFloor();
       showToast("Time set");
-      g_setPage = SetPage::Time;
+      setBack();                    // the page that opened the editor: Time
     } else {
       showToast("Time not set");
     }
-    g_setScroll = 0;
     drawSettings();
     return;
   }
@@ -2430,33 +2457,31 @@ static void settingsEditorOk() {
     if (s_setNameNode) {
       om::meshNodeNameSet(g_editBuf);
       showToast("Name saved");
-      g_setPage = SetPage::Node;
+      setBack();                    // EST-350: back to the Node page, not to General
     } else if (g_editNew) {
       if (g_addKind == 2) {   // join private: ask for the key next
         g_keyText[0] = 0;
-        g_setPage = SetPage::ChanKey;
+        setGo(SetPage::ChanKey);
       } else {
         const int slot = g_addKind == 1 ? om::mcChannelCreatePrivate(g_editBuf)
                                         : om::mcChannelAddHashtag(g_editBuf);
         if (slot >= 0) {
           om::meshLinkReloadChannels();
           refreshChats();
-          g_setPage = SetPage::Channel;
           g_chanPage = slot;
-          s_setFromChat = false;
+          setGo(SetPage::Channel);
           showToast("Channel added");
         } else {
           showToast("Channel not added");
-          g_setPage = SetPage::ChanAdd;
+          setBack();                // back to Add channel, where the kind was chosen
         }
       }
     } else {
       om::mcChannelSetName(g_editCh, g_editBuf);
       g_chanPage = g_editCh;
-      g_setPage = SetPage::Channel;
+      setBack();                    // EST-350: back to the Channel page
       showToast("Channel renamed");
     }
-    g_setScroll = 0;
     drawSettings();
     return;
   }
@@ -2467,13 +2492,11 @@ static void settingsEditorOk() {
       om::meshLinkReloadChannels();
       refreshChats();
       g_chanPage = slot;
-      s_setFromChat = false;
-      g_setPage = SetPage::Channel;
+      setGo(SetPage::Channel);
       showToast("Channel joined");
     } else {
       showToast("That key is not a 16-byte base64 key");
     }
-    g_setScroll = 0;
     drawSettings();
     return;
   }
@@ -2483,6 +2506,34 @@ static void settingsEditorOk() {
 static void handleSettingsTap(int x, int y) {
   buildSettingsRows();
   const om::ui::SettingsView v = settingsView();
+
+  // EST-350: while the chat selector is open it owns the page, exactly like the Chat tab's dropdown:
+  // a row picks that chat (the page below shows its settings without leaving Settings), the pinned
+  // row opens the channel list, and a tap anywhere else — including Back — closes it and is CONSUMED,
+  // so the press never reaches the row behind it.
+  if (g_setSelOpen) {
+    const om::ui::SelectorPress press = om::ui::settingsSelectorPress(v, x, y);
+    if (press.picks) {
+      const int wasOpen = g_chatSel;
+      om::ui::selectorPickShown(press, &g_setChat);   // g_chatSel is deliberately untouched
+      g_setSelOpen = false;
+      g_setScroll = 0;
+      g_deleteArmed = false;
+      Serial.printf("[set] chat picked: %s (chat screen still on %d)\n",
+                    (g_setChat >= 0 && g_setChat < g_chatCount) ? g_chats[g_setChat].name : "?",
+                    wasOpen);
+      drawSettings();
+      return;
+    }
+    if (press.kind == om::ui::SelectorHitKind::Manage) {
+      g_setSelOpen = false;
+      openChannelList();
+      return;
+    }
+    g_setSelOpen = false;
+    drawSettings();
+    return;                   // consumed: no tap behind a closed dropdown
+  }
 
   if (om::ui::settingsBackHit(v, x, y)) {
     settingsBack();
@@ -2524,6 +2575,7 @@ static void handleSettingsTap(int x, int y) {
     g_setTab = (om::ui::SettingsTab)tab;
     g_setPage = setRootForTab(g_setTab);
     g_setScroll = 0;
+    g_setNav.reset();         // a tab is a new root: Back leaves Settings from it
     g_deleteArmed = false;
     drawSettings();
     return;
@@ -3165,8 +3217,11 @@ void loop() {
 
   if (millis() - lastBeat > 2000) {
     lastBeat = millis();
-    Serial.printf("[hb] uptime=%lus heap=%u board=%s mesh=%s tab=%d settings=%d vol=%u snd=%d dnd=%d\n",
+    // EST-350: `stack` is the loop task's least free stack in bytes since boot (FreeRTOS high-water
+    // mark). The USB command path was the deepest one; this number is how the fix is checked.
+    Serial.printf("[hb] uptime=%lus heap=%u stack=%u board=%s mesh=%s tab=%d settings=%d vol=%u snd=%d dnd=%d\n",
                   (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(),
+                  (unsigned)uxTaskGetStackHighWaterMark(nullptr),
                   g_boardOk ? "ok" : "FAIL",
 #if defined(OM_ENABLE_MESH)
                   om::meshLinkReady() ? "up" : "off",
@@ -3210,6 +3265,12 @@ void loop() {
   // Touch is a gesture: press, drag, release. A drag scrolls (picker rows, settings pixels) or
   // pans the map, and NEVER selects; only a release without a drag is a tap.
   om::otaPoll();   // first: the mesh loop can block for seconds and overrun the CDC FIFO
+  // EST-350: a USB command that arrived in otaPoll() is EXECUTED here, on the loop task and outside
+  // the reader's frame, just like the screen's own paths and history::loop() above. The frame
+  // handler only copies it into one slot (ota.cpp), because the SD stack does not fit inside the
+  // reader's call chain (see docs/PROGRESS.md: 1,136 B otaPoll + 304 B frame handler + the command's
+  // own 1,632 B, on an 8,192 B loop-task stack).
+  om::otaCommandPoll();
 #if defined(OM_ENABLE_MESH)
   om::meshLinkLoop();
 
@@ -3438,7 +3499,14 @@ void loop() {
           const int clamped = om::ui::settingsSnapScroll(g_setScroll, g_setMaxScroll);
           const bool changed = clamped != g_setScroll;
           g_setScroll = clamped;
-          if (g_drag || changed) drawSettings();
+          // EST-350: the dropdown's own scroll snaps back the same way when it was the one dragged.
+          const int selClamped =
+              g_setSelScroll < 0 ? 0
+                                 : (g_setSelScroll > g_setSelMaxScroll ? g_setSelMaxScroll
+                                                                       : g_setSelScroll);
+          const bool selChanged = selClamped != g_setSelScroll;
+          g_setSelScroll = selClamped;
+          if (g_drag || changed || selChanged) drawSettings();
         }
       }
     }
@@ -3451,6 +3519,7 @@ void loop() {
     g_selScroll0 = g_selScroll;
     g_emojiScroll0 = g_emojiScroll;
     g_setScroll0 = g_setScroll;
+    g_setSelScroll0 = g_setSelScroll;
     g_nodeScroll0 = g_nodeScroll;
     g_drag = false;
     g_acted = false;
@@ -3585,7 +3654,18 @@ void loop() {
       handleTap(x, y, true);
     }
     if (g_drag && !g_spent) {
-      if (g_settings) {
+      if (g_settings && g_setSelOpen) {
+        // EST-350: the dropdown's list follows the fingertip with the chat selector's own sign and
+        // give (selDragScroll), and the release path below snaps the stretch back.
+        const int next = om::ui::selDragScroll(g_setSelScroll0, dy, g_setSelMaxScroll);
+        if (next != g_setSelScroll) {
+          g_setSelScroll = next;
+          if (millis() - g_lastRender > 60) {
+            g_lastRender = millis();
+            drawSettings();
+          }
+        }
+      } else if (g_settings) {
         // Every settings page scrolls with the finger, through the one shared drag rule
         // (settings_layout.h: the chat list's sign and give), and snaps back on release.
         const int next = om::ui::settingsDragScroll(g_setScroll0, dy, g_setMaxScroll);
@@ -3935,13 +4015,13 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       snprintf(reply, cap,
                "[cmd] ok status mesh=%s name=\"%s\" path=%s channels=%d contacts=%d dm=%d "
                "unread=%d clock=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
-               "hist_worst_us=%lu hist_dropped=%lu",
+               "hist_worst_us=%lu hist_dropped=%lu loop_stack_free=%u",
                om::meshLinkReady() ? "up" : "down", name, path, om::mcChannelCount(), g_nodeCount,
                om::meshDmCount(), unreadTotal(),
                om::timeSourceName(om::timeKeeper().source()),
                !hs.ready ? "off" : (hs.sd ? "sd" : "spiffs"), (unsigned long)hs.bytes, hs.slots,
                (unsigned long)hs.records, (unsigned long)hs.worstFlushUs,
-               (unsigned long)hs.dropped);
+               (unsigned long)hs.dropped, (unsigned)uxTaskGetStackHighWaterMark(nullptr));
       return;
     }
 

@@ -64,6 +64,59 @@ constexpr bool settingsTabFits(SettingsTab t, int16_t width) {
   return settingsTabLabelWidth(t) + 2 * kSetTabLabelPadX <= tabW;
 }
 
+// --------------------------------------------------------------------------------------------- pages
+// EST-350: every Settings page, here rather than in the shell, so the history that Back walks and
+// the host test that proves it speak about the same thing. The five roots are the Settings tabs; the
+// rest are pages reached from a row.
+enum class SetPage : uint8_t {
+  GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
+  Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
+  Sound, SoundPicker, Wifi, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash, Count,
+};
+constexpr int kSetPageCount = (int)SetPage::Count;
+
+constexpr bool settingsRootPage(SetPage p) { return (int)p <= (int)SetPage::RptrRoot; }
+
+// Where the user came from, one entry per step away from a page: the page and the px it was scrolled
+// to. Back pops the last step, so General > Node > Name > Back > Back lands on General exactly where
+// it was left (Filip, EST-350: "Back from the Node page returns to General at the same scroll
+// position"). A full stack drops its OLDEST step, never the newest: Back always has a way up.
+class SettingsNav {
+ public:
+  static constexpr int kMaxDepth = 10;
+
+  void reset() { depth_ = 0; }
+  bool empty() const { return depth_ == 0; }
+  int depth() const { return depth_; }
+
+  void push(SetPage page, int scroll) {
+    if (depth_ >= kMaxDepth) {
+      for (int i = 1; i < kMaxDepth; ++i) {
+        page_[i - 1] = page_[i];
+        scroll_[i - 1] = scroll_[i];
+      }
+      depth_ = kMaxDepth - 1;
+    }
+    page_[depth_] = page;
+    scroll_[depth_] = (int16_t)scroll;
+    ++depth_;
+  }
+
+  // Pops one step. False (and nothing written) when there is none: Back then leaves Settings.
+  bool pop(SetPage* page, int* scroll) {
+    if (depth_ <= 0) return false;
+    --depth_;
+    if (page != nullptr) *page = page_[depth_];
+    if (scroll != nullptr) *scroll = scroll_[depth_];
+    return true;
+  }
+
+ private:
+  SetPage page_[kMaxDepth] = {};
+  int16_t scroll_[kMaxDepth] = {};
+  int depth_ = 0;
+};
+
 // --------------------------------------------------------------------------------------------- rows
 // A page is a flat list. Section headers are rows too, so one index addresses everything and the
 // content height is the sum of the same heights the drawing uses.
@@ -77,6 +130,7 @@ enum class SetRowKind : uint8_t {
   Button,        // a bordered key with a centred label
   Warn,          // the mock's .warn box, word-wrapped, up to three lines
   Note,          // one dim line of plain text
+  Selector,      // EST-350: a section header that IS the chat selector (label, name, chevron)
 };
 
 constexpr int kSetLabelCap = 160;
@@ -120,9 +174,15 @@ struct SettingsLayout {
   Rect body;
   Rect tabs[kSettingsTabCount];
   bool subPage = false;
+  // EST-350: the chat selector's dropdown, over the body under its selector row (empty when closed).
+  // Same three rectangles the Chat tab's dropdown uses, so one drawing and one hit test serve both.
+  Rect selPanel;
+  Rect selList;
+  Rect selManage;
 };
 
-constexpr SettingsLayout settingsLayoutFor(int16_t w, int16_t h, bool subPage) {
+constexpr SettingsLayout settingsLayoutFor(int16_t w, int16_t h, bool subPage,
+                                           bool selector = false) {
   SettingsLayout L;
   L.subPage = subPage;
   L.status = Rect{0, 0, w, kStatusH};
@@ -139,6 +199,16 @@ constexpr SettingsLayout settingsLayoutFor(int16_t w, int16_t h, bool subPage) {
                       kSetBackW, kSetBackH};
   const int16_t bodyTop = (int16_t)(titleTop + kSetTitleH);
   L.body = Rect{0, bodyTop, w, (int16_t)(h - bodyTop)};
+  if (selector) {
+    // The dropdown hangs under the selector row, which stays visible above it (like the Chat tab's
+    // header): the row is the page's first row, so its height is the same 30 px the drawing uses.
+    const int16_t top = (int16_t)(L.body.y + settingsRowHeight(SetRowKind::Selector));
+    L.selPanel = Rect{L.body.x, top, L.body.w, (int16_t)(L.body.bottom() - top)};
+    L.selManage = Rect{L.selPanel.x, (int16_t)(L.selPanel.bottom() - kSelManageH), L.selPanel.w,
+                       kSelManageH};
+    L.selList = Rect{L.selPanel.x, L.selPanel.y, L.selPanel.w,
+                     (int16_t)(L.selManage.y - L.selPanel.y)};
+  }
   return L;
 }
 

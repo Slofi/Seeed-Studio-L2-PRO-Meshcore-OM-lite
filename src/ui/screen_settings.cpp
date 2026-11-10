@@ -68,6 +68,18 @@ void drawChevron(lgfx::LovyanGFX* d, int right, int cy, uint16_t col) {
   d->drawLine((int16_t)right, (int16_t)cy, (int16_t)(right - 4), (int16_t)(cy + 3), col);
 }
 
+// The chat selector's chevron: down closed, up open. The same two 4 px lines the Chat tab's header
+// draws, so the Settings selector looks exactly like the one it reuses.
+void drawSelectorChevron(lgfx::LovyanGFX* d, int x, int cy, uint16_t col, bool up) {
+  if (up) {
+    d->drawLine((int16_t)x, (int16_t)(cy + 2), (int16_t)(x + 3), (int16_t)(cy - 2), col);
+    d->drawLine((int16_t)(x + 3), (int16_t)(cy - 2), (int16_t)(x + 6), (int16_t)(cy + 2), col);
+  } else {
+    d->drawLine((int16_t)x, (int16_t)(cy - 2), (int16_t)(x + 3), (int16_t)(cy + 2), col);
+    d->drawLine((int16_t)(x + 3), (int16_t)(cy + 2), (int16_t)(x + 6), (int16_t)(cy - 2), col);
+  }
+}
+
 void drawBackKey(lgfx::LovyanGFX* d, const Rect& r) {
   d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kPanel2);
   d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kLine);
@@ -146,6 +158,28 @@ void drawRow(lgfx::LovyanGFX* d, const SettingRow& row, const Rect& r) {
                        row.label);
       if (lineBelow) d->drawFastHLine(r.x, r.bottom() - 1, r.w, kRowLine);
       return;
+    case SetRowKind::Selector: {
+      // EST-350: a section header that is the chat selector. Same shape as the Chat tab's header
+      // (mono label, the name in ink, a chevron after it), gold and lifted while the list is open.
+      // `on` is the dropdown's open state.
+      const uint16_t bg = row.on ? kSelBg : kScreen;
+      if (row.on) d->fillRect(r.x, r.y, r.w, r.h, bg);
+      setRole(d, FontRole::MonoMeta);
+      d->setTextDatum(lgfx::textdatum_t::middle_left);
+      d->setTextColor(kDim, bg);
+      d->drawString(row.label, labelX, cy);
+      const int labelW = textWidth(d, FontRole::MonoMeta, row.label);
+      const int nameX = labelX + labelW + kSelGap;
+      const int room = r.right() - kSetPadX - 8 - nameX;
+      drawTextEllipsis(d, FontRole::SansBody, row.on ? kAccInk : kInk, bg, nameX, cy, room,
+                       row.value);
+      const int nameW = textWidth(d, FontRole::SansBody, row.value);
+      int chevX = nameX + (nameW > room ? room : nameW) + kHeadChevronGap;
+      const int chevMax = r.right() - kSetPadX - 8;
+      if (chevX > chevMax) chevX = chevMax;
+      drawSelectorChevron(d, chevX, cy, kDim, row.on);
+      break;
+    }
     case SetRowKind::Button: {
       const Rect b{(int16_t)(r.x + kSetPadX), (int16_t)(r.y + 3), (int16_t)(r.w - 2 * kSetPadX),
                    (int16_t)(r.h - 6)};
@@ -262,7 +296,8 @@ void settingsScreenDraw(const SettingsView& v) {
     return;
   }
 
-  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage);
+  const SettingsLayout L =
+      settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage, v.selector);
   d->fillScreen(kScreen);
   drawTabRow(d, L, v.tab);
   drawTitleRow(d, L, v);
@@ -276,6 +311,9 @@ void settingsScreenDraw(const SettingsView& v) {
       drawRow(d, v.rows[i], settingsRowRect(L, v.rows, v.rowCount, i, v.scroll));
     }
     d->clearClipRect();
+    // EST-350: the dropdown over the rows under it, drawn with the Chat tab's own selector drawing
+    // (ui/chat_selector.cpp) and the three rectangles the hit test uses.
+    if (v.selector) drawChatSelector(d, v.sel, L.selPanel, L.selList, L.selManage);
   } else {
     drawEmptyState(d, L.body, "No settings here", "Nothing on this tab yet.");
   }
@@ -333,6 +371,15 @@ bool settingsEditorOkHit(const SettingsView& v, int x, int y) {
   if (v.editor == SettingsEditor::None) return false;
   const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage);
   return editorOkRect(L).contains(x, y);
+}
+
+SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y) {
+  SelectorPress none;
+  none.kind = SelectorHitKind::Close;   // a press with no dropdown open is not ours
+  if (!v.selector) return none;
+  const SettingsLayout L =
+      settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage, v.selector);
+  return selectorPress(v.sel, L.selPanel, L.selList, L.selManage, x, y);
 }
 
 }  // namespace ui

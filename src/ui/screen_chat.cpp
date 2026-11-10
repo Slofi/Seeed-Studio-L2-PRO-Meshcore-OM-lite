@@ -11,6 +11,7 @@
 #include "mesh_link.h"   // meshPathHopName: naming the repeaters a packet came over
 #include "ui/age.h"       // the one timestamp formatter
 #include "ui/badge_font.h"
+#include "ui/chat_selector.h"   // EST-350: one selector, drawn here and in Settings > Chat
 #include "ui/compose_text.h"
 #include "ui/dm_delivery.h"
 #include "ui/emoji_picker.h"
@@ -21,6 +22,22 @@
 namespace om {
 namespace ui {
 namespace {
+
+// EST-350: the ChatView's selector fields as the shared model (ui/chat_selector.h). One adapter, so
+// the drawing and the hit test read the same numbers and Settings has its own model of the same shape.
+SelectorModel selectorModelOf(const ChatView& v) {
+  SelectorModel m;
+  m.chats = v.chats;
+  m.chatCount = v.chatCount;
+  m.channelCount = v.channelCount;
+  m.dmCount = v.dmCount;
+  m.selected = v.selChat;
+  m.scroll = v.selScroll;
+  m.nowSec = v.nowSec;
+  m.nowWall = v.nowWall;
+  m.nowReal = v.nowReal;
+  return m;
+}
 
 struct MeasureCtx {
   lgfx::LovyanGFX* d;
@@ -40,14 +57,6 @@ void messageStamp(char* out, size_t cap, const ChatView& v, const ChatMsgView& m
   s.uptime = m.ts;
   s.wallReal = m.wallReal;
   stampText(out, cap, s, v.nowWall, v.nowSec, v.nowReal, form);
-}
-
-void entryStamp(char* out, size_t cap, const ChatView& v, const ChatEntry& e) {
-  Stamp s;
-  s.wall = e.lastWall;
-  s.uptime = e.lastTs;
-  s.wallReal = e.lastWallReal;
-  stampText(out, cap, s, v.nowWall, v.nowSec, v.nowReal, StampForm::Clock);
 }
 
 // An unread count as the screens show it: one digit, or "9+" above nine (ui/badge_font.h holds the
@@ -135,95 +144,6 @@ int chatMsgHeights(const ChatView& v, int16_t* out, int max) {
 const ChatEntry* openChat(const ChatView& v) {
   if (v.chats == nullptr || v.selChat < 0 || v.selChat >= v.chatCount) return nullptr;
   return &v.chats[v.selChat];
-}
-
-// One row of the dropdown: the chat's name and the last message's age on the first line, its sender
-// and the start of its text on the second, the unread count at the right. The open chat carries the
-// gold dot.
-void drawSelRow(lgfx::LovyanGFX* d, const ChatView& v, const ChatEntry& e, int entry,
-                const Rect& list) {
-  const int top = selRowTop(list, v.channelCount, v.dmCount, entry, v.selScroll);
-  const Rect row{list.x, (int16_t)top, list.w, kSelRowH};
-  if (!row.overlaps(list)) return;
-  const bool on = (entry == v.selChat);
-  if (on) d->fillRect(row.x, row.y, row.w, row.h, kSelBg);
-
-  const int cy1 = row.y + kSelLine1Cy;
-  const int cy2 = row.y + kSelLine2Cy;
-  const int dotX = row.x + kSelPadX;
-  if (on) d->fillCircle(dotX + kSelDot / 2, cy1, kSelDot / 2, kAcc);
-  const int nameX = dotX + kSelDot + kSelDotGap;
-
-  int right = row.right() - kSelPadX;
-  char age[16];
-  if (e.hasLast) {
-    entryStamp(age, sizeof(age), v, e);
-    drawTextRight(d, FontRole::MonoMeta, kDimmer, on ? kSelBg : kPanel, right, cy1, age);
-    right -= textWidth(d, FontRole::MonoMeta, age) + kSelGap;
-  }
-  drawTextEllipsis(d, FontRole::SansBody, on ? kAccInk : kInk, on ? kSelBg : kPanel, nameX, cy1,
-                   right - nameX, e.name);
-
-  int textRight = row.right() - kSelPadX;
-  if (e.unread > 0) {
-    char b[4];
-    countText(b, sizeof(b), e.unread);
-    drawTextRight(d, FontRole::MonoMeta, kAcc, on ? kSelBg : kPanel, textRight, cy2, b);
-    textRight -= textWidth(d, FontRole::MonoMeta, b) + kSelGap;
-  }
-  char line[kMeshNameCap + 2 + kMeshTextCap];   // "from: text", both at MeshCore's own limits
-  if (e.hasLast) {
-    snprintf(line, sizeof(line), "%s: %s", e.lastFrom, e.lastText);
-    // A preview line may still be too wide: drawTextEllipsis cuts on a code point boundary and ends
-    // the line with "...", never mid-sequence and never without saying so.
-    drawTextEllipsis(d, FontRole::MonoMeta, kDim, on ? kSelBg : kPanel, nameX, cy2,
-                     textRight - nameX, line);
-  } else {
-    snprintf(line, sizeof(line), "no messages yet");
-    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, on ? kSelBg : kPanel, nameX, cy2,
-                     textRight - nameX, line);
-  }
-
-  const int lineY = row.bottom() - 1;
-  if (lineY >= list.y && lineY < list.bottom()) {
-    d->drawFastHLine(row.x, lineY, row.w, kRowLine);
-  }
-}
-
-// The selector: a vertical list over the message area, sections "Channels" and "Direct messages",
-// and the pinned "Manage channels" row at its floor.
-void drawSelector(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
-  d->fillRect(g.selPanel.x, g.selPanel.y, g.selPanel.w, g.selPanel.h, kPanel);
-  d->drawRect(g.selPanel.x, g.selPanel.y, g.selPanel.w, g.selPanel.h, kLine);
-
-  d->setClipRect(g.selList.x, g.selList.y, g.selList.w, g.selList.h);
-  int y = g.selList.y - v.selScroll;
-  drawTextLeft(d, FontRole::MonoMeta, kDim, kPanel, g.selList.x + kSelPadX,
-               y + kSelSectionH / 2, "Channels");
-  y += kSelSectionH;
-  for (int i = 0; i < v.channelCount && i < v.chatCount; ++i) {
-    drawSelRow(d, v, v.chats[i], i, g.selList);
-  }
-  y += v.channelCount * kSelRowH;
-  drawTextLeft(d, FontRole::MonoMeta, kDim, kPanel, g.selList.x + kSelPadX,
-               y + kSelSectionH / 2, "Direct messages");
-  y += kSelSectionH;
-  if (v.dmCount <= 0) {
-    drawTextLeft(d, FontRole::MonoMeta, kDimmer, kPanel, g.selList.x + kSelPadX,
-                 y + kSelEmptyH / 2, "No direct messages yet");
-  } else {
-    for (int i = 0; i < v.dmCount; ++i) {
-      const int entry = v.channelCount + i;
-      if (entry < v.chatCount) drawSelRow(d, v, v.chats[entry], entry, g.selList);
-    }
-  }
-  d->clearClipRect();
-
-  const int cy = g.selManage.y + g.selManage.h / 2;
-  d->drawFastHLine(g.selManage.x, g.selManage.y, g.selManage.w, kLine);
-  drawTextLeft(d, FontRole::SansBody, kAcc, kPanel, g.selManage.x + kSelPadX, cy,
-               "Manage channels");
-  drawChevron(d, g.selManage.right() - kSelPadX - kSelChevronW, cy, kAcc, false, true);
 }
 
 // The header row: the open chat's name with a down chevron, and the gold dot counting unread in the
@@ -676,7 +596,10 @@ void chatScreenDraw(const ChatView& v) {
   drawStatusBar(d, L, v.status);
   drawHead(d, v, g);
   drawMessages(d, v, g);
-  if (v.selector) drawSelector(d, v, g);
+  if (v.selector) {
+    // EST-350: the SAME drawing the Settings > Chat selector uses (ui/chat_selector.cpp).
+    drawChatSelector(d, selectorModelOf(v), g.selPanel, g.selList, g.selManage);
+  }
   if (v.osk) drawSheet(d, v, g);
   else drawCompose(d, v, g);
   // The sheet covers the bottom edge, so the tab bar is not drawn while it is open (mock .kb-open).
@@ -716,19 +639,19 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   }
 
   // The dropdown swallows the screen: a row opens that chat, the last row opens the channel
-  // settings, a tap on the header or anywhere else closes it.
+  // settings, a tap on the header or anywhere else closes it. EST-350: the hit test is the ONE in
+  // ui/chat_selector.h, the same call Settings > Chat makes with its own rectangles.
   if (v.selector) {
-    if (g.selManage.contains(x, y)) {
+    const SelectorPress h =
+        selectorPress(selectorModelOf(v), g.selPanel, g.selList, g.selManage, x, y);
+    if (h.kind == SelectorHitKind::Manage) {
       r.hit = ChatHit::SelManage;
       return r;
     }
-    if (g.selList.contains(x, y)) {
-      const int i = selRowAt(g.selList, v.channelCount, v.dmCount, v.selScroll, y);
-      if (i >= 0 && i < v.chatCount) {
-        r.hit = ChatHit::SelRow;
-        r.index = i;
-        return r;
-      }
+    if (h.kind == SelectorHitKind::Row) {
+      r.hit = ChatHit::SelRow;
+      r.index = h.row;
+      return r;
     }
     r.hit = ChatHit::SelClose;
     return r;
@@ -855,7 +778,7 @@ int chatMaxScroll(const ChatView& v) {
 int chatSelectorMaxScroll(const ChatView& v) {
   if (!v.selector) return 0;   // the dropdown is closed: nothing to scroll
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
-  return selMaxScroll(g.selList, v.channelCount, v.dmCount);
+  return selectorMaxScroll(selectorModelOf(v), g.selList);   // EST-350: the shared clamp
 }
 
 int chatEmojiMaxScroll(const ChatView& v) {

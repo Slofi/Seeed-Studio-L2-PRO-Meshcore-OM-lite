@@ -4149,3 +4149,102 @@ Trio Glass Top and Multi Glass Sparkle.
 
 ## 2026-11-10 23:40 (Claude): EST-369 on the device
 - 41 WAVs checked (0 clipped, edges at zero, none silent): Solo 10 (beeps included: Beep Clean, Beep High, Soft Tick ...), Duo 10, Trio 10, Multi 10, Alert 1. Built in the sandbox (exit 0, RAM 156,752 B, flash 2,799,289 B), tests exit 0, reviewed binary flashed (2,799,648 B); `chats` 0 mismatches; `play message` -> "Soft Hi" (a migrated choice). Listening: Filip.
+
+## 2026-11-10 23:47 (DeepSeek): EST-370 map credits plain, names toggle, centre dot
+
+The ticket (Filip ~23:40): the attribution loses its outline too, a Names key next to the Traces key,
+and a small dot at the map's centre. Plain words: three small changes, one new saved setting, and a
+check of what the zoom already did.
+
+### 1. Credits: plain text, nothing around it
+- `screen_map.cpp` no longer draws the four 1 px outline copies. `drawPlainTextOnMap()` sets only the
+  ink colour and draws the string once, so the tiles show through the anti-aliased glyph edges: no
+  outline, no plate, no background rectangle. The box is still `mapCreditRect()` (6..144, 199..209)
+  and the text is still the small dim mono line "Esri, HERE, Garmin, OSM".
+- `theme.h` lost the now-unused `kMapCreditEdge`. The near-black survives only as `kMapBg`, which the
+  centre dot uses for its ring. The ellipsis fallback for a screen too narrow for the whole line is
+  still there; neither the L2 nor the Tanmatsu takes it.
+
+### 2. The Names key
+- Fifth key on the top of the right column, above Traces / locate / + / -:
+  `MapChrome::names` is 24x24 at (290, 73), centre (302, 85). The hit test is the same call as the
+  drawing (`mapHitAt` -> `MapHitKind::Names`), so a tap and the key can never disagree.
+- Icon from `tools/mkicons.py`: `Names`, a 13x13 label tag with its string hole, generated with the
+  rest (the preview `docs/shots/icons-preview.png` was regenerated). Ink while off, gold on the dark
+  gold key while on, exactly like the Traces route icon.
+- `MapView::namesOn` gates the label loop. Off hides EVERY contact label (clients included, so the
+  ticket's "nodes, repeaters and rooms" all obey it); the markers stay. Our own marker still has no
+  label (it is the tab's "Your position"). When on, an unselected client is labelled too, where the
+  old mock rule showed clients only when selected; that is the one visible behaviour change beyond
+  the toggle.
+- Saved in NVS `names`, default ON, read once at boot. The two switches now share one small store,
+  `ui/map_layers.h` (`MapLayerPrefs`), which owns the keys (`traces`, `names`), the defaults and the
+  one-key save; `main.cpp` injects the Preferences read/write. Boot prints
+  `[map] layers traces=1 names=1`; a tap prints `[map] names on|off`.
+
+### 3. The centre dot
+- `kMapCentreDotR = 1`: a 3 px `kInk` core with a 1 px `kMapBg` ring. The ring is only contrast, so
+  the dot reads on a bright topo tile and on a dark one; it is not a crosshair.
+- `mapCentreOf(chrome)` derives it from the one view rectangle: (160, 107) on the L2. `mapCentreDotRect`
+  returns the 3x3 core. The screen draws it after the tiles and the trace route, before the markers,
+  labels, chip and keys, so it can never cover a node or a button.
+- The same numbers are now `ui/map_chrome.h`'s `kMapCanvasW/H` and `map.cpp` builds its `kViewW/H` from
+  them, so the tile renderer, the dot, `mapProject`/`mapScreenToLatLon` and the picker share one source.
+- The Position picker is untouched: `drawMapPick` calls `mapRender()` and draws its own crosshair at
+  the same point (crosshair box 154,101 12x12 -> 160,107); it never calls `drawCentreDot`. The
+  picker's `mapScreenToLatLon` call now uses the shared `kMapCentreX/Y` instead of repeating 160,107.
+
+### 4. Does the zoom really zoom around that centre? YES, and + / - keep it fixed
+- `mapZoomBy()` only changes the zoom level, then calls `centreFromLatLon()` from the UNCHANGED
+  `s_cLat/s_cLon`; `mapRender()` puts that geographic centre at (kViewW/2, kViewH/2) = (160,107),
+  and `mapProject()` / `mapScreenToLatLon()` use the same point. So the point under the dot is the
+  zoom focus.
+- Checked the arithmetic offline (same formulas as `map.cpp`) for the whole range z9..z18, the z17
+  <-> z18 2x magnification, and after a pan then zoom in/out: the centre latitude/longitude projected
+  to exactly (160.0, 107.0) every time. The + / - keys call `mapZoomBy(1/-1)`, so they keep the centre
+  fixed; the picker's two keys use the same call, so its crosshair stays on the same point too.
+- Two limits that are by design, not bugs: at the pack's ends (z9, z18) `mapZoomBy` does nothing, and
+  follow/lock recentres on our GPS fix instead of the previous centre.
+
+### Build and tests
+- `pio run -e om_lite_l2` exit 0: **RAM 156,768 B** (47.8% of 327,680; EST-369 was 156,752, so +16 B:
+  the two bools and the store), **flash 2,800,001 B** (42.7% of 6,553,600; +712 B: the tag mask, the
+  extra key, the labels/credits code and the store), `firmware.bin` **2,800,368 B** (+720 B).
+- `sh test/host/run.sh` exit 0. New `test/host/test_est370.cpp` (linked with `ui/map_chrome.cpp`):
+  - the Names rect is the top key (290..314, 73..97), 4 px gaps, no overlap with the chip or any other
+    key; its centre and every pixel answer Names, one pixel outside does not, and a marker sitting on
+    it still wins; the credit box never overlaps it;
+  - the centre point is (160,107), equals the view's centre and the canvas centre, the dot's core is
+    3x3 there, inside the map and clear of the bars, chip and keys; it stays put when the callout
+    opens; the picker's crosshair centre is the same pixel;
+  - the saved switches: keys "names"/"traces", both default ON with no writes on a first boot, a
+    toggle writes only that key and survives a fresh load, set-without-flip persists, a failed write
+    still flips the on-screen value and returns false, no reader keeps the defaults, and each key is
+    independent of the other.
+  - `test_est351.cpp` updated for the fifth key and the plain credit; all its other checks pass.
+- Both full runs of `test/host/run.sh` in this session exited 0 (the second re-run was a confirmation).
+
+### Could not check (no device and no radio in the sandbox)
+- The glass: whether the plain dim credit is still readable on a bright topo tile (it has no outline
+  now), whether the tag reads at 13 px next to the Traces route, whether the 3 px dot is visible on
+  both light and dark tiles, labels on/off on real contacts, and the new key's gold/plain states.
+- The saved key across a real reboot (the host proves the store, NVS itself is the device's).
+- The picker on the glass (the code path is proven: it does not call the dot).
+
+### Next step for Claude (one reader on the USB port)
+1. Flash `firmware.bin` (2,800,368 B). Boot log must show `[map] layers traces=1 names=1`.
+2. `tools/cmd.py tap 200 227` (Map tab), `tools/shot.py`: the credit at the bottom left is plain dim
+   text with NO outline and NO plate; a small dot sits at (160,107); the Names tag key is at the top of
+   the right column (centre 302,85) and gold (names default on); Traces (302,113) still gold.
+3. `tools/cmd.py tap 302 85`: log `[map] names off`, every label disappears, the markers stay. Tap
+   again: `[map] names on`, labels return. Reboot once: the last state must come back.
+4. `tools/cmd.py tap 302 113`: Traces still toggles independently (`[map] traces off/on`), names do
+   not change.
+5. `tools/cmd.py tap 302 169` / `302 197` (+ / -): log `[map] zoom N`; a landmark that was under the
+   centre dot must stay under it at every step. Old zoom-out is 302,197 and zoom-in 302,169.
+6. RPTR > Position > the map picker: its own crosshair is there and the small centre dot must NOT be.
+7. Look at the credit over the brightest tile in the pack at z13: if the plain line is too faint to
+   read, the next ticket can give it a shadow again, but that is Filip's call.
+
+## 2026-11-10 23:50 (Claude): EST-370 on the device
+- Built in the sandbox (exit 0, RAM 156,768 B, flash 2,800,001 B), tests exit 0, reviewed binary flashed (2,800,368 B), `chats` 0 mismatches. Map (`docs/shots/2026-11-10-2343-map-names-dot.png`): credits plain dim text, the Names key (on) above Traces, a small centre dot; zoom keeps the centre (DS read the code: + / - change only the level around the unchanged centre).

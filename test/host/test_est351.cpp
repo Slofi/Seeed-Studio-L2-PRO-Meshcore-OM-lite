@@ -1,8 +1,9 @@
-// EST-351 host test: the map chrome's key rectangles and hit test, the outlined tile attribution and
+// EST-351 host test: the map chrome's key rectangles and hit test, the plain tile attribution and
 // the RPTR page rectangles. EST-352 keeps: the RPTR row's labelled second line, the native RGB565
 // byte-order round trip and the shared keyboard sheet's per-field filters, limits and geometry.
 // EST-368 removed the distance scale and its two end-anchored labels; the Traces key joined the
-// column and the attribution moved to the bottom left, without a plate. Plain g++, no Arduino.
+// column and the attribution moved to the bottom left, without a plate. EST-370 removed the
+// attribution's outline too and put the Names key on top of the column. Plain g++, no Arduino.
 #include <math.h>
 
 #ifndef M_PI
@@ -38,14 +39,17 @@ static void testMapChrome() {
   CHECK(c.zoomOut.right() == c.zoomIn.right());
   CHECK(c.lock.right() == c.zoomIn.right());
   CHECK(c.traces.right() == c.zoomIn.right());
+  CHECK(c.names.right() == c.zoomIn.right());
   CHECK(c.zoomOut.bottom() == c.view.bottom() - kMapMargin);
   CHECK(c.zoomOut.y == c.zoomIn.bottom() + kMapKeyGap);
   CHECK(c.zoomIn.y == c.lock.bottom() + kMapKeyGap);
-  CHECK(c.lock.y == c.traces.bottom() + kMapKeyGap);   // EST-368: Traces is the top key
+  CHECK(c.lock.y == c.traces.bottom() + kMapKeyGap);
+  CHECK(c.traces.y == c.names.bottom() + kMapKeyGap);   // EST-370: Names is the top key
   CHECK(!c.zoomIn.overlaps(c.zoomOut));
   CHECK(!c.lock.overlaps(c.zoomIn));
   CHECK(!c.traces.overlaps(c.lock));
-  CHECK(c.traces.y >= c.chip.bottom());                // the column stays below the chip
+  CHECK(!c.names.overlaps(c.traces));
+  CHECK(c.names.y >= c.chip.bottom());                  // the column stays below the chip
   CHECK(c.callout.empty());                            // nothing selected: no panel
 
   const MapChrome s = mapChromeFor(L, true);
@@ -65,6 +69,8 @@ static void testMapHit() {
         MapHitKind::Lock);
   CHECK(mapHitAt(c, nullptr, 0, c.traces.x + c.traces.w / 2,
                  c.traces.y + c.traces.h / 2).kind == MapHitKind::Traces);
+  CHECK(mapHitAt(c, nullptr, 0, c.names.x + c.names.w / 2,
+                 c.names.y + c.names.h / 2).kind == MapHitKind::Names);
   CHECK(mapHitAt(c, nullptr, 0, c.callout.x + 4, c.callout.y + 4).kind == MapHitKind::Callout);
   CHECK(mapHitAt(c, nullptr, 0, 160, 90).kind == MapHitKind::Map);
   CHECK(mapHitAt(c, nullptr, 0, 0, 0).kind == MapHitKind::None);   // the status bar's pixels
@@ -165,9 +171,9 @@ static void testRgb565RoundTrip() {
 }
 
 static void testMapCredit() {
-  // EST-368: the attribution is drawn straight on the tiles with a 1 px outline, no plate. It sits on
-  // the bottom LEFT (where the removed scale was), clamped inside the map area and clear of the key
-  // column. The mono advance the map draws with is 6 px.
+  // EST-370: the attribution is plain dim text straight on the tiles, no outline and no plate. It
+  // sits on the bottom LEFT (where the removed scale was), clamped inside the map area and clear of
+  // the key column. The mono advance the map draws with is 6 px.
   const int creditW = 6 * (int)strlen(kMapCreditText);
   CHECK(creditW == 138);   // "Esri, HERE, Garmin, OSM", 23 glyphs
 
@@ -183,7 +189,7 @@ static void testMapCredit() {
     CHECK(cr.right() <= c.view.right());
     CHECK(cr.y >= c.status.bottom());
     CHECK(!cr.overlaps(c.zoomIn) && !cr.overlaps(c.zoomOut) && !cr.overlaps(c.lock) &&
-          !cr.overlaps(c.traces));
+          !cr.overlaps(c.traces) && !cr.overlaps(c.names));
     CHECK(!cr.overlaps(c.chip));
   }
 
@@ -353,6 +359,6 @@ int main() {
     printf("est351: %d failure(s)\n", g_fail);
     return 1;
   }
-  printf("est351: map chrome (no scale), outlined credit placement, RPTR layout, RGB565 round trip and the shared keyboard sheet ok\n");
+  printf("est351: map chrome (no scale, plain credit), RPTR layout, RGB565 round trip and the shared keyboard sheet ok\n");
   return 0;
 }

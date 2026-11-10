@@ -16,6 +16,7 @@
 #include "board.h"
 #include "psram_alloc.h"
 #include "radio_stats.h"
+#include "ui/map_chrome.h"   // EST-370: the canvas size and centre are one source (the chrome's dot)
 #include "ui/rgb565.h"
 #include "ui/theme.h"
 
@@ -24,8 +25,10 @@ namespace om {
 namespace {
 
 constexpr int kTile = 256;
-constexpr int kViewW = 320;   // the map area above the tab bar
-constexpr int kViewH = 214;
+// EST-370: ui/map_chrome.h owns the canvas size and its centre point, so the tile renderer, the
+// chrome's dot, mapProject/mapScreenToLatLon and the position picker cannot drift apart.
+constexpr int kViewW = ui::kMapCanvasW;   // the map area above the tab bar
+constexpr int kViewH = ui::kMapCanvasH;
 constexpr size_t kMaxTile = 256 * 1024;
 constexpr uint32_t kRec = 24;
 constexpr int kCache = 8;

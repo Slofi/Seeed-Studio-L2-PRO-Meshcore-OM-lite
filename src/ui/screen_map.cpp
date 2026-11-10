@@ -2,8 +2,9 @@
 // Map screen: the new layer's chrome over map.cpp's tiles. Everything is drawn into the off-screen
 // frame, once, then pushed by omFrameEnd(); the toast rides on top as always.
 //
-// EST-368: no distance scale; the attribution is written straight on the map with a 1 px outline;
-// the Traces key toggles OM's animated routes, drawn over the tiles at the map's own frame rate.
+// EST-368: no distance scale; the Traces key toggles OM's animated routes, drawn over the tiles at
+// the map's own frame rate. EST-370 (Filip ~23:40): the attribution is plain dim text, the Names key
+// hides every label, and a small dot marks the map's centre.
 #include "ui/screen_map.h"
 
 #include <Arduino.h>
@@ -54,23 +55,27 @@ void drawMarker(lgfx::LovyanGFX* d, const MapMarker& m) {
   }
 }
 
-// EST-368: text straight on the tiles. LovyanGFX fills a character cell only when the background
-// colour differs from the ink, so setTextColor(fg) alone is a transparent draw; the outline is the
-// same string at the four 1 px neighbours in a near-black, which is what keeps a small dim line
-// legible on a bright topo tile without a box behind it.
-void drawTextOnMap(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, const Rect& box, const char* s) {
+// EST-370 (Filip ~23:40: "no outline on the credits!"): the attribution is plain small dim text
+// straight on the tiles. setTextColor(fg) with no background makes LovyanGFX draw only the glyph
+// pixels (the tile shows through the anti-aliased edges), so nothing is drawn around or behind it.
+void drawPlainTextOnMap(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, const Rect& box,
+                        const char* s) {
   if (d == nullptr || s == nullptr || s[0] == 0 || box.w <= 0) return;
   setRole(d, role);
   d->setTextDatum(lgfx::textdatum_t::middle_left);
-  const int x = box.x;
-  const int cy = box.y + box.h / 2;
-  d->setTextColor(kMapCreditEdge);
-  d->drawString(s, x - 1, cy);
-  d->drawString(s, x + 1, cy);
-  d->drawString(s, x, cy - 1);
-  d->drawString(s, x, cy + 1);
   d->setTextColor(ink);
-  d->drawString(s, x, cy);
+  d->drawString(s, box.x, box.y + box.h / 2);
+}
+
+// EST-370: the centre dot, above the tiles (and the route) but below the markers and the keys. A
+// 3 px kInk core with a 1 px dark ring, so it reads on a bright topo tile as well as a dark one. It
+// is not a crosshair: the Position picker keeps its own crosshair and never calls this screen.
+void drawCentreDot(lgfx::LovyanGFX* d, const MapChrome& c) {
+  const Rect r = mapCentreDotRect(c);
+  const int cx = r.x + r.w / 2;
+  const int cy = r.y + r.h / 2;
+  d->fillCircle(cx, cy, kMapCentreDotR + 1, kMapBg);   // the 1 px ring
+  d->fillCircle(cx, cy, kMapCentreDotR, kInk);         // the 3 px core
 }
 
 // A colour laid over whatever the frame already holds (the tiles) by a 0..255 alpha. omFramePixel
@@ -173,18 +178,18 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
 
   const MapChrome c = mapScreenChrome(v);
 
-  // EST-368 (Filip ~21:35): the tile attribution, drawn straight on the map in a small dim face
-  // with a 1 px dark outline. No plate behind it, on the bottom left where the scale used to be.
+  // EST-370 (Filip ~23:40): the tile attribution is PLAIN small dim text on the map: no outline, no
+  // plate, nothing around it.
   if (om::mapReady()) {
     const int creditW =
         measureText(d, FontRole::MonoMeta, kMapCreditText, (int)strlen(kMapCreditText));
     const Rect cr = mapCreditRect(c, (int16_t)creditW);
     if (!cr.empty()) {
       if (creditW <= cr.w) {
-        drawTextOnMap(d, FontRole::MonoMeta, kMapCredit, cr, kMapCreditText);
+        drawPlainTextOnMap(d, FontRole::MonoMeta, kMapCredit, cr, kMapCreditText);
       } else {
-        // A box too narrow for the whole line: the ellipsis form, on the panel colour, so the cut
-        // is visible instead of running under the keys.
+        // A box too narrow for the whole line (no real screen is): shorten it so it never runs
+        // under the key column.
         drawTextEllipsis(d, FontRole::MonoMeta, kMapCredit, kMapBg, cr.x, cr.y + cr.h / 2, cr.w,
                          kMapCreditText);
       }
@@ -193,6 +198,9 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
 
   // The route belongs under the markers; the moving dot goes on top of them (below).
   if (!v.trace.direct) drawTrace(d, v.trace, false);
+
+  // EST-370: the centre dot, above the tiles and the route, below the markers and the keys.
+  drawCentreDot(d, c);
 
   // Node markers over the tiles, our own position last so it is never hidden by a contact.
   for (int i = 0; i < v.markerCount; ++i) {
@@ -203,16 +211,19 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
     if (v.markers[i].self) drawMarker(d, v.markers[i]);
   }
 
-  // Labels: the mock shows every repeater and room, a client only when selected or on a trace.
-  for (int i = 0; i < v.markerCount; ++i) {
-    const MapMarker& m = v.markers[i];
-    if (m.self || (m.type == 1 && !m.selected)) continue;
-    setRole(d, FontRole::MonoMeta);
-    const int w = measureText(d, FontRole::MonoMeta, m.name, (int)strlen(m.name));
-    const int lx = m.x - w / 2;
-    const int ly = m.y + 11;
-    d->fillRect(lx - 2, ly - 5, w + 4, 10, kMapBg);
-    drawTextLeft(d, FontRole::MonoMeta, m.selected ? kAccInk : kInk, kMapBg, lx, ly, m.name);
+  // EST-370: the Names key. Off hides every marker label; the markers themselves stay. When on,
+  // every contact is named (clients included), our own marker never (the tab's "Your position").
+  if (v.namesOn) {
+    for (int i = 0; i < v.markerCount; ++i) {
+      const MapMarker& m = v.markers[i];
+      if (m.self) continue;
+      setRole(d, FontRole::MonoMeta);
+      const int w = measureText(d, FontRole::MonoMeta, m.name, (int)strlen(m.name));
+      const int lx = m.x - w / 2;
+      const int ly = m.y + 11;
+      d->fillRect(lx - 2, ly - 5, w + 4, 10, kMapBg);
+      drawTextLeft(d, FontRole::MonoMeta, m.selected ? kAccInk : kInk, kMapBg, lx, ly, m.name);
+    }
   }
 
   // The moving dot, its tail and the direct-arrival ring ride above markers and labels.
@@ -227,11 +238,12 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   drawTextLeft(d, FontRole::MonoMeta, kDim, kPanel, c.chip.x + kMapChipPadX,
                c.chip.y + c.chip.h / 2, chip);
 
-  // Zoom, follow and the Traces toggle (EST-368), bottom right, as in the mock.
+  // Zoom, follow, Traces (EST-368) and Names (EST-370), bottom right, as in the mock.
   keyBox(d, c.zoomIn, kPanel, kLine);
   keyBox(d, c.zoomOut, kPanel, kLine);
   keyBox(d, c.lock, v.locked ? kSelBg2 : kPanel, v.locked ? kAcc : kLine);
   keyBox(d, c.traces, v.tracesOn ? kSelBg2 : kPanel, v.tracesOn ? kAcc : kLine);
+  keyBox(d, c.names, v.namesOn ? kSelBg2 : kPanel, v.namesOn ? kAcc : kLine);
   setRole(d, FontRole::SansTitle);
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(kInk, kPanel);
@@ -243,6 +255,11 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   const int iconY = c.traces.y + (c.traces.h - (int)kIconTrace.h) / 2;
   drawIcon(d, kIconTrace, iconX, iconY, v.tracesOn ? kAcc : kInk,
            v.tracesOn ? kSelBg2 : kPanel);
+  // The Names icon (tools/mkicons.py): a label tag, gold while names are on.
+  const int namesX = c.names.x + (c.names.w - (int)kIconNames.w) / 2;
+  const int namesY = c.names.y + (c.names.h - (int)kIconNames.h) / 2;
+  drawIcon(d, kIconNames, namesX, namesY, v.namesOn ? kAcc : kInk,
+           v.namesOn ? kSelBg2 : kPanel);
 
   // The tapped marker's panel (mock .callout): dark gold, gold edge, the name then one mono line.
   if (v.callout && !c.callout.empty()) {

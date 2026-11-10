@@ -59,10 +59,11 @@ constexpr uint16_t kReplyInk  = rgb565(0xbcd8f0);
 constexpr uint16_t kTagInk    = rgb565(0x9ad7ff);
 constexpr uint16_t kMapBg     = rgb565(0x191816);  // mock .mapwrap
 constexpr uint16_t kMapSide   = rgb565(0x11100e);  // mock .map-side
-constexpr uint16_t kMapCredit = rgb565(0x9aa3b0);  // tile attribution, drawn straight on the tiles
-// EST-368: the attribution has no plate behind it, so a 1 px dark outline carries it over a bright
-// tile the way a text shadow does. Never a black box (Filip, ~21:35).
-constexpr uint16_t kMapCreditEdge = rgb565(0x0b0a09);
+constexpr uint16_t kMapCredit = rgb565(0x9aa3b0);  // tile attribution, plain dim text on the tiles
+// EST-370 (Filip ~23:40): the attribution is PLAIN text now, no outline and no plate ("no outline on
+// the credits!"). Its box is still mapCreditRect(); the screen draws it transparently.
+// The Map's centre dot uses kInk for its 3 px core and kMapBg for the 1 px ring that keeps it
+// readable on both a bright topo tile and a dark one.
 // EST-368: OM's Traces (OverMesh .trace CSS): a faint dashed route, a moving dot with a short
 // fading tail, and an expanding ring for a direct arrival.
 constexpr uint16_t kTraceLine = rgb565(0x8b5cf6);   // the route, drawn at low opacity

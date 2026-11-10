@@ -35,6 +35,9 @@ ICONS = [
     # EST-368: the Map's Traces toggle: a route seen from above, a line through three hops with the
     # moving packet as a dot at the end. 13 px, the same box as the gear and the lock.
     ("Trace", "trace", 13),
+    # EST-370: the Map's Names toggle: a label tag with its string hole, the partner of the Traces
+    # route key above it. 13 px, the same box as the other map keys' icons.
+    ("Names", "names", 13),
 ]
 
 
@@ -159,6 +162,22 @@ def trace_mask(size=13):
     end_r = N * 0.13
     ex, ey = pts[-1]
     d.ellipse((ex - end_r, ey - end_r, ex + end_r, ey + end_r), fill=255)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def names_mask(size=13):
+    """EST-370: Names. A label tag seen straight on: a filled pentagon, its point at the left, with
+    a hole for the string, so at 13 px it reads as a tag next to the Traces route key."""
+    S = SUPERSAMPLE
+    N = size * S
+    img = Image.new("L", (N, N), 0)
+    d = ImageDraw.Draw(img)
+    pts = [(N * 0.06, N * 0.50), (N * 0.42, N * 0.10), (N * 0.94, N * 0.10),
+           (N * 0.94, N * 0.90), (N * 0.42, N * 0.90)]
+    d.polygon(pts, fill=255)
+    hole_r = N * 0.105
+    hx, hy = N * 0.34, N * 0.50
+    d.ellipse((hx - hole_r, hy - hole_r, hx + hole_r, hy + hole_r), fill=0)
     return img.resize((size, size), Image.LANCZOS)
 
 
@@ -305,6 +324,8 @@ def main():
             mask = fault_mask(size)
         elif kind == "trace":
             mask = trace_mask(size)
+        elif kind == "names":
+            mask = names_mask(size)
         else:
             raise SystemExit("unknown icon kind %s" % kind)
         mask, peak = clean(mask)

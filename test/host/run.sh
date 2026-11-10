@@ -51,7 +51,8 @@ BIN30="$(mktemp /tmp/om-lite-est365.XXXXXX)"
 BIN31="$(mktemp /tmp/om-lite-est366.XXXXXX)"
 BIN32="$(mktemp /tmp/om-lite-est367.XXXXXX)"
 BIN33="$(mktemp /tmp/om-lite-est368.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33"' EXIT
+BIN34="$(mktemp /tmp/om-lite-est370.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -275,3 +276,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est368.cpp \
   ../../src/ui/map_trace.cpp ../../src/ui/notice_panel.cpp ../../src/ui/text_wrap.cpp \
   ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/timekeeper.cpp -o "$BIN33"
 "$BIN33"
+
+# EST-370: the Map's Names key, the centre dot and the two saved switches. The key is the top of the
+# right column (rect, tap, no overlap with the chip or the credit box, a marker still wins), the dot
+# is 3 px at (160,107), the same point map.cpp projects the view centre onto and the Position
+# picker's crosshair uses, and the names/traces store proves its defaults, one-key writes, reloads, a
+# failed write and a missing key.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est370.cpp \
+  ../../src/ui/map_chrome.cpp -o "$BIN34"
+"$BIN34"

@@ -51,6 +51,7 @@
 #include "ui/new_node.h"
 #include "ui/node_info.h"
 #include "ui/map_chrome.h"
+#include "ui/map_layers.h"
 #include "ui/rptr_layout.h"
 #include "ui/screen_chat.h"
 #include "ui/screen_node_info.h"
@@ -348,6 +349,17 @@ static uint8_t g_sndBatt = 0;
 static bool g_dnd = false;
 static Preferences g_prefs;
 
+// EST-370: the Map's two saved layer switches (ui/map_layers.h) read and write through these thin
+// callbacks, so the host test proves the same load/save rule with RAM instead of NVS.
+static bool mapLayerPrefRead(void*, const char* key, bool fallback, bool& out) {
+  if (!g_prefs.isKey(key)) return false;   // a first boot: the caller's default, nothing written
+  out = g_prefs.getBool(key, fallback);
+  return true;
+}
+static bool mapLayerPrefWrite(void*, const char* key, bool value) {
+  return g_prefs.putBool(key, value) != 0;   // Preferences returns the bytes written (0 = failed)
+}
+
 static uint8_t& choiceFor(SoundEvent ev) {
   switch (ev) {
     case SoundEvent::Boot:       return g_sndBoot;
@@ -516,10 +528,11 @@ static char g_mapNodeStamp[24] = "";    // its "last heard" text, built once per
 // traceHopTable()'s path-hash lookup (one 3 KB copy, not two, on the loop task's static RAM).
 static om::MeshContact g_mapContacts[32];
 
-// --- EST-368: OM's Traces on the Map -------------------------------------------------------------
+// --- EST-368 / EST-370: the Map's layer switches and OM's Traces ---------------------------------
 // The model (hop mapping, route, 420 ms geometry, the one-at-a-time queue) is ui/map_trace.h. This
-// is the shell's part: our contact table, our own position, the frame pump and its cost.
-static bool g_mapTraces = true;             // the Traces key: default on, saved in NVS "traces"
+// is the shell's part: our contact table, our own position, the frame pump and its cost. The two
+// saved switches (Traces, Names) and their NVS keys live in ui/map_layers.h, host-tested.
+static om::ui::MapLayerPrefs g_mapLayers;
 static om::ui::TraceQueue g_traceQueue;     // one route at a time
 static om::ui::TraceFrame g_traceFrame;     // what the frame being drawn shows
 static uint32_t g_traceNextFrameMs = 0;     // the animation's own frame clock
@@ -702,8 +715,10 @@ static void buildMapView(om::ui::MapView& v) {
   v.locked = g_mapLock;
   v.hasFix = g_gps.valid;
   v.markerCount = 0;
-  // EST-368: the Traces key's highlight and the one live animation frame.
-  v.tracesOn = g_mapTraces;
+  // EST-368: the Traces key's highlight and the one live animation frame. EST-370: the Names key's
+  // highlight; both come from the one saved-switch store.
+  v.tracesOn = g_mapLayers.traces();
+  v.namesOn = g_mapLayers.names();
   v.trace = g_traceFrame;
 
   // Our own position: the white dot with the gold halo.
@@ -840,7 +855,7 @@ static void tracePump(bool uiDrawOk) {
     if (g_traceQueue.busy() || g_traceFrame.live) traceMapReset();
     return;
   }
-  if (!g_mapTraces) return;
+  if (!g_mapLayers.traces()) return;
 #if defined(OM_ENABLE_MESH)
   traceWatchArrivals();
 #endif
@@ -3408,7 +3423,8 @@ static bool rptrMapDirty() {
 
 static void rptrMapPickCentreToDraft() {
   double lat = 0, lon = 0;
-  om::mapScreenToLatLon(160, 107, lat, lon);
+  // EST-370: the same centre point the Map tab's dot marks (ui/map_chrome.h), not a second number.
+  om::mapScreenToLatLon(om::ui::kMapCentreX, om::ui::kMapCentreY, lat, lon);
   g_rptrDraft.latE6 = (int32_t)(lat * 1e6);
   g_rptrDraft.lonE6 = (int32_t)(lon * 1e6);
 }
@@ -5148,8 +5164,12 @@ void setup() {
   // EST-359: the touch click is optional and OFF for a fresh device.
   g_touchSnd = g_prefs.getBool("tsnd", false);
   g_welcome = g_prefs.getBool("welc", true);
-  // EST-368: the Map's Traces toggle is remembered; default ON (Filip's ticket).
-  g_mapTraces = g_prefs.getBool("traces", true);
+  // EST-368 / EST-370: the Map's two layer switches are remembered (both default ON). The store
+  // owns the keys ("traces", "names") and reads each once, here, after Preferences is open.
+  g_mapLayers.begin(mapLayerPrefRead, mapLayerPrefWrite, nullptr);
+  g_mapLayers.load();
+  Serial.printf("[map] layers traces=%d names=%d\n", g_mapLayers.traces() ? 1 : 0,
+                g_mapLayers.names() ? 1 : 0);
   // Persist the migrated ids once, so the next boot reads ids directly.
   if (g_sndPrefsVersion < 2) {
     g_sndPrefsVersion = 2;
@@ -5365,7 +5385,7 @@ static void showTab(int tab) {
     // EST-368: entering the Map starts a clean replay: the routes of the newest message per sender,
     // run one at a time. Nothing is replayed when the Traces toggle is off.
     traceMapReset();
-    if (g_mapTraces) traceSeedFromRing();
+    if (g_mapLayers.traces()) traceSeedFromRing();
   }
   if (tab == 3 && g_rptrList && !om::rptrScan().listening) {
     // EST-362: opening the tab scans by itself. The header's Scan is the rescan (and the only
@@ -5595,11 +5615,17 @@ static void handleTap(int x, int y, bool longPress) {
       case om::ui::MapHitKind::Traces: {
         // EST-368: the toggle, highlighted while on, saved (default on). Turning it off ends the
         // current route and clears the dot; turning it on replays the newest message per sender.
-        g_mapTraces = !g_mapTraces;
-        g_prefs.putBool("traces", g_mapTraces);
+        const bool on = g_mapLayers.toggleTraces();
         traceMapReset();
-        if (g_mapTraces) traceSeedFromRing();
-        Serial.printf("[map] traces %s\n", g_mapTraces ? "on" : "off");
+        if (on) traceSeedFromRing();
+        Serial.printf("[map] traces %s\n", on ? "on" : "off");
+        drawMapTab();
+        return;
+      }
+      case om::ui::MapHitKind::Names: {
+        // EST-370: hide or show every marker label; the markers stay. Saved (default on).
+        const bool on = g_mapLayers.toggleNames();
+        Serial.printf("[map] names %s\n", on ? "on" : "off");
         drawMapTab();
         return;
       }

@@ -3,9 +3,10 @@
 // pan stay exactly where they were; this file owns the pixels and the rectangles of everything
 // around them, and draws the whole view into the off-screen frame.
 //
-// EST-368: the distance scale is gone, the tile attribution is drawn straight on the map with a
-// 1 px outline instead of a box, and the Map carries OM's Traces: a faint dashed route, a dot with a
-// short tail moving hop by hop, and a ring for a direct arrival (ui/map_trace.h owns the model).
+// EST-368: the distance scale is gone and the Map carries OM's Traces: a faint dashed route, a dot
+// with a short tail moving hop by hop, and a ring for a direct arrival (ui/map_trace.h owns the
+// model). EST-370: the attribution is plain dim text (no outline, no plate), a Names key hides every
+// label, and a small dot marks the map's centre, where a zoom focuses.
 #pragma once
 
 #include <LovyanGFX.hpp>
@@ -33,6 +34,8 @@ struct MapView {
   // EST-368: the Traces toggle (highlighted when on) and the one live animation frame, sampled by
   // the shell at the map's own frame rate. `trace.live` false draws nothing.
   bool tracesOn = false;
+  // EST-370: the Names toggle. Off hides every marker label and leaves the markers themselves.
+  bool namesOn = false;
   TraceFrame trace;
 };
 

@@ -20,5 +20,6 @@ extern const IconMask kIconBluetooth;
 extern const IconMask kIconDnd;
 extern const IconMask kIconFault;
 extern const IconMask kIconTrace;
+extern const IconMask kIconNames;
 }  // namespace ui
 }  // namespace om

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Map chrome arithmetic: the key rectangles, the attribution's box and the one hit test. No
-// LovyanGFX. EST-368 removed the distance scale and its 1-2-5 ladder.
+// Map chrome arithmetic: the key rectangles, the attribution's box, the centre point and the one
+// hit test. No LovyanGFX. EST-368 removed the distance scale and its 1-2-5 ladder; EST-370 added
+// the Names key and the centre dot's geometry.
 #include "ui/map_chrome.h"
 
 #include <string.h>
@@ -18,14 +19,15 @@ MapChrome mapChromeFor(const Layout& L, bool selected) {
   const int16_t right = (int16_t)(w - kMapMargin);
   c.chip = Rect{(int16_t)(right - 92), (int16_t)(L.status.bottom() + 6), 92, kMapChipH};
 
-  // The mock's stack, now four keys from the bottom right corner up: zoom out, zoom in, follow,
-  // and the Traces toggle on top (EST-368).
+  // The mock's stack, now five keys from the bottom right corner up: zoom out, zoom in, follow,
+  // Traces (EST-368) and Names (EST-370) on top.
   const int16_t bx = (int16_t)(right - kMapKey);
   const int16_t by = (int16_t)(h - kMapMargin - kMapKey);
   c.zoomOut = Rect{bx, by, kMapKey, kMapKey};
   c.zoomIn = Rect{bx, (int16_t)(by - kMapKey - kMapKeyGap), kMapKey, kMapKey};
   c.lock = Rect{bx, (int16_t)(c.zoomIn.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
   c.traces = Rect{bx, (int16_t)(c.lock.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
+  c.names = Rect{bx, (int16_t)(c.traces.y - kMapKey - kMapKeyGap), kMapKey, kMapKey};
 
   if (selected) {
     c.callout = Rect{8, (int16_t)(h - 8 - kMapCalloutH), (int16_t)(w - 16), kMapCalloutH};
@@ -36,8 +38,8 @@ MapChrome mapChromeFor(const Layout& L, bool selected) {
 Rect mapCreditRect(const MapChrome& c, int16_t width) {
   Rect r;
   if (width <= 0) return r;   // nothing to draw, nothing to place
-  // EST-368: on the bottom LEFT, where the removed scale used to be, clamped to the map area. The
-  // text is drawn straight on the tiles with a 1 px dark outline, so no plate has to reserve room.
+  // EST-370: plain dim text, no plate and no outline. The box is clamped to the map area and to
+  // the key column's left edge, the same rule that keeps every other piece of chrome off the keys.
   const int16_t cy = (int16_t)(c.view.h - kMapMargin - kMapCreditH / 2);
   int16_t x = (int16_t)(c.view.x + kMapMargin);
   r = Rect{x, (int16_t)(cy - kMapCreditH / 2), width, kMapCreditH};
@@ -74,6 +76,7 @@ MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, 
   if (c.zoomOut.contains(x, y)) { hit.kind = MapHitKind::ZoomOut; return hit; }
   if (c.lock.contains(x, y)) { hit.kind = MapHitKind::Lock; return hit; }
   if (c.traces.contains(x, y)) { hit.kind = MapHitKind::Traces; return hit; }
+  if (c.names.contains(x, y)) { hit.kind = MapHitKind::Names; return hit; }
   if (!c.callout.empty() && c.callout.contains(x, y)) { hit.kind = MapHitKind::Callout; return hit; }
   if (c.view.contains(x, y)) { hit.kind = MapHitKind::Map; return hit; }
   return hit;

@@ -100,6 +100,43 @@ int main() {
     CHECK(g.accept(1400, true) == true);
   }
 
+  // --- EST-339: a press away from an overlay is spent, the next one acts -----
+  // The shell's whole rule is `spent = d.onPress(overlayOpen && !inside)`: the overlay is closed on
+  // that press, and the drag and the release that follow it do nothing. The three overlays differ
+  // only in what "outside" means, which test_chat proves per overlay (chatOverlayPress).
+  for (int c = 0; c < 3; ++c) {
+    OverlayDismiss d;
+    const bool outside = true;              // the press landed away from the overlay
+    const bool spent = d.onPress(outside);
+    CHECK(spent);
+    int actions = 0;
+    if (!d.spent()) ++actions;              // a drag while the finger is still down
+    CHECK(actions == 0);
+    if (!d.spent()) ++actions;              // the release
+    d.onRelease();
+    CHECK(actions == 0);
+    // The next new press may act on what was behind (the overlay is closed by now).
+    CHECK(!d.onPress(false));
+    CHECK(!d.spent());
+    if (!d.spent()) ++actions;
+    d.onRelease();
+    CHECK(actions == 1);
+  }
+  {
+    // A press INSIDE the overlay is an ordinary gesture: not spent, and its release acts.
+    OverlayDismiss d;
+    CHECK(!d.onPress(false));
+    CHECK(!d.spent());
+    d.onRelease();
+    CHECK(!d.spent());
+    // ... and a press that follows one which never released still starts clean: the last press is
+    // the one that decides, so an inside press is never left spent from an earlier gesture.
+    CHECK(d.onPress(true));
+    CHECK(!d.onPress(false));
+    CHECK(!d.spent());
+    d.onRelease();
+  }
+
   if (g_fail) {
     printf("%d touch gate check(s) FAILED\n", g_fail);
     return 1;

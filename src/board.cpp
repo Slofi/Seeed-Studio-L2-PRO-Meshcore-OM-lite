@@ -475,13 +475,13 @@ uint16_t batteryMilliVolts() {
 static char s_nmea[128];
 static uint8_t s_nmeaLen = 0;
 
-// The constellation/mode commands are NOT sent at boot. gpsBegin() used to sleep 250 ms and write
-// "$PCAS04,7" into a module that had only just had its reset released; the boot log showed binary
-// bytes before the first NMEA line and the module stayed in its factory GPS+BeiDou mode. gps_mode.h
-// now waits for the first checksum-valid sentence (the module is up), proves the TX path with a
-// $PCAS03 GSV off/on probe, then tries mode 7 and, if needed, mode 5, and finally restores mode 3
-// unless mode 7 worked. The module's flash is never written ($PCAS00 is never sent).
-static GpsModeSetter s_gpsMode;
+// The mode command is NOT sent at boot. gpsBegin() used to sleep 250 ms and write "$PCAS04,7" into a
+// module that had only just had its reset released; the boot log showed binary bytes before the first
+// NMEA line and the module stayed in its factory GPS+BeiDou mode. gps_mode.h now waits for the first
+// checksum-valid sentence (the module is up) and sends the ONE command there, once (EST-339: the
+// EST-338 TX probe and the mode 5/mode 3 attempts are gone, and "accepted" is never claimed). The
+// module's flash is never written ($PCAS00 is never sent).
+static GpsModeCommand s_gpsMode;
 
 // One complete $... command with the L76K's XOR checksum.
 static void sendL76KCommand(const char* body) {
@@ -490,86 +490,6 @@ static void sendL76KCommand(const char* body) {
   char cmd[40];
   snprintf(cmd, sizeof(cmd), "$%s*%02X\r\n", body, sum);
   Serial1.print(cmd);
-}
-
-static const char* txPathText(GpsTxPath p) {
-  switch (p) {
-    case GpsTxPath::Ok: return "ok";
-    case GpsTxPath::NoEffect: return "no effect";
-    default: return "unknown";
-  }
-}
-
-static const char* modeResultText(GpsModeResult r) {
-  switch (r) {
-    case GpsModeResult::Taken: return "taken";
-    case GpsModeResult::NotTaken: return "not taken";
-    default: return "not tried";
-  }
-}
-
-// One event log line and one command, in the same place, so the boot log reads as the sequence.
-static void runGpsDiagStep(const GpsDiagStep& step) {
-  switch (step.event) {
-    case GpsDiagEvent::TxPathOk:
-      Serial.println("[gps] tx path: ok (GSV stopped for 5 s and came back)");
-      break;
-    case GpsDiagEvent::TxPathNoEffect:
-      Serial.printf("[gps] tx path: no effect (GSV during off=%d, after on=%d)\n",
-                    s_gpsMode.gsvDuringOff(), s_gpsMode.gsvDuringOn());
-      break;
-    case GpsDiagEvent::Mode7Taken:
-      Serial.println("[gps] mode 7: GLONASS seen (accepted)");
-      break;
-    case GpsDiagEvent::Mode7NotTaken:
-      Serial.println("[gps] mode 7: not taken after 15 s");
-      break;
-    case GpsDiagEvent::Mode5Taken:
-      Serial.println("[gps] mode 5: GLONASS seen (accepted)");
-      break;
-    case GpsDiagEvent::Mode5NotTaken:
-      Serial.println("[gps] mode 5: not taken after 15 s");
-      break;
-    case GpsDiagEvent::None:
-      break;
-  }
-
-  switch (step.action) {
-    case GpsDiagAction::TxProbeOff:
-      Serial.println("[gps] tx probe: GSV output off for 5 s ($PCAS03)");
-      sendL76KCommand("PCAS03,1,1,1,0,1,1,1,1");
-      break;
-    case GpsDiagAction::TxProbeOn:
-      Serial.println("[gps] tx probe: GSV output on ($PCAS03)");
-      sendL76KCommand("PCAS03,1,1,1,1,1,1,1,1");
-      break;
-    case GpsDiagAction::Mode7:
-      Serial.println("[gps] mode 7: sent ($PCAS04,7)");
-      sendL76KCommand("PCAS04,7");
-      break;
-    case GpsDiagAction::Mode5:
-      Serial.println("[gps] mode 5: sent ($PCAS04,5)");
-      sendL76KCommand("PCAS04,5");
-      break;
-    case GpsDiagAction::Mode3:
-      Serial.println("[gps] mode 3: restored ($PCAS04,3)");
-      sendL76KCommand("PCAS04,3");
-      break;
-    case GpsDiagAction::None:
-      break;
-  }
-
-  if (s_gpsMode.done()) {
-    const GpsTxPath tx = s_gpsMode.txPath();
-    const GpsModeResult m7 = s_gpsMode.mode7();
-    const GpsModeResult m5 = s_gpsMode.mode5();
-    const char* accepted = "none (mode 7 and mode 5 refused)";
-    if (m7 == GpsModeResult::Taken) accepted = "mode 7 (GPS+BeiDou+GLONASS)";
-    else if (m5 == GpsModeResult::Taken) accepted = "mode 5 only (GPS+GLONASS; mode 3 restored)";
-    else if (tx != GpsTxPath::Ok) accepted = "unknown (TX path had no effect)";
-    Serial.printf("[gps] diagnostic done: tx path=%s, mode 7=%s, mode 5=%s; accepted: %s\n",
-                  txPathText(tx), modeResultText(m7), modeResultText(m5), accepted);
-  }
 }
 
 static double nmeaToDegrees(const char* field, const char* hemi) {
@@ -596,8 +516,8 @@ void gpsBegin(bool swapPins) {
   // The sky counts (expected/heard, the 60 s window, max heard) live in the caller's GpsState now,
   // which starts zeroed. The only re-begin is the 10 s pin retry, and that runs only while no byte
   // has ever arrived (bytes == 0), so there is no sky state to clear here.
-  // A re-begin means the module may have restarted too, so the mode machine starts over and will
-  // send its command again as soon as the module talks.
+  // A re-begin means the module may have restarted too, so the command is armed again and goes out
+  // once more as soon as the module talks.
   s_gpsMode.onModuleReboot();
 }
 
@@ -614,10 +534,12 @@ void gpsPoll(GpsState& out) {
         ++out.checksumBad;   // a garbled line is never parsed, so it cannot move the fix or the clock
         continue;
       }
-      // A whole, trusted sentence is the proof that the module is up. The diagnostic machine starts
-      // its TX-path probe on this moment (not a boot delay), counts GSV lines during the probe, and
-      // looks for GLONASS here before the parsers below split the line on commas.
-      runGpsDiagStep(s_gpsMode.onValidSentence(s_nmea, millis()));
+      // A whole, trusted sentence is the proof that the module is up. The first one sends the one
+      // mode command; every later one sends nothing (s_gpsMode stays sent until gpsBegin re-arms it).
+      if (s_gpsMode.onValidSentence(s_nmea)) {
+        Serial.println("[gps] mode 7 sent");
+        sendL76KCommand("PCAS04,7");
+      }
       // $GNGGA,hhmmss.ss,lat,N,lon,E,quality,sats,...   sats = USED in the fix
       if (strncmp(s_nmea, "$GNGGA", 6) == 0 || strncmp(s_nmea, "$GPGGA", 6) == 0) {
         char* fields[15] = {nullptr};
@@ -654,9 +576,6 @@ void gpsPoll(GpsState& out) {
   // Once per poll, with no data needed: the 60 s best-C/N0 window has to expire even when the module
   // has gone quiet (a stale "best" from the last satellite heard would otherwise stay for ever).
   gpsSkyRefresh(out, millis());
-  // The diagnostic's windows (5 s GSV off, 5 s back, 15 s mode 7, 15 s mode 5) run on this clock,
-  // so a module that stays silent cannot stop the sequence.
-  runGpsDiagStep(s_gpsMode.tick(millis()));
 }
 
 bool setAudioPa(bool on) { return setOutput(kBitAudioPa, on); }

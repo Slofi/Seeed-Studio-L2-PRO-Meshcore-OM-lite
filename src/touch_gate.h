@@ -40,4 +40,31 @@ class TouchGate {
   uint32_t wakeMs_ = 0;
 };
 
+// Tap-away for overlays (EST-339). Filip: "tapping away from the keyboard should hide it. It does,
+// but now I can also press something: I pressed away, in the chat area, and it opened a chat menu.
+// The first tap away should only hide it and not press anything behind it."
+//
+// So a press that lands outside an open overlay CLOSES the overlay and spends the rest of that
+// gesture: its release and any drag that follows from the same press must not reach what was behind
+// it. Only the next new press may act. The caller closes the overlay when onPress() returns true and
+// then does nothing else (no tap, no scroll) until the finger lifts.
+class OverlayDismiss {
+ public:
+  // A new press. `outside` is true when an overlay is open and the finger landed outside it.
+  // Returns true when the caller must close that overlay now; the whole gesture is then spent.
+  bool onPress(bool outside) {
+    spent_ = outside;
+    return spent_;
+  }
+
+  // True from that press until it lifts: drag and release must do nothing.
+  bool spent() const { return spent_; }
+
+  // The finger lifted: the next new press is a fresh one and may act on what is behind.
+  void onRelease() { spent_ = false; }
+
+ private:
+  bool spent_ = false;
+};
+
 }  // namespace om

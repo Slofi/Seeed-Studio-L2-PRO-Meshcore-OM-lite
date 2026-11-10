@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "fade.h"
 
+#include <math.h>
+
 namespace om {
 namespace {
 
@@ -12,26 +14,28 @@ int clampLevel(int v) {
 
 }  // namespace
 
-int FadeRamp::easedPermille(uint32_t elapsedMs, uint32_t durationMs, bool easeOut) {
-  if (durationMs == 0) return 1000;
-  uint32_t t = 1000;
-  if (elapsedMs < durationMs) {
-    t = (uint32_t)(((uint64_t)elapsedMs * 1000ULL) / durationMs);
+int FadeRamp::levelAt(int from, int to, uint32_t elapsedMs, uint32_t durationMs) {
+  from = clampLevel(from);
+  to = clampLevel(to);
+  if (durationMs == 0 || elapsedMs >= durationMs) return to;
+  const double p = (double)elapsedMs / (double)durationMs;   // 0..1 through the fade
+  double duty = 0.0;
+  if (to >= from) {
+    // Fade up: the perceived brightness rises linearly, the duty follows p^2.2.
+    duty = (double)from + (double)(to - from) * pow(p, kGamma);
+  } else {
+    // Fade down: the same curve played backwards, so the fade looks as smooth as the fade-in.
+    duty = (double)to + (double)(from - to) * pow(1.0 - p, kGamma);
   }
-  if (!easeOut) return (int)t;
-  // Ease-out cubic: p = 1 - (1 - t)^3. Fast at the start, settling into the target.
-  const uint32_t inv = 1000U - t;
-  const uint32_t p = 1000U - (uint32_t)(((uint64_t)inv * inv * inv) / 1000000ULL);
-  return (int)p;
+  return clampLevel((int)(duty + 0.5));
 }
 
-void FadeRamp::start(uint32_t nowMs, int from, int to, uint32_t durationMs, bool easeOut) {
+void FadeRamp::start(uint32_t nowMs, int from, int to, uint32_t durationMs) {
   from_ = clampLevel(from);
   to_ = clampLevel(to);
   level_ = from_;
   startMs_ = nowMs;
   durationMs_ = durationMs;
-  easeOut_ = easeOut;
   steps_ = 0;
   active_ = (from_ != to_);
 }
@@ -39,10 +43,7 @@ void FadeRamp::start(uint32_t nowMs, int from, int to, uint32_t durationMs, bool
 int FadeRamp::tick(uint32_t nowMs) {
   if (!active_) return -1;
   const uint32_t elapsed = (uint32_t)(nowMs - startMs_);
-  const int p = easedPermille(elapsed, durationMs_, easeOut_);
-  const int64_t delta = (int64_t)(to_ - from_) * (int64_t)p;
-  int value = from_ + (int)((delta >= 0 ? delta + 500 : delta - 500) / 1000);
-  value = clampLevel(value);
+  int value = levelAt(from_, to_, elapsed, durationMs_);
   const bool done = (durationMs_ == 0) || (elapsed >= durationMs_);
   if (done) {
     value = to_;
@@ -60,7 +61,6 @@ void FadeRamp::reset(int level) {
   to_ = level_;
   startMs_ = 0;
   durationMs_ = 0;
-  easeOut_ = true;
   active_ = false;
   steps_ = 0;
 }

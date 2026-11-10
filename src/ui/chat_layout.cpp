@@ -187,6 +187,29 @@ KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y) {
   return hit;
 }
 
+ChatOverlayPress chatOverlayPress(const ChatLayout& g, bool menuOpen, const Rect& menuPanel,
+                                  int x, int y) {
+  ChatOverlayPress p;
+  // The order is the drawing order: the message sheet sits over everything (screen_chat draws it
+  // last), then the selector over the message band, then the keyboard sheet.
+  if (menuOpen) {
+    p.overlay = ChatOverlay::MessageSheet;
+    p.inside = menuPanel.contains(x, y);
+    return p;
+  }
+  if (g.selector) {
+    p.overlay = ChatOverlay::Selector;
+    p.inside = g.selPanel.contains(x, y);
+    return p;
+  }
+  if (g.osk) {
+    p.overlay = ChatOverlay::Keyboard;
+    p.inside = g.sheet.contains(x, y);
+    return p;
+  }
+  return p;
+}
+
 int selContentHeight(int channelCount, int dmCount) {
   if (channelCount < 0) channelCount = 0;
   if (dmCount < 0) dmCount = 0;

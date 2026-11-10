@@ -942,6 +942,98 @@ static void testKeyboardEdges() {
   CHECK(!chatSheetClosesAt(g, 100, L.height - 1));
 }
 
+// Tap-away (EST-339). For every overlay: a press outside it is classified as that overlay and
+// OUTSIDE, so the shell closes it and spends the gesture; a press inside is an ordinary gesture. The
+// message band behind the keyboard used to answer (Filip's "I pressed away, in the chat area, and it
+// opened a chat menu"), so the exact point that would be a message is checked to be "outside".
+static void testOverlayTapAway() {
+  const Layout& L = l2();
+
+  // No overlay: nothing to dismiss, every press acts.
+  {
+    const ChatLayout g = chatLayoutFor(L, false, false, false, false);
+    const ChatOverlayPress p = chatOverlayPress(g, false, Rect{}, 100, 100);
+    CHECK(p.overlay == ChatOverlay::None);
+    CHECK(p.inside);
+  }
+
+  // The keyboard sheet: a press on the message band above it is OUTSIDE (this is the bug), a press
+  // on a key or the draft is inside, and the header above is outside too.
+  {
+    const ChatLayout g = chatLayoutFor(L, true, false, false, false);
+    const int bandY = (g.head.bottom() + g.sheet.y) / 2;
+    CHECK(g.msgs.contains(100, bandY));   // a point that used to hit a message behind the sheet
+    const ChatOverlayPress outside = chatOverlayPress(g, false, Rect{}, 100, bandY);
+    CHECK(outside.overlay == ChatOverlay::Keyboard);
+    CHECK(!outside.inside);
+
+    const ChatOverlayPress head = chatOverlayPress(g, false, Rect{}, g.head.x + 4, g.head.y + 4);
+    CHECK(head.overlay == ChatOverlay::Keyboard);
+    CHECK(!head.inside);
+
+    const ChatOverlayPress key = chatOverlayPress(g, false, Rect{}, g.keys[1][1].x + 2,
+                                                  g.keys[1][1].y + 2);
+    CHECK(key.overlay == ChatOverlay::Keyboard);
+    CHECK(key.inside);
+    const ChatOverlayPress gap =
+        chatOverlayPress(g, false, Rect{}, g.keyHit[3][0].right(), g.keys[3][0].y + 2);
+    CHECK(gap.overlay == ChatOverlay::Keyboard);
+    CHECK(gap.inside);   // a gap inside the sheet: inside (it just does nothing on the release)
+  }
+
+  // The selector: a press on its panel is inside, a press on the header or the compose row is out.
+  {
+    const ChatLayout g = chatLayoutFor(L, false, false, false, true);
+    const ChatOverlayPress inside =
+        chatOverlayPress(g, false, Rect{}, g.selPanel.x + 4, g.selPanel.y + 4);
+    CHECK(inside.overlay == ChatOverlay::Selector);
+    CHECK(inside.inside);
+    const ChatOverlayPress head = chatOverlayPress(g, false, Rect{}, g.head.x + 4, g.head.y + 4);
+    CHECK(head.overlay == ChatOverlay::Selector);
+    CHECK(!head.inside);
+    const ChatOverlayPress compose =
+        chatOverlayPress(g, false, Rect{}, g.compose.x + 4, g.compose.y + 4);
+    CHECK(compose.overlay == ChatOverlay::Selector);
+    CHECK(!compose.inside);
+    // ... and the message band is inside the panel, not behind it.
+    const ChatOverlayPress band = chatOverlayPress(g, false, Rect{}, g.selPanel.x + 4,
+                                                   g.selPanel.bottom() - 2);
+    CHECK(band.overlay == ChatOverlay::Selector);
+    CHECK(band.inside);
+  }
+
+  // The message sheet: inside its panel (a row or the header), outside above it. The message band
+  // above the panel is again the exact point that must not be pressed.
+  {
+    const ChatLayout g = chatLayoutFor(L, false, false, false, false);
+    const MessageSheetLayout m = messageSheetLayout(L, 3);
+    const ChatOverlayPress row =
+        chatOverlayPress(g, true, m.panel, m.rows[0].x + 4, m.rows[0].y + 4);
+    CHECK(row.overlay == ChatOverlay::MessageSheet);
+    CHECK(row.inside);
+    const ChatOverlayPress head = chatOverlayPress(g, true, m.panel, m.head.x + 4, m.head.y + 4);
+    CHECK(head.overlay == ChatOverlay::MessageSheet);
+    CHECK(head.inside);
+    const int aboveY = m.panel.y - 4;
+    CHECK(g.msgs.contains(100, aboveY));
+    const ChatOverlayPress above = chatOverlayPress(g, true, m.panel, 100, aboveY);
+    CHECK(above.overlay == ChatOverlay::MessageSheet);
+    CHECK(!above.inside);
+    // The sheet is on top of everything: even with the keyboard flag set (it is closed with the
+    // sheet) the sheet is the one that answers, so a key under the panel is a sheet touch, not a
+    // key press, and a touch above the panel is still "outside".
+    const ChatLayout gk = chatLayoutFor(L, true, false, false, false);
+    const ChatOverlayPress overKey =
+        chatOverlayPress(gk, true, m.panel, gk.keys[3][0].x + 2, gk.keys[3][0].y + 2);
+    CHECK(overKey.overlay == ChatOverlay::MessageSheet);
+    CHECK(overKey.inside);   // the sheet's band covers the keyboard's bottom rows
+    const ChatOverlayPress overBand =
+        chatOverlayPress(gk, true, m.panel, 100, gk.sheet.y - 2);
+    CHECK(overBand.overlay == ChatOverlay::MessageSheet);
+    CHECK(!overBand.inside);
+  }
+}
+
 int main() {
   testWrap();
   testUtf8();
@@ -955,6 +1047,7 @@ int main() {
   testBadge();
   testMessageSheet();
   testKeyboardEdges();
+  testOverlayTapAway();
 
   if (g_fail) {
     printf("%d chat check(s) FAILED\n", g_fail);

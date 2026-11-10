@@ -127,8 +127,13 @@ static om::GpsState g_gps;
 static uint32_t g_buildEpoch = 0;
 // The wake button woke the screen: touches are gated for 300 ms and a held finger never counts.
 static om::TouchGate g_touchGate;
-// Backlight ramp (EST-338). boardSetBrightness() steps in one go; this is the non-blocking ramp
-// loop() ticks, one I2C write per tick. The level is reset to kScreenBrightness after boardBegin().
+// EST-339: a press that lands outside an open overlay closes it and spends the whole gesture. g_spent
+// is the loop's copy for the drag, the hold and the release paths.
+static om::OverlayDismiss g_dismiss;
+static bool g_spent = false;
+// Backlight ramp (EST-338, gamma 2.2 since EST-339). boardSetBrightness() steps in one go; this is
+// the non-blocking ramp loop() ticks, one I2C write per tick. The level is reset to kScreenBrightness
+// after boardBegin().
 static om::FadeRamp g_fade;
 
 // Nodes tab state. The rows are copied out of mesh_link's contact table, never sample data.
@@ -1009,7 +1014,9 @@ static void handleChatTap(int x, int y) {
       chatKey(hit);
       break;
     case om::ui::ChatHit::Outside:
-      g_compose = false;   // a tap outside the sheet closes it and leaves the tab bar back
+      // Belt and braces: the shell already closed the sheet on the PRESS that landed above it and
+      // spent that gesture (EST-339), so this is only reached if a hit test runs on an open sheet.
+      g_compose = false;
       break;
     case om::ui::ChatHit::None:
       // Not the chat surface: the tab bar (hidden while the sheet is open), the fault mark and the
@@ -1038,6 +1045,47 @@ static void handleChatTap(int x, int y) {
       return;
   }
   drawChat();
+}
+
+// The overlay on top of the chat at a press, and whether the finger is inside it (EST-339). The same
+// rectangles the drawing and the release-time hit test use, so the two can never disagree.
+static om::ui::ChatOverlayPress chatOverlayPressAt(int x, int y) {
+  om::ui::ChatView v;
+  buildChatView(v);
+  const om::ui::ChatLayout g =
+      om::ui::chatLayoutFor(om::ui::l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
+  return om::ui::chatOverlayPress(g, v.menuMsg >= 0, om::ui::chatSheetPanel(v), x, y);
+}
+
+// Close one overlay because a press landed outside it. Returns true when something was open.
+static bool closeChatOverlay(om::ui::ChatOverlay which) {
+  switch (which) {
+    case om::ui::ChatOverlay::MessageSheet:
+      if (g_bubMenuSeq == 0) return false;
+      g_bubMenuSeq = 0;
+      return true;
+    case om::ui::ChatOverlay::Selector:
+      if (!g_selector) return false;
+      g_selector = false;
+      return true;
+    case om::ui::ChatOverlay::Keyboard:
+      if (!g_compose) return false;
+      g_compose = false;
+      return true;
+    case om::ui::ChatOverlay::None:
+    default:
+      return false;
+  }
+}
+
+static const char* chatOverlayName(om::ui::ChatOverlay which) {
+  switch (which) {
+    case om::ui::ChatOverlay::MessageSheet: return "the message sheet";
+    case om::ui::ChatOverlay::Selector: return "the selector";
+    case om::ui::ChatOverlay::Keyboard: return "the keyboard";
+    case om::ui::ChatOverlay::None:
+    default: return "no overlay";
+  }
 }
 
 static void drawRptrTab() {
@@ -1845,15 +1893,17 @@ void loop() {
   if (om::wakePressed(pressed)) {
     if (pressed && !wakePrev) {
       if (screenOn) {
-        // Sleep: fade the backlight out over 150 ms, THEN put the panel to sleep. Any gesture in
+        // Sleep: fade the backlight out over kFadeOutMs, THEN put the panel to sleep. Any gesture in
         // flight is dropped, so the finger that was on the glass cannot turn into a tap in the dark.
         screenOn = false;
         g_down = false;
         g_drag = false;
         g_acted = false;
         sleepPending = true;
-        g_fade.start(millis(), g_fade.level(), 0, 150, false);
-        Serial.printf("[wake] screen off (fade 150 ms from %d)\n", g_fade.level());
+        const int fromLevel = g_fade.level();
+        g_fade.start(millis(), fromLevel, 0, om::kFadeOutMs);
+        Serial.printf("[wake] screen off (fade out %lums from %d)\n",
+                      (unsigned long)om::kFadeOutMs, fromLevel);
       } else {
         // Wake, in the order that leaves no diagonal on the glass (Filip, EST-336): the panel out of
         // sleep, DISPOFF at once (LovyanGFX's wakeup() ends with DISPON, see board.h), its sleep-out
@@ -1871,7 +1921,7 @@ void loop() {
           // Pressed again while the fade-out was still running: the panel never slept, so reverse
           // the ramp from the current level instead of waking (and flashing) the panel.
           sleepPending = false;
-          g_fade.start(wakeMs, g_fade.level(), om::kScreenBrightness, 200, true);
+          g_fade.start(wakeMs, g_fade.level(), om::kScreenBrightness, om::kFadeInMs);
           g_touchGate.onWake(wakeMs, downAtWake);
           Serial.printf("[wake] screen on (fade reversed at %d), %lums masked\n", g_fade.level(),
                         (unsigned long)om::TouchGate::kGateMs);
@@ -1883,9 +1933,10 @@ void loop() {
           redrawCurrentScreen();
           om::panelDisplay(true);
           delay(om::kPanelFramePeriodMs);
-          // The gate starts when the light starts, so it covers the whole 200 ms fade (EST-338).
+          // The gate starts when the light starts, so it covers the whole fade-in; the fade now runs
+          // on a gamma 2.2 curve for 300 ms, so it is longer than the gate (EST-339).
           const uint32_t litMs = millis();
-          g_fade.start(litMs, 0, om::kScreenBrightness, 200, true);
+          g_fade.start(litMs, 0, om::kScreenBrightness, om::kFadeInMs);
           g_touchGate.onWake(litMs, downAtWake);
           Serial.printf("[wake] screen on (%s at wake), %lums masked\n",
                         downAtWake ? "finger held" : "no finger",
@@ -2068,30 +2119,37 @@ void loop() {
       g_upX = g_sx;
       g_upY = g_sy;
       g_upMs = millis();
-      if (!g_drag && !g_acted) handleTap(g_sx, g_sy, false);
-      // A rubber band needs a spring: clamp the chat back into range when the finger lifts. The
-      // selector list has its own scroll and only moves while it is open.
-      if (g_tab == 1 && !g_compose && !g_settings) {
-        bool redraw = false;
-        if (g_selector) {
-          const int clamped = g_selScroll < 0 ? 0
-                            : (g_selScroll > g_selMaxScroll ? g_selMaxScroll : g_selScroll);
-          if (clamped != g_selScroll) {
-            g_selScroll = clamped;
-            redraw = true;
+      // A spent gesture was the press that closed an overlay: its release does nothing at all (no
+      // tap, no rubber band, no redraw). Only the NEXT new press acts on what was behind (EST-339).
+      const bool spent = g_spent;
+      g_dismiss.onRelease();
+      g_spent = false;
+      if (!spent) {
+        if (!g_drag && !g_acted) handleTap(g_sx, g_sy, false);
+        // A rubber band needs a spring: clamp the chat back into range when the finger lifts. The
+        // selector list has its own scroll and only moves while it is open.
+        if (g_tab == 1 && !g_compose && !g_settings) {
+          bool redraw = false;
+          if (g_selector) {
+            const int clamped = g_selScroll < 0 ? 0
+                              : (g_selScroll > g_selMaxScroll ? g_selMaxScroll : g_selScroll);
+            if (clamped != g_selScroll) {
+              g_selScroll = clamped;
+              redraw = true;
+            }
+          } else {
+            const int clamped = g_chatScroll < 0 ? 0
+                              : (g_chatScroll > g_chatMaxScroll ? g_chatMaxScroll : g_chatScroll);
+            if (clamped != g_chatScroll) {
+              g_chatScroll = clamped;
+              redraw = true;
+            }
           }
-        } else {
-          const int clamped = g_chatScroll < 0 ? 0
-                            : (g_chatScroll > g_chatMaxScroll ? g_chatMaxScroll : g_chatScroll);
-          if (clamped != g_chatScroll) {
-            g_chatScroll = clamped;
-            redraw = true;
-          }
+          if (redraw) drawChat();
         }
-        if (redraw) drawChat();
+        // The Nodes scroll is clamped while dragging, but the last 60 ms may not have been drawn.
+        if (g_drag && g_tab == 0 && !g_settings && screenOn) drawHome();
       }
-      // The Nodes scroll is clamped while dragging, but the last 60 ms may not have been drawn.
-      if (g_drag && g_tab == 0 && !g_settings && screenOn) drawHome();
     }
   } else if (!g_down) {
     g_down = true;
@@ -2105,9 +2163,30 @@ void loop() {
     g_nodeScroll0 = g_nodeScroll;
     g_drag = false;
     g_acted = false;
+    // EST-339, the one rule for every overlay on the Chat tab: a new press INSIDE the overlay on top
+    // is an ordinary gesture; a press OUTSIDE it closes the overlay on this press and spends the whole
+    // gesture (its drag and its release included), so nothing behind the overlay is pressed. Only the
+    // next new press may act on what is behind. The overlay is found from the same rectangles the
+    // drawing used (chatOverlayPress), and the message sheet's panel from chatSheetPanel.
+    bool outsideOverlay = false;
+    om::ui::ChatOverlay overlay = om::ui::ChatOverlay::None;
+    if (g_tab == 1 && !g_settings) {
+      const om::ui::ChatOverlayPress op = chatOverlayPressAt(x, y);
+      outsideOverlay = (op.overlay != om::ui::ChatOverlay::None && !op.inside);
+      overlay = op.overlay;
+    }
+    g_spent = g_dismiss.onPress(outsideOverlay);
+    if (g_spent) {
+      const bool closed = closeChatOverlay(overlay);
+      Serial.printf("[tap] %d,%d away from %s: %s, gesture spent\n", (int)x, (int)y,
+                    chatOverlayName(overlay), closed ? "closed" : "nothing to close");
+      if (closed) drawChat();
+      g_drag = true;    // no drag scroll and no tap on the release
+      g_acted = true;
+    }
     // This panel lifts between samples during a drag, so a press that lands near the previous
     // release shortly after it is treated as the same gesture (pan), not a tap.
-    const bool cont = (g_tab == 2 && !g_settings && g_upMs &&
+    const bool cont = (g_tab == 2 && !g_settings && g_upMs && !g_spent &&
                        (millis() - g_upMs) < 400 &&
                        abs((int)x - g_upX) < 80 && abs((int)y - g_upY) < 80);
     if (cont) {
@@ -2120,12 +2199,13 @@ void loop() {
   } else {
     const int dy = g_sy - (int)y;
     if (dy > 12 || dy < -12) g_drag = true;
-    // A hold fires while the finger is still down: the menu opens under the finger.
-    if (!g_drag && !g_acted && (millis() - g_downMs) >= 450) {
+    // A hold fires while the finger is still down: the menu opens under the finger. A spent gesture
+    // never gets here (its overlay was closed on the press).
+    if (!g_spent && !g_drag && !g_acted && (millis() - g_downMs) >= 450) {
       g_acted = true;
       handleTap(x, y, true);
     }
-    if (g_drag) {
+    if (g_drag && !g_spent) {
       if (g_settingsScreen == 1) {
         const int count = g_pickerKind ? kClickCount : kChimeCount;
         int next = g_scroll0 + dy / 22;
@@ -2183,7 +2263,7 @@ void loop() {
       }
     }
   }
-  // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels in the 200 ms
-  // fade; otherwise keep the old 20 ms loop (mesh, touch, draw).
+  // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels over the 300 ms
+  // fade-in (150 ms out); otherwise keep the old 20 ms loop (mesh, touch, draw).
   delay(g_fade.active() ? 1 : 20);
 }

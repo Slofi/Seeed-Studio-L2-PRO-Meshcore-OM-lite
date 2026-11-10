@@ -108,9 +108,10 @@ void sdUnmount();
 uint16_t batteryMilliVolts();
 
 // L76K GNSS: UART1, RX 18 / TX 17 at 9600. gpsPoll() chews whatever has arrived and returns the
-// latest GGA/GSV state; it never blocks. gpsBegin() only opens the UART: after the first
-// checksum-valid sentence, gpsPoll() runs the one-boot diagnostic in gps_mode.h: a $PCAS03 GSV
-// off/on TX-path probe, then mode 7, then mode 5, then mode 3 restored unless mode 7 worked.
+// latest GGA/GSV state; it never blocks. gpsBegin() only opens the UART; after the first
+// checksum-valid sentence gps_mode.h sends ONE `$PCAS04,7` (GPS + BeiDou + GLONASS), logged once as
+// `[gps] mode 7 sent`. Nothing watches for it to be taken: a heard GLONASS satellite in the
+// heartbeat's `heard=..(g.. l.. b..)` count is the only proof.
 //
 // GpsState and the GSV half of the parser live in gps_sky.h (plain C++): GSV's "in view" number is
 // what the module's almanac EXPECTS, and only a satellite with a C/N0 value above zero is HEARD, so

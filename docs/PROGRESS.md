@@ -912,3 +912,80 @@
 - **GPS TX path proven:** `[gps] tx path: ok (GSV stopped for 5 s and came back)`. Commands reach the module.
 - **GLONASS result not trustworthy:** `mode 7: GLONASS seen (accepted)`, but the heartbeat still says `expected=13(g11 l0 b2)`, no GLONASS satellite listed. The detector counts a `$GNGSA ...,2` line (NMEA 4.1 system id 2 = GLONASS) as "seen", and those GSA lines were in the boot log at 08:52, BEFORE any command was sent. So either GLONASS was on from the factory (a GLONASS GSA slot from the first boot suggests it) and simply has no satellite listed yet, or the detector is fooled. Only a GLONASS satellite in GSV (GLGSV, or GN PRN 65..96) proves it; the outdoor per-constellation `heard` count will settle it.
 - **Log flood (bug):** `[gps] diagnostic done: ...` is printed on every loop after the diagnosis: 4,062 lines in 80 s (417 KB of log). Must print once.
+
+## 2026-11-10 10:45 (DeepSeek): EST-339 - GPS diagnostic out, log flood, gamma fade, tap-away is only close
+- **1. One command, no diagnostic.** `gps_mode.h` is now `GpsModeCommand`: a single bool. The first
+  checksum-valid NMEA sentence sends `$PCAS04,7` once, logged exactly `[gps] mode 7 sent`; every later
+  sentence sends nothing; `gpsBegin()` (the 10 s pin retry) arms it again. Gone: the `$PCAS03` GSV
+  on/off probe, the 15 s GLONASS watches, the mode 5 fallback, the mode 3 restore, the 5 s silence
+  reboot detector, `GpsDiagAction`/`GpsDiagEvent`/`GpsDiagStep`/`GpsTxPath`/`GpsModeResult`,
+  `gpsLineHasGsv()`, `gpsLineHasGlonass()` (the fooled detector), the `tick()` call in `gpsPoll()`, and
+  the whole `runGpsDiagStep()` in `board.cpp`. Nothing claims the mode was accepted: the heartbeat's
+  per-constellation `expected/heard` counts are unchanged and a heard GLONASS satellite (`l` above 0)
+  is the only proof.
+- **2. Log flood.** Root cause: `runGpsDiagStep()` ended with `if (s_gpsMode.done())` and was called on
+  every sentence AND on every `gpsPoll()`, so the "done" state printed on every loop pass (4,062 lines
+  in 80 s). It went with the diagnostic; in the new code the only GPS log is the one send.
+  **Audit of the other 151 `Serial.*` statements** (all of `src/`, looked for a state printed while it
+  holds instead of when it changes, i.e. a log on a per-loop or per-sentence path):
+  - fixed: the GPS diagnostic line (above);
+  - clear: the heartbeat (`[hb]`, every 2 s by design), `[gps] ... used=...` (1 s gate, prints only
+    when sats/valid/heardTotal changed), `[batt]` (on change), `[wake] fade done/panel asleep` (once per
+    fade), `[touch] raw ... clamped` (first clamp only), `[time] GPS -> ...` (on change), every boot
+    line (setup), every tap/mesh/send/OTA line (one per action), `audio`/`radio` init and fault lines
+    (on change);
+  - noted, not changed: `map.cpp` prints `[map] decode z...` per decoded tile and `[map] z... -> N tiles`
+    per rendered frame, so a pan at the 60 ms redraw rate logs ~16 lines/s. Each line is one real render
+    (not a held state), and it stops when the finger stops; left as is.
+- **3. Fade on a perceptual curve.** `FadeRamp` lost the `easeOut` flag: `levelAt()` is gamma 2.2 both
+  ways, fade up `from + (to-from) * p^2.2`, fade down `to + (from-to) * (1-p)^2.2` (the fade-in curve
+  mirrored in time), so the two directions look alike. Fade-in 300 ms (`om::kFadeInMs`), fade-out
+  stays 150 ms (`om::kFadeOutMs`); `main.cpp` uses the constants and the sleep log now names the real
+  start level. Host test: monotonic both ways, exact at both ends, a perfect time mirror between the
+  directions, and after the first 20 % of the fade-in (60 of 300 ms) the duty is 5 of 160, i.e. under
+  5 % of the target (a linear ramp would be at 32).
+- **4. Tap away closes and is consumed, for every overlay.** New pure `chatOverlayPress()` in
+  `chat_layout.h/.cpp`: the overlay on top (message sheet > selector > keyboard sheet, the draw order)
+  and whether a point is inside it; the message sheet's panel comes from the new
+  `chatSheetPanel()` (screen_chat). New `OverlayDismiss` in `touch_gate.h`: `onPress(outside)` spends
+  the whole gesture, `spent()` is true until the finger lifts, `onRelease()` re-arms. `loop()` now
+  decides on the PRESS: outside the top overlay it closes that overlay, logs
+  `[tap] x,y away from <overlay>: closed, gesture spent`, redraws, and skips the drag scroll, the hold
+  and the release tap; only the next new press acts. `chatScreenHit()` no longer lets a tap on a
+  message above the keyboard open the message sheet (that was Filip's bug); anything above the sheet is
+  `Outside`. The bug also fixed the message sheet: a drag started above it used to scroll the chat
+  behind it.
+  - Per overlay (host test): keyboard sheet (message band above it = outside, key/draft inside, a 2 px
+    key gap inside but inert), selector (panel inside, header/compose outside), message sheet (rows and
+    header inside, band above outside, sheet wins over the keyboard), and the guard sequence for each:
+    tap away closes, its drag and release do nothing, the next tap acts.
+  - **Not covered, because they do not exist in this tree**: a toast with a close (the fault toast has
+    no button and auto-expires) and any confirm dialog (delete channel is a two-tap "tap again to
+    delete" row, no overlay). The map's info panel is a map interaction (a tap elsewhere moves the
+    pin), not one of the listed overlays, so it is unchanged. When a toast-with-close or a confirm
+    arrives it must go through `chatOverlayPress`/`OverlayDismiss`.
+  - Note for later (Filip, not this ticket): Send (bottom row right) sits under Backspace (row 3
+    right), so a missed press sends instead of deleting.
+- **Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS, 21.4 s. RAM **88,988 B**
+  of 327,680 (27.2 %, previous 89,012, **-24 B**), flash **866,385 B** of 6,553,600 (13.2 %, previous
+  867,773, **-1,388 B**), `firmware.bin` **866,752 B** (previous 868,144, **-1,392 B**). The removal of
+  the diagnostic pays for the overlay plumbing.
+- **Tests**: `test/host/run.sh` exit 0 (11 C++ binaries + the 9 python checks). `test_gps_mode.cpp`
+  rewritten: nothing before the module talks (null/empty/garbage/not-a-sentence), exactly one send and
+  1,800 more sentences sending nothing, re-arm after a module reboot (twice in a row = one command).
+  `test_fade.cpp` rewritten for the gamma curve (see 3.). `test_chat.cpp` gains `testOverlayTapAway()`
+  (per overlay, including the exact message-band point that used to answer). `test_touch_gate.cpp`
+  gains the `OverlayDismiss` sequence.
+- **Could not check** (no device): the fade on the glass (300 ms in, 150 ms out, gamma banding at the
+  panel's real response); tap-away on the real panel at 1:1 (every overlay, and that the release of the
+  dismissing press never taps); whether the L76K takes mode 7 (still open, and no longer claimed); the
+  one-line boot log in a real boot.
+- **Next step**: Claude flashes and checks, in this order: the boot log has exactly one
+  `[gps] mode 7 sent` and no `diagnostic done` line, and 80 s of log is small again; with the keyboard
+  open, a tap on the chat area only hides it (no message sheet, no chat menu), and the NEXT tap on a
+  message opens the sheet; tap above the open message sheet: it closes and nothing behind it fires;
+  the same for the selector (open it, press the message band: closes, no row opens); press Wake: the
+  light comes up over ~300 ms with no jump at the start, and goes down over ~150 ms.
+
+## 2026-11-10 10:45 (Claude): EST-339 checked
+- Built in the sandbox (exit 0, RAM 88,988 B, flash 866,385 B), tests exit 0. Committed before flashing because the L2 is outside for a GPS run; flash + device check when it is back.

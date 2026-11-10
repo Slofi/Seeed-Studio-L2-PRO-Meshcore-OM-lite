@@ -498,6 +498,15 @@ void drawMessageSheet(lgfx::LovyanGFX* d, const ChatView& v) {
 
 }  // namespace
 
+Rect chatSheetPanel(const ChatView& v) {
+  if (v.menuMsg < 0 || v.msgs == nullptr) return Rect{};
+  char path[96];
+  formatSheetPath(v, path, sizeof(path));
+  SheetRow rows[kMaxSheetRows];
+  const int n = buildSheetRows(v, path, rows);
+  return messageSheetLayout(l2(), n).panel;
+}
+
 void chatScreenDraw(const ChatView& v) {
   if (!omFrameBegin()) {
     omFrameEnd();
@@ -533,8 +542,9 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   ChatHitResult r;
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
 
-  // The message sheet swallows the screen: a row is its action, a tap on the header or anywhere
-  // outside the panel closes it (the same rule the keyboard sheet has).
+  // The message sheet swallows the screen: a row is its action, a touch on its header or inside its
+  // panel closes it. A touch OUTSIDE it never gets here: the shell closes the sheet on that press and
+  // spends the whole gesture, so nothing behind it is pressed (EST-339).
   if (v.menuMsg >= 0 && v.msgs != nullptr) {
     char path[96];
     formatSheetPath(v, path, sizeof(path));
@@ -592,21 +602,10 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
         return r;
       }
     }
-    // A tap on a message above the sheet still finds it: the shell closes the sheet and opens the
-    // message menu, which is what the mock does when a message is tapped with the keyboard up.
-    if (g.msgs.contains(x, y)) {
-      int16_t heights[kMaxChatMsgs];
-      const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
-      const int i = msgAt(g.msgs, heights, n, v.scroll, y);
-      if (i >= 0) {
-        r.hit = ChatHit::Msg;
-        r.index = i;
-        r.seq = v.msgs[i].seq;
-        return r;
-      }
-    }
-    // Inside the sheet but not on a key/draft (a 2 px gap, the header line): do nothing at all. Only
-    // a touch ABOVE the sheet closes it (EST-338). The tab bar is hidden while the sheet is open.
+    // Anything above the sheet is OUTSIDE it: the shell has already closed the sheet on that press
+    // and spends the gesture, so a message behind the keyboard is never tapped (Filip, EST-339: "I
+    // pressed away, in the chat area, and it opened a chat menu"). Inside the sheet, a touch that is
+    // not on a key/draft (a 2 px gap, the header line) does nothing at all.
     if (chatSheetClosesAt(g, x, y)) r.hit = ChatHit::Outside;
     return r;
   }

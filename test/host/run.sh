@@ -34,7 +34,8 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_chat.cpp \
 # Ljubljana DST clock.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_timekeeper.cpp \
   ../../src/timekeeper.cpp -o "$BIN4"
-# Wake touch gate: a finger held through the wake is ignored, a new press after 300 ms counts.
+# Wake touch gate: a finger held through the wake is ignored, a new press after 300 ms counts. Also
+# the tap-away guard (EST-339): a press outside an overlay spends its drag and its release.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_touch_gate.cpp \
   ../../src/touch_gate.cpp -o "$BIN5"
 # The one timestamp formatter (today / this week / older, the fixed 2025-01-01 cut-off, the age
@@ -48,11 +49,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps.cpp -o "$BIN7"
 # The new top bar (EST-337): time left, gear/battery/GPS/optional icons right-aligned with one gap,
 # the measured worst-case fit, the fault mark's rect, and the Nodes header text.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_status_bar.cpp -o "$BIN8"
-# The L76K one-boot diagnostic: $PCAS03 GSV off/on TX-path probe, mode 7, mode 5, mode 3 restored.
+# The L76K mode command (EST-339): ONE $PCAS04,7, only after the module talks, never a second time.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps_mode.cpp -o "$BIN9"
 # The radio-fault mark's state: each reason, a good TX clears, a radio re-init clears, silence never.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_radio_fault.cpp -o "$BIN10"
-# The backlight ramp: start, end, monotonic, many distinct 8-bit levels, a wake reverses a fade-out.
+# The backlight ramp: gamma 2.2 both ways (monotonic, exact ends, slow start), 300 ms in, 150 ms out,
+# many distinct 8-bit levels, a wake reverses a fade-out.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_fade.cpp \
   ../../src/fade.cpp -o "$BIN11"
 "$BIN3"

@@ -58,13 +58,31 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
 // The key under (x, y), or {-1,-1}. The caller has already clamped into the screen.
 KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y);
 
-// A touch inside the keyboard sheet never closes it (only the fingers on a key, the draft or a
-// message above do something). Only a touch ABOVE the sheet closes it. Plain arithmetic so host tests
-// can prove the rule without LovyanGFX.
+// A touch inside the keyboard sheet never closes it (only the fingers on a key, the draft, or a tap
+// on the sheet's own header/close do something). Only a touch ABOVE the sheet closes it. Plain
+// arithmetic so host tests can prove the rule without LovyanGFX.
 inline bool chatSheetClosesAt(const ChatLayout& g, int x, int y) {
   (void)x;
   return g.osk && y < g.sheet.y;
 }
+
+// --- overlays: one press, one answer (EST-339) ---------------------------------------------------
+// Every overlay in the chat is a bottom-anchored panel, drawn in this order: the keyboard sheet,
+// then the chat selector over it, then the message sheet. A press that lands OUTSIDE the one on top
+// closes it and is CONSUMED: that press's release and any drag that follows it must not press what
+// was behind (Filip, 2026-11-10: "I pressed away, in the chat area, and it opened a chat menu"). Only
+// the next new press may act on what is behind.
+enum class ChatOverlay : uint8_t { None = 0, Keyboard, Selector, MessageSheet };
+
+struct ChatOverlayPress {
+  ChatOverlay overlay = ChatOverlay::None;
+  bool inside = true;   // always true when overlay == None
+};
+
+// The overlay on top at a press and whether (x, y) is inside it. `menuPanel` is the open message
+// sheet's panel (messageSheetLayout().panel) and is read only when `menuOpen` is true.
+ChatOverlayPress chatOverlayPress(const ChatLayout& g, bool menuOpen, const Rect& menuPanel,
+                                  int x, int y);
 
 // --- the chat selector arithmetic ---------------------------------------------------------------
 // The list holds a "Channels" label, one row per channel, a "Direct messages" label and either one

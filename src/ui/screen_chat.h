@@ -85,5 +85,9 @@ int chatMaxScroll(const ChatView& v);
 // The selector list's scroll clamp and the row under a y. The shell drags the list with the finger.
 int chatSelectorMaxScroll(const ChatView& v);
 
+// The open message sheet's panel, or an empty rect when no sheet is open. The shell needs it on the
+// PRESS, not just the release: a press outside the panel closes the sheet and is spent (EST-339).
+Rect chatSheetPanel(const ChatView& v);
+
 }  // namespace ui
 }  // namespace om

@@ -144,16 +144,16 @@ static void playClickIdx(int idx) {
   for (uint8_t i = 0; i < c.n; ++i) om::audioTone(c.f[i], c.d[i]);
 }
 
-// A slower, warmer four-note welcome (C5 E5 G5 C6) than the notification chimes.
-// Boot welcome: two rising notes a fifth apart, A5 -> E6, 130 + 190 ms. Positive and open (a rising
-// fifth), higher than the earlier takes and slower per note than the 60 ms arpeggio, without the old
-// 1.3 s pad. Retune by editing these two arrays only (Filip, S492).
+// Boot welcome (Filip, 2026-11-10): a short, high double beep, "TK-TK", welcoming and positive.
+// Two short beeps with a small gap, the second a step higher so it lifts instead of nagging.
+// A tone of 0 Hz is silence that keeps the I2S stream fed, so the gap makes no click.
+// Retune by editing these three arrays only.
 static void playWelcome() {
-  const uint16_t f[2] = {1319, 1661};   // E6 G#6 - a rising major third: warm, "happy", not shrill
-  const uint16_t d[2] = {85, 145};
+  const uint16_t f[3] = {2349, 0, 2794};   // D7, gap, F7: a rising minor third, bright on a small speaker
+  const uint16_t d[3] = {45, 55, 55};      // ms: short enough to read as "tk", not as a tone
   if (!g_soundOn || g_dnd) return;
   om::audioVolume(g_volume);
-  for (int i = 0; i < 2; ++i) om::audioTone(f[i], d[i]);
+  for (int i = 0; i < 3; ++i) om::audioTone(f[i], d[i]);
 }
 
 static void playClick() {

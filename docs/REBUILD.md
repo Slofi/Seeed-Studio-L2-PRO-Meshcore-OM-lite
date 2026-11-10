@@ -21,19 +21,21 @@ colours): restyling the drawing would break touch everywhere. That layer is rebu
 
 ## The visual guide
 
-`/home/slofi/Projects/pocket-mesh/ui-mock/preview.html` ("the preview", approved 2026-10-20; read its CSS
-and markup, it is the spec). It draws BOTH devices: L2 Pro 320x240 touch (bottom tab bar, single column,
+`/home/slofi/Projects/pocket-mesh/ui-mock/index.html` (read its CSS and markup, it is the spec). It is
+the approved preview of 2026-10-20 (`preview.html`, frozen) with ONE change Filip asked for on 2026-11-10:
+the accent is OM gold. If the two disagree on anything else, say so. It draws BOTH devices: L2 Pro 320x240 touch (bottom tab bar, single column,
 list then full-screen detail with back, keyboard as a sheet over the tab bar) and Tanmatsu 800x480 with a
 keyboard and no touch (left sidebar, list + detail two panes, focus ring, key hints).
 
 Design tokens from it (CSS custom properties): bg `#0f1115`, panel `#161a21`, panel2 `#1d232c`,
-line `#2a3240`, ink `#e8edf5`, dim `#93a0b4`, dimmer `#5f6b7d`, acc `#4aa3ff`, acc2 `#39d98a`,
+line `#2a3240`, ink `#e8edf5`, dim `#93a0b4`, dimmer `#5f6b7d`, acc `#e8b04f` (gold), client `#4aa3ff`, acc2 `#39d98a`,
 warn `#ffb020`, bad `#ff5c5c`; status bar `#11161d`, 26 px, 11 px text; tab bar `#11161d`, 25 px;
 list rows min 30 px; on-screen keys about 22 px. Text: a sans for names and messages, a mono for numbers,
 ids, ages and the status line (the mock uses mono in about 40 places).
-**Accent:** Filip chose OM gold `#e8b04f` on 2026-11-09 for titles and the selected tab. Keep gold as the
-accent and the mock's palette for everything else, as ONE named constant, so it can be flipped to the
-mock's blue in one line if he prefers.
+**Accent: OM gold `#e8b04f`** (Filip, 2026-11-10: "change the blue colour accent with the golden one",
+done in `index.html` first so he could see it). In the mock: `--acc` gold; client nodes keep their own blue
+`--client:#4aa3ff` (repeater green, room amber), so a client dot never looks selected; selected backgrounds
+are dark gold `#3a2c12` / `#1f1a10`, selected text `#f6e3b8`. One named constant per colour in `theme.h`.
 
 What makes the current app look "retro", and what replaces it: bitmap fonts → anti-aliased smooth fonts
 (LovyanGFX smooth/VLW fonts in flash, two families, a few sizes); flat boxes → the mock's panels, 1 px

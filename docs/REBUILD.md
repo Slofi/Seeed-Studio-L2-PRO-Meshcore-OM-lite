@@ -27,12 +27,12 @@ the accent is OM gold. If the two disagree on anything else, say so. It draws BO
 list then full-screen detail with back, keyboard as a sheet over the tab bar) and Tanmatsu 800x480 with a
 keyboard and no touch (left sidebar, list + detail two panes, focus ring, key hints).
 
-Design tokens from it (CSS custom properties), WARM since 2026-11-10 (Filip: "change the grey-ish
-background colour, to better match the gold"; every dark grey had its blue tint mirrored into amber, same
-darkness): bg `#15110f`, panel `#211a16`, panel2 `#2c231d`, line `#40322a`, ink `#e8edf5`, dim `#93a0b4`,
-dimmer `#5f6b7d`, acc `#e8b04f` (gold), client `#4aa3ff`, acc2 `#39d98a`, warn `#ffb020`, bad `#ff5c5c`;
-status bar and tab bar `#1d1611`, 26 px and 25 px, 11 px status text; row line `#251d17`. Read the rest
-from `index.html`, it is the truth;
+Design tokens from it (CSS custom properties), NEUTRAL GREY with a slight warm lean since 2026-11-10
+(Filip: the first blue-tinted greys were "too cold, suitable for blue accent, but not for gold", the amber
+try was "too warm"; each grey now keeps its brightness with almost no tint): bg `#131210`, panel `#1c1b19`,
+panel2 `#242321`, line `#333230`, ink `#e8edf5`, dim `#93a0b4`, dimmer `#5f6b7d`, acc `#e8b04f` (gold),
+client `#4aa3ff`, acc2 `#39d98a`, warn `#ffb020`, bad `#ff5c5c`; status bar and tab bar `#171614`, 26 px
+and 25 px, 11 px status text; row line `#1e1d1b`. Read the rest from `index.html`, it is the truth;
 list rows min 30 px; on-screen keys about 22 px. Text: a sans for names and messages, a mono for numbers,
 ids, ages and the status line (the mock uses mono in about 40 places).
 **Accent: OM gold `#e8b04f`** (Filip, 2026-11-10: "change the blue colour accent with the golden one",

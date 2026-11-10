@@ -336,6 +336,57 @@ void meshClearUnread(int channelIdx) {
   if (channelIdx >= 0 && channelIdx < 8) s_unread[channelIdx] = 0;
 }
 
+// --- node DB ---------------------------------------------------------------------------------------
+// The UI gets a copy, never a pointer into contacts[]: the mesh may overwrite a slot on the next
+// advert while the screen is being built.
+namespace {
+bool validContact(const ContactInfo& c) {
+  return c.type != ADV_TYPE_NONE && c.name[0] != 0;
+}
+}  // namespace
+
+int meshContactList(MeshContact* out, int max) {
+  if (!out || max <= 0 || !s_ctx || !s_ctx->mesh) return 0;
+  const int total = s_ctx->mesh->getTotalContactSlots();
+  int n = 0;
+  for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
+    ContactInfo ci;
+    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    MeshContact mc{};
+    snprintf(mc.name, sizeof(mc.name), "%s", ci.name);
+    mc.type = ci.type;
+    mc.path_len = ci.out_path_len;
+    mc.lastmod = ci.lastmod;
+    mc.has_pos = (ci.gps_lat != 0 || ci.gps_lon != 0);
+    mc.lat_e6 = ci.gps_lat;
+    mc.lon_e6 = ci.gps_lon;
+    // Insert newest first; the newest max contacts win when the table is larger than the view.
+    int pos = n;
+    while (pos > 0 && out[pos - 1].lastmod < mc.lastmod) --pos;
+    if (pos >= max) continue;
+    if (n < max) ++n;
+    for (int j = n - 1; j > pos; --j) out[j] = out[j - 1];
+    out[pos] = mc;
+  }
+  return n;
+}
+
+uint32_t meshContactSignature() {
+  uint32_t h = 2166136261u;
+  if (!s_ctx || !s_ctx->mesh) return h;
+  const int total = s_ctx->mesh->getTotalContactSlots();
+  for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
+    ContactInfo ci;
+    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    h = (h ^ ci.lastmod) * 16777619u;
+    h = (h ^ ci.type) * 16777619u;
+    for (const char* p = ci.name; *p; ++p) h = (h ^ (uint8_t)*p) * 16777619u;
+  }
+  return h;
+}
+
+uint32_t meshNow() { return (s_ctx && s_ctx->mesh) ? s_ctx->mesh->getRTCClock()->getCurrentTime() : 0; }
+
 bool meshLinkSend(int channelIdx, const char* text) {
   Serial.printf("[mc] send ch%d ready=%d ctx=%d mesh=%d\n", channelIdx, (int)s_ready,
                 s_ctx != nullptr, s_ctx && s_ctx->mesh != nullptr);

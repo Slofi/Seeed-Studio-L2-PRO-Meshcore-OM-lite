@@ -123,6 +123,8 @@ constexpr int16_t kBadgePillW  = 19;              // "9+" (two 5 px digits and a
 constexpr int16_t kBadgeRing   = 1;               // the separating ring, in the bar colour
 constexpr int16_t kBadgeTop    = kTabTopLine + 1; // tab top -> badge top (clear of the gold line)
 constexpr int16_t kBadgeCxOfs  = kTabIcon / 2;    // tab centre -> badge centre: the icon's right edge
+// The new-node notice's dot: a plain 5 px gold circle (no count), same corner as the badge.
+constexpr int16_t kNewDotR    = 2;
 
 constexpr int16_t kBattW      = 16;
 constexpr int16_t kBattH      = 7;
@@ -219,6 +221,9 @@ constexpr int16_t kSheetPadX    = 10;
 constexpr int16_t kSheetPadY    = 6;
 constexpr int16_t kSheetHeadH   = 34;
 constexpr int16_t kSheetRowH    = 22;
+// The Nodes long-press sheet has at most eight rows (a client and a repeater both top out there);
+// 20 px keeps the whole panel above the status bar: 12 + 34 + 8 * 20 = 206 px, top edge at 34.
+constexpr int16_t kNodeSheetRowH = 20;
 constexpr int16_t kSheetLine1Cy = 11;   // from the header's top: the sender
 constexpr int16_t kSheetLine2Cy = 25;   // from the header's top: channel, hops, SNR
 constexpr int16_t kSheetGap     = 6;    // a row's label -> its value

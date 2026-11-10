@@ -329,7 +329,7 @@ void drawToast(lgfx::LovyanGFX* d, const Layout& L, const char* text) {
   d->drawString(text, box.x + box.w / 2, box.y + box.h / 2);
 }
 
-void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {
+void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread, bool newNodeDot) {
   const Rect& bar = L.tabbar;
   d->fillRect(bar.x, bar.y, bar.w, bar.h, kBar);
   d->drawFastHLine(bar.x, bar.y, bar.w, kLine);
@@ -359,6 +359,17 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread) {
   if (unread > 0) {
     const Rect box = countBadgeRect(L.tab(Tab::Chat), unread > 9);
     drawCountBadge(d, box, unread, kBar);
+  }
+
+  // EST-342: a small gold dot on the Nodes tab while a contact added since the screen was last
+  // opened is still unseen. It is not a count, so it is a dot, and it sits in the same corner the
+  // Chat badge uses.
+  if (newNodeDot) {
+    const Rect tab = L.tab(Tab::Nodes);
+    const int cx = tab.x + tab.w / 2 + kBadgeCxOfs;
+    const int cy = tab.y + kBadgeTop + kBadgeD / 2;
+    d->fillSmoothCircle(cx, cy, kNewDotR + kBadgeRing, kBar);
+    d->fillSmoothCircle(cx, cy, kNewDotR, kAcc);
   }
 }
 
@@ -409,8 +420,15 @@ void drawListRow(lgfx::LovyanGFX* d, const Rect& r, const RowModel& row) {
   d->fillCircle(dotCx, cy, kTypeDot / 2, typeColour(row.type));
 
   const int right = r.right() - kRowPadX;
+  // EST-342: the favourite star sits at the far right, so it is seen before the age; the age and the
+  // note shift left by its width, never under it.
+  int ageRight = right;
+  if (row.favourite) {
+    drawTextRight(d, FontRole::SansBody, kAcc, row.selected ? kSelBg : kScreen, right, cy, "*");
+    ageRight -= textWidth(d, FontRole::SansBody, "*") + kRowGap;
+  }
   const int ageW = textWidth(d, FontRole::MonoMeta, row.age);
-  const int ageX = right - ageW;
+  const int ageX = ageRight - ageW;
   int cursor = ageX - kRowGap;
   int noteRight = cursor;
   int noteW = 0;

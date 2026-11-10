@@ -3,9 +3,10 @@
 // like the keyboard sheet, drawn over the tab bar; a tap outside closes it. Its header carries what
 // the old INFO panel showed (sender, channel, age, hops, SNR), so INFO is no longer a separate step.
 //
-// Rows appear only when their action can actually work: a DM row while the DM store is empty, a
-// "Node details" row for a sender who is not a known contact, a "Show on map" row for a contact with
-// no position and a "Path" row for a packet that carried no repeater are all left OUT, never greyed.
+// Rows appear only when their action can actually work: a "Direct message" row without the sender's
+// public key (nothing to encrypt to), a "Node details" row for a sender who is not a known contact,
+// a "Show on map" row for a contact with no position and a "Path" row for a packet that carried no
+// repeater are all left OUT, never greyed.
 //
 // Plain C++ (no LovyanGFX, no Arduino), so test/host proves the rows, the rectangles and the path
 // naming with the system g++.
@@ -23,7 +24,7 @@ namespace ui {
 enum class SheetAction : uint8_t {
   None = 0,
   Reply,          // the "@Name text" draft, as REPLY did
-  DirectMessage,  // once the DM store exists (upstream's companion code)
+  DirectMessage,  // the sender's thread, opened or created (needs the contact's key)
   CopyText,       // the whole text into the draft
   Mention,        // "@Name " into the draft, without the reply bar
   NodeDetails,    // jump to the sender in Nodes
@@ -44,7 +45,12 @@ struct SheetRow {
 // One message's facts, filled by the shell from the mesh facade.
 struct SheetContext {
   bool mine = false;
-  bool dmAvailable = false;
+  // EST-342: "Direct message" is offered only when the sender is a known contact whose public key
+  // we hold (that key is what encrypts the DM), and never while the sheet is already open inside
+  // that same thread.
+  bool senderHasKey = false;
+  bool alreadyDm = false;
+  bool dm = false;                 // a direct message thread (Resend/Heard differ there)
   bool senderKnown = false;
   bool senderHasPosition = false;
   bool pathKnown = false;

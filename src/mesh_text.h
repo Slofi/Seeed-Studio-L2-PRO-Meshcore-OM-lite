@@ -20,6 +20,10 @@ constexpr int kMeshTextMax = 160;   // MAX_TEXT_LEN: bytes of one channel text, 
 constexpr int kMeshTextCap = kMeshTextMax + 1;   // + the terminator
 constexpr int kMeshNameMax = 32;    // sizeof(ContactInfo::name), terminator included
 constexpr int kMeshNameCap = kMeshNameMax;       // the field already holds its own terminator
+// MeshCore's MeshCore.h: MAX_PATH_SIZE 64 (bytes of path hashes) and PUB_KEY_SIZE 32. Both are
+// static_asserted against upstream in src/mesh_link.cpp.
+constexpr int kMeshPathMax = 64;
+constexpr int kMeshPubKey = 32;
 
 // The default name this node sends with: MeshCore writes "<this>: " in front of every channel
 // text. The running name comes from MeshCore's NodePrefs (meshNodeName()), because the phone can
@@ -37,6 +41,12 @@ constexpr int kMeshOwnPrefix = cstrLen(kMeshOwnName) + 2;
 
 // The longest text the air will carry from us: MAX_TEXT_LEN minus our own prefix.
 constexpr int kMeshOwnTextMax = kMeshTextMax - kMeshOwnPrefix;
+
+// A direct text message has no "<name>: " prefix, but BaseChatMesh::composeMsgPacket() puts a 4-byte
+// timestamp and one attempt byte in front of the text. The DM composer may therefore use
+// MAX_TEXT_LEN minus those five bytes (EST-342); the receiver needs nothing, the text arrives alone.
+constexpr int kMeshDmFrameBytes = 5;   // 4 timestamp + 1 attempt (BaseChatMesh::composeMsgPacket)
+constexpr int kMeshDmTextMax = kMeshTextMax - kMeshDmFrameBytes;
 
 // The same budget for the real node name (NodePrefs::node_name, at most 31 characters).
 inline int meshOwnTextMaxFor(const char* name) {

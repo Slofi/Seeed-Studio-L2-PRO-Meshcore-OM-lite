@@ -18,7 +18,8 @@ bool meshLinkReloadChannels();
 
 // Recent channel traffic for the UI (oldest first).
 int meshMsgCount();
-uint32_t meshMsgSerial();   // monotonic: changes on every stored message, even when the ring is full
+uint32_t meshMsgSerial();   // monotonic: changes on every stored CHANNEL message, even when the ring is full
+                            // (DMs have their own serial: meshDmSerial/meshDmRecvSerial)
 const char* meshMsgText(int idx);
 int meshMsgChannel(int idx);
 const char* meshMsgName(int idx);
@@ -41,14 +42,87 @@ int meshUnread(int channelIdx);
 void meshClearUnread(int channelIdx);
 
 // Direct messages, now fed by upstream's companion code: one thread per contact, with the same
-// seq / wall / real / hops / SNR rules as channel messages and an unread count. The DM chat screen
-// and the sheet's "Direct message" row are the next ticket; the data is here.
+// seq / wall / real / hops / SNR rules as channel messages and an unread count. A thread exists as
+// soon as a DM arrives OR the user opens one from the Nodes menu, so an empty thread can be written
+// to (EST-342).
 int meshDmCount();
 const char* meshDmName(int idx);
 int meshDmUnread(int idx);   // messages received from that contact since it was last cleared
 // Whether a DM can actually be opened at all: false while the DM store is empty, so the message
 // sheet leaves "Direct message" out instead of offering a row that cannot work.
 bool meshDmAvailable();
+uint32_t meshDmSerial();               // changes on every DM stored, sent or delivered
+// Changes only when a DM ARRIVES: what the DM chime listens to, so our own send stays silent.
+uint32_t meshDmRecvSerial();
+void meshDmClearUnread(int thread);
+
+// One stored DM, copied out (the ring may shift while the screen draws).
+struct MeshDm {
+  char name[32];               // the sender's MeshCore name (the partner's, for ours)
+  char text[161];
+  bool mine;
+  uint8_t state;               // om::ui::DmState as a plain byte (0 sending, 1 delivered, 2 not
+                               // confirmed, 3 failed); the facade stays free of UI headers
+  uint32_t seq;
+  uint32_t ts;                 // uptime seconds
+  uint32_t wall;               // system-clock seconds
+  bool wallReal;
+  uint32_t ackWall;            // when the ACK arrived (0 = none yet)
+  bool ackReal;
+  int8_t hops;
+  int8_t snr4;
+  uint8_t pathHashSize;
+  uint8_t pathCount;
+  uint8_t path[64];
+};
+// Oldest first, at most max. Returns how many of this thread's messages are in the ring.
+int meshDmList(int thread, MeshDm* out, int max);
+
+// The thread for a contact's exact name, creating an empty one when the contact is known (the Nodes
+// menu's "Direct message"). False when there is no such contact, so no thread can exist.
+bool meshDmOpenByName(const char* name, int* threadOut);
+// Send one DM through BaseChatMesh::sendMessage (the companion's own path, its ACK and its timeout).
+// The text is bounded by the DM frame budget; refusing here means nothing went on the air.
+bool meshDmSend(int thread, const char* text);
+
+// --- node operations (the Nodes long-press menu) -------------------------------------------------
+// Ping: BaseChatMesh::sendRequest(REQ_TYPE_GET_STATUS) and the reply through
+// Listener::onUnhandledResponse, so the round-trip is measured, not guessed.
+enum class MeshPingState : uint8_t { Idle, Sent, Replied, Timeout, Failed };
+bool meshNodePing(const char* name);
+MeshPingState meshPingState(uint32_t* rttMs, char* nameOut, size_t nameCap);
+
+// Trace: Mesh::createTrace() + sendDirect() along the contact's path, exactly the packet the
+// companion's CMD_SEND_TRACE_PATH builds. The result arrives through Listener::onTraceRecv.
+struct MeshTraceHop {
+  char name[32];
+  int8_t snr4;
+  bool known;   // the hash matched a known repeater's public key
+};
+struct MeshTrace {
+  MeshTraceHop hops[8];
+  int count;
+  int8_t finalSnr4;
+  uint32_t rttMs;
+  bool haveRtt;
+  char node[32];
+};
+bool meshNodeTrace(const char* name);
+uint32_t meshTraceSerial();
+bool meshTraceResult(MeshTrace* out);
+
+bool meshNodeResetPath(const char* name);
+bool meshNodeFavourite(const char* name, bool on);
+bool meshNodeIsFavourite(const char* name);
+bool meshNodeRemove(const char* name);
+// The RPTR tab exists in this build; the row is offered only for a repeater and only when it does.
+bool meshRptrTabExists();
+
+// --- the new-node notice -------------------------------------------------------------------------
+// Adverts that ADD a contact queue one event each (name + advert type), for the toast, the dot on
+// the Nodes tab and the per-event sound. Known contacts never queue.
+uint32_t meshNewNodeSerial();
+bool meshNewNodeTake(char* nameOut, size_t nameCap, uint8_t* advTypeOut);
 
 // The name this node sends with, from MeshCore's NodePrefs (the phone can change it later; the
 // composer budget must read this, not a constant).
@@ -76,6 +150,13 @@ struct MeshContact {
   bool has_pos;
   int32_t lat_e6;
   int32_t lon_e6;
+  bool has_key;          // a real contact always has a public key; false only for a bad record
+  uint8_t pub_key[32];
+  bool favourite;        // kept in our own NVS, favourites sort first
+  // The path's bytes are NOT copied into this struct (64 bytes x 64 rows of RAM for a page that is
+  // opened rarely): meshContactPathText() formats it on demand (EST-342).
+  int8_t adv_snr4;       // SNR x 4 of the last advert; 0 = unknown (see PROGRESS.md)
+  bool adv_snr_known;
 };
 
 // Newest first, at most max. Returns how many valid contacts were written (0 is a real answer:
@@ -87,6 +168,9 @@ bool meshContactByName(const char* name, MeshContact* out);
 // Name one packet-path hash: the repeater whose public key starts with these bytes, copied into buf.
 // "" when no known repeater matches (MeshCore's path hash is the first 1..3 bytes of the pub_key).
 const char* meshPathHopName(const uint8_t* hash, uint8_t len, char* buf, size_t cap);
+// The path to reach a contact as text: "direct", "unknown", or the named/hex hops joined by " > ".
+// False when there is no such contact.
+bool meshContactPathText(const char* name, char* out, size_t cap);
 // Cheap change detector: count, names, types and lastmod. Changes when the list would change.
 uint32_t meshContactSignature();
 // MeshCore's current clock, for age arithmetic. 0 when the mesh is not up.

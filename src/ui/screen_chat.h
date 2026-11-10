@@ -42,6 +42,7 @@ struct ChatView {
   bool nums = false;
   const char* draft = "";
   const char* ownName = "OM Lite";   // MeshCore NodePrefs name, for the composer byte budget
+  bool dmThread = false;             // the open chat is a DM: its frame has no "name: " prefix
   uint32_t replySeq = 0;    // held message id, 0 = no reply
   const char* replyName = "";   // copied at the moment REPLY was tapped
   int menuMsg = -1;         // resolved index into msgs, -1 = closed / fell out of the ring
@@ -54,14 +55,16 @@ struct ChatView {
   int menuHeard = 0;        // own message: times we heard our packet repeated by others
   bool menuSenderKnown = false;
   bool menuSenderHasPos = false;
-  bool dmAvailable = false;
+  bool menuSenderHasKey = false;   // the sender's public key is known: a DM can be encrypted to
+  bool menuInDm = false;           // the sheet is already open inside that sender's DM thread
   int unread = 0;           // chat badge on the tab bar
+  bool newNodeDot = false;  // EST-342: a contact was added since Nodes was last opened
 };
 
 void chatScreenDraw(const ChatView& v);
 
 enum class ChatHit : uint8_t {
-  None, Head, SelRow, SelManage, SelClose, Msg, SheetRow, SheetClose, Field, Key, Outside,
+  None, Head, SelRow, SelManage, SelClose, Msg, SenderName, SheetRow, SheetClose, Field, Key, Outside,
 };
 
 struct ChatHitResult {
@@ -77,6 +80,10 @@ struct ChatHitResult {
 
 // What a tap at (x, y) would hit. Pure read: it measures text but changes nothing.
 ChatHitResult chatScreenHit(const ChatView& v, int x, int y);
+
+// The rectangle of one message's sender name, as drawn on the first line. The tap on a name opens
+// that sender's DM (EST-342), so the same pixels that the eye reads are the ones that answer.
+bool chatSenderNameRect(const ChatView& v, int msgIndex, Rect* out);
 
 // Message band arithmetic for the shell: the content height is what decides whether a new message
 // may move the view (only when the reader is already at the bottom), and maxScroll clamps a drag.

@@ -1181,3 +1181,138 @@
 - **Post-mortem of the EST-340 crash, decoded by Claude** (dump sha `c0ce7515c7b2a618` = sha256 of the saved EST-340 ELF): `LoadProhibited` at vaddr 0 in `fs::FS::mkdir` <- `DataStore::begin()` (DataStore.cpp:62, `_fs->mkdir("/bl")`) <- `meshLinkBegin` (mesh_link.cpp:569, `store.begin()`). So the panic was in `store.begin()`, with `store._fs` == NULL, not in `savePrefs` as DS reasoned. Same root cause, different victim: the_mesh was allocated with the 32-contact size (15,312 B) while MyMesh's constructor writes the 100-contact layout (28,096 B), so it wrote ~12.8 KB past the object into the neighbouring globals, `store` among them. DS's fix (one MAX_CONTACTS for every TU + static_assert) removes the cause; the boot proves it.
 - Seen: `/contacts3 already valid (1520 B, 12 in /contacts), kept`: EST-340's run had written /contacts3 with 10 contacts; the 2 contacts heard later on the rollback image are not in it. They come back with their next advert. Acceptable, recorded.
 - To do on the air (Filip): chat both ways on Don't Panic, and a DM to the L2.
+
+## 2026-11-10 12:11 (DeepSeek): EST-342 — direct messages end to end, node menu, new-node notice, Nodes scroll
+
+Built on `d65b0b2`. Read `docs/REBUILD.md` and the end of this log first (the core is MeshCore's own
+companion code). Nothing in `lib/` was touched, `.git` untouched, nothing committed.
+
+- **1. Direct messages, display and send (the two missing halves).** Reception already worked: the
+  thread existed because `storeDm()` ran. The chat screen returned early for a non-channel entry in
+  `refreshChatMessages()`, and nothing called a send at all. Now:
+  - A DM thread exists as soon as a DM arrives OR the user opens one from the Nodes menu; the
+    selector row keeps its `thread` index in `ChatEntry`, so the open chat and the send path never
+    guess from the list position. Opening a DM shows the same chat screen with the header
+    `DM: <name>`, the thread's messages, the compose field and the keyboard sheet.
+  - Sending goes through **upstream's own path**: `BaseChatMesh::sendMessage(contact, wireTs,
+    attempt, text, expected_ack, est_timeout)`, the same calls the companion app's
+    `CMD_SEND_TXT_MSG` makes. `MyMesh` computes the frame hash for the ACK; we keep it, and
+    `Listener::onACKRecv()` proves delivery. The ACK also shows the companion's own `est_timeout`:
+    one resend per expired attempt up to attempt 3 (the 2-bit attempt field `composeMsgPacket()`
+    writes), then **not confirmed**. A MeshCore compose failure shows **not sent**; **no** of these
+    sets the radio-fault mark, because an unanswered DM is not a broken radio.
+  - Delivery state per sent DM, in the thread under the text: `sending`, `delivered <time>` (the
+    ACK's wall-clock time, `ui/age.h`), `not confirmed`, `not sent`. The delivery machine is pure
+    C++ (`ui/dm_delivery.h`) and host-tested from ACK events and timeouts.
+  - Receiving through the Listener (`onMessageRecv`) stores the thread, counts unread (selector row
+    and the Chat tab badge via `unreadTotal()`), and plays the existing per-event DM sound (`dm=`).
+    A new receive-only serial (`meshDmRecvSerial()`) is what the chime watches, so our own send
+    never rings it.
+  - **Composer budget for a DM: 155 bytes.** `BaseChatMesh::composeMsgPacket()` puts a 4-byte
+    timestamp and one attempt byte in front of the text, and there is no `"name: "` prefix, so the
+    budget is `MAX_TEXT_LEN` (160) minus those 5 bytes (`mesh_text.h`, `static_assert`ed against
+    upstream). The draft counter, the key guard and the send check all use that one number.
+  - Times, not ages: DM message stamps and the ACK time use the same `ui/age` formatter as the
+    rest of the chat (the age is only the fallback when the clock was not real, rule 8).
+  - The own-message sheet follows the thread: `Copy text` + `Resend` (Resend sends the DM again
+    through the companion's path), and `Heard repeats` is left out in a DM because a direct packet
+    has no group repeats to count. Copy/Mention take the DM's 155-byte budget in a DM.
+- **2. Sender-name tap and the sheet's DM row.** A tap on a sender's *name* in a channel message is
+  the same as the message sheet's `Direct message` row: `chatScreenHit()` measures the drawn name
+  rectangle (`chatSenderNameRect`), and only a non-mine, non-DM message can hit it. The sheet row is
+  built only when the sender is a known contact **with a public key**, and it is left out inside that
+  same DM thread (already open) and for our own messages. **Why a name that is not a contact gets no
+  row:** the key is what `createDatagram` encrypts to; without it there is nothing to send to, so the
+  row is absent rather than greyed (the same rule as the other rows).
+- **3. Node menu (long press).** A 450 ms hold on a Nodes row opens a bottom sheet in the message
+  sheet's style; the row behind it turns gold as the visual cue, the hold fires once, and its release
+  is not a tap. A drag of more than 12 px cancels it. The rule is one tested struct
+  (`ui/long_press.h`), used by the shell instead of the old inline `millis() - downMs >= 450` for this
+  list. Plain tap still just selects the row. The sheet header is the name plus
+  `type · last heard (time) · path`; the rows are:
+  `Direct message` (clients with a key), `Info`, `Show on map` (with a position), `Ping`, `Trace`
+  (when a path is known; upstream's trace packet takes an explicit path), `Reset path`, `Favourite`,
+  `Remove contact` (two taps: the first renames the row), and for a repeater `Log in (RPTR)`.
+  - **Info** is a full page (`ui/screen_node_info.*`): key short (8 bytes hex) and the whole key split
+    over two mono lines, type, last advert as a time, position when there is one, path.
+    **The SNR of the last advert is not shown: the companion's `Listener::onDiscoveredContact()`
+    gets the contact and its path but not the packet, so there is no SNR to report.** The field is in
+    the model for the day upstream carries it; the row is left out today.
+  - **Ping** is `sendRequest(contact, REQ_TYPE_GET_STATUS)`. The reply reaches
+    `Listener::onUnhandledResponse()` (we call `sendRequest` directly, so MyMesh's own
+    `pending_status` stays 0) and the toast gives the measured round trip, or `no reply` after the
+    companion's estimate. **Trace** is `Mesh::createTrace()` + `sendDirect()` along the contact's
+    path, the same packet the companion's `CMD_SEND_TRACE_PATH` builds; `Listener::onTraceRecv()`
+    gives one SNR per hop and the final SNR, drawn as the small list.
+  - **Reset path** goes through `lookupContactByPubKey()` so `resetPathTo()` edits the table entry,
+    not a copy (a copy would be forgotten immediately).
+  - **Favourite** is kept in our own NVS namespace `omfav` (public keys, 32 max) because MeshCore's
+    `ContactInfo` has a favourite *flag* but no public setter; `addContact()` allocates a new slot
+    instead of replacing. Favourites sort first in `meshContactList()` (`nodeComesBefore`) and draw a
+    gold star at the row's right. `Remove contact` uses `removeContact()` + `saveContacts()`.
+  - **Log in (RPTR)** opens the RPTR tab with the node remembered. The tab itself is still the old
+    placeholder, so it now says `node: <name>` and `Login exchange: not built yet` instead of
+    pretending. **This is a gap on purpose: the repeater login/status flow is a later ticket**;
+    Claude decides whether the row should stay until that tab works.
+- **4. New-node notice.** One event (name + advert type) is queued when an advert really ADDS a
+  contact; the shell drains it into a 3 s toast `New node: <name> (<type>)`, a small gold dot on the Nodes tab
+  (drawn on the new tab bar and on the old Map/RPTR bar too) until the Nodes screen is next drawn, and
+  the sound. The rules are pure (`ui/new_node.h`, host-tested): known contacts never queue, DND
+  silences only the sound, toast and dot remain. The toast is drawn only, never hit-tested, so it
+  cannot steal a touch outside its own rectangle. **Detection had to be our own:** MeshCore
+  v1.18.0's `Listener::onDiscoveredContact(is_new)` initialises `is_new = false` and never sets it
+  true on the normal add path (checked in `lib/meshcore/helpers/BaseChatMesh.cpp`; it is true only on
+  the early-exit paths where the contact is NOT added). So `ui/new_node.h` carries a small 32-bit
+  key-hash set (`KnownKeySet`, 128 slots, ~0.5 KB): seeded from the contact table right after
+  `the_mesh.begin()`, added on a new advert and removed on Remove contact. A notice fires only when
+  the key is absent from the baseline AND the contact is in the table now, so a filtered or
+  table-full advert that did not add anything cannot toast. Settings > Sound gained a `New node >` row in the
+  same picker as message/DM/mention; **the picker now ends with `Off` for every event** (stored as
+  `kChimeCount`, so old NVS values still mean the same chime). The default new-node sound is a new
+  soft two-note `Soft`, appended so no existing picker index moved. The ten settings rows now sit at
+  a 19 px pitch and all fit above the tab bar.
+- **5. Nodes scroll.** The drag did `g_nodeScroll0 - dy` while the rows are drawn at `y - scroll`:
+  the list ran away from the finger, the EST-334 sign bug again. It now uses the shared tested
+  `selDragScroll(base, dyUp, maxScroll)` (finger up moves the rows up), with the same 10 px give and
+  a snap-back on release. `test_dm.cpp` drives the same helper over the Nodes layout and checks the
+  row really moves with the fingertip.
+- **6. One linking fix found by the build.** `the_mesh` is defined inside `mesh_link.cpp`'s anonymous
+  namespace, below the DM code. A use compiled *before* that definition bound to `MyMesh.h`'s global
+  `extern MyMesh the_mesh` and failed to link; the object is now declared at the top of the anonymous
+  namespace with a comment, so every use is the file-local object.
+- **Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS. RAM **150,848 B** of
+  327,680 (46.0 %, previous 135,208, **+15,640 B**), flash **940,321 B** of 6,553,600 (14.3 %,
+  previous 919,801, **+20,520 B**), `firmware.bin` **940,688 B** (previous 920,160, **+20,528 B**).
+  The first cut cost +28.5 KB of RAM: two 32-message `MeshDm` copy buffers in `main.cpp` and a
+  64-byte path copied into every `MeshContact`. They are now one shared copy buffer (the two users
+  never nest) and the path is formatted on demand (`meshContactPathText`), which brought it to
+  +15.1 KB. Only the two pre-existing RadioLib `#warning`s.
+- **Tests**: `test/host/run.sh` exit 0 (13 C++ binaries + 3 python checks). New `test_dm.cpp`:
+  the DM budget (155, one byte over refused), the delivery table (matching ACK, a different ACK,
+  a late duplicate ACK, one resend per timeout, attempt 0..3, not confirmed, a retry's new ACK), the
+  long press (fires exactly at 450 ms once, release before is a tap, release after is not, 12 px
+  cancels, 8/6 px does not), the node sheet rows for a client/repeater/room/no-key contact and the
+  two-step remove label, the sheet geometry and hit rects (8 rows, top edge 34, clear of the status
+  bar), the new-node rules (new/known, DND, master off, per-event Off) and toast text, the message
+  sheet's DM row (key, unknown name, already in the DM, own message), the Info page's lines (short
+  and whole key, no SNR row, position/path only when known), favourite ordering, the known-key
+  baseline (new vs known, a removed contact counting as new again), and the Nodes drag sign. `test_chat.cpp` moved to the new `SheetContext` (key rule instead of `dmAvailable`).
+- **Could not check** (no device in the sandbox): the glass. Everything below needs Filip/Claude on
+  the device: a DM to and from OverMesh on gandalf (send, ACK time, the `delivered` line, an
+  unanswered DM reaching `not confirmed` after the retries), the DM sound and unread dot/badge, a tap
+  on a sender's name, the long press and each menu row, the Info page layout at 320 px, a ping round
+  trip, a trace with two or three hops, the new-node toast/dot/sound on an advert from a third node,
+  and the Nodes scroll with a full list. The Status/response path was proved by reading upstream
+  (`onUnhandledResponse` is the fallthrough for an unmatched RESPONSE), not on the air.
+- **Known limits, said plainly:** the DM ring is RAM-only (32 messages, like the channel ring); the
+  favourite list holds 32 keys; advert SNR is not available through the companion Listener; a trace
+  needs a known path, so its row is absent until one exists; the RPTR login exchange is not built;
+  two contacts heard after the EST-341 migration are not in `/contacts3` and will produce a
+  new-node notice on the first boot of this image, which is honest (they really are new to the
+  baseline, which is seeded from `/contacts3`).
+- **Next step**: Claude flashes this image and takes screenshots; Filip tests DM both ways with
+  OverMesh, the node menu, a new-node advert and the Nodes scroll. Then the RPTR tab (login/status)
+  and the remaining MeshCore features from REBUILD.md's work order.
+
+## 2026-11-10 12:15 (Claude): EST-342 on the device
+- Built in the sandbox (exit 0, RAM 150,848 B, flash 940,321 B), tests exit 0, reviewed binary flashed (940,688 B). Boot: identity same, mesh up, heap 191,996 B. Cosmetic: `[crash] stored core dump: unreadable (err 0x104)` on an erased partition (fix in the next ticket). DM both ways, node menu, new-node notice, Nodes scroll: Filip to test.

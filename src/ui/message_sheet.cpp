@@ -24,9 +24,11 @@ int messageSheetRows(const SheetContext& c, SheetRow* out, int max) {
   int n = 0;
   if (!c.mine) {
     add(out, n, max, SheetAction::Reply, "Reply");
-    // The DM store arrives with upstream's companion code. Until then there is no DM to open, so the
-    // row is left out rather than shown greyed (EST-336).
-    if (c.dmAvailable) add(out, n, max, SheetAction::DirectMessage, "Direct message");
+    // EST-342: a DM needs the sender's public key to encrypt to, so the row exists only for a known
+    // contact, and not when the sheet is already open inside that thread.
+    if (c.senderHasKey && !c.alreadyDm) {
+      add(out, n, max, SheetAction::DirectMessage, "Direct message");
+    }
     add(out, n, max, SheetAction::CopyText, "Copy text");
     add(out, n, max, SheetAction::Mention, "Mention");
     if (c.senderKnown) add(out, n, max, SheetAction::NodeDetails, "Node details");
@@ -36,8 +38,8 @@ int messageSheetRows(const SheetContext& c, SheetRow* out, int max) {
     add(out, n, max, SheetAction::CopyText, "Copy text");
     add(out, n, max, SheetAction::Resend, "Resend");
     // The count is drawn by the screen from the held message (screen_chat.cpp), because it is a live
-    // number: the row itself only says what the tap means.
-    add(out, n, max, SheetAction::HeardRepeats, "Heard repeats");
+    // number: the row itself only says what the tap means. A DM has no group repeats to count.
+    if (!c.dm) add(out, n, max, SheetAction::HeardRepeats, "Heard repeats");
   }
   return n;
 }

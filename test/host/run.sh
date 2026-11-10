@@ -24,7 +24,8 @@ BIN9="$(mktemp /tmp/om-lite-gpsmode.XXXXXX)"
 BIN10="$(mktemp /tmp/om-lite-fault.XXXXXX)"
 BIN11="$(mktemp /tmp/om-lite-fade.XXXXXX)"
 BIN12="$(mktemp /tmp/om-lite-crash.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12"' EXIT
+BIN13="$(mktemp /tmp/om-lite-dm.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -68,6 +69,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_fade.cpp \
 # (magic, truncation, seq), and the two one-line formats (task/PC/cause/backtrace, none/corrupt).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_crash_report.cpp \
   ../../src/crash_report_logic.cpp -o "$BIN12"
+# EST-342: the DM frame budget, the delivery state from the ACK and the companion's timeout, the
+# Nodes long-press rule, the node sheet's rows per node type, the new-node notice, the message
+# sheet's DM row, the Info page's lines and the Nodes drag sign.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_dm.cpp \
+  ../../src/ui/chat_layout.cpp ../../src/ui/text_wrap.cpp ../../src/ui/node_menu.cpp \
+  ../../src/ui/message_sheet.cpp -o "$BIN13"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -78,3 +85,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_crash_report.cpp \
 "$BIN10"
 "$BIN11"
 "$BIN12"
+"$BIN13"

@@ -29,6 +29,12 @@ struct ChatMsgView {
   int8_t hops = -1;         // packet hops, -1 = local echo / unknown
   int8_t snrq = 0;          // SNR x 4 (MeshCore's unit), 0 = unknown
   bool mine = false;
+  bool dm = false;          // a direct message (one thread per contact)
+  // My DMs only: the delivery state from MeshCore's ACK (ui/dm_delivery.h) and when that ACK
+  // arrived, as a wall clock the thread draws like any other time (EST-342).
+  uint8_t delivery = 0;     // ui::DmState
+  uint32_t ackWall = 0;
+  bool ackReal = false;
   // The packet's path, as it arrived: `path` points into mesh_link's ring (valid while this view
   // exists). pathHashCount repeaters of pathHashSize bytes each; 0 count = heard directly.
   const uint8_t* path = nullptr;
@@ -44,6 +50,7 @@ struct ChatEntry {
   char name[kChatNameCap] = "";        // the channel's name, or "DM: <partner>" for a direct message
   uint16_t unread = 0;
   bool dm = false;
+  int thread = -1;                     // DM only: mesh_link's thread index
   bool muted = false;
   bool hasLast = false;
   char lastFrom[kMeshNameCap] = "";    // the last message's sender, MeshCore's own name limit

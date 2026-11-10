@@ -39,11 +39,13 @@ struct RowModel {
   const char* note = "";    // optional mono text before the age, e.g. "direct" or "path 4B"
   const char* age = "";     // mono, right aligned
   bool selected = false;
+  bool favourite = false;   // a gold star at the right edge, before the age
 };
 
 // Status bar and tab bar.
 void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m);
-void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread);
+void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread,
+                bool newNodeDot = false);
 
 // One-line toast above the tab bar (theme.h kToastH / kToastMargin). Used by a tap on the radio fault
 // mark to say which of the three things is wrong. The caller keeps the text and the time.

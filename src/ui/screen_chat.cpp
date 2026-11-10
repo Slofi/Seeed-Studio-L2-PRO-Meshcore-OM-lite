@@ -12,6 +12,7 @@
 #include "ui/age.h"       // the one timestamp formatter
 #include "ui/badge_font.h"
 #include "ui/compose_text.h"
+#include "ui/dm_delivery.h"
 #include "ui/fonts.h"
 #include "ui/text_wrap.h"
 #include "ui/theme.h"
@@ -115,7 +116,7 @@ int wrapMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, con
 }
 
 // The drawn height of every message block. The draw and the hit test both use this, so a tap lands
-// on the block the eye sees.
+// on the block the eye sees. My own DMs get one more line: their delivery state (EST-342).
 int chatMsgHeights(const ChatView& v, int16_t* out, int max) {
   lgfx::LovyanGFX* d = om_display();
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
@@ -124,7 +125,8 @@ int chatMsgHeights(const ChatView& v, int16_t* out, int max) {
   for (int i = 0; i < v.msgCount && i < max; ++i) {
     WrapLine lines[kMaxWrapLines];
     const int nl = wrapMessage(d, v, v.msgs[i], g.msgs, lines, kMaxWrapLines, nullptr);
-    out[n++] = (int16_t)(nl * kMsgLineH);
+    const int statusLine = (v.msgs[i].dm && v.msgs[i].mine) ? 1 : 0;
+    out[n++] = (int16_t)((nl + statusLine) * kMsgLineH);
   }
   return n;
 }
@@ -278,6 +280,26 @@ void drawMessage(lgfx::LovyanGFX* d, const ChatView& v, const ChatMsgView& m, co
     drawTextLeft(d, FontRole::SansBody, kInk, kScreen, lx, top + kMsgLineH / 2 + r * kMsgLineH,
                  buf);
   }
+
+  // My own DMs say whether MeshCore's ACK came back, and when (EST-342). One extra line under the
+  // text; chatMsgHeights counts it, so the tap band includes it.
+  if (m.dm && m.mine) {
+    const DmState st = (DmState)m.delivery;
+    char state[48];
+    if (st == DmState::Delivered && m.ackWall != 0) {
+      Stamp s;
+      s.wall = m.ackWall;
+      s.uptime = m.ts;
+      s.wallReal = m.ackReal;
+      char when[24];
+      stampText(when, sizeof(when), s, v.nowWall, v.nowSec, v.nowReal, StampForm::DayTime);
+      snprintf(state, sizeof(state), "delivered %s", when);
+    } else {
+      snprintf(state, sizeof(state), "%s", dmStateToken(st));
+    }
+    drawTextLeft(d, FontRole::MonoMeta, st == DmState::Delivered ? kDim : kDimmer, kScreen,
+                 padX, top + kMsgLineH / 2 + nl * kMsgLineH, state);
+  }
 }
 
 void drawMessages(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
@@ -308,9 +330,11 @@ void drawMessages(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
 // the tail can never run under it (EST-334).
 void drawDraft(lgfx::LovyanGFX* d, const Rect& field, uint16_t bg, const ChatView& v, bool focus) {
   const char* draft = v.draft ? v.draft : "";
-  // MeshCore counts "<our name>: " against MAX_TEXT_LEN, so our budget is that much smaller, and a
-  // reply spends another "@Name " before the draft even starts.
-  const int allow = composeAllowance(v.replySeq != 0, v.replyName, v.ownName);
+  // A channel text counts "<our name>: " against MAX_TEXT_LEN (and a reply spends another
+  // "@Name "); a DM frame spends only its timestamp and attempt bytes (EST-342).
+  const int allow = v.dmThread
+      ? kMeshDmTextMax
+      : composeAllowance(v.replySeq != 0, v.replyName, v.ownName);
   const int left = composeRemaining(allow, (int)strlen(draft));
 
   char count[8];
@@ -422,7 +446,9 @@ int buildSheetRows(const ChatView& v, const char* pathText, SheetRow* out) {
   SheetContext c;
   const ChatMsgView& m = v.msgs[v.menuMsg];
   c.mine = m.mine;
-  c.dmAvailable = v.dmAvailable;
+  c.senderHasKey = v.menuSenderHasKey;
+  c.alreadyDm = v.menuInDm;
+  c.dm = m.dm;
   c.senderKnown = v.menuSenderKnown;
   c.senderHasPosition = v.menuSenderHasPos;
   c.pathKnown = v.menuPathCount > 0 && v.menuPathSize >= 1 && v.menuPathSize <= 3;
@@ -528,7 +554,7 @@ void chatScreenDraw(const ChatView& v) {
   if (v.osk) drawSheet(d, v, g);
   else drawCompose(d, v, g);
   // The sheet covers the bottom edge, so the tab bar is not drawn while it is open (mock .kb-open).
-  if (!v.osk) drawTabBar(d, L, Tab::Chat, v.unread);
+  if (!v.osk) drawTabBar(d, L, Tab::Chat, v.unread, v.newNodeDot);
   // The message sheet is last: the mock's bottom sheet sits over the tab bar.
   if (v.menuMsg >= 0) drawMessageSheet(d, v);
 
@@ -624,12 +650,36 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
     const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
     const int i = msgAt(g.msgs, heights, n, v.scroll, y);
     if (i >= 0) {
-      r.hit = ChatHit::Msg;
       r.index = i;
       r.seq = v.msgs[i].seq;
+      // A tap on the sender's NAME is the same as the sheet's "Direct message" row (EST-342); a tap
+      // anywhere else on the message still opens the sheet.
+      Rect name;
+      if (!v.msgs[i].mine && !v.msgs[i].dm && chatSenderNameRect(v, i, &name) &&
+          name.contains(x, y)) {
+        r.hit = ChatHit::SenderName;
+      } else {
+        r.hit = ChatHit::Msg;
+      }
     }
   }
   return r;
+}
+
+bool chatSenderNameRect(const ChatView& v, int msgIndex, Rect* out) {
+  if (out == nullptr || v.msgs == nullptr || msgIndex < 0 || msgIndex >= v.msgCount) return false;
+  lgfx::LovyanGFX* d = om_display();
+  if (d == nullptr) return false;
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
+  int16_t heights[kMaxChatMsgs];
+  int16_t tops[kMaxChatMsgs];
+  const int n = chatMsgHeights(v, heights, kMaxChatMsgs);
+  if (msgIndex >= n) return false;
+  msgSpans(g.msgs, heights, n, v.scroll, tops);
+  const int nameW = textWidth(d, FontRole::MonoMeta, v.msgs[msgIndex].name);
+  *out = Rect{(int16_t)(g.msgs.x + kMsgPadX + kMsgStampW + kMsgHdrGap), tops[msgIndex],
+              (int16_t)nameW, kMsgLineH};
+  return true;
 }
 
 int chatContentHeight(const ChatView& v) {

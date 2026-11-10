@@ -716,7 +716,7 @@ static void testMessageSheet() {
   // --- someone else's message, with every fact available ----------------------
   SheetContext c;
   c.mine = false;
-  c.dmAvailable = true;
+  c.senderHasKey = true;
   c.senderKnown = true;
   c.senderHasPosition = true;
   c.pathKnown = true;
@@ -737,14 +737,14 @@ static void testMessageSheet() {
   // --- rows that cannot work are LEFT OUT, never greyed -----------------------
   c = SheetContext();
   n = messageSheetRows(c, rows, kMaxSheetRows);
-  CHECK(n == 3);   // Reply, Copy text, Mention: no DM store, unknown sender, no path
+  CHECK(n == 3);   // Reply, Copy text, Mention: no key for a DM, unknown sender, no path
   CHECK(rows[0].action == SheetAction::Reply);
   CHECK(rows[1].action == SheetAction::CopyText);
   CHECK(rows[2].action == SheetAction::Mention);
 
-  // ... the DM row exists only once the DM store does
+  // ... the DM row exists only for a sender whose key we hold (EST-342)
   c = SheetContext();
-  c.dmAvailable = true;
+  c.senderHasKey = true;
   n = messageSheetRows(c, rows, kMaxSheetRows);
   CHECK(n == 4);
   CHECK(rows[1].action == SheetAction::DirectMessage);
@@ -772,7 +772,7 @@ static void testMessageSheet() {
   // --- our own message: Copy text, Resend, Heard repeats ----------------------
   c = SheetContext();
   c.mine = true;
-  c.dmAvailable = true;
+  c.senderHasKey = true;
   c.senderKnown = true;
   c.senderHasPosition = true;
   c.pathKnown = true;
@@ -789,7 +789,7 @@ static void testMessageSheet() {
 
   // --- the cap: never more than the array holds -------------------------------
   c = SheetContext();
-  c.dmAvailable = true;
+  c.senderHasKey = true;
   n = messageSheetRows(c, rows, 2);
   CHECK(n == 2);
   CHECK(messageSheetRows(c, nullptr, 4) == 0);

@@ -144,15 +144,15 @@ static void testRptr() {
   h = rptrListHitAt(list, 5, 0, 10, list.head.y + 2);
   CHECK(h.kind == RptrHit::None);
 
-  // EST-362: one page layout. A back key, a title, the rows and at most one Apply button; the
-  // status card and the clock banner sit above the rows and never overlap them.
+  // EST-366 rule 2: one page layout, one scrolling column. A fixed header (back, title), then the
+  // status card, the clock banner and the rows as content above the one Apply button.
   const RptrPageLayout a = rptrPageLayoutFor(L, true, true, true, false, false);
   CHECK(a.back.y >= L.status.bottom());
   CHECK(a.back.right() < a.title.x);
   CHECK(a.title.right() <= L.width);
   CHECK(a.card.y > a.title.bottom());
   CHECK(a.banner.y > a.card.bottom());
-  CHECK(a.body.y >= a.banner.bottom());
+  CHECK(a.rowsY >= a.banner.bottom());
   CHECK(a.body.bottom() <= a.apply.y);
   CHECK(a.apply.bottom() <= L.tabbar.y);
   CHECK(a.visibleRows >= 1);   // card + clock banner + Apply: the rows scroll

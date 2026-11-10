@@ -244,8 +244,8 @@ static void testNodeSheet() {
 static void testNewNode() {
   NodeNotice n = newNodeNotice(true, true, false, false);
   CHECK(n.toast && n.dot && n.sound);
-  n = newNodeNotice(true, true, true, false);   // DND
-  CHECK(n.toast && n.dot && !n.sound);
+  n = newNodeNotice(true, true, true, false);   // DND (EST-366: the pop-up is silenced too)
+  CHECK(!n.toast && n.dot && !n.sound);
   n = newNodeNotice(true, false, false, false); // master sound off
   CHECK(n.toast && n.dot && !n.sound);
   n = newNodeNotice(true, true, false, true);   // the per-event Off

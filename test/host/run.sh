@@ -48,6 +48,7 @@ BIN27="$(mktemp /tmp/om-lite-est362.XXXXXX)"
 BIN28="$(mktemp /tmp/om-lite-est363.XXXXXX)"
 BIN29="$(mktemp /tmp/om-lite-est364.XXXXXX)"
 BIN30="$(mktemp /tmp/om-lite-est365.XXXXXX)"
+BIN31="$(mktemp /tmp/om-lite-est366.XXXXXX)"
 trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
@@ -238,3 +239,14 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est365.cpp \
   ../../src/radio_stats.cpp ../../src/rptr_model.cpp ../../src/usb_cmd_logic.cpp \
   ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN30"
 "$BIN30"
+
+# EST-366: the 21:15 review. CR in the radio read-back and the Radio page; the scrolling card (the
+# card is content, only the header is fixed); a complete region list parse (multi-line, CRLF, no
+# stale tail, the wildcard-only answer); Apply only while draft != read-back with a dot per changed
+# row; neighbours "-none-" vs an error; the map picker's layout/hit test; PageNav one level for every
+# sub-page; the home/default pickers; and the notification rules (DND, open chat, newest-wins queue,
+# text forms).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est366.cpp \
+  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp \
+  ../../src/timekeeper.cpp -o "$BIN31"
+"$BIN31"

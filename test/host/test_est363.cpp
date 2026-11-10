@@ -336,7 +336,8 @@ static void testLayoutDefects() {
   CHECK(hintPx <= a.banner.w - 12);
 
   // --- 2/the row area ends on a row boundary and the button sits under the last row
-  CHECK(a.body.h % om::ui::kRptrPageRowH == 0);
+  // EST-366 rule 2: the body is the viewport; whole rows sit below the card/banner at scroll 0.
+  CHECK(a.visibleRows == (a.body.bottom() - a.rowsY) / om::ui::kRptrPageRowH);
   CHECK(a.body.bottom() <= a.big.y);
   CHECK(a.big.bottom() <= L.tabbar.y);
   CHECK(a.visibleRows >= 3);                       // regions, clock, signal all visible, no scrolling
@@ -354,12 +355,12 @@ static void testLayoutDefects() {
 
   // --- the same rule on every page shape: Apply, big button and console
   const om::ui::RptrPageLayout apply = om::ui::rptrPageLayoutFor(L, false, true, true, false, false);
-  CHECK(apply.body.h % om::ui::kRptrPageRowH == 0);
+  CHECK(apply.visibleRows == (apply.body.bottom() - apply.rowsY) / om::ui::kRptrPageRowH);
   CHECK(apply.body.bottom() <= apply.apply.y);
   const om::ui::RptrPageLayout card = om::ui::rptrPageLayoutFor(L, true, true, true, false, false);
-  CHECK(card.body.h % om::ui::kRptrPageRowH == 0);
+  CHECK(card.visibleRows == (card.body.bottom() - card.rowsY) / om::ui::kRptrPageRowH);
   CHECK(card.card.bottom() <= card.banner.y);
-  CHECK(card.banner.bottom() <= card.body.y);
+  CHECK(card.banner.bottom() <= card.rowsY);
   CHECK(card.body.bottom() <= card.apply.y);
   CHECK(card.visibleRows >= 1);
   // The console keeps its full area: it draws log lines, not 30 px rows.
@@ -377,7 +378,8 @@ static void testLayoutDefects() {
     if (s.hasConsole) continue;
     const int maxScroll = om::ui::rptrPageMaxScroll(lp, s.count);
     if (s.count > lp.visibleRows) {
-      CHECK(maxScroll == s.count * om::ui::kRptrPageRowH - lp.body.h);
+      const int contentH = (lp.rowsY - lp.body.y) + s.count * om::ui::kRptrPageRowH;
+      CHECK(maxScroll == contentH - lp.body.h);
       CHECK(maxScroll > 0);
       // At the bottom of the scroll the last row is fully visible.
       const om::ui::RptrRowRects last = om::ui::rptrPageRowRects(lp, s.rows[s.count - 1],

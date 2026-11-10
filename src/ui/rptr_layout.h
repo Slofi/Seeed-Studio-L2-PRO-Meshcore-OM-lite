@@ -72,18 +72,24 @@ struct RptrPageLayout {
   Rect back;
   Rect title;
   Rect sub;
+  // EST-366 (rule 2): the page is ONE scrolling column. `body` is the viewport; the card, the banner
+  // and the rows are its content, drawn at their `...y - scroll` position and clipped to `body`. Only
+  // the header (back + title + subtitle) is fixed. The rectangles below are the content positions at
+  // scroll == 0, so the same rectangle answers a tap once the scroll is subtracted.
   Rect card;           // empty (w 0) when the page has no status card
   Rect refresh;        // the card's refresh ICON (kRptrRefreshIcon square, in its own gutter)
   Rect refreshTap;     // the finger target: kRptrRefreshTap square around the icon
   int16_t cardColW = 0;   // the width of ONE value column: the gutter is not part of it
   Rect banner;         // empty when there is no line to say
   Rect bannerButton;   // "Set clock" inside the banner
-  Rect body;           // the scrolling rows
+  Rect body;           // the scrolling viewport (clip rect)
+  int16_t rowsY = 0;   // where row 0 starts, below the card and the banner (at scroll 0)
   Rect apply;          // the one Apply button (empty when the page has none)
   Rect big;            // the one big "Log in" button (empty otherwise)
   Rect input;          // console: the free command line
   Rect send;           // console: Send
   int visibleRows = 0;
+  int contentTop() const { return body.y; }
 };
 
 // `hasCard` / `hasBanner` / `hasApply` / `big` / `console` say which pieces the page uses; the shell
@@ -135,6 +141,30 @@ struct RptrModalLayout {
 RptrModalLayout rptrModalLayoutFor(const Layout& L, const char* verb);
 enum class RptrModalHit : uint8_t { None = 0, Cancel, Confirm, Outside };
 RptrModalHit rptrModalHitAt(const RptrModalLayout& m, int x, int y);
+
+// --------------------------------------------------------------------------------- the map picker
+// EST-366 (rule 6): the Position page's map. It is the Map tab's own renderer (map.cpp, offline
+// tiles) with a crosshair at the view centre; the coordinate under the map is the crosshair's.
+// `apply` false means the draft still equals the repeater's position, so the Apply key is not drawn
+// (rule 4 applies here too).
+struct RptrMapPickLayout {
+  Rect map;        // the tile area (map.cpp's 320x214 view)
+  Rect back;       // "< back" over the map, under the status bar
+  Rect zoomIn;
+  Rect zoomOut;
+  Rect panel;      // the coordinate bar along the bottom of the map
+  Rect coords;     // the two coordinate lines' box
+  Rect useGps;     // "Use my GPS position"
+  Rect apply;      // empty when there is nothing to apply
+  Rect crosshair;  // the target box around the crosshair; the view centre is its centre
+};
+RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply);
+
+enum class RptrMapPickHit : uint8_t {
+  None = 0, Back, ZoomIn, ZoomOut, UseGps, Apply, Map,
+};
+// Buttons win over the map; any other tap inside the tile area is a pan/drop.
+RptrMapPickHit rptrMapPickHitAt(const RptrMapPickLayout& m, int x, int y);
 
 }  // namespace ui
 }  // namespace om

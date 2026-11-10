@@ -1669,6 +1669,21 @@ int meshDmList(int thread, MeshDm* out, int max) {
   return s_dmRing->list(thread, out, max);
 }
 
+bool meshDmLatest(int* threadOut, char* name, size_t nameCap, char* text, size_t textCap) {
+  if (threadOut != nullptr) *threadOut = -1;
+  if (name != nullptr && nameCap > 0) name[0] = 0;
+  if (text != nullptr && textCap > 0) text[0] = 0;
+  if (s_dmRing == nullptr) return false;
+  // recvSerial() changes only on an ARRIVAL, and at that moment the newest ring entry is the arrived
+  // message; a later send of ours can never be handed to the notification path here.
+  const DmMsg* m = s_dmRing->find(s_dmRing->newestSeq());
+  if (m == nullptr || m->mine) return false;
+  if (threadOut != nullptr) *threadOut = (int)m->thread;
+  if (name != nullptr && nameCap > 0) snprintf(name, nameCap, "%s", m->name);
+  if (text != nullptr && textCap > 0) snprintf(text, textCap, "%s", m->text);
+  return true;
+}
+
 bool meshDmOpenByName(const char* name, int* threadOut) {
   if (threadOut) *threadOut = -1;
   if (name == nullptr || name[0] == 0) return false;

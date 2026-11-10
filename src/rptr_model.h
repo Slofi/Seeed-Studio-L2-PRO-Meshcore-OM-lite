@@ -397,6 +397,8 @@ int cliName(char* out, size_t cap, const char* name);           // "set name rpt
 int cliOwner(char* out, size_t cap, const char* owner);         // "set owner.info own"
 // Position: the mock sends two commands. lat/lon are in micro-degrees (MeshCore's own int32 store),
 // printed with five decimals so the repeater gets back the value it sent.
+// EST-366: the map picker's coordinate line uses the same five-decimal form as the CLI it will send.
+int degreesText(char* out, size_t cap, int32_t e6);              // "46.04263"
 int cliLat(char* out, size_t cap, int32_t latE6);               // "set lat 46.25000"
 int cliLon(char* out, size_t cap, int32_t lonE6);               // "set lon 14.40000"
 int cliRegionFlood(char* out, size_t cap, const char* name, bool allow);   // "region allowf lj"

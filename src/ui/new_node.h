@@ -64,12 +64,13 @@ struct NodeNotice {
   bool sound = false;   // the "New node" per-event sound, silent under DND or Off
 };
 
-// A notice is only for a genuinely new contact. DND silences the sound like the other events; the
-// toast and the dot still appear, because they are information, not noise (the existing rules).
+// A notice is only for a genuinely new contact. EST-366 (Filip ~21:50) puts the toast under the same
+// DND rule as every other pop-up ("not while DND is on, except error/low battery"); the DOT on the
+// Nodes tab still appears, because it is information on the bar, not a pop-up.
 inline NodeNotice newNodeNotice(bool isNew, bool soundOn, bool dnd, bool soundOff) {
   NodeNotice n;
   if (!isNew) return n;
-  n.toast = true;
+  n.toast = !dnd;
   n.dot = true;
   n.sound = soundOn && !dnd && !soundOff;
   return n;

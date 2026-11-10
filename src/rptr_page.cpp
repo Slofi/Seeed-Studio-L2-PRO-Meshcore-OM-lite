@@ -93,7 +93,9 @@ void radioText(char* out, size_t cap, const RadioValues& v) {
   char b[16];
   freqText(f, sizeof(f), v.freq_khz);
   bwText(b, sizeof(b), v.bw_hz);
-  snprintf(out, cap, "%s MHz, SF%u, BW %s", f, (unsigned)v.sf, b);
+  // EST-366 (rule 1): the CLI `set radio f,bw,sf,cr` has FOUR fields and Argus answers all four
+  // ("869.6179809,62.5,8,8"); the row used to drop CR, so the page could not show the coding rate.
+  snprintf(out, cap, "%s MHz, SF%u, BW %s, CR%u", f, (unsigned)v.sf, b, (unsigned)v.cr);
 }
 
 void advertText(char* out, size_t cap, const Facts& f) {
@@ -182,6 +184,44 @@ void Draft::reset(const Facts& f, const RegionList& regions, const char* homeNam
     defaultNone = defScope[0] == 0;
     copyText(defaultScope, sizeof(defaultScope), defScope);
   }
+}
+
+DirtyFields draftChanges(const Facts& f, const Draft& d, const RegionList& regions,
+                         const char* home, const char* defScope) {
+  DirtyFields out;
+  // A value that was never read is not "changed" by the draft's own seed: the draft is seeded FROM
+  // the same facts, so equality holds until the finger moves something. An unnamed/never-read field
+  // therefore still shows Apply as soon as the draft carries a value the facts do not.
+  out.name = strcmp(d.name, f.name) != 0;
+  out.lat = d.latE6 != f.latE6;
+  out.lon = d.lonE6 != f.lonE6;
+  out.freq = d.v.radio.freq_khz != f.radio.freq_khz;
+  out.bw = d.v.radio.bw_hz != f.radio.bw_hz;
+  out.sf = d.v.radio.sf != f.radio.sf;
+  out.cr = d.v.radio.cr != f.radio.cr;
+  out.tx = d.v.radio.tx != f.tx;
+  out.repeat = d.v.repeat != f.repeat;
+  out.advertLocal = d.v.advertLocal != f.advertLocal;
+  out.advertFlood = d.v.advertFlood != f.advertFlood;
+  out.floodMax = d.v.floodMax != f.floodMax;
+  out.loop = d.v.loop != f.loop;
+  out.pathHash = d.v.pathHash != f.pathHash;
+  for (int i = 0; i < regions.count && i < kMaxRegions; ++i) {
+    if (d.floodChanged[i] || d.flood[i] != regions.rows[i].allow) {
+      out.floodRegion = true;
+      break;
+    }
+  }
+  const char* wasHome = home != nullptr && home[0] ? home : "*";
+  out.home = d.homeChanged || strcmp(d.home, wasHome) != 0;
+  const char* wasDef = defScope != nullptr ? defScope : "";
+  out.defScope = d.defaultChanged ||
+                 (d.defaultNone ? wasDef[0] != 0 : strcmp(d.defaultScope, wasDef) != 0);
+  out.addRegion = d.hasAdd && d.addName[0] != 0;
+  out.any = out.name || out.lat || out.lon || out.freq || out.bw || out.sf || out.cr || out.tx ||
+            out.repeat || out.advertLocal || out.advertFlood || out.floodMax || out.loop ||
+            out.pathHash || out.floodRegion || out.home || out.defScope || out.addRegion;
+  return out;
 }
 
 // ----------------------------------------------------------------------------------------- the list
@@ -285,6 +325,16 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
   out->reset();
   out->title[0] = 0;
 
+  // EST-366 (rule 4): ONE draft-vs-read-back comparison for the whole page. It decides `hasApply`
+  // and each row's dot below; no page keeps its own "changed" flag.
+  const Facts emptyFacts;
+  const Draft emptyDraft;
+  const RegionList emptyRegions;
+  const DirtyFields dirty =
+      draftChanges(in.facts != nullptr ? *in.facts : emptyFacts,
+                   in.draft != nullptr ? *in.draft : emptyDraft,
+                   in.regions != nullptr ? *in.regions : emptyRegions, in.home, in.defaultScope);
+
   switch (in.page) {
     case Page::List:
       return 0;
@@ -323,6 +373,10 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
         return out->count;
       }
 
+      // EST-366 (rule 3): a LOGGED-IN page reads only the repeater's own CLI answers. `in.anon` is
+      // the pre-login scan cache and is deliberately not consulted here: the anonymous list can be
+      // minutes old (Filip removed "lj" on Argus and this page still had it), while the logged-in
+      // `region` answer is the truth. `not read` is honest until that answer arrives.
       copyText(out->subtitle, sizeof(out->subtitle), "repeater, logged in");
       const Status* st = in.status;
       const Facts* f = in.facts != nullptr ? in.facts : nullptr;
@@ -377,7 +431,7 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       addRow(out, "Name", f->nameKnown ? f->name : "not read", Act::Open, false,
              (uint8_t)Page::Name);
       addRow(out, "Position", pos, Act::Open, false, (uint8_t)Page::Position);
-      char radio[48];
+      char radio[64];
       if (f->radioKnown) radioText(radio, sizeof(radio), f->radio);
       else copyText(radio, sizeof(radio), "not read");
       addRow(out, "Radio", radio, Act::Open, false, (uint8_t)Page::Radio);
@@ -419,7 +473,8 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       copyText(out->title, sizeof(out->title), "Name");
       const Draft* d = in.draft;
       addRow(out, "Name", d ? d->name : "", Act::Edit, false, 0);
-      out->hasApply = true;
+      out->rows[out->count - 1].changed = dirty.name;
+      out->hasApply = in.draft != nullptr && dirty.name;
       return out->count;
     }
 
@@ -432,10 +487,17 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
         coordText(lat, sizeof(lat), d->latE6);
         coordText(lon, sizeof(lon), d->lonE6);
       }
+      // EST-366 (rule 6): the map is the primary way to place the repeater; the two numeric fields
+      // stay as the secondary option (a value typed here still applies the same two CLI lines).
+      addRow(out, "Pick on map", "pan and zoom", Act::MapPick);
+      out->rows[out->count - 1].arrow = true;
       addRow(out, "Latitude", lat, Act::Edit, false, 0);
+      out->rows[out->count - 1].changed = dirty.lat;
       addRow(out, "Longitude", lon, Act::Edit, false, 1);
-      copyText(out->banner, sizeof(out->banner), "Five decimals, the repeater's own precision.");
-      out->hasApply = true;
+      out->rows[out->count - 1].changed = dirty.lon;
+      copyText(out->banner, sizeof(out->banner),
+               "Move the map under the crosshair, or type the coordinates.");
+      out->hasApply = in.draft != nullptr && (dirty.lat || dirty.lon);
       return out->count;
     }
 
@@ -449,19 +511,25 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       snprintf(v, sizeof(v), "%s MHz", f);
       addRow(out, "Frequency", v, Act::Step, false, (uint8_t)RadioKey::Freq);
       out->rows[out->count - 1].stepKeys = true;
+      out->rows[out->count - 1].changed = dirty.freq;
       char b[12];
       bwText(b, sizeof(b), rv.bw_hz);
       snprintf(v, sizeof(v), "%s kHz", b);
       addRow(out, "Bandwidth", v, Act::Step, false, (uint8_t)RadioKey::Bw);
       out->rows[out->count - 1].stepKeys = true;
+      out->rows[out->count - 1].changed = dirty.bw;
       snprintf(v, sizeof(v), "SF%u", (unsigned)rv.sf);
       addRow(out, "Spread factor", v, Act::Step, false, (uint8_t)RadioKey::Sf);
       out->rows[out->count - 1].stepKeys = true;
+      out->rows[out->count - 1].changed = dirty.sf;
+      // EST-366 (rule 1): the coding rate is one of the four fields `set radio f,bw,sf,cr` takes,
+      // clamped 5..8 by radioStep(); it is editable here like SF and BW.
       snprintf(v, sizeof(v), "CR%u", (unsigned)rv.cr);
       addRow(out, "Coding rate", v, Act::Step, false, (uint8_t)RadioKey::Cr);
       out->rows[out->count - 1].stepKeys = true;
-      out->hasApply = true;
-      out->applyDanger = true;
+      out->rows[out->count - 1].changed = dirty.cr;
+      out->hasApply = in.draft != nullptr && (dirty.freq || dirty.bw || dirty.sf || dirty.cr);
+      out->applyDanger = out->hasApply;
       copyText(out->banner, sizeof(out->banner),
                "The mesh radio the repeater uses. A change needs a restart to take effect.");
       return out->count;
@@ -474,7 +542,8 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       snprintf(v, sizeof(v), "%d dBm", d ? (int)d->v.radio.tx : 14);
       addRow(out, "TX power", v, Act::Step, false, (uint8_t)RadioKey::Tx);
       out->rows[out->count - 1].stepKeys = true;
-      out->hasApply = true;
+      out->rows[out->count - 1].changed = dirty.tx;
+      out->hasApply = in.draft != nullptr && dirty.tx;
       return out->count;
     }
 
@@ -483,7 +552,8 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       const Draft* d = in.draft;
       addRow(out, "Repeat floods", d && d->v.repeat ? "on" : "off", Act::Toggle);
       out->rows[out->count - 1].on = d ? d->v.repeat : true;
-      out->hasApply = true;
+      out->rows[out->count - 1].changed = dirty.repeat;
+      out->hasApply = in.draft != nullptr && dirty.repeat;
       copyText(out->banner, sizeof(out->banner),
                "Off means this repeater stops passing other nodes' floods on.");
       return out->count;
@@ -506,6 +576,7 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
           r.act = Act::RegionToggle;
           r.index = (uint8_t)i;
           r.on = d != nullptr && i < kMaxRegions ? d->flood[i] : rg.allow;
+          r.changed = d != nullptr && i < kMaxRegions && d->floodChanged[i];
           if (!regionIsWildcard(rg)) copyText(r.key, sizeof(r.key), "x");
         }
       }
@@ -515,14 +586,17 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       else copyText(v, sizeof(v), in.home);
       addRow(out, "Home region", v, Act::Pick, false, 0);
       out->rows[out->count - 1].arrow = true;
+      out->rows[out->count - 1].changed = dirty.home;
       if (in.defaultScope == nullptr) copyText(v, sizeof(v), "not read");
       else if (in.defaultScope[0] == 0) copyText(v, sizeof(v), "none");
       else copyText(v, sizeof(v), in.defaultScope);
       addRow(out, "Default scope", v, Act::Pick, false, 1);
       out->rows[out->count - 1].arrow = true;
+      out->rows[out->count - 1].changed = dirty.defScope;
       addRow(out, "Add region", "", Act::AddRegion);
       out->rows[out->count - 1].arrow = true;
-      out->hasApply = true;
+      out->hasApply = in.draft != nullptr &&
+                      (dirty.floodRegion || dirty.home || dirty.defScope || dirty.addRegion);
       return out->count;
     }
 
@@ -530,6 +604,7 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       copyText(out->title, sizeof(out->title), "Add region");
       const Draft* d = in.draft;
       addRow(out, "Name", d ? d->addName : "", Act::Edit, false, 0);
+      out->rows[out->count - 1].changed = dirty.addRegion;
       char parent[40] = "none";
       if (d != nullptr && d->parentSel >= 0 && in.regions != nullptr &&
           d->parentSel < in.regions->count) {
@@ -537,7 +612,7 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       }
       addRow(out, "Parent", parent, Act::Toggle);
       out->rows[out->count - 1].on = d != nullptr && d->parentSel >= 0;
-      out->hasApply = true;
+      out->hasApply = in.draft != nullptr && dirty.addRegion;
       copyText(out->banner, sizeof(out->banner), "Tap Parent to change it. New regions repeat floods.");
       return out->count;
     }
@@ -547,15 +622,22 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       const bool home = in.page == Page::HomePicker;
       copyText(out->title, sizeof(out->title), home ? "Home region" : "Default scope");
       const Draft* d = in.draft;
+      // EST-366 (rule 8): MeshCore always has a home; "*" is the unset state and it is offered
+      // here, labelled "(anywhere)", exactly as the default scope offers "none".
       if (home) {
         addRow(out, "* (anywhere)", "no home region", Act::Toggle, false, 0);
-        out->rows[out->count - 1].on = d == nullptr || d->home[0] == 0 || strcmp(d->home, "*") == 0;
+        UiRow& wild = out->rows[out->count - 1];
+        wild.on = d == nullptr || d->home[0] == 0 || strcmp(d->home, "*") == 0;
+        wild.changed = wild.on && dirty.home;
       } else {
         addRow(out, "none", "no default scope", Act::Toggle, false, 0);
-        out->rows[out->count - 1].on = d != nullptr && d->defaultChanged && d->defaultNone;
+        UiRow& none = out->rows[out->count - 1];
+        none.on = d != nullptr && d->defaultChanged && d->defaultNone;
+        none.changed = none.on && dirty.defScope;
         addRow(out, "* (anywhere)", "the wildcard", Act::Toggle, false, 1);
-        out->rows[out->count - 1].on = d != nullptr && !d->defaultNone &&
-                                      strcmp(d->defaultScope, "*") == 0;
+        UiRow& wild = out->rows[out->count - 1];
+        wild.on = d != nullptr && !d->defaultNone && strcmp(d->defaultScope, "*") == 0;
+        wild.changed = wild.on && dirty.defScope;
       }
       const RegionList* list = in.regions;
       if (list != nullptr && list->valid) {
@@ -568,21 +650,27 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
           if (home) r.on = d != nullptr && strcmp(d->home, regionName(rg)) == 0;
           else r.on = d != nullptr && !d->defaultNone &&
                       strcmp(d->defaultScope, regionName(rg)) == 0;
+          r.changed = r.on && (home ? dirty.home : dirty.defScope);
         }
       }
-      out->hasApply = true;
+      out->hasApply = in.draft != nullptr && (home ? dirty.home : dirty.defScope);
       copyText(out->banner, sizeof(out->banner), "Pick one, then Apply.");
       return out->count;
     }
 
     case Page::Neighbours: {
       copyText(out->title, sizeof(out->title), "Neighbours");
-      addRow(out, "Discover neighbours", "ask the repeater", Act::Discover);
+      // EST-366 (rule 5): `discover.neighbors` is not a CommonCLI command (v1.18.0 has no discovery
+      // in the CLI at all) and the page never followed it with the actual read, so nothing came back.
+      // The button now reads the repeater's OWN neighbour table: `neighbors`.
+      addRow(out, "Refresh neighbours", "read the table", Act::Discover);
       const NeighbourList* list = in.neighbours;
       if (list == nullptr || !list->valid) {
         addRow(out, "Neighbours", "not read", Act::None);
       } else if (list->count == 0) {
-        addRow(out, "Neighbours", "none", Act::None);
+        // A REAL empty answer: never a blank page. `-none-` and an empty table both mean the
+        // repeater has not heard any zero-hop advert from a repeater yet.
+        addRow(out, "Neighbours", "the repeater has heard no neighbours yet", Act::None);
       } else {
         for (int i = 0; i < list->count && out->count < kUiRowCap; ++i) {
           const Neighbour& nb = list->rows[i];
@@ -605,10 +693,12 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       snprintf(v, sizeof(v), "%u min", d ? (unsigned)d->v.advertLocal : 0);
       addRow(out, "Local advert", v, Act::Step, false, 0);
       out->rows[out->count - 1].stepKeys = true;
+      out->rows[out->count - 1].changed = dirty.advertLocal;
       snprintf(v, sizeof(v), "%u h", d ? (unsigned)d->v.advertFlood : 0);
       addRow(out, "Flood advert", v, Act::Step, false, 1);
       out->rows[out->count - 1].stepKeys = true;
-      out->hasApply = true;
+      out->rows[out->count - 1].changed = dirty.advertFlood;
+      out->hasApply = in.draft != nullptr && (dirty.advertLocal || dirty.advertFlood);
       return out->count;
     }
 
@@ -619,9 +709,13 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
       snprintf(v, sizeof(v), "%u hops", d ? (unsigned)d->v.floodMax : 0);
       addRow(out, "Flood max", v, Act::Step, false, 0);
       out->rows[out->count - 1].stepKeys = true;
+      out->rows[out->count - 1].changed = dirty.floodMax;
       addRow(out, "Loop detect", d ? loopDetectText(d->v.loop) : "", Act::Toggle, d != nullptr, 10);
+      out->rows[out->count - 1].changed = dirty.loop;
       addRow(out, "Path hash", d ? pathHashText(d->v.pathHash) : "", Act::Toggle, d != nullptr, 11);
-      out->hasApply = true;
+      out->rows[out->count - 1].changed = dirty.pathHash;
+      out->hasApply = in.draft != nullptr &&
+                      (dirty.floodMax || dirty.loop || dirty.pathHash);
       return out->count;
     }
 

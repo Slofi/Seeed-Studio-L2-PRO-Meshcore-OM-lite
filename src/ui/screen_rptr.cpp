@@ -9,6 +9,7 @@
 
 #include "../fonts.h"
 #include "board.h"
+#include "map.h"   // EST-366: the Position page's picker is the Map tab's own offline renderer
 #include "ui/keyboard_draw.h"
 
 namespace om {
@@ -82,6 +83,9 @@ void drawPageRow(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::UiRow&
   if (row.danger) d->fillRect(r.body.x, r.body.y, r.body.w, r.body.h, kDangerBg);
   const bool checkboxRow = row.act == rptr::Act::RegionToggle || row.act == rptr::Act::Toggle;
   if (checkboxRow) checkbox(d, r.box, row.on, row.danger);
+  // EST-366 (rule 4): one small gold dot marks a field whose draft differs from the repeater's
+  // read-back. It sits in the row's left margin, clear of both the label and the checkbox.
+  if (row.changed) d->fillCircle(r.body.x + 4, r.body.y + 15, 2, kAcc);
   drawTextEllipsis(d, FontRole::SansBody, row.danger ? kDangerInk : kInk, bg, r.label.x,
                    r.label.y + 7, r.label.w, row.label);
   if (row.value[0]) {
@@ -106,18 +110,24 @@ void drawPageRow(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::UiRow&
   d->drawFastHLine(r.body.x, r.body.bottom() - 1, r.body.w, kRowLine);
 }
 
-void drawCard(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut& s) {
+void drawCard(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut& s,
+              int scroll) {
   if (a.card.empty()) return;
-  d->fillRoundRect(a.card.x, a.card.y, a.card.w, a.card.h, kRadius, kPanel);
-  d->drawRoundRect(a.card.x, a.card.y, a.card.w, a.card.h, kRadius, kLine);
+  // EST-366 (rule 2): the card is the first CONTENT item; it moves up with the column and is clipped
+  // by the caller's body rect, so it can never paint over the fixed header.
+  Rect card = a.card;
+  card.y = (int16_t)(card.y - scroll);
+  if (!card.overlaps(a.body)) return;
+  d->fillRoundRect(card.x, card.y, card.w, card.h, kRadius, kPanel);
+  d->drawRoundRect(card.x, card.y, card.w, card.h, kRadius, kLine);
   // EST-364: the column width comes from the layout, which keeps the refresh gutter out of it, so a
   // value can never run under the icon.
   const int16_t colW = a.cardColW;
   for (int i = 0; i < s.cellCount && i < 6; ++i) {
     const int col = i % 2;
     const int row = i / 2;
-    const int16_t x = (int16_t)(a.card.x + 8 + col * colW);
-    const int16_t y = (int16_t)(a.card.y + 3 + row * kRptrCardRowH);
+    const int16_t x = (int16_t)(card.x + 8 + col * colW);
+    const int16_t y = (int16_t)(card.y + 3 + row * kRptrCardRowH);
     drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kPanel, x, y, colW - 4, s.cells[i].label);
     // The value on the same line, right-aligned to the cell. A state ("no answer yet") is dim: it is
     // not a reading the repeater sent.
@@ -128,31 +138,34 @@ void drawCard(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut
   // corner (a.refreshTap is the 40x40 finger target around it, never inside a value column).
   if (!a.refresh.empty()) {
     const int cx = a.refresh.x + a.refresh.w / 2;
-    const int cy = a.refresh.y + a.refresh.h / 2;
+    const int cy = (int16_t)(a.refresh.y - scroll) + a.refresh.h / 2;
     d->drawArc(cx, cy, 7, 8, 40, 320, kDim);
-    d->fillTriangle((int16_t)(cx + 6), (int16_t)(cy - 6), (int16_t)(cx + 10), (int16_t)(cy - 2),
-                    (int16_t)(cx + 3), (int16_t)(cy - 2), kDim);
+    d->fillTriangle((int16_t)(cx + 6), (int16_t)(cy - 6), (int16_t)(cx + 10),
+                    (int16_t)(cy - 2), (int16_t)(cx + 3), (int16_t)(cy - 2), kDim);
   }
 }
 
-void drawBanner(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut& s) {
+void drawBanner(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenOut& s,
+                int scroll) {
   if (a.banner.empty() || s.banner[0] == 0) return;
-  d->fillRoundRect(a.banner.x, a.banner.y, a.banner.w, a.banner.h, kRadius, kWarnBg);
-  d->drawRoundRect(a.banner.x, a.banner.y, a.banner.w, a.banner.h, kRadius, kWarnLine);
-  const int16_t textW = s.bannerButton ? (int16_t)(a.bannerButton.x - a.banner.x - 8)
-                                       : (int16_t)(a.banner.w - 12);
-  drawTextEllipsis(d, FontRole::SansBody, kWarnInk, kWarnBg, a.banner.x + 6,
-                   (int16_t)(a.banner.y + a.banner.h / 2), textW, s.banner);
+  Rect banner = a.banner;
+  banner.y = (int16_t)(banner.y - scroll);
+  Rect button = a.bannerButton;
+  button.y = (int16_t)(button.y - scroll);
+  if (!banner.overlaps(a.body)) return;
+  d->fillRoundRect(banner.x, banner.y, banner.w, banner.h, kRadius, kWarnBg);
+  d->drawRoundRect(banner.x, banner.y, banner.w, banner.h, kRadius, kWarnLine);
+  const int16_t textW = s.bannerButton ? (int16_t)(button.x - banner.x - 8)
+                                       : (int16_t)(banner.w - 12);
+  drawTextEllipsis(d, FontRole::SansBody, kWarnInk, kWarnBg, banner.x + 6,
+                   (int16_t)(banner.y + banner.h / 2), textW, s.banner);
   if (s.bannerButton) {
-    d->fillRoundRect(a.bannerButton.x, a.bannerButton.y, a.bannerButton.w, a.bannerButton.h,
-                     kRadiusSm, kSelBg2);
-    d->drawRoundRect(a.bannerButton.x, a.bannerButton.y, a.bannerButton.w, a.bannerButton.h,
-                     kRadiusSm, kAcc);
+    d->fillRoundRect(button.x, button.y, button.w, button.h, kRadiusSm, kSelBg2);
+    d->drawRoundRect(button.x, button.y, button.w, button.h, kRadiusSm, kAcc);
     setRole(d, FontRole::MonoMeta);
     d->setTextDatum(lgfx::textdatum_t::middle_center);
     d->setTextColor(kAccInk, kSelBg2);
-    d->drawString("Set clock", a.bannerButton.x + a.bannerButton.w / 2,
-                  a.bannerButton.y + a.bannerButton.h / 2);
+    d->drawString("Set clock", button.x + button.w / 2, button.y + button.h / 2);
   }
 }
 
@@ -305,11 +318,13 @@ void drawPageStage(lgfx::LovyanGFX* d, const RptrView& v) {
                      s.subtitle);
   }
 
-  drawCard(d, a, s);
-  drawBanner(d, a, s);
+  // EST-366 (rule 2): one scrolling column. The body is the clip rect for the card, the banner and
+  // the rows, so all three disappear under the fixed header exactly like a list row does.
+  d->setClipRect(a.body.x, a.body.y, a.body.w, a.body.h);
+  drawCard(d, a, s, v.pageScroll);
+  drawBanner(d, a, s, v.pageScroll);
   if (console) {
     // The raw log: answers live ONLY here, in mono, with nothing to tap.
-    d->setClipRect(a.body.x, a.body.y, a.body.w, a.body.h);
     setRole(d, FontRole::MonoMeta);
     int y = a.body.y + 2;
     for (int i = 0; i < s.logLineCount && y + 12 <= a.body.bottom(); ++i) {
@@ -343,6 +358,48 @@ void drawModal(lgfx::LovyanGFX* d, const RptrView& v) {
   drawWrapped(d, FontRole::SansBody, kInk, kPanel, m.text, v.modalText);
   drawButton(d, m.cancel, "Cancel", false);
   drawButton(d, m.confirm, v.modalVerb, true);
+}
+
+// EST-366 (rule 6): the Position page's map. Same renderer as the Map tab (offline tiles), a
+// crosshair at the view centre, pan by dragging, zoom with the two keys, and the coordinate under the
+// map. The panel is drawn over the map's bottom so the tile area stays map.cpp's own 320x214.
+void drawMapPick(lgfx::LovyanGFX* d, const RptrView& v) {
+  om::mapRender();
+  const RptrMapPickLayout m = rptrMapPickLayoutFor(l2(), v.mapApply);
+  if (!om::mapReady()) {
+    drawEmptyState(d, Rect{8, 60, 304, 100}, "Map pack not open.",
+                   "The card needs /maps/slo/tiles.pack.");
+  }
+  drawBack(d, m.back, "< back");
+  smallKey(d, m.zoomIn, "+", false);
+  smallKey(d, m.zoomOut, "-", false);
+  if (v.mapHint[0]) {
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kMapBg, (int16_t)(m.back.right() + 8),
+                     (int16_t)(m.back.y + m.back.h / 2),
+                     (int16_t)(m.zoomIn.x - m.back.right() - 16), v.mapHint);
+  }
+  // The crosshair: a ring and four ticks, the gold centre dot marks the exact pixel picked.
+  const int cx = m.crosshair.x + m.crosshair.w / 2;
+  const int cy = m.crosshair.y + m.crosshair.h / 2;
+  d->drawCircle(cx, cy, 7, kInk);
+  d->drawFastHLine(cx - 14, cy, 5, kInk);
+  d->drawFastHLine(cx + 10, cy, 5, kInk);
+  d->drawFastVLine(cx, cy - 14, 5, kInk);
+  d->drawFastVLine(cx, cy + 10, 5, kInk);
+  d->fillCircle(cx, cy, 2, kAcc);
+
+  d->fillRect(m.panel.x, m.panel.y, m.panel.w, m.panel.h, kPanel);
+  d->drawFastHLine(m.panel.x, m.panel.y, m.panel.w, kLine);
+  drawTextEllipsis(d, FontRole::MonoMeta, kInk, kPanel, m.coords.x,
+                   (int16_t)(m.coords.y + m.coords.h / 2), m.coords.w, v.mapCoords);
+  d->fillRoundRect(m.useGps.x, m.useGps.y, m.useGps.w, m.useGps.h, kRadiusSm, kPanel2);
+  d->drawRoundRect(m.useGps.x, m.useGps.y, m.useGps.w, m.useGps.h, kRadiusSm, kLine);
+  setRole(d, FontRole::MonoMeta);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(v.mapGps ? kInk : kDimmer, kPanel2);
+  d->drawString("Use my GPS position", m.useGps.x + m.useGps.w / 2,
+                m.useGps.y + m.useGps.h / 2);
+  if (!m.apply.empty()) drawButton(d, m.apply, "Apply", false);
 }
 
 }  // namespace
@@ -382,7 +439,9 @@ void rptrScreenDraw(const RptrView& v) {
     return;
   }
   d->fillScreen(kScreen);
-  if (v.list) {
+  if (v.mapPick) {
+    drawMapPick(d, v);
+  } else if (v.list) {
     drawListStage(d, v);
   } else {
     drawPageStage(d, v);

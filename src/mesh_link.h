@@ -85,6 +85,9 @@ void meshDmClearUnread(int thread);
 using MeshDm = ui::DmMsg;
 // Oldest first, at most max. Returns how many of this thread's messages are in the ring.
 int meshDmList(int thread, MeshDm* out, int max);
+// EST-366: the newest RECEIVED DM, for the notification toast ("DM <sender>: ..."). False when the
+// ring has no received message (or no ring at all). Our own sends are never returned.
+bool meshDmLatest(int* threadOut, char* name, size_t nameCap, char* text, size_t textCap);
 
 // The thread for a contact's exact name, creating an empty one when the contact is known (the Nodes
 // menu's "Direct message"). False when there is no such contact, so no thread can exist.

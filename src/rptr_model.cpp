@@ -418,13 +418,30 @@ bool anonOwnerParse(const uint8_t* buf, int len, char* name, size_t nameCap, cha
 int neighboursParse(const char* text, NeighbourList* out) {
   if (out == nullptr) return 0;
   out->count = 0;
-  out->valid = true;
-  if (text == nullptr || text[0] == 0) return 0;
-  if (strcmp(text, "-none-") == 0) return 0;   // a real answer: the repeater knows nobody
-  const char* line = text;
+  out->valid = false;   // only a reply that LOOKS like the table may become a real empty answer
+  for (int i = 0; i < kMaxNeighbours; ++i) out->rows[i] = Neighbour();
+  if (text == nullptr) return 0;
+  const char* p = text;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+  if (p[0] == '>' && p[1] == ' ') p += 2;   // CommonCLI's prompt, when a caller kept it
+  while (*p == ' ' || *p == '\t') ++p;
+  if (*p == 0) {
+    out->valid = true;   // an empty answer to `neighbors` is still an answer: nobody heard yet
+    return 0;
+  }
+  // A real answer with no rows. `-none-` is CommonCLI's own word; "none" is accepted so a newer
+  // format cannot turn a real empty table into "not read".
+  if (strcmp(p, "-none-") == 0 || strcmp(p, "none") == 0) {
+    out->valid = true;
+    return 0;
+  }
+  // Anything else that is not at least one "hhhhhhhh:secs:snr4" line is NOT a neighbour answer
+  // (for example "Err - unknown command"): the page must not claim the table is empty.
+  const char* line = p;
   while (*line && out->count < kMaxNeighbours) {
     const char* end = strchr(line, '\n');
-    const int lineLen = end ? (int)(end - line) : (int)strlen(line);
+    int lineLen = end ? (int)(end - line) : (int)strlen(line);
+    while (lineLen > 0 && (line[lineLen - 1] == '\r' || line[lineLen - 1] == ' ')) --lineLen;
     // "hhhhhhhh:secs:snr4"
     if (lineLen >= 11) {
       char hex[9] = {0};
@@ -464,36 +481,66 @@ int neighboursParse(const char* text, NeighbourList* out) {
     if (end == nullptr) break;
     line = end + 1;
   }
+  // At least one parsed "prefix:secs:snr" line proves this is the table. A reply with no such line
+  // (an error, an unknown command) stays valid=false, so the page says "not read", never "empty".
+  out->valid = out->count > 0;
   return out->count;
 }
 
 // ------------------------------------------------------------------------------------------ regions
 int regionsParse(const char* text, RegionList* out) {
   if (out == nullptr) return 0;
+  // Start from an empty list EVERY time: a shorter answer (Filip removed "lj") must not leave the
+  // old tail behind. This was the shape of the stale list the EST-366 review found.
   out->count = 0;
+  for (int i = 0; i < kMaxRegions; ++i) out->rows[i] = Region();
+  out->valid = false;   // only a list-shaped answer may be shown as the repeater's regions
+  if (text == nullptr || text[0] == 0) {
+    out->valid = true;   // an empty answer to `region` is a real empty map
+    return 0;
+  }
+  // CommonCLI prefixes a refusal with "Err - " / "Error"; that is not a region called "Err".
+  const char* first = text;
+  while (*first == ' ' || *first == '\t' || *first == '\r' || *first == '\n') ++first;
+  if (first[0] == '>' && first[1] == ' ') first += 2;
+  while (*first == ' ' || *first == '\t') ++first;
+  if (strncmp(first, "Err - ", 6) == 0 || strncmp(first, "Error", 5) == 0 ||
+      strcmp(first, "Unknown command") == 0) {
+    return 0;
+  }
   out->valid = true;
-  if (text == nullptr || text[0] == 0) return 0;
-  const char* line = text;
+  const char* line = first;
   while (*line && out->count < kMaxRegions) {
     const char* end = strchr(line, '\n');
-    const int lineLen = end ? (int)(end - line) : (int)strlen(line);
-    // Indentation is depth; the first line is the wildcard region (RegionMap's tree root).
+    int lineLen = end ? (int)(end - line) : (int)strlen(line);
+    // CommonCLI's exportTo() ends every line with '\n'; a CLI carried over a packet may show '\r\n'.
+    // Trailing CR/space is formatting, never part of a region name or its flags.
+    while (lineLen > 0 && (line[lineLen - 1] == '\r' || line[lineLen - 1] == ' ' ||
+                           line[lineLen - 1] == '\t')) {
+      --lineLen;
+    }
+    // Indentation is the tree depth; the first line of a complete answer is the wildcard region.
     int at = 0;
-    while (at < lineLen && line[at] == ' ') ++at;
+    while (at < lineLen && (line[at] == ' ' || line[at] == '\t')) ++at;
     if (at < lineLen) {
       Region& r = out->rows[out->count];
       r = Region();
       int n = 0;
-      while (at < lineLen && line[at] != ' ' && line[at] != '^' && n < (int)sizeof(r.name) - 1) {
+      while (at < lineLen && line[at] != ' ' && line[at] != '^' && line[at] != '\t' &&
+             n < (int)sizeof(r.name) - 1) {
         r.name[n++] = line[at++];
       }
       r.name[n] = 0;
-      // " F" at the end means flood is allowed; "^" marks the home region.
+      // RegionMap::printChildRegions() writes "<name>[^][ F]\n": '^' is the home region, " F" means
+      // flood allowed (no F = denied). Both markers may come after the name in either order in a
+      // future format, so the whole tail is scanned rather than only its last two bytes.
       for (int i = at; i < lineLen; ++i) {
         if (line[i] == '^') r.home = true;
       }
-      r.allow = (lineLen >= 2) && line[lineLen - 1] == 'F' && line[lineLen - 2] == ' ';
-      r.wildcard = (out->count == 0);
+      for (int i = at; i < lineLen; ++i) {
+        if (line[i] == 'F' && i > 0 && (line[i - 1] == ' ' || line[i - 1] == '\t')) r.allow = true;
+      }
+      r.wildcard = r.name[0] == '*' || out->count == 0;
       if (r.name[0]) ++out->count;
     }
     if (end == nullptr) break;

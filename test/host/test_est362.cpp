@@ -480,9 +480,12 @@ static void testLayout() {
 
   // A page with a card, a banner and one Apply.
   const om::ui::RptrPageLayout a = om::ui::rptrPageLayoutFor(L, true, true, true, false, false);
+  // EST-366 rule 2: the card and the banner are CONTENT of the one scrolling column; only the
+  // header is fixed. At scroll 0 the card starts at the top of the viewport.
   CHECK(a.card.y >= L.status.bottom());
+  CHECK(a.card.y == a.body.y);
   CHECK(a.banner.y >= a.card.bottom());
-  CHECK(a.body.y >= a.banner.bottom());
+  CHECK(a.rowsY >= a.banner.bottom());
   CHECK(a.body.bottom() <= a.apply.y);
   CHECK(a.apply.bottom() <= L.tabbar.y);
   CHECK(a.refresh.contains(a.refresh.x + 2, a.refresh.y + 2));
@@ -502,6 +505,8 @@ static void testLayout() {
   in.facts = &facts;
   in.home = "*";
   in.defaultScope = "";
+  // EST-366 rule 4: Apply exists only for an unsaved change; mark one region's flood flag changed.
+  d.floodChanged[1] = true;
   ScreenOut s;
   buildScreen(in, &s);
   const om::ui::RptrPageLayout b = om::ui::rptrPageLayoutFor(L, false, false, s.hasApply, false, false);

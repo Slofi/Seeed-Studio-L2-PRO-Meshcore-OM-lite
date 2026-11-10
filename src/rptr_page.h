@@ -56,7 +56,8 @@ enum class Act : uint8_t {
   AddRegion,     // the name sheet for a new region
   RegionToggle,  // one region's "Repeats floods here" checkbox
   RemoveRegion,  // one region's remove key
-  Discover,      // neighbours: discover.neighbors
+  Discover,      // neighbours: read the repeater's own table (`neighbors`)
+  MapPick,       // position: open the map picker
   ConsoleEdit,   // the console's free command line
   ConsoleSend,   // send what was typed
 };
@@ -70,6 +71,9 @@ struct UiRow {
   uint8_t index = 0;      // region ordinal, picker kind, ...
   bool stepKeys = false;  // draw the -/+ pair
   bool arrow = false;     // draw the ">" key at the right
+  // EST-366 (rule 4): this row's draft value differs from the repeater's read-back. The screen draws
+  // a small gold dot, so the user sees WHICH field is unsaved, not only that Apply is there.
+  bool changed = false;
   char key[4] = "";       // draw one small key with this text ("x" to remove)
 };
 
@@ -132,6 +136,72 @@ struct Draft {
 
   void reset(const Facts& f, const RegionList& regions, const char* homeName,
              const char* defScope);
+};
+
+// ------------------------------------------------------------------------------------ draft vs facts
+// EST-366 (Filip, rule 4): Apply exists only while the draft differs from what the repeater answered.
+// This is the ONE comparison: buildScreen reads it for `hasApply` and for the per-row dot, and the
+// shell reads it for nothing else (the read-back still owns the truth).
+struct DirtyFields {
+  bool any = false;
+  bool name = false;
+  bool lat = false;
+  bool lon = false;
+  bool freq = false;
+  bool bw = false;
+  bool sf = false;
+  bool cr = false;
+  bool tx = false;
+  bool repeat = false;
+  bool advertLocal = false;
+  bool advertFlood = false;
+  bool floodMax = false;
+  bool loop = false;
+  bool pathHash = false;
+  bool floodRegion = false;   // at least one region's flood flag
+  bool home = false;
+  bool defScope = false;
+  bool addRegion = false;
+};
+// `regions`/`home`/`defScope` are the repeater's read-backs (home "*" = anywhere, "" = none).
+DirtyFields draftChanges(const Facts& f, const Draft& d, const RegionList& regions,
+                         const char* home, const char* defScope);
+
+// ------------------------------------------------------------------------------------- page history
+// EST-366 (rule 7, Filip ~21:25): every RPTR sub-page is reached through a stack, exactly like
+// Settings (EST-350). Back pops ONE level and restores the scroll that page had; only an empty stack
+// falls back to the repeater page (and the repeater page's Back leaves the session).
+class PageNav {
+ public:
+  static constexpr int kMaxDepth = 8;
+
+  void reset() { depth_ = 0; }
+  bool empty() const { return depth_ == 0; }
+  int depth() const { return depth_; }
+  void push(Page page, int scroll) {
+    if (depth_ >= kMaxDepth) {
+      for (int i = 1; i < kMaxDepth; ++i) {
+        page_[i - 1] = page_[i];
+        scroll_[i - 1] = scroll_[i];
+      }
+      depth_ = kMaxDepth - 1;
+    }
+    page_[depth_] = page;
+    scroll_[depth_] = (int16_t)scroll;
+    ++depth_;
+  }
+  bool pop(Page* page, int* scroll) {
+    if (depth_ <= 0) return false;
+    --depth_;
+    if (page != nullptr) *page = page_[depth_];
+    if (scroll != nullptr) *scroll = scroll_[depth_];
+    return true;
+  }
+
+ private:
+  Page page_[kMaxDepth] = {};
+  int16_t scroll_[kMaxDepth] = {};
+  int depth_ = 0;
 };
 
 // ----------------------------------------------------------------------------------------- the list

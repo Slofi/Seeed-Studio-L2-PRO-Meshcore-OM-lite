@@ -59,6 +59,7 @@
 #include "ui/screen_nodes.h"
 #include "ui/screen_settings.h"
 #include "ui/settings_prefs.h"
+#include "ui/notify.h"
 #include "ui/text_wrap.h"
 #include "ui/toast.h"
 #include "ui/widgets.h"
@@ -1548,6 +1549,39 @@ static const char* chatOverlayName(om::ui::ChatOverlay which) {
 static void showToast(const char* text);
 static void drawRptrTab();
 
+// ------------------------------------------------------------------------------ notifications (EST-366)
+// One door for every event that plays a sound (rule 9): the DND rule, the open-chat rule and the
+// burst queue live in ui/notify.h (host-tested), and this only decides WHERE the text goes: straight
+// to the toast, or into the one pending slot while a toast is already showing. `chatOpen` is true
+// only when the chat that received this message is the one on screen.
+static bool g_noticeScreenOn = true;   // the loop keeps this in step with its panel state
+static om::ui::NoticeQueue g_noticeQueue;
+
+static bool chatOpenForChannel(int channel) {
+  if (g_tab != 1 || g_settings || g_selector) return false;
+  if (g_chatSel < 0 || g_chatSel >= g_chatCount) return false;
+  if (g_chatSel >= g_channelCount) return false;   // a DM is open, not this channel
+  return g_chatSel == channel;
+}
+
+static bool chatOpenForThread(int thread) {
+  if (g_tab != 1 || g_settings || g_selector) return false;
+  if (g_chatSel < 0 || g_chatSel >= g_chatCount) return false;
+  const om::ui::ChatEntry& c = g_chats[g_chatSel];
+  return c.dm && (int)c.thread == thread;
+}
+
+static void notify(om::ui::NoticeKind kind, const char* text, bool chatOpen) {
+  if (text == nullptr || text[0] == 0) return;
+  if (!g_noticeScreenOn) return;
+  if (!om::ui::noticeWanted(kind, g_dnd, chatOpen)) return;
+  if (om::ui::toastState().visible(millis())) {
+    g_noticeQueue.push(text);   // newest wins; the current toast finishes first
+    return;
+  }
+  showToast(text);
+}
+
 static bool g_rptrList = true;                       // the list is showing (else one page)
 static om::rptr::Page g_rptrPage = om::rptr::Page::List;
 static int g_rptrScroll = 0;
@@ -1555,6 +1589,18 @@ static int g_rptrScroll0 = 0;
 static int g_rptrCount = 0;                          // the last build's list rows (drag clamp)
 static int g_rptrPageScroll = 0;
 static int g_rptrPageScroll0 = 0;
+// EST-366 (rule 7): every sub-page is reached through this stack, so Back pops exactly one level and
+// restores that page's scroll (the Settings history of EST-350, applied to RPTR).
+static om::rptr::PageNav g_rptrNav;
+
+// --- EST-366 (rule 6): the Position page's map picker
+// The centre itself lives in map.cpp (mapSetView/mapPan/mapScreenToLatLon); these are the drag's base
+// and the view's last state.
+static bool g_rptrMapPick = false;
+static int g_rptrPickZoom = 15;
+static int g_rptrPickDragX = 0;
+static int g_rptrPickDragY = 0;
+static bool g_rptrPickDragging = false;
 
 // --- the open session
 static char g_rptrNode[32] = "";                     // the repeater this page is about (Settings too)
@@ -1693,6 +1739,8 @@ static void rptrClearSession() {
   g_rptrInFlight[0] = 0;
   g_rptrApplyPending = false;
   g_rptrApplyWritesLeft = 0;
+  g_rptrApplyErr = false;
+  g_rptrApplyErrText[0] = 0;
   g_rptrResult[0] = 0;
   g_rptrResultPending = false;
   g_rptrStatusWait = false;
@@ -1702,6 +1750,9 @@ static void rptrClearSession() {
   g_rptrPageScroll = 0;
   g_rptrLoginWait = 0;
   g_rptrFoundIndex = 255;
+  g_rptrNav.reset();
+  g_rptrMapPick = false;
+  g_rptrPickZoom = 15;
 }
 
 static void rptrFillAnonFromScan() {
@@ -1778,10 +1829,22 @@ static void rptrLoginNow() {
   drawRptrTab();
 }
 
-// Back: from a setting to the repeater page, from the repeater page to the list (and out of the
-// session, exactly like the mock's "< list").
+// Back: one level, from the stack (EST-366, rule 7). A Home/Default picker opened from Regions goes
+// back to Regions (not straight to the repeater page, which is what the old one-level rule did);
+// with an empty stack, Back on the repeater page leaves the session for the list.
 static void rptrBack() {
   if (g_rptrList) return;
+  om::rptr::Page page = g_rptrPage;
+  int scroll = g_rptrPageScroll;
+  if (g_rptrNav.pop(&page, &scroll)) {
+    g_rptrPage = page;
+    g_rptrPageScroll = scroll;
+    g_rptrResult[0] = 0;
+    g_rptrResultPending = false;
+    g_rptrAskOpen = false;
+    rptrSyncDraft();
+    return;
+  }
   if (g_rptrPage != om::rptr::Page::Repeater) {
     g_rptrPage = om::rptr::Page::Repeater;
     g_rptrPageScroll = 0;
@@ -1794,14 +1857,19 @@ static void rptrBack() {
   rptrClearSession();
 }
 
-// Open one setting page and ask the repeater for its own values.
+// Open one setting page and ask the repeater for its own values. The page it came from and that
+// page's scroll go on the history first, so Back is exactly one level.
 static void rptrGoPage(om::rptr::Page page) {
+  if (page != g_rptrPage) g_rptrNav.push(g_rptrPage, g_rptrPageScroll);
   g_rptrPage = page;
   g_rptrPageScroll = 0;
   g_rptrResult[0] = 0;
   g_rptrResultPending = false;
   g_rptrApplyPending = false;
+  g_rptrApplyErr = false;
+  g_rptrApplyErrText[0] = 0;
   g_rptrAskOpen = false;
+  g_rptrMapPick = false;
   rptrSyncDraft();
   if (!g_rptrLoggedIn) return;
   char reads[om::rptr::kReadBackMax][24];
@@ -1826,6 +1894,10 @@ static void rptrCheckApplyDone() {
     // applied, never a page the finger has moved on to.
     if (g_rptrPage == g_rptrApplyPage) rptrSyncDraft();
   }
+  // EST-366 (rule 9): an RPTR result is a notification too, but when the RPTR page itself is on
+  // screen its own result line already says it (the chat-open rule, one level up).
+  const bool onRptrPage = g_tab == 3 && !g_settings && !g_rptrList && !g_rptrMapPick;
+  notify(om::ui::NoticeKind::Rptr, g_rptrResult, onRptrPage);
 }
 
 // Start an Apply: the writes, then the read-backs for this page.
@@ -2128,7 +2200,13 @@ static void rptrTakeReply(const om::RptrReply& rep) {
     }
   } else if (strcmp(cmd, om::rptr::kCliRegionList) == 0) {
     om::rptr::regionsParse(rep.text, &g_rptrRegions);
-    g_rptrRegions.valid = true;
+    if (!g_rptrRegions.valid) {
+      // An error is not an empty map: say what the repeater said instead of inventing a region
+      // named "Err".
+      om::rptr::answerPlainText(rep.text, g_rptrResult, sizeof(g_rptrResult));
+      g_rptrResultOk = false;
+      g_rptrResultPending = false;
+    }
   } else if (strcmp(cmd, om::rptr::kCliRegionHomeRead) == 0) {
     if (om::rptr::regionHomeReplyParse(rep.text, g_rptrHome, sizeof(g_rptrHome))) {
       g_rptrHomeKnown = true;
@@ -2145,6 +2223,12 @@ static void rptrTakeReply(const om::RptrReply& rep) {
     }
   } else if (strcmp(cmd, om::rptr::kCliNeighboursRead) == 0) {
     om::rptr::neighboursParse(rep.text, &g_rptrNeighbours);
+    if (!g_rptrNeighbours.valid) {
+      // Not a neighbour answer (an error or an unknown command): never turn it into "empty".
+      om::rptr::answerPlainText(rep.text, g_rptrResult, sizeof(g_rptrResult));
+      g_rptrResultOk = false;
+      g_rptrResultPending = false;
+    }
     static om::MeshContact list[32];
     const int n = om::meshContactList(list, 32);
     for (int i = 0; i < g_rptrNeighbours.count; ++i) {
@@ -2162,16 +2246,22 @@ static void rptrTakeReply(const om::RptrReply& rep) {
                  nb.prefix[2], nb.prefix[3]);
       }
     }
-    g_rptrNeighbours.valid = true;
+    // `valid` comes from neighboursParse(): a real table (rows or "-none-") is valid, an error is not.
   } else {
     read = false;   // a console command's answer: logged, nothing parsed
   }
   if (read && g_rptrLoggedIn && !g_rptrResultPending) {
     const om::rptr::Page from = rptrReadPage(cmd);
-    if (g_rptrPage == om::rptr::Page::Repeater || g_rptrPage == from ||
-        (from == om::rptr::Page::Regions &&
-         (g_rptrPage == om::rptr::Page::HomePicker || g_rptrPage == om::rptr::Page::DefaultPicker ||
-          g_rptrPage == om::rptr::Page::AddRegion))) {
+    // EST-366 (rule 4): after a FAILED apply the draft is the user's unsaved intent, not what the
+    // repeater answered. The read-backs still update Facts, but they must not overwrite the draft
+    // (which would hide Apply and throw the error's context away). A success re-syncs as before.
+    const bool failedHere = g_rptrApplyErr && g_rptrPage == g_rptrApplyPage;
+    if (!failedHere &&
+        (g_rptrPage == om::rptr::Page::Repeater || g_rptrPage == from ||
+         (from == om::rptr::Page::Regions &&
+          (g_rptrPage == om::rptr::Page::HomePicker ||
+           g_rptrPage == om::rptr::Page::DefaultPicker ||
+           g_rptrPage == om::rptr::Page::AddRegion)))) {
       rptrSyncDraft();
     }
   }
@@ -2253,10 +2343,20 @@ static void rptrPump() {
       g_rptrResultOk = true;
       g_rptrResultPending = false;
       om::rptrStatusRequest();
+      // EST-366 (rule 3): from this moment the ONLY region truth is the repeater's own CLI answer.
+      // The anonymous scan cache (which can be minutes old) and any list left from before the login
+      // are dropped, and `region` is the FIRST read queued, so the logged-in list replaces the scan
+      // list before the page has a chance to draw a stale name.
+      g_rptrAnon = om::rptr::AnonFacts();
+      g_rptrRegions = om::rptr::RegionList();
+      g_rptrHome[0] = 0;
+      g_rptrHomeKnown = false;
+      g_rptrDefault[0] = 0;
+      g_rptrDefaultKnown = false;
       // The repeater page's own facts, one command at a time through the queue.
-      static const char* const kFirst[] = {"get name", "get lat", "get lon", "get radio", "get tx",
-                                           "get repeat", "clock", "region", "region home",
-                                           "region default"};
+      static const char* const kFirst[] = {"region", "region home", "region default", "get name",
+                                           "get lat", "get lon", "get radio", "get tx",
+                                           "get repeat", "clock"};
       for (const char* line : kFirst) rptrQueue(line, kRptrOutRead);
       rptrSyncDraft();
       redrawCurrentScreen();
@@ -2339,6 +2439,8 @@ static void rptrBuildList(om::ui::RptrView& v) {
   g_rptrCount = n;
 }
 
+static bool rptrMapDirty();   // defined with the map picker's tap handler below
+
 static void rptrBuildPage(om::ui::RptrView& v) {
   const om::rptr::Status& status = om::rptrStatus();
   const om::rptr::LoginMachine& login = om::rptrLogin();
@@ -2366,9 +2468,35 @@ static void rptrBuildPage(om::ui::RptrView& v) {
   in.logCount = g_rptrLogCount;
   in.consoleInput = g_rptrCmd;
   om::rptr::buildScreen(in, &v.screen);
+  // Rule 4 changes the layout when Apply appears/disappears (the body shrinks or grows). Keep the
+  // scroll inside the new clamp, so a page that was scrolled to the bottom never shows blank space
+  // under the last row after the button goes away.
+  {
+    const om::ui::RptrPageLayout a = om::ui::rptrPageLayoutFor(
+        om::ui::l2(), v.screen.cellCount > 0, v.screen.banner[0] != 0, v.screen.hasApply,
+        v.screen.bigButton, v.screen.hasConsole);
+    const int maxScroll = om::ui::rptrPageMaxScroll(a, v.screen.count);
+    if (g_rptrPageScroll > maxScroll) g_rptrPageScroll = maxScroll;
+    if (g_rptrPageScroll < 0) g_rptrPageScroll = 0;
+  }
   snprintf(v.result, sizeof(v.result), "%s", g_rptrResult);
   v.resultOk = g_rptrResultOk;
   v.resultPending = g_rptrResultPending;
+
+  // EST-366 (rule 6): the map picker's own view state. The centre itself is map.cpp's; the two lines
+  // under the map are the DRAFT position (what Apply would send) and the zoom, so what the eye reads
+  // is exactly what the CLI will receive.
+  v.mapPick = g_rptrMapPick;
+  if (g_rptrMapPick) {
+    char lat[20];
+    char lon[20];
+    om::rptr::degreesText(lat, sizeof(lat), g_rptrDraft.latE6);
+    om::rptr::degreesText(lon, sizeof(lon), g_rptrDraft.lonE6);
+    snprintf(v.mapCoords, sizeof(v.mapCoords), "%s, %s", lat, lon);
+    snprintf(v.mapHint, sizeof(v.mapHint), "z%d", g_rptrPickZoom);
+    v.mapGps = g_gps.valid;
+    v.mapApply = rptrMapDirty();
+  }
 }
 
 static void buildRptrView(om::ui::RptrView& v) {
@@ -2700,10 +2828,42 @@ static void rptrPageRowTapped(const om::rptr::UiRow& row, bool key, int dir) {
       rptrRemoveRegion(row.label);
       break;
     case om::rptr::Act::Discover:
-      rptrLog(">", om::rptr::kCliNeighboursDiscover);
-      rptrQueue(om::rptr::kCliNeighboursDiscover, kRptrOutCmd);
-      snprintf(g_rptrResult, sizeof(g_rptrResult), "Asking, replies take a few seconds");
+      // EST-366 (rule 5): the old path sent `discover.neighbors`, which CommonCLI v1.18.0 does not
+      // know (there is no discovery command in the CLI at all) and never read the table, so a blank
+      // page was the only possible answer. `neighbors` IS the repeater's neighbour table; it is a
+      // read, answered like every other CLI line. The table is filled by zero-hop adverts the
+      // repeater itself heard, so nothing this device can send makes it grow faster.
+      g_rptrNeighbours = om::rptr::NeighbourList();
+      rptrLog(">", om::rptr::kCliNeighboursRead);
+      rptrQueue(om::rptr::kCliNeighboursRead, kRptrOutRead);
+      snprintf(g_rptrResult, sizeof(g_rptrResult), "Reading the repeater's neighbour table");
       g_rptrResultOk = true;
+      break;
+    case om::rptr::Act::MapPick:
+      // EST-366 (rule 6): open the map centred on the repeater's draft position (or our GPS, or the
+      // page's last default) with the crosshair at the view centre.
+      {
+        g_rptrMapPick = true;
+        g_rptrPickZoom = 15;
+        double lat = 0.0;
+        double lon = 0.0;
+        if (g_rptrDraft.latE6 != 0 || g_rptrDraft.lonE6 != 0) {
+          lat = (double)g_rptrDraft.latE6 / 1e6;   // the repeater's own (or the typed) position
+          lon = (double)g_rptrDraft.lonE6 / 1e6;
+        } else if (g_gps.valid) {
+          lat = g_gps.lat;                          // no position on the repeater: our own fix
+          lon = g_gps.lon;
+        } else {
+          lat = 46.0569;                            // Ljubljana: the map pack's centre
+          lon = 14.5058;
+        }
+        om::mapSetView(lat, lon, g_rptrPickZoom);
+        // The view is centred on exactly this coordinate, so the draft stays the value that was
+        // opened. (Projecting the centre back through the float maths could add a micro-degree and
+        // make Apply look needed before the finger has moved.)
+        g_rptrDraft.latE6 = (int32_t)lround(lat * 1e6);
+        g_rptrDraft.lonE6 = (int32_t)lround(lon * 1e6);
+      }
       break;
     case om::rptr::Act::ConsoleEdit:
       rptrOpenSheet(6, om::ui::KeyboardField::WifiPassword, "command", g_rptrCmd, false);
@@ -2715,9 +2875,65 @@ static void rptrPageRowTapped(const om::rptr::UiRow& row, bool key, int dir) {
 }
 
 // One tap on the RPTR tab. True when it was consumed.
+static bool rptrMapDirty() {
+  return g_rptrDraft.latE6 != g_rptrFacts.latE6 || g_rptrDraft.lonE6 != g_rptrFacts.lonE6;
+}
+
+static void rptrMapPickCentreToDraft() {
+  double lat = 0, lon = 0;
+  om::mapScreenToLatLon(160, 107, lat, lon);
+  g_rptrDraft.latE6 = (int32_t)(lat * 1e6);
+  g_rptrDraft.lonE6 = (int32_t)(lon * 1e6);
+}
+
 static bool handleRptrTap(int x, int y) {
   const om::ui::Layout& L = om::ui::l2();
   buildRptrView(g_rptrViewStore);
+
+  // EST-366 (rule 6): the map picker's own keys. A tap on the map itself is a drop of the crosshair
+  // (the pan happens while the finger moves); it changes nothing else.
+  if (g_rptrMapPick) {
+    const om::ui::RptrMapPickLayout m = om::ui::rptrMapPickLayoutFor(L, rptrMapDirty());
+    switch (om::ui::rptrMapPickHitAt(m, x, y)) {
+      case om::ui::RptrMapPickHit::Back:
+        g_rptrMapPick = false;
+        drawRptrTab();
+        return true;
+      case om::ui::RptrMapPickHit::ZoomIn:
+        om::mapZoomBy(1);
+        g_rptrPickZoom = om::mapZoom();
+        drawRptrTab();
+        return true;
+      case om::ui::RptrMapPickHit::ZoomOut:
+        om::mapZoomBy(-1);
+        g_rptrPickZoom = om::mapZoom();
+        drawRptrTab();
+        return true;
+      case om::ui::RptrMapPickHit::UseGps:
+        if (!g_gps.valid) {
+          showToast("No GPS fix yet");
+          return true;
+        }
+        om::mapSetView(g_gps.lat, g_gps.lon, g_rptrPickZoom);
+        g_rptrDraft.latE6 = (int32_t)(g_gps.lat * 1e6);
+        g_rptrDraft.lonE6 = (int32_t)(g_gps.lon * 1e6);
+        drawRptrTab();
+        return true;
+      case om::ui::RptrMapPickHit::Apply:
+        // Back to the Position page first: the Apply's result line lives in that page's header, and
+        // rule 4 hides Apply again as soon as the read-back matches.
+        g_rptrMapPick = false;
+        rptrApplyNow();
+        drawRptrTab();
+        return true;
+      case om::ui::RptrMapPickHit::Map:
+        rptrMapPickCentreToDraft();
+        drawRptrTab();
+        return true;
+      default:
+        return true;   // the panel/back are over the map; nothing else is a map tap
+    }
+  }
 
   if (g_rptrAskOpen) {
     const om::ui::RptrModalLayout m = om::ui::rptrModalLayoutFor(L, g_rptrAsk.verb);
@@ -4937,6 +5153,7 @@ void loop() {
   }
   static uint32_t lastBeat = 0;
   static bool screenOn = true;
+  g_noticeScreenOn = screenOn;   // EST-366: every notification door checks the screen once per pass
   static bool sleepPending = false;   // the backlight is fading out; the panel is still awake
   static bool wakePrev = false;
   static uint32_t lastTap = 0;
@@ -5056,6 +5273,9 @@ void loop() {
     if (!lowBattWarned && pct >= 0 && pct <= 15) {
       lowBattWarned = true;
       playEvent(SoundEvent::LowBattery);   // DND lets this one through (with error)
+      char battText[om::ui::kNoticeCap];
+      om::ui::noticeBatteryText(battText, sizeof(battText), pct);
+      notify(om::ui::NoticeKind::LowBattery, battText, false);
       Serial.printf("[batt] low (%d%%), low-battery sound\n", pct);
     } else if (lowBattWarned && pct > 20) {
       lowBattWarned = false;
@@ -5071,6 +5291,7 @@ void loop() {
       seenFault = fault;
       if (fault != om::RadioFault::None) {
         playEvent(SoundEvent::Error);
+        notify(om::ui::NoticeKind::Error, om::radioFaultText(fault), false);
         Serial.printf("[radio] fault sound: %s\n", om::radioFaultToken(fault));
       }
     }
@@ -5100,6 +5321,15 @@ void loop() {
   // frame is pushed without it. expire() answers true exactly once (EST-344).
   if (om::ui::toastState().expire(millis())) {
     if (screenOn) redrawCurrentScreen();
+  }
+  // EST-366 (rule 9): a burst leaves ONE newest notification waiting. The moment no toast is on
+  // screen (expired, or dismissed by the consumed tap), that one takes the screen. This is also what
+  // makes the tap's dismissal enough: no second tap is needed when nothing is pending.
+  if (!om::ui::toastState().visible(millis()) && g_noticeQueue.hasPending) {
+    char next[om::ui::kNoticeCap];
+    if (g_noticeQueue.take(next, sizeof(next))) {
+      if (screenOn) showToast(next);
+    }
   }
   // The floor is a one-way lower bound; persistence every 10 minutes is enough once a sync has set it.
   if (om::timeKeeper().saveDue(millis() / 1000)) saveTimeFloor();
@@ -5296,37 +5526,65 @@ void loop() {
             om::ui::newNodeNotice(true, g_soundOn, g_dnd, !om::sound::validSound(g_sndNew));
         g_newNodeDot = true;   // until the Nodes screen is next drawn
         if (notice.sound) playEvent(SoundEvent::NewNode);
-        // showToast redraws the current screen, which also puts the dot on the tab bar of whatever
-        // is showing; one push carries both the dot and the toast (EST-344).
-        if (screenOn) showToast(lastText);
+        // EST-366 (rule 9): the same toast door as a message, so DND and a burst are handled once.
+        // The dot still appears: it is information on the bar, not a pop-up.
+        notify(om::ui::NoticeKind::NewNode, lastText, false);
         Serial.printf("[nodes] notice: %s\n", lastText);
       }
     }
   }
-  // 2) A DM ARRIVED: the per-event DM sound. Our own sends do not bump this serial.
+  // 2) A DM ARRIVED: the per-event DM sound and its toast ("DM <sender>: ..."). Our own sends do not
+  //    bump this serial. The open-chat rule is the DM thread's, not the channel's.
   {
     static uint32_t seenDm = 0;
     const uint32_t serial = om::meshDmRecvSerial();
     if (serial != seenDm) {
       seenDm = serial;
       playEvent(SoundEvent::Dm);
+      int thread = -1;
+      char from[32] = "";
+      char body[om::kMeshTextCap] = "";
+      if (om::meshDmLatest(&thread, from, sizeof(from), body, sizeof(body))) {
+        char text[om::ui::kNoticeCap];
+        om::ui::noticeDmText(text, sizeof(text), from, body);
+        notify(om::ui::NoticeKind::Dm, text, chatOpenForThread(thread));
+      }
     }
   }
   // 3) A CHANNEL message ARRIVED (EST-359). mesh_link bumps the sound serial only for a message that
   //    should be heard (not muted, not our own send); a mention has its own serial and wins when both
-  //    changed in one pass, so one message never plays two sounds.
+  //    changed in one pass, so one message never plays two sounds. EST-366 adds the toast from the
+  //    same arrival: "<sender> in <chat>: <start>" (a mention is marked), suppressed only when that
+  //    chat is the one already on screen.
   {
     static uint32_t seenMsg = 0;
     static uint32_t seenMention = 0;
     const uint32_t mention = om::meshMentionSerial();
     const uint32_t msg = om::meshMsgSoundSerial();
+    bool isMention = false;
+    bool gotOne = false;
     if (mention != seenMention) {
       seenMention = mention;
       seenMsg = msg;
       playEvent(SoundEvent::Mention);
+      isMention = true;
+      gotOne = true;
     } else if (msg != seenMsg) {
       seenMsg = msg;
       playEvent(SoundEvent::Message);
+      gotOne = true;
+    }
+    if (gotOne) {
+      const int last = om::meshMsgCount() - 1;
+      if (last >= 0) {
+        const int ch = om::meshMsgChannel(last);
+        char text[om::ui::kNoticeCap];
+        om::ui::noticeChannelText(text, sizeof(text), om::meshMsgName(last),
+                                  (ch >= 0 && ch < om::mcChannelCount()) ? om::mcChannelName(ch) : "?",
+                                  om::meshMsgText(last), isMention);
+        notify(isMention ? om::ui::NoticeKind::Mention : om::ui::NoticeKind::Channel, text,
+               chatOpenForChannel(ch));
+      }
     }
   }
   // 3) A ping's status reply (or its timeout) arrives later: the toast carries the round trip.
@@ -5439,6 +5697,7 @@ void loop() {
       g_upX = g_sx;
       g_upY = g_sy;
       g_upMs = millis();
+      g_rptrPickDragging = false;   // EST-366: the next map gesture starts a fresh pan base
       // A spent gesture was the press that closed an overlay: its release does nothing at all (no
       // tap, no rubber band, no redraw). Only the NEXT new press acts on what was behind (EST-339).
       const bool spent = g_spent;
@@ -5520,8 +5779,9 @@ void loop() {
           g_nodeScroll = clamped;
           if (g_drag || changed) drawHome();
         }
-        // The repeater list and a page's rows snap their give back the same way.
-        if (g_tab == 3 && !g_settings && !g_rptrOsk) {
+        // The repeater list and a page's rows snap their give back the same way. The map picker has
+        // no scroll of its own: its pan is applied live, so the release does nothing.
+        if (g_tab == 3 && !g_settings && !g_rptrOsk && !g_rptrMapPick) {
           bool changed = false;
           if (g_rptrList) {
             const om::ui::RptrListLayout rr = om::ui::rptrListLayoutFor(om::ui::l2());
@@ -5802,8 +6062,31 @@ void loop() {
           drawMapTab();
         }
       } else if (g_tab == 3 && !g_rptrOsk) {
-        // The list, or the open page's rows, follows the finger; the release snaps the give back.
-        if (g_rptrList) {
+        // EST-366 (rule 6): dragging the map picker pans the offline map under the fixed crosshair.
+        // The first move of a gesture only records the base; later moves apply the delta, so the map
+        // never jumps by the distance from an earlier gesture.
+        if (g_rptrMapPick) {
+          if (!g_rptrPickDragging) {
+            g_rptrPickDragging = true;
+            g_rptrPickDragX = (int)x;
+            g_rptrPickDragY = (int)y;
+          } else {
+            om::mapPan(g_rptrPickDragX - (int)x, g_rptrPickDragY - (int)y);
+            g_rptrPickDragX = (int)x;
+            g_rptrPickDragY = (int)y;
+            rptrMapPickCentreToDraft();
+          }
+          g_drag = true;
+          if (millis() - g_lastRender > 60) {
+            g_lastRender = millis();
+            drawRptrTab();
+          }
+          if (dy > 12 || dy < -12) g_drag = true;
+          g_lastX = x;
+          g_lastY = y;
+          // Skip the pages' own scroll handling below.
+        } else if (g_rptrList) {
+          // The list, or the open page's rows, follows the finger; the release snaps the give back.
           const om::ui::RptrListLayout rr = om::ui::rptrListLayoutFor(om::ui::l2());
           const int next =
               om::ui::selDragScroll(g_rptrScroll0, dy, om::ui::rptrListMaxScroll(rr, g_rptrCount));

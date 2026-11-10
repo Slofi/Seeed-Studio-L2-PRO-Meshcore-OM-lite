@@ -3544,3 +3544,175 @@ been observed; `radio` is the measurement. The owner query depends on the repeat
 ## 2026-11-10 21:55 (Claude): EST-365 on the device
 - Built in the sandbox (exit 0, RAM 154,528 B, flash 2,776,877 B), tests exit 0, password paths read (the USB command line is redacted before it is logged; the stored password only feeds the login), reviewed binary flashed (2,777,248 B).
 - Badge on the Map and RPTR tabs: shown ("32", "33"). `msgs` now ends with the newest (seq 55 at 20:52 after restore). `radio`: gain=boosted, noise -85 dBm (min -85; the average -73 still includes the first samples after boot), RX 4 / CRC 3 in the first minute, `radio packets` lists type, route, sender hash, RSSI/SNR, path. loop_worst 317 ms "by=usb" (my commands). 3 minutes of log: no restart (an earlier "uptime 46 s" reading was the same boot; my misread of the timing).
+
+## 2026-11-10 22:10 (DeepSeek): EST-366, the 21:15 review of the logged-in RPTR page
+Ticket: CR, the scrolling status card, the stale region list, Apply only when changed, neighbours,
+the Position map picker, one-level Back, the home picker's "*", and the message pop-ups. Firmware
+only; no lib/ file was edited and nothing was committed.
+
+### 1. Coding rate
+- Argus answers `get radio` as FOUR fields (`869.6179809,62.5,8,8`); the last one is CR. The read-back
+  parser already took it, but the Repeater page's Radio row dropped it. `radioText()` now prints
+  `869.618 MHz, SF8, BW 62.5, CR8`.
+- The Radio page's "Coding rate" row (step keys, CR5..CR8, `radioStep()` clamp) is now part of the
+  rule-4 draft/dot logic; `set radio f,bw,sf,cr` still sends the 5..8 value, and the existing
+  risky-change pop-up is unchanged.
+- Host: `radioReplyParse("> 869.6179809,62.5,8,8")`, the 5/8 clamps, the row text and the CR dot.
+
+### 2. The status card scrolls
+- `RptrPageLayout` now treats the card and banner as CONTENT of one scrolling column: `body` is the
+  viewport (clip rect), `rowsY` is where row 0 starts below the card/banner, and `card`/`banner`/
+  `refreshTap` hold their scroll-0 rectangles. Only the header (back + title/subtitle) is fixed.
+- Drawing, the refresh target, the banner button, row rectangles and `rptrPageMaxScroll` all use the
+  same scroll offset. At scroll 0 the card starts at the top of the viewport; scrolling moves it up
+  and out under the fixed header like any row. The refresh icon scrolls with it and stops answering
+  once it is out.
+- Host: card at body top, rowsY below the banner, max scroll includes card+banner, refresh hit at
+  scroll 0 and not after the card height, and the layout bands on both screen sizes.
+
+### 3. Stale regions (and whether "si" still exists on Argus)
+- `regionsParse()` now clears every row before parsing, accepts trailing `\r`/spaces and a `> `
+  prompt, scans the whole flag tail (not only its last two bytes), and rejects a CommonCLI error
+  (`Err - ...` / `Error`) instead of turning "Err" into a region.
+- On login the shell throws away the anonymous scan cache and any previous list, and queues
+  `region` FIRST (before `region home`, `region default`, name, position, radio, tx, repeat,
+  clock). A logged-in page reads only `g_rptrRegions`; `in.anon` is never consulted there (the code
+  says so and the test builds a stale anon cache `*, si, lj` with an empty logged-in list).
+- Every region write still ends with the `region`/`region home`/`region default` read-backs
+  (`rptrApplyNow`, remove-region, both pickers), so the list is refreshed from the repeater.
+- **Does "si" still exist on Argus? No, not as a region.** The 21:05 run's logged-in answer was
+  `*^ F`: the region map holds ONLY the wildcard, so `lj` and `si` are both gone. `region default`
+  still answers `si` because the default scope is a stored name (31 bytes in NodePrefs) and is not
+  checked against the map; it can name a region that no longer exists. That is the repeater's
+  stored prefs, not the list the page draws. The anonymous `rptr regions` query can be re-run to
+  confirm (`cmd.py rptr regions "Argus mobile RPTR"`), and the Regions page's `region` read-back
+  is the direct proof.
+
+### 4. Apply only when something changed
+- New `DirtyFields draftChanges()` in `rptr_page.h` is the ONE comparison of draft vs the repeater's
+  read-back (name, position, four radio fields, tx, repeat, both adverts, flood max, loop, path
+  hash, every region flood flag, home, default scope, add-region).
+- `buildScreen()` sets `hasApply` per page from it; a changed row gets `UiRow.changed` and is drawn
+  with a small gold dot in its left margin (the screen draws it; the model only says which).
+- After a successful apply the shell's existing `rptrSyncDraft()` (facts -> draft) makes the page
+  clean, so Apply disappears; when the read-backs arrive the row shows the repeater's own value.
+- A FAILED apply now keeps the draft: `rptrTakeReply` skips the read-back `rptrSyncDraft()` while
+  the failure is on that page (`g_rptrApplyErr && g_rptrPage == g_rptrApplyPage`), so Apply stays
+  visible with the error. Opening a page or a new apply clears the failed flag.
+- The map picker's Apply follows the same rule (`rptrMapDirty()`), and the page scroll is clamped
+  when Apply appears/disappears.
+- Host: 18 change cases (every editable field), clean -> Apply hidden, changed -> Apply + at least
+  one dot, reset from a matching read-back -> hidden, failure -> still visible, CR8 read-back ->
+  hidden.
+
+### 5. Discover neighbours showed nothing
+- Root cause: the button sent `discover.neighbors` and never read the table. `discover.neighbors`
+  is NOT in CommonCLI v1.18.0 (grep of the vendored `CommonCLI.cpp` finds no `discover` command at
+  all), so the repeater could only answer an unknown command.
+- The bundled MeshCore v1.18.0 has only `REQ_TYPE_GET_STATUS` 0x01, `KEEP_ALIVE` 0x02 and
+  `GET_TELEMETRY_DATA` 0x03; there is no `REQ_TYPE_GET_NEIGHBOURS` binary request, and the
+  companion app source has no neighbour path. The full list with names and SNR is therefore the
+  CLI `neighbors` answer: `prefix:secs:snr4` lines or `-none-`. The button (and the page's normal
+  read-back) now sends `neighbors`; the raw answer is already logged as `[rptr] cli <- ...`.
+- Nothing this device can send makes another repeater advertise, so no "discovery first" step is
+  possible or used. The table only holds repeaters whose zero-hop adverts the repeater itself heard.
+- `neighboursParse()` now distinguishes a REAL empty answer (`-none-`, `none`, empty) from a
+  non-answer (`Err - unknown command` -> valid=false), trims CR/spaces and accepts a `> ` prompt.
+  The page says "the repeater has heard no neighbours yet" for a real empty table, never a blank
+  page, and the shell resolves names from our contacts by the 4-byte prefix (hex otherwise).
+- Host: `-none-`/empty -> valid empty, error -> not valid, two lines with negative SNR, the empty
+  message, a named row.
+
+### 6. Position with a map picker
+- The Position page gains a "Pick on map" row (the numeric Latitude/Longitude rows stay as the
+  secondary option). The picker is `om::mapRender()` (the Map tab's offline tiles) with a crosshair
+  at the view centre, pan by dragging, + / - zoom keys, a coordinate line under the map, "Use my GPS
+  position" (enabled when there is a fix) and Apply. It opens centred on the repeater's draft
+  position, else our GPS fix, else Ljubljana.
+- `RptrMapPickLayout`/`rptrMapPickHitAt()` in `ui/rptr_layout.h` hand out every rectangle and answer
+  the tap; `drawMapPick()` in `ui/screen_rptr.cpp` draws it. Apply sends the existing
+  `set lat <5dp>` / `set lon <5dp>` pair through `applyPlan(Position)`.
+- Host: the crosshair is exactly (160,107), all keys inside the width, panel above the tab bar,
+  Apply only when `rptrMapDirty()`, the Use-GPS/Apply keys do not overlap.
+
+### 7. Back goes one level
+- New `om::rptr::PageNav` (the EST-350 Settings history for RPTR): `rptrGoPage()` pushes the current
+  page and scroll; `rptrBack()` pops exactly one and restores that scroll. A Home/Default picker
+  opened from Regions now returns to Regions, not to the Repeater page. Only an empty stack falls
+  back to the repeater page, and its Back leaves the session.
+- Host: every sub-page (Name..Console) pushed over Repeater and popped back with its own scroll; the
+  Regions -> HomePicker chain; the overflow drops the oldest entry and keeps the newest scroll.
+
+### 8. Home region picker
+- Already offered `* (anywhere)` (value "no home region") as the first row, and `region home *` as
+  the "no home" line; the test now pins both it and the default picker's "none" plus its own
+  `* (anywhere)` row. MeshCore always has a home, so no "none" row is offered for home.
+
+### 9. Notification pop-ups for messages
+- New `src/ui/notify.h` (plain C++, host-tested) owns the decisions: DND silences every pop-up
+  except error and low battery; a message in the chat already on screen does not pop up over itself;
+  and the burst queue keeps ONE pending slot, always the newest.
+- The shell wires it to every sound event: channel message (`<sender> in <chat>: <start>`), mention
+  (`Mention: <sender> in <chat>: ...`), DM (`DM <sender>: ...`), new node, low battery
+  (`Low battery: 12 %`), radio/mesh error, and an RPTR result when the RPTR page is not showing its
+  own result line. Text is one line, whitespace collapsed, UTF-8-safe and ends in "..." when cut.
+- The toast is the existing 5 s `ui/toast.h` overlay with the EST-346 consumed-tap dismissal; the
+  loop promotes the newest pending notice as soon as no toast is visible. A tap on a toast dismisses
+  it and spends the gesture; no second tap is needed.
+- `meshDmLatest()` was added to the facade (newest RECEIVED DM), so the DM toast never shows our own
+  send.
+- Host: DND (all events vs error/battery), open-chat for channel/DM/mention, text forms and
+  ellipsis, the ten-message burst keeping #9, and the new-node DND rule (the dot still appears).
+
+### Build and tests
+- `pio run -e om_lite_l2` exit 0 (two runs, the second after the last edit): **RAM 154,728 B**
+  (47.2% of 327,680), **flash 2,783,989 B** (42.5% of 6,553,600), `firmware.bin` 2,784,352 B.
+- `sh test/host/run.sh` exit 0. New `test/host/test_est366.cpp` covers every item above. Existing
+  tests were updated only where the ticket changed the old rule: EST-362's "always Apply" row and
+  the fixed-card geometry, EST-363/EST-351's body geometry and max-scroll arithmetic, EST-364's
+  "refresh target never overlaps the body" assertion, and test_dm's new-node toast under DND.
+
+### Could not check (no device in the sandbox)
+The glass: the card really moving under the header, the dots at 1:1, the map picker's pan/zoom feel
+and the crosshair over real tiles, and the toast's 48-byte line in the 304 px panel. The radio: that
+Argus accepts CR=8 (the parse side is proven). The regions: whether `si` is really gone (the 21:05
+logged-in answer says the map has only `*`; `region default` may still NAME si). The neighbours: what
+Trnovo II / Argus answer to `neighbors` now, and whether their tables contain any zero-hop repeater
+yet. No SSH host was involved.
+
+### Next step for Claude (one reader on the USB port)
+1. Flash `firmware.bin` (2,784,352 B). Boot must still print `[rptr] sizes: ...` and
+   `board=ok mesh=up`.
+2. Login on Argus: `tools/cmd.py rptr login "Argus mobile RPTR" <password>` (EST-365; the reply is
+   `result=sent`, never the password), wait for the answer, then `tools/cmd.py rptr status "Argus
+   mobile RPTR"` must show `login=admin`. (Or log in on the glass.)
+3. `tools/cmd.py tap 280 227` (RPTR tab), `tools/cmd.py tap 120 70` (first row): `tools/shot.py`.
+   Scrolling: `tools/cmd.py drag 160 190 160 90 500` then `shot.py`: the status card must move up
+   with the rows, the back+name row must stay.
+4. Radio row: `shot.py` after scrolling to it must say `..., CR8`. Open Radio (tap the Radio row),
+   check the four rows; tap `+` on Coding rate: the dot appears and Apply appears; tap Apply -> the
+   risky-change pop-up; Cancel must send nothing (`[rptr] cli ->` lines stay absent).
+5. Regions: tap the Regions row; `shot.py` must list only `*` (no `lj`, no `si`). Tap Home region ->
+   Back: it must return to Regions (not the Repeater page), at the same scroll. Tap Default scope
+   -> Back likewise. `tools/cmd.py rptr regions "Argus mobile RPTR"` re-runs the anonymous query for
+   the same question.
+6. Neighbours: tap Neighbours (after scrolling), then "Refresh neighbours"; the log must show
+   `[rptr] cli -> Argus mobile RPTR: neighbors` and `[rptr] cli <- ...`. An empty table must say
+   "the repeater has heard no neighbours yet"; a row with a known prefix must carry the contact's
+   name. The raw answer is in the log.
+7. Position map: tap Position -> "Pick on map": `shot.py` (tiles, crosshair, coordinate line),
+   drag the map and `shot.py` (coordinate changes, Apply appears), tap "Use my GPS position" with a
+   fix, tap Apply; the Position page must show the new coordinate after the read-back.
+8. Apply rule: on Name (or Radio), make no change: no Apply. Change one field: Apply + one dot.
+   Apply and wait for `OK` and the read-back: Apply disappears. Force a failure (an invalid value
+   the repeater refuses) and check Apply stays with the error line.
+9. Message pop-ups: send a channel message from another node with the Chat tab on Nodes (toast
+   appears for ~5 s), with that chat open (no toast), with DND on (no toast; error/low battery
+   still show), and send a burst of three (one toast, then the newest). DM: `DM <sender>: ...`.
+   Tap the toast once: it goes away and nothing under it is pressed; a second tap is not needed.
+
+## 2026-11-10 22:20 (Claude): EST-366 on the device, Argus re-read
+- Built in the sandbox (exit 0, RAM 154,728 B, flash 2,783,989 B), tests exit 0, reviewed binary flashed (2,784,352 B). Login admin; status 3.75 V 62 % (charging), noise -120; Radio row now shows CR8; the status card scrolls away with the page (`docs/shots/2026-11-10-2208-argus-page.png`).
+- **Argus's regions, read logged in** (multi-line answer now parsed): `*^ F`, `si F`, `eu F`, `europe F` = home `*`, floods allowed for si, eu, europe; `lj` is gone. `region default` = `<null>`. `region home` (no argument) timed out once (8 s) and the order re-synced.
+- **Neighbours: DS's conclusion was wrong.** `discover.neighbors` IS a repeater command in v1.18.0, implemented in examples/simple_repeater/MyMesh.cpp handleCommand (not in CommonCLI, which is why the grep missed it): it sends a zero-hop node-discover request and fills the repeater's neighbour table over ~60 s; `neighbors` then reads the table. The reference is now in `reference/meshcore-repeater-v1.18.0/`.
+- Filip: the status card's top edge draws outside its border (the bottom is fine).

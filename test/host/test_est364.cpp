@@ -373,7 +373,9 @@ static void testRefreshLayout() {
   CHECK(om::ui::rptrPageHitAt(a, s, 0, (int16_t)(a.bannerButton.x + 2),
                               (int16_t)(a.bannerButton.y + 2)).kind ==
         om::ui::RptrHit::BannerButton);
-  CHECK(!a.refreshTap.overlaps(a.body));
+  // EST-366 rule 2: the card (and its refresh target) now scrolls WITH the page, so at scroll 0 the
+  // target is inside the viewport; it must still never eat the banner button.
+  CHECK(a.refreshTap.y >= a.body.y && a.refreshTap.bottom() <= a.body.bottom());
   CHECK(!a.refreshTap.overlaps(a.bannerButton));
 
   // The same rules hold on the 800x480 arrangement (the second screen the layout serves).

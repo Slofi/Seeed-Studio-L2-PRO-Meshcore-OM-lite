@@ -49,6 +49,15 @@ struct RptrView {
   bool resultOk = false;
   bool resultPending = false;
 
+  // --- EST-366: the Position page's map picker. The shell owns the centre (map.cpp holds it); this
+  // view carries only what the drawing needs: the two lines under the map, whether we have a GPS fix
+  // for the shortcut, and whether Apply has something to send (rule 4).
+  bool mapPick = false;
+  char mapCoords[40] = "";          // "46.04263, 14.50145"
+  char mapHint[40] = "";            // "z15 · drag the map"
+  bool mapGps = false;              // a fix exists: "Use my GPS position" works
+  bool mapApply = false;            // the crosshair differs from the repeater's position
+
   // --- the confirmation pop-up
   bool modal = false;
   char modalText[128] = "";

@@ -72,12 +72,59 @@ int utf8Encode(uint32_t cp, char* out) {
   return 4;
 }
 
+int textUnitAt(const char* s, int end, int i, TextUnit* out) {
+  if (out == nullptr) return end;
+  out->start = (int16_t)i;
+  out->coreEnd = (int16_t)i;
+  out->end = (int16_t)i;
+  out->cp = kUtf8Invalid;
+  out->zero = true;
+  if (s == nullptr || i < 0 || i >= end) return end;
+
+  int at = i;
+  const uint32_t cp = utf8Decode(s, &at);
+  if (at > end) at = end;
+  if (at <= i) at = i + 1;
+  out->cp = cp;
+  out->coreEnd = (int16_t)at;
+  out->end = (int16_t)at;
+
+  // A selector or modifier with no base in front of it: no room, nothing drawn.
+  if (utf8IsEmojiModifier(cp)) return at;
+  out->zero = false;
+
+  // They belong to the base. A ZWJ also belongs to the part before it; the part after it is
+  // the next unit, so a joined sequence draws its parts in order.
+  int j = at;
+  while (j < end) {
+    int k = j;
+    const uint32_t next = utf8Decode(s, &k);
+    if (k > end) k = end;
+    if (k <= j) k = j + 1;
+    if (utf8IsEmojiModifier(next)) {
+      j = k;
+      out->end = (int16_t)j;
+      continue;
+    }
+    if (next == kUtf8Zwj) {
+      j = k;
+      out->end = (int16_t)j;
+    }
+    break;
+  }
+  return (int)out->end;
+}
+
 int measureUtf8(const char* text, int len, GlyphWidthFn glyph, void* ctx, int spaceW) {
   if (text == nullptr || glyph == nullptr || len <= 0) return 0;
   int w = 0;
   for (int i = 0; i < len;) {
-    const uint32_t cp = utf8Decode(text, &i);
-    const int gw = glyph(ctx, cp);
+    TextUnit u;
+    const int next = textUnitAt(text, len, i, &u);
+    if (next <= i) break;              // never loop on a refused unit
+    i = next;
+    if (u.zero) continue;              // a stray selector takes no room
+    const int gw = glyph(ctx, u.cp);
     w += gw > 0 ? gw : spaceW + kMissingExtra;
   }
   return w;

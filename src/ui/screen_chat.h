@@ -40,6 +40,11 @@ struct ChatView {
   bool osk = false;
   bool shift = false;
   bool nums = false;
+  bool emoji = false;               // the smiley page is open (replaces the four key rows)
+  const uint32_t* emojiRecent = nullptr;   // last 16 picks, most recent first
+  int emojiRecentCount = 0;
+  int emojiGroup = 0;               // faces / hands / hearts / objects / symbols
+  int emojiScroll = 0;              // the selected group's grid scroll, px
   const char* draft = "";
   const char* ownName = "OM Lite";   // MeshCore NodePrefs name, for the composer byte budget
   bool dmThread = false;             // the open chat is a DM: its frame has no "name: " prefix
@@ -65,6 +70,7 @@ void chatScreenDraw(const ChatView& v);
 
 enum class ChatHit : uint8_t {
   None, Head, SelRow, SelManage, SelClose, Msg, SenderName, SheetRow, SheetClose, Field, Key, Outside,
+  EmojiCell, EmojiCat, EmojiBack, EmojiSend,
 };
 
 struct ChatHitResult {
@@ -76,6 +82,8 @@ struct ChatHitResult {
   int keyCol = -1;
   KeyKind keyKind = KeyKind::Char;
   char keyCh = 0;
+  uint32_t emojiCp = 0;   // EmojiCell: the code point to append
+  int emojiGroup = -1;    // EmojiCat: the group to open
 };
 
 // What a tap at (x, y) would hit. Pure read: it measures text but changes nothing.
@@ -92,6 +100,9 @@ int chatMaxScroll(const ChatView& v);
 
 // The selector list's scroll clamp and the row under a y. The shell drags the list with the finger.
 int chatSelectorMaxScroll(const ChatView& v);
+
+// The emoji grid's scroll clamp for the open group (0 when the group fits).
+int chatEmojiMaxScroll(const ChatView& v);
 
 // The open message sheet's panel, or an empty rect when no sheet is open. The shell needs it on the
 // PRESS, not just the release: a press outside the panel closes the sheet and is spent (EST-339).

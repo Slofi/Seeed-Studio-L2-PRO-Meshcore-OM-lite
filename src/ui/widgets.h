@@ -98,5 +98,9 @@ int measureText(lgfx::LovyanGFX* d, FontRole role, const char* s, int len);
 // U+00B7 (theme.h), so anything else is the placeholder box.
 bool fontHasGlyph(FontRole role, uint32_t cp);
 
+// Draw one emoji cell from the flash table, its 4-bit coverage blended over `bg` (the surface the
+// caller is drawing on). Returns false when the table has no entry for `cp`.
+bool drawEmoji(lgfx::LovyanGFX* d, uint32_t cp, int x, int cy, uint16_t bg);
+
 }  // namespace ui
 }  // namespace om

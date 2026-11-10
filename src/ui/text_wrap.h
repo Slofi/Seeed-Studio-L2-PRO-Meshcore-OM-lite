@@ -28,12 +28,46 @@ uint32_t utf8Decode(const char* s, int* i);
 // Write cp as UTF-8 into out (at least 5 bytes); returns the byte count (0 for a bad code point).
 int utf8Encode(uint32_t cp, char* out);
 
+// --- emoji sequences ---------------------------------------------------------------------------
+// A face can draw one code point; an emoji is often more than one. The walker below answers with
+// ONE drawable unit at a time and eats the sequence-only code points: a variation selector, a
+// skin-tone modifier and U+20E3 belong to their base; a ZWJ belongs to the part BEFORE it, so the
+// next call returns the part after it and a joining sequence draws its parts in order. Regional
+// indicators are not consumed as a pair: each is its own missing glyph, which is the ticket's
+// "a flag pair draws as two regional letters' placeholder".
+constexpr uint32_t kUtf8Zwj = 0x200Du;
+constexpr uint32_t kUtf8Vs15 = 0xFE0Eu;
+constexpr uint32_t kUtf8Vs16 = 0xFE0Fu;
+constexpr uint32_t kUtf8Keycap = 0x20E3u;
+
+constexpr bool utf8IsSkinTone(uint32_t cp) { return cp >= 0x1F3FBu && cp <= 0x1F3FFu; }
+constexpr bool utf8IsEmojiModifier(uint32_t cp) {
+  return cp == kUtf8Vs15 || cp == kUtf8Vs16 || cp == kUtf8Keycap || utf8IsSkinTone(cp);
+}
+constexpr bool utf8IsRegionalIndicator(uint32_t cp) {
+  return cp >= 0x1F1E6u && cp <= 0x1F1FFu;
+}
+
+// One drawable unit of a string. `start..coreEnd` is the base code point (what the face draws),
+// `start..end` also covers the modifiers and a following ZWJ. `zero` marks a stray modifier with
+// no base: it takes no room and draws nothing.
+struct TextUnit {
+  uint32_t cp = 0;
+  int16_t start = 0;
+  int16_t coreEnd = 0;
+  int16_t end = 0;
+  bool zero = false;
+};
+
+// Decode the unit at s[i], never reading past `end`. Returns the byte offset of the next unit.
+int textUnitAt(const char* s, int end, int i, TextUnit* out);
+
 // Width of one drawable code point, or 0 when the face has no glyph for it.
 using GlyphWidthFn = int (*)(void* ctx, uint32_t cp);
 
-// Width of a byte range walked code point by code point. A code point the face lacks measures as a
-// space plus kMissingExtra, the same width as the dim placeholder box the screen draws for it, so the
-// wrap and the drawing agree. Never splits a sequence.
+// Width of a byte range walked unit by unit (emoji modifiers take no room of their own). A code
+// point the face lacks measures as a space plus kMissingExtra, the same width as the dim
+// placeholder box the screen draws for it, so the wrap and the drawing agree.
 int measureUtf8(const char* text, int len, GlyphWidthFn glyph, void* ctx, int spaceW);
 
 struct WrapLine {

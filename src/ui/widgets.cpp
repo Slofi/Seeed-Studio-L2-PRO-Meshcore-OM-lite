@@ -7,6 +7,8 @@
 #include <string.h>
 
 #include "ui/badge_font.h"
+#include "ui/emoji.h"
+#include "ui/emoji_table.h"
 #include "ui/fonts.h"
 #include "ui/icons.h"
 #include "ui/status_cells.h"
@@ -102,6 +104,13 @@ void drawTabIcon(lgfx::LovyanGFX* d, Tab t, int cx, int cy, uint16_t col) {
 
 }  // namespace
 
+namespace {
+
+// Defined with the text helpers below; declared here so drawEmoji() can use it.
+void drawEmojiGlyph(lgfx::LovyanGFX* d, int x, int cy, const EmojiGlyph& e, uint16_t bg);
+
+}  // namespace
+
 void drawIcon(lgfx::LovyanGFX* d, const IconMask& icon, int x, int y, uint16_t fg, uint16_t bg) {
   if (!d || !icon.alpha || icon.w == 0 || icon.h == 0) return;
   for (int yy = 0; yy < icon.h; ++yy) {
@@ -111,6 +120,13 @@ void drawIcon(lgfx::LovyanGFX* d, const IconMask& icon, int x, int y, uint16_t f
       d->drawPixel((int16_t)(x + xx), (int16_t)(y + yy), blend565(fg, bg, a));
     }
   }
+}
+
+bool drawEmoji(lgfx::LovyanGFX* d, uint32_t cp, int x, int cy, uint16_t bg) {
+  const EmojiGlyph* e = emojiFind(cp);
+  if (e == nullptr) return false;
+  drawEmojiGlyph(d, x, cy, *e, bg);
+  return true;
 }
 
 // Text helpers, public because the screens use the same role fonts and colour pairs. They draw into
@@ -133,11 +149,13 @@ struct Utf8Ctx {
   FontRole role;
 };
 
-// Width of one code point, or 0 when the face has no glyph for it (measureUtf8 then uses the
-// placeholder width, a space plus 2 px).
+// Width of one code point, or 0 when neither the emoji table nor the face has it (measureUtf8
+// then uses the placeholder width, a space plus 2 px).
 int glyphWidthCb(void* ctx, uint32_t cp) {
   Utf8Ctx* c = (Utf8Ctx*)ctx;
-  if (c->d == nullptr || !fontHasGlyph(c->role, cp)) return 0;
+  if (c->d == nullptr) return 0;
+  if (const EmojiGlyph* e = emojiFind(cp)) return (int)e->w + 1;   // the cell and one px of air
+  if (!fontHasGlyph(c->role, cp)) return 0;
   char b[5] = {0};
   const int n = utf8Encode(cp, b);
   if (n <= 0) return 0;
@@ -154,6 +172,24 @@ int spaceWidth(lgfx::LovyanGFX* d, FontRole role) {
 // The fallback glyph: one small dim box, never LovyanGFX's full-height missing-glyph rectangle.
 void drawMissingGlyph(lgfx::LovyanGFX* d, int x, int cy, int w) {
   d->drawRect(x, cy - kMissingBoxH / 2, w, kMissingBoxH, kDimmer);
+}
+
+// One emoji: the RGB565 cell blended by its 4-bit coverage over the colour the caller knows it is
+// drawing on (the same bargain drawIcon makes, so no pixel read from the frame is needed).
+void drawEmojiGlyph(lgfx::LovyanGFX* d, int x, int cy, const EmojiGlyph& e, uint16_t bg) {
+  if (d == nullptr || e.rgb == nullptr || e.alpha == nullptr || e.w == 0 || e.h == 0) return;
+  const int top = cy - (int)e.h / 2;
+  const int stride = (e.w + 1) / 2;
+  for (int yy = 0; yy < (int)e.h; ++yy) {
+    for (int xx = 0; xx < (int)e.w; ++xx) {
+      const uint8_t packed = e.alpha[(size_t)yy * stride + xx / 2];
+      const uint8_t nibble = (xx & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
+      if (nibble == 0) continue;
+      const uint16_t rgb = emojiReadU16(e.rgb + ((size_t)yy * e.w + xx) * 2);
+      d->drawPixel((int16_t)(x + xx), (int16_t)(top + yy),
+                   blend565(rgb, bg, (uint8_t)(nibble * 17)));
+    }
+  }
 }
 
 // Draw the drawable run [a, b) at (x, cy), advancing x. Long runs are cut at a code point boundary
@@ -193,22 +229,43 @@ void drawTextLeft(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, i
   d->setTextDatum(lgfx::textdatum_t::middle_left);
   d->setTextColor(fg, bg);
   if (*s == 0) return;
+  const int len = (int)strlen(s);
   int runStart = -1;
+  int runEnd = -1;
   int xCursor = x;
-  for (int i = 0; s[i] != 0;) {
-    const int at = i;
-    const uint32_t cp = utf8Decode(s, &i);
-    if (fontHasGlyph(role, cp)) {
-      if (runStart < 0) runStart = at;
+  for (int i = 0; i < len;) {
+    TextUnit u;
+    const int next = textUnitAt(s, len, i, &u);
+    if (next <= i) break;
+    i = next;
+    if (u.zero) continue;   // a stray selector has no base and no width
+
+    if (const EmojiGlyph* e = emojiFind(u.cp)) {
+      if (runStart >= 0) {
+        xCursor = drawRun(d, xCursor, y, s, runStart, runEnd);
+        runStart = -1;
+        runEnd = -1;
+      }
+      drawEmojiGlyph(d, xCursor, y, *e, bg);
+      xCursor += (int)e->w + 1;
       continue;
     }
-    if (runStart >= 0) xCursor = drawRun(d, xCursor, y, s, runStart, at);
-    runStart = -1;
+    if (fontHasGlyph(role, u.cp)) {
+      if (runStart < 0) runStart = u.start;
+      runEnd = u.coreEnd;   // a consumed selector is never handed to the face
+      continue;
+    }
+
+    if (runStart >= 0) {
+      xCursor = drawRun(d, xCursor, y, s, runStart, runEnd);
+      runStart = -1;
+      runEnd = -1;
+    }
     const int w = spaceWidth(d, role) + kMissingExtra;
     drawMissingGlyph(d, xCursor, y, w);
     xCursor += w;
   }
-  if (runStart >= 0) drawRun(d, xCursor, y, s, runStart, (int)strlen(s));
+  if (runStart >= 0) drawRun(d, xCursor, y, s, runStart, runEnd);
 }
 
 int drawTextRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int right, int y,
@@ -219,7 +276,7 @@ int drawTextRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, i
   return w;
 }
 
-// Never draws outside maxW; the cut is on a code point boundary and ends with "...".
+// Never draws outside maxW; the cut is on a drawable-unit boundary and ends with "...".
 void drawTextEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
                       int maxW, const char* s) {
   if (d == nullptr || s == nullptr || maxW <= 0) return;
@@ -232,14 +289,19 @@ void drawTextEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t b
   char buf[80];
   int cut = 0;
   int w = 0;
-  for (int i = 0; s[i] != 0 && cut < (int)sizeof(buf) - 4;) {
-    int at = i;
-    utf8Decode(s, &at);
-    const int cw = measureText(d, role, s + i, at - i);
-    if (w + cw + ellW > maxW) break;
-    w += cw;
-    cut = at;
-    i = at;
+  for (int i = 0; i < len && cut < (int)sizeof(buf) - 4;) {
+    TextUnit u;
+    const int next = textUnitAt(s, len, i, &u);
+    if (next <= i) break;
+    if (!u.zero) {
+      const int cw = measureText(d, role, s + u.start, u.end - u.start);
+      if (w + cw + ellW > maxW) break;
+      w += cw;
+      cut = u.end;
+    } else {
+      cut = u.end;
+    }
+    i = next;
   }
   if (cut == 0) return;
   memcpy(buf, s, (size_t)cut);

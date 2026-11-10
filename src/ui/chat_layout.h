@@ -9,11 +9,13 @@
 
 #include "layout.h"
 #include "theme.h"
+#include "ui/emoji_picker.h"
+#include "ui/emoji_recent.h"
 
 namespace om {
 namespace ui {
 
-enum class KeyKind : uint8_t { Char, Shift, Mode, Space, Del, Send };
+enum class KeyKind : uint8_t { Char, Shift, Mode, Space, Del, Send, Emoji };
 
 struct KeyDef {
   char label[8] = "";
@@ -98,6 +100,50 @@ int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py
 // rows dyUp px up, and the scroll grows by dyUp. kSelGive px of stretch is allowed past either end;
 // the release path snaps it back into [0, maxScroll].
 int selDragScroll(int base, int dyUp, int maxScroll);
+
+// --- emoji keyboard page -----------------------------------------------------------------------
+// The smiley key swaps the four key rows for this: a rail of five group buttons plus "abc", a
+// Recent strip of the last 16 picks with Send at its right, and a scrolling 22 px grid below it.
+// `area` is exactly the rectangle the key rows would have taken, so the sheet height does not
+// change. All arithmetic lives here so the grid draws and answers with one cell rectangle.
+struct EmojiPadLayout {
+  Rect area;
+  Rect rail;
+  Rect cat[kEmojiGroupCount];   // faces, hands, hearts, objects, symbols
+  Rect abc;                // back to the letters/numbers keyboard
+  Rect recentStrip;
+  Rect recent[kEmojiRecentMax];
+  Rect send;               // Send at the right of the Recent strip
+  Rect grid;
+  int cols = 0;
+  int rows = 0;            // visible rows
+  int group = 0;
+  int scroll = 0;
+  int count = 0;           // entries in the selected group
+};
+
+// `recentCount` is the number of valid cells in the Recent row. `count` is the selected group's
+// size and `scroll` its pixel offset. Empty when the layout has no room for the emoji page.
+EmojiPadLayout emojiPadLayout(const Layout& L, const ChatLayout& g, int recentCount, int group,
+                              int scroll, int count);
+
+// The screen rectangle of one grid entry (may be outside `grid` when scrolled out).
+Rect emojiPadCell(const EmojiPadLayout& e, int index);
+
+// What a point hits on the emoji page. `cat` is a group index, `recent` an index into the Recent
+// row, `cell` an index into the selected group; -1 when nothing. `send` and `abc` are flags.
+struct EmojiPadHit {
+  int cat = -1;
+  int recent = -1;
+  int cell = -1;
+  bool send = false;
+  bool abc = false;
+};
+EmojiPadHit emojiPadHit(const EmojiPadLayout& e, int x, int y);
+
+// Content height and the scroll clamp for one group.
+int emojiPadContentHeight(const EmojiPadLayout& e, int count);
+int emojiPadMaxScroll(const EmojiPadLayout& e, int count);
 
 // --- message band -------------------------------------------------------------------------------
 // heights[] is the drawn height of every message block (text lines, no gaps). Oldest first.

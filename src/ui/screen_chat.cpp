@@ -13,6 +13,7 @@
 #include "ui/badge_font.h"
 #include "ui/compose_text.h"
 #include "ui/dm_delivery.h"
+#include "ui/emoji_picker.h"
 #include "ui/fonts.h"
 #include "ui/text_wrap.h"
 #include "ui/theme.h"
@@ -372,6 +373,28 @@ void drawCompose(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   drawDraft(d, g.field, kFieldBg, v, false);
 }
 
+// The smiley key's face: a vector, because the ASCII faces carry no glyph for it.
+void drawSmiley(lgfx::LovyanGFX* d, const Rect& r, uint16_t col) {
+  const int cx = r.x + r.w / 2;
+  const int cy = r.y + r.h / 2;
+  const int rad = 5;
+  const int l = cx - 2;
+  const int rr = cx + 2;
+  // A round outline plus the two eyes and the mouth: reads as an emoji key at 22 px.
+  for (int y = -rad; y <= rad; ++y) {
+    for (int x = -rad; x <= rad; ++x) {
+      const int dd = x * x + y * y;
+      if (dd <= rad * rad && dd >= (rad - 1) * (rad - 1)) {
+        d->drawPixel((int16_t)(cx + x), (int16_t)(cy + y), col);
+      }
+    }
+  }
+  d->drawPixel((int16_t)l, (int16_t)(cy - 1), col);
+  d->drawPixel((int16_t)rr, (int16_t)(cy - 1), col);
+  d->drawLine(l, cy + 2, cx, cy + 3, col);
+  d->drawLine(cx, cy + 3, rr, cy + 2, col);
+}
+
 void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
   const bool on = (k.kind == KeyKind::Send) || (k.kind == KeyKind::Shift && shift);
   const uint16_t bg = on ? kSelBg2 : kKeyBg;
@@ -384,6 +407,10 @@ void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
     drawBackspace(d, r, fg);
     return;
   }
+  if (k.kind == KeyKind::Emoji) {
+    drawSmiley(d, r, fg);
+    return;
+  }
   char label[8];
   snprintf(label, sizeof(label), "%s", k.kind == KeyKind::Shift ? (shift ? "CAPS" : "shift")
                                                                : k.label);
@@ -392,6 +419,69 @@ void drawKey(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) {
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(fg, bg);
   d->drawString(label, cx, cy);
+}
+
+// The emoji page: a rail of group icons plus "abc", the Recent strip with Send, and the scrolling
+// 22 px grid. Every rectangle comes from emojiPadLayout(), the same one the hit test uses.
+void drawEmojiPage(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
+  const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
+  const int count = group ? group->count : 0;
+  const EmojiPadLayout e =
+      emojiPadLayout(l2(), g, v.emojiRecentCount, v.emojiGroup, v.emojiScroll, count);
+  if (e.area.empty()) return;
+
+  for (int i = 0; i < kEmojiGroupCount; ++i) {
+    const bool on = (i == v.emojiGroup);
+    d->fillRoundRect(e.cat[i].x, e.cat[i].y, e.cat[i].w, e.cat[i].h, kKeyRadius,
+                     on ? kSelBg : kKeyBg);
+    d->drawRoundRect(e.cat[i].x, e.cat[i].y, e.cat[i].w, e.cat[i].h, kKeyRadius,
+                     on ? kAcc : kKeyLine);
+    const uint32_t icon = emojiGroupAt(i) ? emojiGroupAt(i)->icon : 0;
+    const int cy = e.cat[i].y + e.cat[i].h / 2;
+    if (!drawEmoji(d, icon, e.cat[i].x + (e.cat[i].w - 13) / 2, cy,
+                   on ? kSelBg : kKeyBg)) {
+      d->drawRect(e.cat[i].x + 12, cy - kMissingBoxH / 2, 16, kMissingBoxH, kDimmer);
+    }
+  }
+
+  d->fillRoundRect(e.abc.x, e.abc.y, e.abc.w, e.abc.h, kKeyRadius, kKeyBg);
+  d->drawRoundRect(e.abc.x, e.abc.y, e.abc.w, e.abc.h, kKeyRadius, kKeyLine);
+  setRole(d, FontRole::MonoMeta);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(kInk, kKeyBg);
+  d->drawString("abc", e.abc.x + e.abc.w / 2, e.abc.y + e.abc.h / 2);
+
+  // The Recent strip: the last 16 picks, most recent on the left. The newline under it separates
+  // it from the scrolling grid without a second label stealing a row.
+  for (int i = 0; i < v.emojiRecentCount && i < kEmojiRecentMax; ++i) {
+    const Rect r = e.recent[i];
+    if (r.empty()) continue;
+    const int cy = r.y + r.h / 2;
+    if (!drawEmoji(d, v.emojiRecent[i], r.x + (r.w - 13) / 2, cy, kSheet)) {
+      d->drawRect(r.x + 2, cy - kMissingBoxH / 2, r.w - 4, kMissingBoxH, kDimmer);
+    }
+  }
+  d->drawFastHLine(e.recentStrip.x, e.recentStrip.bottom() - 1, e.recentStrip.w, kRowLine);
+
+  d->fillRoundRect(e.send.x, e.send.y, e.send.w, e.send.h, kKeyRadius, kSelBg2);
+  d->drawRoundRect(e.send.x, e.send.y, e.send.w, e.send.h, kKeyRadius, kAcc);
+  setRole(d, FontRole::SansTab);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(kAccInk, kSelBg2);
+  d->drawString("Send", e.send.x + e.send.w / 2, e.send.y + e.send.h / 2);
+
+  // Only the cells that intersect the viewport are painted. A clip is still set, so a half cell
+  // at the top or bottom edge is cut exactly where the drag put it.
+  d->setClipRect(e.grid.x, e.grid.y, e.grid.w, e.grid.h);
+  for (int i = 0; i < count; ++i) {
+    const Rect c = emojiPadCell(e, i);
+    if (c.empty() || !c.overlaps(e.grid)) continue;
+    const int cy = c.y + c.h / 2;
+    if (!drawEmoji(d, group->cps[i], c.x + (c.w - 13) / 2, cy, kSheet)) {
+      d->drawRect(c.x + 4, cy - kMissingBoxH / 2, c.w - 8, kMissingBoxH, kDimmer);
+    }
+  }
+  d->clearClipRect();
 }
 
 void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
@@ -415,10 +505,14 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->drawRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kAcc);
   drawDraft(d, g.draft, kCodeBg, v, true);
 
-  for (int r = 0; r < 4; ++r) {
-    KeyDef defs[10];
-    const int n = keyRow(v.nums, r, defs);
-    for (int c = 0; c < n && c < g.keyCount[r]; ++c) drawKey(d, g.keys[r][c], defs[c], v.shift);
+  if (v.emoji) {
+    drawEmojiPage(d, v, g);
+  } else {
+    for (int r = 0; r < 4; ++r) {
+      KeyDef defs[10];
+      const int n = keyRow(v.nums, r, defs);
+      for (int c = 0; c < n && c < g.keyCount[r]; ++c) drawKey(d, g.keys[r][c], defs[c], v.shift);
+    }
   }
 }
 
@@ -615,6 +709,37 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
       r.hit = ChatHit::Field;
       return r;
     }
+    if (v.emoji) {
+      const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
+      const EmojiPadLayout e = emojiPadLayout(l2(), g, v.emojiRecentCount, v.emojiGroup,
+                                             v.emojiScroll, group ? group->count : 0);
+      const EmojiPadHit h = emojiPadHit(e, x, y);
+      if (h.abc) {
+        r.hit = ChatHit::EmojiBack;
+        return r;
+      }
+      if (h.cat >= 0) {
+        r.hit = ChatHit::EmojiCat;
+        r.emojiGroup = h.cat;
+        return r;
+      }
+      if (h.send) {
+        r.hit = ChatHit::EmojiSend;
+        return r;
+      }
+      if (h.recent >= 0 && v.emojiRecent != nullptr && h.recent < v.emojiRecentCount) {
+        r.hit = ChatHit::EmojiCell;
+        r.emojiCp = v.emojiRecent[h.recent];
+        return r;
+      }
+      if (h.cell >= 0 && group != nullptr && h.cell < group->count) {
+        r.hit = ChatHit::EmojiCell;
+        r.emojiCp = group->cps[h.cell];
+        return r;
+      }
+      if (chatSheetClosesAt(g, x, y)) r.hit = ChatHit::Outside;
+      return r;
+    }
     // keyAt() uses keyHit: the outer keys reach the screen edges and the bottom row reaches the
     // floor, so a firm tap low on Send (or on 123/space) is still that key, not "outside" (EST-338).
     const KeyHit key = keyAt(g, v.nums, x, y);
@@ -701,6 +826,16 @@ int chatSelectorMaxScroll(const ChatView& v) {
   if (!v.selector) return 0;   // the dropdown is closed: nothing to scroll
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
   return selMaxScroll(g.selList, v.channelCount, v.dmCount);
+}
+
+int chatEmojiMaxScroll(const ChatView& v) {
+  if (!v.osk || !v.emoji) return 0;
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
+  const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
+  const int count = group ? group->count : 0;
+  const EmojiPadLayout e =
+      emojiPadLayout(l2(), g, v.emojiRecentCount, v.emojiGroup, v.emojiScroll, count);
+  return emojiPadMaxScroll(e, count);
 }
 
 }  // namespace ui

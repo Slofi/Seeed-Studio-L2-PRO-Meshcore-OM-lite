@@ -345,21 +345,22 @@ static void testComposeAndSheet() {
     }
   }
   CHECK(kOskKeyH == 22);
-  CHECK(o.keyCount[0] == 10 && o.keyCount[1] == 9 && o.keyCount[2] == 9 && o.keyCount[3] == 5);
+  CHECK(o.keyCount[0] == 10 && o.keyCount[1] == 9 && o.keyCount[2] == 9 && o.keyCount[3] == 6);
 
-  // the bottom row of the letters page: 123, comma, space, dot, Send (Filip, 2026-11-10)
+  // the bottom row of the letters page: 123, emoji, comma, space, dot, Send (EST-345)
   const Rect* row3 = o.keys[3];
-  // 123 and Send are the two wide keys (the last one takes the rounding remainder)
-  CHECK(row3[0].w >= 60 && row3[4].w >= 60);
-  CHECK(row3[0].w - row3[4].w <= 1 && row3[4].w - row3[0].w <= 1);
-  CHECK(row3[2].w > row3[1].w && row3[2].w > row3[3].w);   // the space is the widest of the three
-  CHECK(row3[1].w == row3[3].w);                       // comma and dot are one unit each
+  // 123, the smiley and Send are the wide keys (the last one takes the rounding remainder)
+  CHECK(row3[0].w >= 50 && row3[1].w >= 50 && row3[5].w >= 50);
+  CHECK(row3[0].w - row3[1].w <= 1 && row3[1].w - row3[0].w <= 1);
+  CHECK(row3[5].w - row3[0].w <= 1 && row3[0].w - row3[5].w <= 1);
+  CHECK(row3[3].w > row3[2].w && row3[3].w > row3[4].w);   // the space is the widest of the three
+  CHECK(row3[2].w == row3[4].w);                       // comma and dot are one unit each
 
   // the numbers page has the same footprint and its own keys
   const ChatLayout num = chatLayoutFor(L, true, false, true, false);
   CHECK(num.sheet.y == o.sheet.y && num.sheet.h == o.sheet.h);
   CHECK(num.keyCount[0] == 10 && num.keyCount[1] == 10 && num.keyCount[2] == 10 &&
-        num.keyCount[3] == 4);
+        num.keyCount[3] == 6);
   for (int r = 0; r < 4; ++r) {
     for (int i = 0; i < num.keyCount[r]; ++i) CHECK(num.keys[r][i].h == kOskKeyH);
   }
@@ -381,24 +382,27 @@ static void testComposeAndSheet() {
   CHECK(defs[0].kind == KeyKind::Shift);
   CHECK(defs[1].label[0] == 'y' && defs[7].label[0] == 'm');
   CHECK(defs[8].kind == KeyKind::Del);
-  // the new bottom row: 123, comma, space, dot, Send
-  CHECK(keyRow(false, 3, defs) == 5);
+  // the new bottom row: 123, emoji, comma, space, dot, Send
+  CHECK(keyRow(false, 3, defs) == 6);
   CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "123") == 0);
-  CHECK(defs[1].kind == KeyKind::Char && defs[1].label[0] == ',');
-  CHECK(defs[2].kind == KeyKind::Space);
-  CHECK(defs[3].kind == KeyKind::Char && defs[3].label[0] == '.');
-  CHECK(defs[4].kind == KeyKind::Send);
-  CHECK(defs[2].units > defs[1].units);   // the space takes more of the row
+  CHECK(defs[1].kind == KeyKind::Emoji);
+  CHECK(defs[2].kind == KeyKind::Char && defs[2].label[0] == ',');
+  CHECK(defs[3].kind == KeyKind::Space);
+  CHECK(defs[4].kind == KeyKind::Char && defs[4].label[0] == '.');
+  CHECK(defs[5].kind == KeyKind::Send);
+  CHECK(defs[3].units > defs[2].units);   // the space takes more of the row
   CHECK(keyRow(true, 0, defs) == 10 && defs[0].label[0] == '1');
   CHECK(keyRow(true, 1, defs) == 10 && defs[0].label[0] == '@');
   CHECK(keyRow(true, 2, defs) == 10);
   CHECK(defs[0].kind == KeyKind::Mode && defs[9].kind == KeyKind::Del);
-  // the dot and the comma are on the 123 page too
-  CHECK(keyRow(true, 3, defs) == 4);
-  CHECK(defs[0].kind == KeyKind::Space);
-  CHECK(defs[1].kind == KeyKind::Char && defs[1].label[0] == ',');
-  CHECK(defs[2].kind == KeyKind::Char && defs[2].label[0] == '.');
-  CHECK(defs[3].kind == KeyKind::Send);
+  // the dot and the comma are on the 123 page too, and the smiley is one key away there as well
+  CHECK(keyRow(true, 3, defs) == 6);
+  CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "abc") == 0);
+  CHECK(defs[1].kind == KeyKind::Emoji);
+  CHECK(defs[2].kind == KeyKind::Space);
+  CHECK(defs[3].kind == KeyKind::Char && defs[3].label[0] == ',');
+  CHECK(defs[4].kind == KeyKind::Char && defs[4].label[0] == '.');
+  CHECK(defs[5].kind == KeyKind::Send);
   CHECK(keyRow(false, 9, defs) == 0);
   CHECK(keyRow(false, 0, nullptr) == 0);
 }
@@ -884,16 +888,17 @@ static void testKeyboardEdges() {
   const ChatLayout g = chatLayoutFor(L, true, false, false, false);
   KeyDef defs[10];
   const int n = keyRow(false, 3, defs);
-  CHECK(n == 5);
+  CHECK(n == 6);
   CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "123") == 0);
-  CHECK(defs[2].kind == KeyKind::Space);
-  CHECK(defs[4].kind == KeyKind::Send);
-  CHECK(g.keyCount[3] == 5);
+  CHECK(defs[1].kind == KeyKind::Emoji);
+  CHECK(defs[3].kind == KeyKind::Space);
+  CHECK(defs[5].kind == KeyKind::Send);
+  CHECK(g.keyCount[3] == 6);
 
   // The DRAWN rectangles did not move: the 4 px side pad and the 4 px pad under the last row stay.
   CHECK(g.keys[3][0].x == kOskPad);
   CHECK(g.keys[3][0].bottom() == (int16_t)(L.height - kOskPad));
-  CHECK(g.keys[3][4].right() == (int16_t)(L.width - kOskPad));
+  CHECK(g.keys[3][5].right() == (int16_t)(L.width - kOskPad));
 
   // The TOUCH rectangles reach the floor and the side edges on every row.
   for (int r = 0; r < 4; ++r) {
@@ -1034,6 +1039,83 @@ static void testOverlayTapAway() {
   }
 }
 
+// EST-345 item 4: the last list row must be FULLY visible at max scroll, and its bottom must end
+// above the pinned "Manage channels" row. The ticket reported the second line sliding under that
+// row; this checks every count the app can show, not one screenshot.
+static void testSelectorLastRowVisible() {
+  const Layout& L = l2();
+  const ChatLayout s = chatLayoutFor(L, false, false, false, true);
+  const Rect list = s.selList;
+  CHECK(list.bottom() == s.selManage.y);      // the scrollable height ends at the pinned row's top
+  CHECK(!list.overlaps(s.selManage));
+  for (int channels = 0; channels <= 8; ++channels) {
+    for (int dms = 0; dms <= 4; ++dms) {
+      if (channels + dms == 0) continue;
+      const int content = selContentHeight(channels, dms);
+      const int maxS = selMaxScroll(list, channels, dms);
+      const int last = channels + dms - 1;
+      const int top = selRowTop(list, channels, dms, last, maxS);
+      CHECK(top >= list.y);
+      if (content > list.h) {
+        CHECK(maxS == content - list.h);
+        // The content's last pixel lands on the scrolling viewport's floor, which is the pinned
+        // row's top. With DMs present the last row is the content's end, so its 30 px touch that
+        // floor; with no DMs the "No direct messages yet" line is what follows it.
+        CHECK(list.y + content - maxS == list.bottom());
+        if (dms > 0) CHECK(top + kSelRowH == list.bottom());
+      } else {
+        CHECK(maxS == 0);
+      }
+      CHECK(top + kSelRowH <= list.bottom());
+      CHECK(top + kSelRowH <= s.selManage.y);
+      CHECK(selRowAt(list, channels, dms, maxS, top) == last);
+      CHECK(selRowAt(list, channels, dms, maxS, top + kSelRowH - 1) == last);  // the second line
+      CHECK(selRowAt(list, channels, dms, maxS, s.selManage.y) == -1);
+    }
+  }
+}
+
+// EST-345: the emoji page takes the key rows' rectangle, the 16-cell Recent strip plus Send sits
+// above a 3-row 22 px grid, and its drawn cell is the cell the hit test answers.
+static void testEmojiPad() {
+  const Layout& L = l2();
+  const ChatLayout g = chatLayoutFor(L, true, false, false, false);
+  const EmojiPadLayout e = emojiPadLayout(L, g, 16, 0, 0, 40);
+  CHECK(!e.area.empty());
+  CHECK(e.area.y == g.keys[0][0].y);
+  CHECK(e.area.bottom() == g.keys[3][0].bottom());
+  CHECK(e.cols == 12);
+  CHECK(e.rows == 3);
+  CHECK(e.grid.h >= e.rows * kEmojiCell);
+  CHECK(e.recent[0].w == kEmojiRecentCell && e.recent[0].h == kEmojiRecentCell);
+  CHECK(e.recent[15].right() <= e.send.x);
+  CHECK(e.send.right() <= e.recentStrip.right());
+  CHECK(e.recentStrip.bottom() <= e.grid.y);
+  CHECK(e.cat[4].bottom() <= e.abc.y);
+
+  // Every drawn rectangle answers at its own centre, in the rail, the strip, the grid and Send.
+  const Rect c0 = emojiPadCell(e, 0);
+  CHECK(c0.x == e.grid.x && c0.y == e.grid.y);
+  CHECK(emojiPadHit(e, e.cat[2].x + 2, e.cat[2].y + 2).cat == 2);
+  CHECK(emojiPadHit(e, e.recent[3].x + 2, e.recent[3].y + 2).recent == 3);
+  CHECK(emojiPadHit(e, e.send.x + 2, e.send.y + 2).send);
+  CHECK(emojiPadHit(e, e.abc.x + 2, e.abc.y + 2).abc);
+  CHECK(emojiPadHit(e, c0.x + 2, c0.y + 2).cell == 0);
+  CHECK(emojiPadHit(e, emojiPadCell(e, 5).x + 2, emojiPadCell(e, 5).y + 2).cell == 5);
+  CHECK(emojiPadHit(e, e.grid.x - 2, e.grid.y + 2).cell == -1);   // the rail is not the grid
+
+  // A 40-entry group needs two rows of scroll; at max the last cell ends on the viewport floor.
+  const int maxS = emojiPadMaxScroll(e, 40);
+  CHECK(maxS > 0);
+  CHECK(maxS == emojiPadContentHeight(e, 40) - e.grid.h);
+  const EmojiPadLayout e2 = emojiPadLayout(L, g, 16, 0, maxS, 40);
+  const Rect last = emojiPadCell(e2, 39);
+  CHECK(last.bottom() == e2.grid.bottom());
+  CHECK(emojiPadHit(e2, last.x + 2, last.y + 2).cell == 39);
+  CHECK(emojiPadMaxScroll(e, 12) == 0);   // a group that fits does not scroll
+  CHECK(emojiPadLayout(L, g, 0, 0, 0, 0).area.empty() == false);   // an empty group still lays out
+}
+
 int main() {
   testWrap();
   testUtf8();
@@ -1048,6 +1130,8 @@ int main() {
   testMessageSheet();
   testKeyboardEdges();
   testOverlayTapAway();
+  testSelectorLastRowVisible();
+  testEmojiPad();
 
   if (g_fail) {
     printf("%d chat check(s) FAILED\n", g_fail);

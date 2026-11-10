@@ -56,8 +56,9 @@ int keyRow(bool nums, int row, KeyDef* out) {
         return n;
       default:
         // Filip, 2026-11-10: "where are the dot and comma?" The bottom row is
-        // 123, comma, space, dot, Send.
+        // 123, emoji, comma, space, dot, Send. The smiley opens the emoji page.
         put(out[n++], "123", kKeyUnitWide, KeyKind::Mode);
+        put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
         put(out[n++], ",", kKeyUnit, KeyKind::Char);
         put(out[n++], "space", kKeyUnitSpace, KeyKind::Space);
         put(out[n++], ".", kKeyUnit, KeyKind::Char);
@@ -76,7 +77,9 @@ int keyRow(bool nums, int row, KeyDef* out) {
       put(out[n++], "", kKeyUnitWide, KeyKind::Del);
       return n;
     default:
-      // The dot and the comma stay on the 123 page too.
+      // The dot and the comma stay on the 123 page too, and the smiley is always one key away.
+      put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
+      put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
       put(out[n++], "space", kKeyUnitSpace, KeyKind::Space);
       put(out[n++], ",", kKeyUnit, KeyKind::Char);
       put(out[n++], ".", kKeyUnit, KeyKind::Char);
@@ -185,6 +188,101 @@ KeyHit keyAt(const ChatLayout& g, bool nums, int x, int y) {
     }
   }
   return hit;
+}
+
+// --- emoji page --------------------------------------------------------------------------------
+EmojiPadLayout emojiPadLayout(const Layout& L, const ChatLayout& g, int recentCount, int group,
+                              int scroll, int count) {
+  EmojiPadLayout e;
+  if (!g.osk || g.sheet.empty() || g.draft.empty()) return e;
+  const int16_t top = (int16_t)(g.draft.bottom() + kOskDraftGap);
+  const int16_t bottom = (int16_t)(g.sheet.bottom() - kOskPad);
+  if (bottom - top < 2 * kEmojiRailCellH) return e;
+  e.area = Rect{kOskPad, top, (int16_t)(L.width - 2 * kOskPad), (int16_t)(bottom - top)};
+
+  e.rail = Rect{e.area.x, e.area.y, kEmojiRailW, e.area.h};
+  int16_t ry = e.area.y;
+  for (int i = 0; i < kEmojiGroupCount; ++i) {
+    e.cat[i] = Rect{e.area.x, ry, kEmojiRailW, kEmojiRailCellH};
+    ry = (int16_t)(ry + kEmojiRailCellH);
+  }
+  e.abc = Rect{e.area.x, (int16_t)(e.area.bottom() - kEmojiAbcH), kEmojiRailW, kEmojiAbcH};
+
+  const int16_t cx = (int16_t)(e.area.x + kEmojiRailW + 2);
+  const int16_t cw = (int16_t)(e.area.right() - cx);
+  e.recentStrip = Rect{cx, e.area.y, cw, kEmojiStripH};
+  const int nRecent = recentCount < 0 ? 0 : (recentCount > kEmojiRecentMax ? kEmojiRecentMax
+                                                                          : recentCount);
+  for (int i = 0; i < kEmojiRecentMax; ++i) {
+    e.recent[i] = Rect{};
+    if (i < nRecent) {
+      e.recent[i] = Rect{(int16_t)(cx + i * kEmojiRecentCell), (int16_t)(e.area.y + 2),
+                         kEmojiRecentCell, kEmojiRecentCell};
+    }
+  }
+  e.send = Rect{(int16_t)(cx + kEmojiRecentMax * kEmojiRecentCell + 2),
+                (int16_t)(e.area.y + 2), kEmojiSendW, (int16_t)(kEmojiStripH - 4)};
+
+  e.grid = Rect{cx, (int16_t)(e.recentStrip.bottom() + kEmojiGridGap), cw,
+                (int16_t)(e.area.bottom() - e.recentStrip.bottom() - kEmojiGridGap)};
+  e.cols = e.grid.w / kEmojiCell;
+  e.rows = e.grid.h / kEmojiCell;
+  e.group = group;
+  e.scroll = scroll;
+  e.count = count;
+  return e;
+}
+
+Rect emojiPadCell(const EmojiPadLayout& e, int index) {
+  if (e.cols <= 0 || index < 0 || index >= e.count) return Rect{};
+  const int col = index % e.cols;
+  const int row = index / e.cols;
+  return Rect{(int16_t)(e.grid.x + col * kEmojiCell),
+              (int16_t)(e.grid.y + row * kEmojiCell - e.scroll), kEmojiCell, kEmojiCell};
+}
+
+int emojiPadContentHeight(const EmojiPadLayout& e, int count) {
+  if (e.cols <= 0 || count <= 0) return 0;
+  return ((count + e.cols - 1) / e.cols) * kEmojiCell;
+}
+
+int emojiPadMaxScroll(const EmojiPadLayout& e, int count) {
+  const int content = emojiPadContentHeight(e, count);
+  return content > e.grid.h ? content - e.grid.h : 0;
+}
+
+EmojiPadHit emojiPadHit(const EmojiPadLayout& e, int x, int y) {
+  EmojiPadHit h;
+  if (e.area.empty() || !e.area.contains(x, y)) return h;
+  if (e.abc.contains(x, y)) {
+    h.abc = true;
+    return h;
+  }
+  for (int i = 0; i < kEmojiGroupCount; ++i) {
+    if (e.cat[i].contains(x, y)) {
+      h.cat = i;
+      return h;
+    }
+  }
+  if (e.send.contains(x, y)) {
+    h.send = true;
+    return h;
+  }
+  for (int i = 0; i < kEmojiRecentMax; ++i) {
+    if (e.recent[i].contains(x, y)) {
+      h.recent = i;
+      return h;
+    }
+  }
+  if (e.grid.contains(x, y) && e.cols > 0) {
+    const int col = (x - e.grid.x) / kEmojiCell;
+    const int row = (y - e.grid.y + e.scroll) / kEmojiCell;
+    if (col >= 0 && col < e.cols && row >= 0) {
+      const int index = row * e.cols + col;
+      if (index >= 0 && index < e.count) h.cell = index;
+    }
+  }
+  return h;
 }
 
 ChatOverlayPress chatOverlayPress(const ChatLayout& g, bool menuOpen, const Rect& menuPanel,

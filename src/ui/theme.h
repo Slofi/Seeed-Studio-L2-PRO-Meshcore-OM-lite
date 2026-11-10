@@ -213,6 +213,18 @@ constexpr uint8_t kKeyUnit     = 10;   // a normal key; wide keys are 22 units (
 constexpr uint8_t kKeyUnitWide = 22;
 constexpr uint8_t kKeyUnitSpace = 40;  // the bottom row's space, wider than the comma and the dot
 
+// The emoji page takes exactly the four key rows' rectangle (94 px), so the sheet height and the
+// message band above it do not move. A group cell is the ticket's 22 px; the Recent strip uses
+// 15 px cells so all 16 fit in one row beside Send, with a 13 px glyph centred in each.
+constexpr int16_t kEmojiCell      = 22;
+constexpr int16_t kEmojiRecentCell = 15;
+constexpr int16_t kEmojiRailW     = 40;
+constexpr int16_t kEmojiRailCellH = 15;
+constexpr int16_t kEmojiStripH    = 20;
+constexpr int16_t kEmojiGridGap   = 2;
+constexpr int16_t kEmojiSendW     = 26;
+constexpr int16_t kEmojiAbcH      = 17;
+
 // The message sheet (a tap on a message, EST-336): a bottom sheet in the mock's style, like the
 // keyboard sheet, over the tab bar. Its two-line header carries sender, channel, age, hops and SNR;
 // the rows below it are kSheetRowH tall and end on a 1 px row line. Seven rows (a channel message

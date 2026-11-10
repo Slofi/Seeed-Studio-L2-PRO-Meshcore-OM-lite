@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// EST-361: the synth and the one shared sound library. See sound_synth.h for the model.
+// EST-369: the synth and the shared sound library, organised by shape. See sound_synth.h.
 //
-// A phrase is a few notes; a note is a frequency, a start, a length and a voice. A voice is 2-3 sine
-// partials (the bell's are inharmonic, the marimba's fourth-partial ratio, the chime's octaves), one
-// ADSR envelope with a 3..8 ms soft attack and an exponential decay, and one gentle one-pole
-// low-pass over the whole phrase. Nothing here allocates, and the same code is compiled into the
-// firmware and into tools/mksounds.cpp, so the WAV Filip listens to is the waveform the device
-// streams.
+// A phrase is a few notes; a note is a frequency, a start, a length and a voice. A voice is 1-3 sine
+// partials (the bell's are inharmonic, the marimba's fourth-partial ratio, the organ's octave stack,
+// the kalimba's tine partial), one ADSR envelope with a 2..14 ms soft attack and an exponential decay,
+// and one gentle one-pole low-pass over the whole phrase. Nothing here allocates, and the same code is
+// compiled into the firmware and into tools/mksounds.cpp, so the WAV Filip listens to is the waveform
+// the device streams.
 #include "sound_synth.h"
 
 #include <math.h>
@@ -17,12 +17,12 @@ namespace sound {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-constexpr int kTailFadeMs = 3;        // final ramp to exactly zero (no click at the end)
-constexpr float kLowpassHz = 6500.0f; // gentle: the top partials are still there, the edge is gone
+constexpr int kTailFadeMs = 3;          // final ramp to exactly zero (no click at the end)
+constexpr float kLowpassHz = 6500.0f;   // gentle: the top partials are still there, the edge is gone
 constexpr float kAliasMaxHz = 7200.0f;  // skip a partial above this (Nyquist is 8 kHz)
-constexpr int kMaxNotes = 8;          // the longest phrase is six notes (low battery)
+constexpr int kMaxNotes = 8;            // the longest phrase is six notes (low battery)
 
-enum class Voice : uint8_t { Bell = 0, Marimba, Pluck, Chime, Soft, Count };
+enum class Voice : uint8_t { Bell = 0, Marimba, Pluck, Chime, Soft, Beep, Organ, Kalimba, Count };
 
 struct VoiceDef {
   float attackMs;
@@ -37,7 +37,8 @@ struct VoiceDef {
 };
 
 // Bell: inharmonic partials (1, 2, 2.76). Marimba: the bar's fourth-partial ratio 3.93. Pluck:
-// nearly harmonic, soft. Chime: octaves. Soft: octaves at a low level. Attack 3..8 ms everywhere.
+// nearly harmonic, soft. Chime: octaves. Soft: octaves at a low level. Beep: one clean partial that
+// holds, then releases. Organ: a mellow octave stack. Kalimba: a tine's 5.4 partial over a fast decay.
 constexpr VoiceDef kVoices[(int)Voice::Count] = {
     // attack, release, tau, sustain, gain, parts, ratios, amps, upper decay
     {4.0f, 22.0f, 120.0f, 0.00f, 0.62f, 3, {1.00f, 2.00f, 2.76f}, {1.00f, 0.32f, 0.18f}, {1.0f, 1.7f, 2.6f}},
@@ -45,6 +46,9 @@ constexpr VoiceDef kVoices[(int)Voice::Count] = {
     {5.0f, 18.0f, 70.0f, 0.00f, 0.72f, 3, {1.00f, 2.00f, 3.01f}, {1.00f, 0.22f, 0.09f}, {1.0f, 1.6f, 2.4f}},
     {6.0f, 26.0f, 150.0f, 0.00f, 0.62f, 3, {1.00f, 2.00f, 3.00f}, {1.00f, 0.28f, 0.12f}, {1.0f, 1.5f, 2.2f}},
     {8.0f, 30.0f, 110.0f, 0.05f, 0.75f, 3, {1.00f, 2.00f, 3.00f}, {1.00f, 0.16f, 0.05f}, {1.0f, 1.4f, 2.0f}},
+    {2.0f, 12.0f, 220.0f, 0.55f, 0.62f, 1, {1.00f, 0.00f, 0.00f}, {1.00f, 0.00f, 0.00f}, {1.0f, 1.0f, 1.0f}},
+    {14.0f, 40.0f, 380.0f, 0.40f, 0.52f, 3, {1.00f, 2.00f, 3.00f}, {1.00f, 0.35f, 0.15f}, {1.0f, 1.2f, 1.8f}},
+    {2.0f, 14.0f, 55.0f, 0.00f, 0.72f, 3, {1.00f, 5.40f, 2.00f}, {1.00f, 0.20f, 0.10f}, {1.0f, 2.5f, 2.0f}},
 };
 
 struct Note {
@@ -62,70 +66,67 @@ struct Recipe {
   Note notes[kMaxNotes];
 };
 
-// The library ids. The array kLibrary below must stay in exactly this order: an id is stored in NVS
-// and appending new sounds at the end is what keeps every existing choice stable.
-enum SoundId : uint8_t {
-  kBootBellTk = 0,
-  kBootBellPair,
-  kBootChimeUp,
-  kBootSoftRise,
-  kBootMarimbaUp,
-  kBootChimeArp,
-  kMsgSoftHi,
-  kMsgMarimbaHi,
-  kMsgBellHi,
-  kMsgSoftHighFifth,
-  kMsgMarimbaHighFifth,
-  kMsgBellHighFifth,
-  kDmSoftWarm,
-  kDmSoftDeep,
-  kDmSoftBasso,
-  kDmSoftLowFifth,
-  kDmSoftLowThird,
-  kDmSoftDark,
-  kMenChimeBright,
-  kMenBellHigh,
-  kMenChimeGlass,
-  kMenChimeTop,
-  kMenBellVeryHigh,
-  kMenGlassTrio,
-  kSentTick,
-  kSentBlip,
-  kSentTock,
-  kSentTickTock,
-  kSentTickTick,
-  kSentBlipTock,
-  kErrLow,
-  kErrWarn,
-  kErrTriple,
-  kErrDeep,
-  kErrDouble,
-  kErrBellDescend,
-  kNewSoftLo,
-  kNewMarimbaLo,
-  kNewBellLo,
-  kNewSoftLowFifth,
-  kNewMarimbaLowFifth,
-  kNewBellLowFifth,
-  kBattLow,
-  kBattSigh,
-  kBattBell,
-  kBattDeep,
-  kBattAlarm,
-  kBattPulse,
-  kTapTick,
-  kTapTock,
-  kTapClick,
-  kTapTik,
-  kTapSnap,
-  kTapDouble,
+// The current library starts here. Ids below it are the EST-361 sounds, retired but still accepted
+// from NVS (kRedirect). The array kLibrary below must stay in exactly this order: an id is stored in
+// NVS and appending new sounds at the end is what keeps every existing choice stable.
+constexpr uint8_t kFirstCurrent = 54;
+
+// The current sounds, one block per shape. The names start with the voice so the picker row says
+// both ("Bell C6" under SOLO) and INDEX.md carries the same word in its voice column.
+enum CurrentId : uint8_t {
+  // --- Solo: one note, 80..250 ms ---------------------------------------------------------------
+  kBeepClean = kFirstCurrent,  // a clean, plain beep
+  kBeepHigh,
+  kSoftTick,                   // the quiet acknowledgement (Sent, touch)
+  kBellC6,
+  kBellLow,
+  kGlassPing,
+  kMarimbaTock,
+  kWoodPluck,
+  kOrganMellow,
+  kKalimbaTine,
+  // --- Duo: two notes (seven kept from EST-361, three new) ---------------------------------------
+  kBellTk,                     // Filip's TK-TK boot, kept exactly
+  kSoftHi,                     // message default, kept
+  kMarimbaHi,
+  kBellHi,
+  kWoodWarm,                   // DM default, kept
+  kChimeBright,                // mention default, kept
+  kSoftLo,                     // new-node default, kept (Filip likes this voice)
+  kOrganLow,
+  kKalimbaRise,
+  kWoodDouble,
+  // --- Trio: three notes, up to 450 ms ----------------------------------------------------------
+  kGlassTrio,                  // kept
+  kChimeArp,
+  kBellRise,
+  kBellFall,
+  kMarimbaRoll,
+  kWoodMotif,
+  kSoftMotif,
+  kOrganRise,
+  kKalimbaTurn,
+  kGlassTop,
+  // --- Multi: four or more notes, a short phrase or chord, under 600 ms --------------------------
+  kBellChime,
+  kChimeRun,
+  kMarimbaRun,
+  kWoodGroove,
+  kSoftChord,
+  kOrganChord,
+  kKalimbaLick,
+  kGlassSparkle,
+  kBellRoad,
+  kAlertMotif,
+  // --- Alert: the one long low-battery warning (kept) --------------------------------------------
+  kBatteryLow,
 };
-constexpr int kSoundTotal = (int)kTapDouble + 1;
+constexpr int kSoundTotal = (int)kBatteryLow + 1;
 
 struct LibrarySound {
-  const char* name;
-  Family family;
-  Event home;
+  const char* name;   // starts with the voice word
+  const char* voice;  // the picker / INDEX.md word: bell, chime, glass, soft, beep, ...
+  Shape shape;
   Recipe recipe;
 };
 
@@ -133,7 +134,7 @@ struct EventDef {
   const char* key;
   const char* label;
   const char* tag;
-  uint8_t def;        // a library id
+  uint8_t def;        // a current library id
   bool dndExempt;
 };
 
@@ -158,110 +159,104 @@ constexpr Recipe peak(Recipe r, uint16_t target) {
   return r;
 }
 
-// The shared library, grouped by family in the picker but stored by id. Every note sequence is
-// unique (the host test proves it), so no two choices can sound the same.
-//
-// Boot keeps Filip's original TK-TK (D7, a short gap, F7) and adds five clearly different motifs.
-// Message is the new-node family a fourth (or fifth) UP; new node is the same family a fourth (or
-// fifth) DOWN, so the two never blur. Low battery is the long, loud descending figure twice.
-constexpr LibrarySound kLibrary[kSoundTotal] = {
-    // --- boot home ---------------------------------------------------------------------------
-    {"Bell TK-TK", Family::Bells, Event::Boot, R(205, N(0, 60, 2349, Voice::Bell, 200), N(115, 70, 2794, Voice::Bell, 210))},
-    {"Bell Pair", Family::Bells, Event::Boot, R(260, N(0, 120, 784, Voice::Bell, 210), N(80, 150, 1047, Voice::Bell, 220))},
-    {"Chime Up", Family::Chimes, Event::Boot, R(240, N(0, 110, 1047, Voice::Chime, 210), N(90, 140, 1319, Voice::Chime, 220))},
-    {"Soft Rise", Family::Soft, Event::Boot, R(220, N(0, 90, 440, Voice::Soft, 220), N(70, 120, 554, Voice::Soft, 225))},
-    {"Marimba Up", Family::Marimba, Event::Boot, R(210, N(0, 100, 880, Voice::Marimba, 220), N(70, 120, 1319, Voice::Marimba, 220))},
-    {"Chime Arp", Family::Chimes, Event::Boot, R(260, N(0, 70, 523, Voice::Chime, 210), N(70, 70, 784, Voice::Chime, 215), N(140, 100, 1047, Voice::Chime, 220))},
+// The current library, in picker order: shape first, then the voice inside the shape. Every note
+// sequence is unique (the host test proves it), and inside a shape the ten differ in pitch, voice and
+// rhythm, not only in level.
+constexpr LibrarySound kLibrary[kSoundTotal - kFirstCurrent] = {
+    // --- Solo ---------------------------------------------------------------------------------
+    {"Beep Clean", "beep", Shape::Solo, R(110, N(0, 110, 880, Voice::Beep, 200))},
+    {"Beep High", "beep", Shape::Solo, R(90, N(0, 90, 1568, Voice::Beep, 190))},
+    {"Soft Tick", "soft", Shape::Solo, R(80, N(0, 80, 1175, Voice::Soft, 70))},
+    {"Bell C6", "bell", Shape::Solo, R(220, N(0, 220, 1047, Voice::Bell, 210))},
+    {"Bell Low", "bell", Shape::Solo, R(250, N(0, 250, 659, Voice::Bell, 205))},
+    {"Glass Ping", "glass", Shape::Solo, R(180, N(0, 180, 2093, Voice::Chime, 200))},
+    {"Marimba Tock", "marimba", Shape::Solo, R(150, N(0, 150, 784, Voice::Marimba, 210))},
+    {"Wood Pluck", "wood", Shape::Solo, R(200, N(0, 200, 392, Voice::Pluck, 210))},
+    {"Organ Mellow", "organ", Shape::Solo, R(240, N(0, 240, 330, Voice::Organ, 220))},
+    {"Kalimba Tine", "kalimba", Shape::Solo, R(180, N(0, 180, 880, Voice::Kalimba, 210))},
 
-    // --- message home: the new-node family, a fourth up --------------------------------------
-    {"Soft Hi", Family::Soft, Event::Message, R(250, N(0, 100, 880, Voice::Soft, 220), N(90, 130, 698, Voice::Soft, 225))},
-    {"Marimba Hi", Family::Marimba, Event::Message, R(230, N(0, 90, 1047, Voice::Marimba, 220), N(80, 120, 784, Voice::Marimba, 220))},
-    {"Bell Hi", Family::Bells, Event::Message, R(230, N(0, 90, 1397, Voice::Bell, 210), N(80, 120, 1047, Voice::Bell, 220))},
-    {"Soft High Fifth", Family::Soft, Event::Message, R(250, N(0, 100, 988, Voice::Soft, 220), N(90, 130, 784, Voice::Soft, 225))},
-    {"Marimba High Fifth", Family::Marimba, Event::Message, R(230, N(0, 90, 1176, Voice::Marimba, 220), N(80, 120, 880, Voice::Marimba, 220))},
-    {"Bell High Fifth", Family::Bells, Event::Message, R(240, N(0, 90, 1568, Voice::Bell, 210), N(80, 130, 1176, Voice::Bell, 220))},
+    // --- Duo ----------------------------------------------------------------------------------
+    // Bell TK-TK is Filip's boot phrase, unchanged: D7 (2349 Hz), a short gap, F7 (2794 Hz).
+    {"Bell TK-TK", "bell", Shape::Duo, R(205, N(0, 60, 2349, Voice::Bell, 200), N(115, 70, 2794, Voice::Bell, 210))},
+    {"Soft Hi", "soft", Shape::Duo, R(250, N(0, 100, 880, Voice::Soft, 220), N(90, 130, 698, Voice::Soft, 225))},
+    {"Marimba Hi", "marimba", Shape::Duo, R(230, N(0, 90, 1047, Voice::Marimba, 220), N(80, 120, 784, Voice::Marimba, 220))},
+    {"Bell Hi", "bell", Shape::Duo, R(230, N(0, 90, 1397, Voice::Bell, 210), N(80, 120, 1047, Voice::Bell, 220))},
+    {"Wood Warm", "wood", Shape::Duo, R(300, N(0, 140, 349, Voice::Pluck, 210), N(100, 160, 440, Voice::Pluck, 210))},
+    {"Chime Bright", "chime", Shape::Duo, R(220, N(0, 80, 1319, Voice::Chime, 220), N(70, 110, 1760, Voice::Chime, 220))},
+    {"Soft Lo", "soft", Shape::Duo, R(250, N(0, 100, 494, Voice::Soft, 210), N(90, 130, 392, Voice::Soft, 210))},
+    {"Organ Low", "organ", Shape::Duo, R(340, N(0, 180, 262, Voice::Organ, 220), N(140, 200, 330, Voice::Organ, 220))},
+    {"Kalimba Rise", "kalimba", Shape::Duo, R(220, N(0, 100, 1047, Voice::Kalimba, 210), N(90, 130, 1319, Voice::Kalimba, 210))},
+    {"Wood Double", "wood", Shape::Duo, R(160, N(0, 70, 587, Voice::Pluck, 220), N(90, 70, 587, Voice::Pluck, 220))},
 
-    // --- DM home: low and soft ---------------------------------------------------------------
-    {"Soft Warm", Family::Soft, Event::Dm, R(300, N(0, 140, 349, Voice::Pluck, 210), N(100, 160, 440, Voice::Pluck, 210))},
-    {"Soft Deep", Family::Soft, Event::Dm, R(300, N(0, 150, 294, Voice::Soft, 230), N(110, 170, 349, Voice::Soft, 220))},
-    {"Soft Basso", Family::Soft, Event::Dm, R(340, N(0, 160, 196, Voice::Pluck, 220), N(120, 180, 294, Voice::Pluck, 220))},
-    {"Soft Low Fifth", Family::Soft, Event::Dm, R(330, N(0, 150, 262, Voice::Soft, 225), N(100, 170, 392, Voice::Soft, 220))},
-    {"Soft Low Third", Family::Soft, Event::Dm, R(300, N(0, 140, 220, Voice::Soft, 225), N(100, 160, 262, Voice::Soft, 220))},
-    {"Soft Dark", Family::Soft, Event::Dm, R(360, N(0, 170, 165, Voice::Soft, 230), N(120, 180, 220, Voice::Soft, 220))},
+    // --- Trio ---------------------------------------------------------------------------------
+    {"Glass Trio", "glass", Shape::Trio, R(280, N(0, 65, 1568, Voice::Chime, 215), N(65, 65, 2093, Voice::Chime, 215), N(130, 110, 2637, Voice::Chime, 210))},
+    {"Chime Arp", "chime", Shape::Trio, R(250, N(0, 70, 1047, Voice::Chime, 215), N(65, 70, 1319, Voice::Chime, 215), N(130, 120, 1568, Voice::Chime, 215))},
+    {"Bell Rise", "bell", Shape::Trio, R(300, N(0, 90, 523, Voice::Bell, 210), N(80, 90, 659, Voice::Bell, 210), N(160, 140, 784, Voice::Bell, 215))},
+    {"Bell Fall", "bell", Shape::Trio, R(300, N(0, 90, 784, Voice::Bell, 215), N(80, 90, 659, Voice::Bell, 210), N(160, 140, 523, Voice::Bell, 210))},
+    {"Marimba Roll", "marimba", Shape::Trio, R(260, N(0, 80, 392, Voice::Marimba, 215), N(70, 80, 523, Voice::Marimba, 215), N(140, 120, 659, Voice::Marimba, 215))},
+    {"Wood Motif", "wood", Shape::Trio, R(300, N(0, 100, 220, Voice::Pluck, 220), N(90, 100, 330, Voice::Pluck, 215), N(180, 120, 262, Voice::Pluck, 215))},
+    {"Soft Motif", "soft", Shape::Trio, R(310, N(0, 90, 440, Voice::Soft, 215), N(80, 90, 415, Voice::Soft, 215), N(160, 150, 349, Voice::Soft, 220))},
+    {"Organ Rise", "organ", Shape::Trio, R(400, N(0, 130, 196, Voice::Organ, 220), N(110, 130, 262, Voice::Organ, 220), N(220, 180, 330, Voice::Organ, 220))},
+    {"Kalimba Turn", "kalimba", Shape::Trio, R(290, N(0, 90, 880, Voice::Kalimba, 210), N(80, 90, 1047, Voice::Kalimba, 210), N(160, 130, 880, Voice::Kalimba, 210))},
+    {"Glass Top", "glass", Shape::Trio, R(250, N(0, 70, 2093, Voice::Chime, 205), N(65, 70, 2349, Voice::Chime, 205), N(130, 120, 2794, Voice::Chime, 205))},
 
-    // --- mention home: bright, above a message -----------------------------------------------
-    {"Chime Bright", Family::Chimes, Event::Mention, R(220, N(0, 80, 1319, Voice::Chime, 220), N(70, 110, 1760, Voice::Chime, 220))},
-    {"Bell High", Family::Bells, Event::Mention, R(240, N(0, 90, 1568, Voice::Bell, 210), N(80, 120, 2093, Voice::Bell, 210))},
-    {"Chime Glass", Family::Chimes, Event::Mention, R(200, N(0, 70, 1760, Voice::Chime, 220), N(65, 100, 2637, Voice::Chime, 210))},
-    {"Chime Top", Family::Chimes, Event::Mention, R(220, N(0, 80, 2093, Voice::Chime, 215), N(70, 110, 2637, Voice::Chime, 210))},
-    {"Bell Very High", Family::Bells, Event::Mention, R(240, N(0, 90, 2093, Voice::Bell, 205), N(80, 120, 2794, Voice::Bell, 210))},
-    {"Glass Trio", Family::Chimes, Event::Mention, R(280, N(0, 65, 1568, Voice::Chime, 215), N(65, 65, 2093, Voice::Chime, 215), N(130, 110, 2637, Voice::Chime, 210))},
+    // --- Multi --------------------------------------------------------------------------------
+    {"Bell Chime", "bell", Shape::Multi, R(390, N(0, 80, 659, Voice::Bell, 210), N(70, 80, 784, Voice::Bell, 210), N(140, 80, 988, Voice::Bell, 210), N(210, 180, 1319, Voice::Bell, 215))},
+    {"Chime Run", "chime", Shape::Multi, R(315, N(0, 60, 784, Voice::Chime, 210), N(55, 60, 1047, Voice::Chime, 210), N(110, 60, 1319, Voice::Chime, 210), N(165, 150, 1568, Voice::Chime, 215))},
+    {"Marimba Run", "marimba", Shape::Multi, R(300, N(0, 60, 523, Voice::Marimba, 210), N(50, 60, 659, Voice::Marimba, 210), N(100, 60, 784, Voice::Marimba, 210), N(150, 150, 1047, Voice::Marimba, 215))},
+    {"Wood Groove", "wood", Shape::Multi, R(360, N(0, 70, 392, Voice::Pluck, 215), N(70, 70, 392, Voice::Pluck, 200), N(140, 70, 523, Voice::Pluck, 215), N(210, 150, 659, Voice::Pluck, 220))},
+    {"Soft Chord", "soft", Shape::Multi, R(300, N(0, 180, 262, Voice::Soft, 175), N(0, 180, 330, Voice::Soft, 175), N(0, 180, 392, Voice::Soft, 175), N(120, 180, 523, Voice::Soft, 200))},
+    {"Organ Chord", "organ", Shape::Multi, R(260, N(0, 160, 196, Voice::Organ, 190), N(20, 160, 262, Voice::Organ, 190), N(40, 160, 330, Voice::Organ, 190), N(60, 200, 392, Voice::Organ, 200))},
+    {"Kalimba Lick", "kalimba", Shape::Multi, R(310, N(0, 70, 880, Voice::Kalimba, 205), N(70, 70, 1047, Voice::Kalimba, 210), N(140, 70, 1319, Voice::Kalimba, 210), N(210, 100, 1047, Voice::Kalimba, 205))},
+    {"Glass Sparkle", "glass", Shape::Multi, R(275, N(0, 55, 1568, Voice::Chime, 200), N(55, 55, 2093, Voice::Chime, 200), N(110, 55, 2637, Voice::Chime, 200), N(165, 110, 3136, Voice::Chime, 195))},
+    {"Bell Road", "bell", Shape::Multi, R(380, N(0, 80, 392, Voice::Bell, 215), N(70, 80, 330, Voice::Bell, 215), N(140, 80, 262, Voice::Bell, 215), N(210, 170, 196, Voice::Bell, 220))},
+    // The error alert as a four-note fall: the old Alert Triple plus its resolving note.
+    {"Wood Alert", "wood", Shape::Multi, R(370, N(0, 70, 587, Voice::Pluck, 225), N(70, 70, 523, Voice::Pluck, 225), N(140, 70, 440, Voice::Pluck, 225), N(210, 160, 349, Voice::Pluck, 230))},
 
-    // --- sent home: quiet, very short acknowledgements ---------------------------------------
-    {"Tick", Family::Ticks, Event::Sent, R(80, N(0, 45, 1319, Voice::Marimba, 95))},
-    {"Blip", Family::Ticks, Event::Sent, R(90, N(0, 50, 1568, Voice::Soft, 90))},
-    {"Tock", Family::Ticks, Event::Sent, R(95, N(0, 55, 1047, Voice::Pluck, 90))},
-    {"Tick Tock", Family::Ticks, Event::Sent, R(120, N(0, 45, 1319, Voice::Marimba, 95), N(50, 55, 1047, Voice::Marimba, 95))},
-    {"Tick Tick", Family::Ticks, Event::Sent, R(90, N(0, 35, 1319, Voice::Soft, 90), N(45, 35, 1319, Voice::Soft, 90))},
-    {"Blip Tock", Family::Ticks, Event::Sent, R(110, N(0, 40, 1568, Voice::Soft, 90), N(50, 50, 1047, Voice::Pluck, 90))},
+    // --- Alert --------------------------------------------------------------------------------
+    // 1.35 s, three descending notes played twice, at its own (loud) target peak.
+    {"Battery Low", "soft", Shape::Alert, peak(R(1350, N(0, 300, 440, Voice::Soft, 250), N(250, 300, 349, Voice::Soft, 250), N(500, 350, 262, Voice::Soft, 250), N(700, 300, 440, Voice::Soft, 250), N(950, 300, 349, Voice::Soft, 250), N(1200, 150, 262, Voice::Soft, 250)), 27000)},
+};
 
-    // --- error home: falling, low, slow (one of the two DND-exempt events) -------------------
-    {"Error Low", Family::Alerts, Event::Error, R(300, N(0, 120, 440, Voice::Pluck, 220), N(105, 160, 349, Voice::Pluck, 230))},
-    {"Error Warn", Family::Alerts, Event::Error, R(310, N(0, 100, 330, Voice::Soft, 240), N(110, 170, 262, Voice::Soft, 240))},
-    {"Alert Triple", Family::Alerts, Event::Error, R(300, N(0, 70, 587, Voice::Pluck, 230), N(70, 70, 523, Voice::Pluck, 230), N(140, 130, 440, Voice::Pluck, 235))},
-    {"Error Deep", Family::Alerts, Event::Error, R(320, N(0, 110, 262, Voice::Soft, 240), N(100, 180, 196, Voice::Soft, 240))},
-    {"Alert Double", Family::Alerts, Event::Error, R(220, N(0, 60, 880, Voice::Pluck, 225), N(90, 60, 880, Voice::Pluck, 225))},
-    {"Bell Descend", Family::Bells, Event::Error, R(320, N(0, 110, 392, Voice::Bell, 220), N(100, 160, 294, Voice::Bell, 230))},
-
-    // --- new node home: the same family as message, a fourth down ---------------------------
-    {"Soft Lo", Family::Soft, Event::NewNode, R(250, N(0, 100, 494, Voice::Soft, 210), N(90, 130, 392, Voice::Soft, 210))},
-    {"Marimba Lo", Family::Marimba, Event::NewNode, R(230, N(0, 90, 587, Voice::Marimba, 210), N(80, 120, 440, Voice::Marimba, 210))},
-    {"Bell Lo", Family::Bells, Event::NewNode, R(230, N(0, 90, 784, Voice::Bell, 200), N(80, 120, 587, Voice::Bell, 210))},
-    {"Soft Node Low Fifth", Family::Soft, Event::NewNode, R(250, N(0, 100, 415, Voice::Soft, 210), N(90, 130, 330, Voice::Soft, 210))},
-    {"Marimba Low Fifth", Family::Marimba, Event::NewNode, R(230, N(0, 90, 523, Voice::Marimba, 210), N(80, 120, 392, Voice::Marimba, 210))},
-    {"Bell Low Fifth", Family::Bells, Event::NewNode, R(240, N(0, 90, 698, Voice::Bell, 200), N(80, 130, 523, Voice::Bell, 210))},
-
-    // --- low battery home: 1.25..1.4 s, three descending notes played twice, at the cap ------
-    {"Battery Low", Family::Alerts, Event::LowBattery, peak(R(1350, N(0, 300, 440, Voice::Soft, 250), N(250, 300, 349, Voice::Soft, 250), N(500, 350, 262, Voice::Soft, 250), N(700, 300, 440, Voice::Soft, 250), N(950, 300, 349, Voice::Soft, 250), N(1200, 150, 262, Voice::Soft, 250)), 27000)},
-    {"Battery Sigh", Family::Alerts, Event::LowBattery, peak(R(1300, N(0, 300, 349, Voice::Soft, 250), N(250, 300, 294, Voice::Soft, 250), N(500, 300, 220, Voice::Soft, 250), N(700, 300, 349, Voice::Soft, 250), N(950, 300, 294, Voice::Soft, 250), N(1200, 100, 220, Voice::Soft, 250)), 27000)},
-    {"Battery Bell", Family::Alerts, Event::LowBattery, peak(R(1400, N(0, 320, 392, Voice::Bell, 250), N(270, 320, 330, Voice::Bell, 250), N(540, 380, 262, Voice::Bell, 250), N(750, 320, 392, Voice::Bell, 250), N(1020, 320, 330, Voice::Bell, 250), N(1290, 110, 262, Voice::Bell, 250)), 27000)},
-    {"Battery Deep", Family::Alerts, Event::LowBattery, peak(R(1250, N(0, 280, 294, Voice::Soft, 250), N(230, 280, 262, Voice::Soft, 250), N(460, 330, 196, Voice::Soft, 250), N(650, 280, 294, Voice::Soft, 250), N(880, 280, 262, Voice::Soft, 250), N(1110, 140, 196, Voice::Soft, 250)), 27000)},
-    {"Battery Alarm", Family::Alerts, Event::LowBattery, peak(R(1300, N(0, 280, 523, Voice::Pluck, 250), N(230, 280, 440, Voice::Pluck, 250), N(460, 330, 349, Voice::Pluck, 250), N(650, 280, 523, Voice::Pluck, 250), N(880, 280, 440, Voice::Pluck, 250), N(1110, 190, 349, Voice::Pluck, 250)), 27000)},
-    {"Battery Pulse", Family::Alerts, Event::LowBattery, peak(R(1350, N(0, 300, 440, Voice::Pluck, 250), N(260, 300, 392, Voice::Pluck, 250), N(520, 330, 330, Voice::Pluck, 250), N(720, 300, 440, Voice::Pluck, 250), N(980, 300, 392, Voice::Pluck, 250), N(1240, 110, 330, Voice::Pluck, 250)), 27000)},
-
-    // --- touch home: the optional tap clicks ------------------------------------------------
-    {"Tap Tick", Family::Ticks, Event::Touch, R(55, N(0, 30, 1500, Voice::Soft, 85))},
-    {"Tap Tock", Family::Ticks, Event::Touch, R(60, N(0, 35, 900, Voice::Soft, 90))},
-    {"Tap Click", Family::Ticks, Event::Touch, R(35, N(0, 18, 2200, Voice::Soft, 80))},
-    {"Tap Tik", Family::Ticks, Event::Touch, R(50, N(0, 30, 1000, Voice::Soft, 85))},
-    {"Tap Snap", Family::Ticks, Event::Touch, R(45, N(0, 20, 1800, Voice::Soft, 80))},
-    {"Tap Double", Family::Ticks, Event::Touch, R(80, N(0, 22, 900, Voice::Soft, 90), N(38, 22, 900, Voice::Soft, 90))},
+// The retired EST-361 ids 0..53 (in their old order) and the kept sound each one now means. The
+// nearest kept sound by shape, then voice, then register; the reasoning is in docs/PROGRESS.md.
+constexpr uint8_t kRedirect[kFirstCurrent] = {
+    64, 67, 69, 70, 66, 75,   // boot: TK-TK, Bell Pair, Chime Up, Soft Rise, Marimba Up, Chime Arp
+    65, 66, 67, 65, 66, 67,   // message: Soft Hi, Marimba Hi, Bell Hi, Soft High Fifth, ...
+    68, 70, 68, 70, 70, 68,   // DM: Warm, Deep, Basso, Low Fifth, Low Third, Dark
+    69, 67, 69, 69, 64, 74,   // mention: Chime Bright, Bell High, Chime Glass, Chime Top, ...
+    60, 55, 61, 60, 60, 56,   // sent ticks: Tick, Blip, Tock, Tick Tock, Tick Tick, Blip Tock
+    68, 70, 93, 70, 73, 67,   // error: Low, Warn, Triple, Deep, Double, Bell Descend
+    70, 66, 67, 70, 66, 67,   // new node: Soft Lo, Marimba Lo, Bell Lo, ...
+    94, 94, 94, 94, 94, 94,   // low battery: all six -> the kept warning
+    55, 54, 59, 56, 55, 54,   // touch: Tick, Tock, Click, Tik, Snap, Double
 };
 
 const EventDef kEvents[kEventCount] = {
-    {"boot", "Boot", "BOOT", kBootBellTk, false},
-    {"message", "Message", "MSG", kMsgSoftHi, false},
-    {"dm", "Direct message", "DM", kDmSoftWarm, false},
-    {"mention", "Mention", "MENT", kMenChimeBright, false},
-    {"sent", "Sent", "SENT", kSentTick, false},
-    {"error", "Error", "ERR", kErrLow, true},
-    {"newnode", "New node", "NODE", kNewSoftLo, false},
-    {"battery", "Low battery", "BATT", kBattLow, true},
-    {"touch", "Touch click", "TAP", kTapTick, false},
+    {"boot", "Boot", "BOOT", kBellTk, false},
+    {"message", "Message", "MSG", kSoftHi, false},
+    {"dm", "Direct message", "DM", kWoodWarm, false},
+    {"mention", "Mention", "MENT", kChimeBright, false},
+    {"sent", "Sent", "SENT", kSoftTick, false},
+    {"error", "Error", "ERR", kBellFall, true},
+    {"newnode", "New node", "NODE", kSoftLo, false},
+    {"battery", "Low battery", "BATT", kBatteryLow, true},
+    {"touch", "Touch click", "TAP", kBeepClean, false},
 };
 
-// EST-359 stored 0..2 per event (3 or 17 = Off). Map each old index to the closest new sound. Boot's
-// three old variants only differed in timbre, so all three land on the original TK-TK.
+// EST-359 stored 0..2 per event (3 or 17 = Off). Map each old index to the EST-361 sound it picked;
+// that id is then resolved to the kept sound like any other retired id. Boot's three old variants
+// only differed in timbre, so all three land on TK-TK.
 constexpr uint8_t kLegacy[kEventCount][3] = {
-    {kBootBellTk, kBootBellTk, kBootBellTk},
-    {kBootChimeUp, kBootBellPair, kBootMarimbaUp},
-    {kDmSoftWarm, kDmSoftDeep, kDmSoftBasso},
-    {kMenChimeBright, kMenBellHigh, kMenChimeGlass},
-    {kSentTick, kSentBlip, kSentTock},
-    {kErrLow, kErrWarn, kErrBellDescend},
-    {kNewSoftLo, kNewMarimbaLo, kNewBellLo},
-    {kBattLow, kBattSigh, kBattBell},
-    {kTapTick, kTapTock, kTapClick},
+    {0, 0, 0},   // boot: all three -> Bell TK-TK
+    {2, 1, 4},   // message: Chime Up, Bell Pair, Marimba Up
+    {12, 13, 14},
+    {18, 19, 20},
+    {24, 25, 26},
+    {30, 31, 35},
+    {36, 37, 38},
+    {42, 43, 44},
+    {48, 49, 50},
 };
 
 const EventDef& defFor(Event ev) {
@@ -270,7 +265,9 @@ const EventDef& defFor(Event ev) {
 }
 
 const LibrarySound& soundFor(uint8_t id) {
-  return kLibrary[id < kSoundTotal ? id : 0];
+  const uint8_t current = resolveSound(id);
+  const int index = current == kSoundOff ? 0 : (int)current - (int)kFirstCurrent;
+  return kLibrary[index];
 }
 
 int samplesForMs(int ms) {
@@ -332,7 +329,7 @@ int renderPass(const Recipe& r, int16_t* out, float scale, RenderInfo* info) {
     }
     lp += lpA * (sum - lp);
     float value = lp;
-    if (i >= total - fadeN) value *= (float)(total - i) / (float)fadeN;
+    if (i >= total - fadeN) value *= (float)(total - 1 - i) / (float)fadeN;
     int s = (int)lroundf(value * scale * 32767.0f);
     if (s > 32767) s = 32767;
     if (s < -32768) s = -32768;
@@ -389,25 +386,39 @@ int rescaleTo(int16_t* out, int n, int peak, int target) {
 
 int soundCount() { return kSoundTotal; }
 
+int libraryCount() { return kSoundTotal - (int)kFirstCurrent; }
+
+uint8_t libraryId(int index) {
+  if (index < 0 || index >= libraryCount()) return kSoundOff;
+  return (uint8_t)((int)kFirstCurrent + index);
+}
+
+bool soundIsCurrent(uint8_t id) { return id >= kFirstCurrent && id < kSoundTotal; }
+
+uint8_t resolveSound(uint8_t id) {
+  if (id >= kFirstCurrent && id < kSoundTotal) return id;
+  if (id < kFirstCurrent) return kRedirect[id];
+  return kSoundOff;
+}
+
 bool validSound(uint8_t id) { return id < kSoundTotal; }
 
 const char* soundName(uint8_t id) { return validSound(id) ? soundFor(id).name : nullptr; }
 
-Family soundFamily(uint8_t id) { return validSound(id) ? soundFor(id).family : Family::Count; }
+Shape soundShape(uint8_t id) { return validSound(id) ? soundFor(id).shape : Shape::Count; }
 
-const char* familyName(Family family) {
-  switch (family) {
-    case Family::Bells: return "Bells";
-    case Family::Chimes: return "Chimes";
-    case Family::Marimba: return "Marimba";
-    case Family::Soft: return "Soft";
-    case Family::Alerts: return "Alerts";
-    case Family::Ticks: return "Ticks";
+const char* shapeName(Shape shape) {
+  switch (shape) {
+    case Shape::Solo: return "Solo";
+    case Shape::Duo: return "Duo";
+    case Shape::Trio: return "Trio";
+    case Shape::Multi: return "Multi";
+    case Shape::Alert: return "Alert";
     default: return "";
   }
 }
 
-Event soundHomeEvent(uint8_t id) { return validSound(id) ? soundFor(id).home : Event::Count; }
+const char* soundVoice(uint8_t id) { return validSound(id) ? soundFor(id).voice : nullptr; }
 
 int soundMs(uint8_t id) { return validSound(id) ? (int)soundFor(id).recipe.ms : 0; }
 
@@ -463,39 +474,12 @@ const char* eventTag(Event ev) { return defFor(ev).tag; }
 
 uint8_t defaultSound(Event ev) { return defFor(ev).def; }
 
-int variantCount(Event ev) {
-  const int i = (int)ev;
-  if (i < 0 || i >= kEventCount) return 0;
-  int count = 0;
-  for (int id = 0; id < kSoundTotal; ++id) {
-    if ((int)kLibrary[id].home == i) ++count;
-  }
-  return count;
-}
-
-uint8_t variantSoundId(Event ev, uint8_t variant) {
-  const int i = (int)ev;
-  if (i < 0 || i >= kEventCount) return kSoundOff;
-  int seen = 0;
-  for (int id = 0; id < kSoundTotal; ++id) {
-    if ((int)kLibrary[id].home != i) continue;
-    if (seen == (int)variant) return (uint8_t)id;
-    ++seen;
-  }
-  return kSoundOff;
-}
-
-const char* variantName(Event ev, uint8_t variant) {
-  const uint8_t id = variantSoundId(ev, variant);
-  return id == kSoundOff ? nullptr : soundName(id);
-}
-
 bool dndExempt(Event ev) { return defFor(ev).dndExempt; }
 
 uint8_t legacyVariantSound(Event ev, uint8_t oldVariant) {
   const int i = (int)ev;
   if (i < 0 || i >= kEventCount || oldVariant >= 3) return kSoundOff;
-  return kLegacy[i][oldVariant];
+  return resolveSound(kLegacy[i][oldVariant]);
 }
 
 bool parseEvent(const char* token, Event* out) {

@@ -132,7 +132,7 @@ static om::ui::CivilTime g_setTime;  // the manual-time steppers' civil time
 static uint8_t g_setBrightness = om::kScreenBrightness;
 // EST-357: PSRAM, allocated once in allocUiBuffers(). (The capacity constants are what the old
 // sizeof(array)/sizeof(array[0]) sites now use: a pointer has no element count.)
-static constexpr int kSetRowsCap = 64;   // the picker lists the whole 54-sound library
+static constexpr int kSetRowsCap = 64;   // the picker lists the whole 41-sound library
 static om::ui::SettingRow* g_setRows = nullptr;
 static int g_setRowCount = 0;
 static om::ui::RadioPrefsStore g_radio;
@@ -423,13 +423,16 @@ static void playClick() {
 // A stored choice from NVS. Version 2+ holds a library id (kSoundOff = Off). Version 0/1 holds the
 // EST-359 per-event index: 0..2 maps to the closest new sound, 3 and the old 17 are Off, and any
 // other out-of-range value falls back to the event's default. A key never written gets the default.
+// EST-369: an EST-361 id whose sound was retired resolves to the kept sound it now means, so an old
+// choice keeps sounding like the nearest new one instead of breaking.
 static uint8_t loadChoice(const char* key, SoundEvent ev) {
   const int raw = (int)g_prefs.getUChar(key, 0xFF);
   if (raw == 0xFF) return om::sound::defaultSound(ev);
   if (g_sndPrefsVersion >= 2) {
     const uint8_t id = (uint8_t)raw;
-    if (id == om::sound::kSoundOff || om::sound::validSound(id)) return id;
-    return om::sound::defaultSound(ev);
+    if (id == om::sound::kSoundOff) return id;
+    const uint8_t kept = om::sound::resolveSound(id);
+    return kept != om::sound::kSoundOff ? kept : om::sound::defaultSound(ev);
   }
   if (raw == 3 || raw == 17) return om::sound::kSoundOff;   // EST-359 / the old 17-chime Off
   if (raw > 3) return om::sound::defaultSound(ev);          // an older out-of-range value
@@ -4108,7 +4111,7 @@ static void buildSettingsRows() {
 
     case SetPage::SoundPicker: {
       const SoundEvent ev = (SoundEvent)g_setSoundEvent;
-      const int count = om::sound::soundCount();
+      const int count = om::sound::libraryCount();
       snprintf(g_setTitle, sizeof(g_setTitle), "%s sound", om::sound::eventLabel(ev));
       // EST-363 (Filip): "Use" lives in the title row, always on the glass, so a sound picked 40 rows
       // down can be saved without scrolling back up. It is dim until the candidate differs from the
@@ -4116,25 +4119,28 @@ static void buildSettingsRows() {
       g_setActionLabel = "Use";
       g_setActionId = A_SoundPickUse;
       g_setActionOn = om::ui::settingsActionEnabled(g_setSoundPending, (int)choiceFor(ev));
-      // The whole shared library, grouped by family. A sound another event already uses carries its
-      // short tag(s) in the dim value; it stays selectable (double duty is allowed).
+      // EST-369: the whole shared library, grouped by SHAPE (Solo, Duo, Trio, Multi, Alert); the voice
+      // starts each name. A sound another event already uses carries its short tag(s) in the dim
+      // value; it stays selectable (double duty is allowed). The action id is the row's index in the
+      // library, because the sound ids themselves start at 54 (0..53 are the retired EST-361 ids).
       char tags[om::ui::kSetValueCap];
-      for (int f = 0; f < om::sound::kFamilyCount; ++f) {
-        const om::sound::Family family = (om::sound::Family)f;
+      for (int s = 0; s < om::sound::kShapeCount; ++s) {
+        const om::sound::Shape shape = (om::sound::Shape)s;
         bool any = false;
-        for (int id = 0; id < count; ++id) {
-          if (om::sound::soundFamily((uint8_t)id) == family) {
+        for (int i = 0; i < count; ++i) {
+          if (om::sound::soundShape(om::sound::libraryId(i)) == shape) {
             any = true;
             break;
           }
         }
         if (!any) continue;
-        setSection(om::sound::familyName(family));
-        for (int id = 0; id < count; ++id) {
-          if (om::sound::soundFamily((uint8_t)id) != family) continue;
-          soundUseTags(ev, (uint8_t)id, tags, sizeof(tags));
-          setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PickBase + id),
-                 om::sound::soundName((uint8_t)id), tags, g_setSoundPending == id);
+        setSection(om::sound::shapeName(shape));
+        for (int i = 0; i < count; ++i) {
+          const uint8_t id = om::sound::libraryId(i);
+          if (om::sound::soundShape(id) != shape) continue;
+          soundUseTags(ev, id, tags, sizeof(tags));
+          setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PickBase + i), om::sound::soundName(id),
+                 tags, g_setSoundPending == (int)id);
         }
       }
       setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_PickBase + count), "Off", "",
@@ -4627,9 +4633,8 @@ static void handleSettingsRow(uint16_t id) {
 
     case A_SoundPickUse: {
       const SoundEvent ev = (SoundEvent)g_setSoundEvent;
-      const int count = om::sound::soundCount();
       if (g_setSoundPending != (int)om::sound::kSoundOff &&
-          (g_setSoundPending < 0 || g_setSoundPending >= count)) {
+          !om::sound::soundIsCurrent((uint8_t)g_setSoundPending)) {
         g_setSoundPending = (int)om::sound::defaultSound(ev);
       }
       choiceFor(ev) = (uint8_t)g_setSoundPending;
@@ -4775,11 +4780,12 @@ static void handleSettingsRow(uint16_t id) {
         setGo(SetPage::ConfirmHash);
       } else if (id >= A_PickBase && id < A_ChanBase) {
         const SoundEvent ev = (SoundEvent)g_setSoundEvent;
-        const int count = om::sound::soundCount();
+        const int count = om::sound::libraryCount();
         const int idx = (int)(id - A_PickBase);
         if (idx >= 0 && idx < count) {
-          g_setSoundPending = idx;
-          playSound(ev, (uint8_t)idx, true);   // preview ignores DND, not master
+          const uint8_t soundId = om::sound::libraryId(idx);
+          g_setSoundPending = (int)soundId;
+          playSound(ev, soundId, true);   // preview ignores DND, not master
         } else if (idx == count) {
           g_setSoundPending = (int)om::sound::kSoundOff;   // the Off row
         }

@@ -392,7 +392,7 @@ Command parseCommand(char* line) {
         c.error = "number";
         return c;
       }
-      if (!sound::validSound((uint8_t)v)) {
+      if (v < 0 || v > 255 || !sound::validSound((uint8_t)v)) {
         c.error = "args";
         return c;
       }

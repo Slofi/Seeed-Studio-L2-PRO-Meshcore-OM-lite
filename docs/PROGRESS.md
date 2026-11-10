@@ -4027,3 +4027,125 @@ and the mock (`ui-mock/index.html`, "OM's animated Traces").
 - Built in the sandbox (exit 0, RAM 156,752 B, flash 2,799,933 B), tests exit 0, reviewed binary flashed (2,800,304 B). `chats`: 6 chats, 0 mismatches.
 - Map (`docs/shots/2026-11-10-2313-map-popup.png`): credits drawn on the map with an outline, no plate; no scale; the Traces button (gold, on) above locate / + / -; the unread badge "10" on the tab bar; a repeater marker with its label. A DM ping to ERA-3 brought the bot's answer as a two-line pop-up over the map ("DM . ERA-3 (SI)" + the text with its emoji). No trace was drawn for it: our GPS had no fix indoors and ERA-3 shares no position, so the route had fewer than two known points (by design). The animation itself needs a message whose path runs through repeaters with known positions: to watch on real traffic (Filip).
 - From now on (REBUILD.md rule 9): the repo is public; no positions, secrets or other people's messages in docs, logs, tests or screenshots.
+
+## 2026-11-10 23:32 (DeepSeek): EST-369 sounds round 3, a library by shape
+
+The ticket (Filip ~22:45 and 22:55): fewer sounds of the same style, about ten per style, and
+different styles from simple beeps to multi-tones, so a notification or the boot welcome has a real
+selection. This is the third sound round; EST-361's 54-sound library grouped by timbre is replaced.
+
+**How the clarification was read.** Filip's list named five example styles (Beeps, Solo, Duo, Trio,
+Multi-tone), while the ticket's work items define SOLO, DUO and TRIO. This build keeps four shape
+sections plus the alert: Solo (one note, which is where the clean beeps live), Duo, Trio, Multi (four
+or more notes, a short phrase or chord) and Alert (only the long low-battery warning). Ten sounds per
+shape, 41 current sounds in all, down from 54. If Filip wants Beeps as a fifth section of their own,
+that is a new ticket and a one-line addition to the shape enum.
+
+### 1. The library is organised by shape first, voice second
+- `sound_synth.cpp` now has `Shape {Solo, Duo, Trio, Multi, Alert}` and one `voice` word per sound
+  (`beep`, `bell`, `chime`, `glass`, `marimba`, `wood`, `soft`, `organ`, `kalimba`). The name starts
+  with the voice ("Beep Clean", "Bell C6", "Kalimba Rise"), so the picker row and INDEX.md say both.
+- Three new synth voices joined the old five: **Beep** (one clean partial that holds then releases),
+  **Organ** (a mellow 1-2-3 octave stack, 14 ms attack, sustains), **Kalimba** (a tine's 5.4 partial
+  over a 55 ms decay). Wood is the existing pluck, glass is the existing chime at high pitch.
+- Shape contents and lengths: Solo 1 note 80..250 ms; Duo 2 notes 160..340 ms; Trio 3 notes 250..400
+  ms; Multi 4 notes 260..390 ms; Alert the kept 1.35 s battery warning. Every note sequence is
+  unique (the host test compares Hz, start and duration across all 41), and inside a shape the ten
+  differ in pitch, rhythm and voice: Solo uses 8 voices, Duo 7, Trio 8, Multi 8.
+- Examples of the range: "Beep Clean" (880 Hz, 110 ms), "Soft Tick" (quiet 1175 Hz, 80 ms),
+  "Bell C6" (one strike, 220 ms), "Organ Mellow" (330 Hz, 240 ms), "Kalimba Tine"; Duo "Bell TK-TK"
+  (the boot, unchanged), "Wood Warm", "Organ Low", "Wood Double" (the old Alert Double's rhythm);
+  Trio "Glass Trio" (kept), "Bell Rise", "Bell Fall", "Chime Arp"; Multi "Bell Chime", "Soft Chord"
+  (four notes, three simultaneous), "Glass Sparkle", "Wood Alert" (the old Alert Triple plus its
+  resolving note); Alert "Battery Low".
+
+### 2. The reduction: what was kept and where the retired ids go
+Kept exactly (same recipes): **Bell TK-TK** (boot), **Soft Hi** (message), **Soft Lo** (new node,
+Filip's soft voice), **Marimba Hi**, **Bell Hi**, **Wood Warm** (DM), **Chime Bright** (mention),
+**Glass Trio**, **Battery Low**. That is seven kept duos (inside the ticket's 6-8) plus one trio and
+the alert. Everything else from EST-361 is retired.
+
+Old ids 0..53 stay valid forever. `resolveSound(id)` maps a retired id to the kept sound it now
+means, `loadChoice` canonicalises it on load so the next save writes the new id, and `soundName`,
+`soundShape`, `soundMs` and `renderSound` all resolve through the same table. The mapping
+(`kRedirect` in `sound_synth.cpp`; old id -> current id/name):
+
+| old ids | -> kept id and name |
+|---|---|
+| 0..5 (boot) | 64 Bell TK-TK, 67 Bell Hi, 69 Chime Bright, 70 Soft Lo, 66 Marimba Hi, 75 Chime Arp |
+| 6..11 (message) | 65 Soft Hi, 66 Marimba Hi, 67 Bell Hi, 65 Soft Hi, 66 Marimba Hi, 67 Bell Hi |
+| 12..17 (DM) | 68 Wood Warm, 70 Soft Lo, 68 Wood Warm, 70 Soft Lo, 70 Soft Lo, 68 Wood Warm |
+| 18..23 (mention) | 69 Chime Bright, 67 Bell Hi, 69 Chime Bright, 69 Chime Bright, 64 Bell TK-TK, 74 Glass Trio |
+| 24..29 (sent) | 60 Marimba Tock, 55 Beep High, 61 Wood Pluck, 60 Marimba Tock, 60 Marimba Tock, 56 Soft Tick |
+| 30..35 (error) | 68 Wood Warm, 70 Soft Lo, 93 Wood Alert, 70 Soft Lo, 73 Wood Double, 67 Bell Hi |
+| 36..41 (new node) | 70 Soft Lo, 66 Marimba Hi, 67 Bell Hi, 70 Soft Lo, 66 Marimba Hi, 67 Bell Hi |
+| 42..47 (battery) | 94 Battery Low for all six |
+| 48..53 (touch) | 55 Beep High, 54 Beep Clean, 59 Glass Ping, 56 Soft Tick, 55 Beep High, 54 Beep Clean |
+
+Why those: nearest kept sound by shape first, then voice, then register. A couple are worth naming:
+old Alert Triple (587/523/440) maps to Multi "Wood Alert", which is that same fall plus a resolving
+349 Hz note; old Bell Descend and the low bell duos go to Bell Hi, since all higher bell duos were
+retired; old Chime Glass/Top go to Chime Bright, and the glass character lives on in Solo Glass Ping,
+Trio Glass Top and Multi Glass Sparkle.
+
+### 3. The picker
+- `SetPage::SoundPicker` now iterates the current library (41 rows) grouped by shape: sections
+  SOLO, DUO, TRIO, MULTI, ALERT, each row named by its voice. The short usage tags (MSG, DM, MENT,
+  SENT, ERR, NODE, BATT, TAP, BOOT) and the "Use" button in the title row are unchanged.
+- The row action id is now the row's **index** in the library, not the sound id, because current ids
+  start at 54. `A_PickBase` (140) still has room for all 41 rows plus Off (A_ChanBase is 200).
+- `kSetRowsCap` stays 64 (48 rows: 5 sections, 41 sounds, Off, the note).
+- Defaults: boot Bell TK-TK, message Soft Hi, DM Wood Warm, mention Chime Bright, sent Soft Tick,
+  new node Soft Lo, error Bell Fall, low battery Battery Low, touch Beep Clean.
+- `play <event> [sound-id]` still accepts any valid id, including a retired one (it resolves and the
+  reply shows the kept name). Fixed while there: `play boot 300` used to wrap to a valid byte (44)
+  and play a wrong sound; an id outside 0..255 is now refused. `play` ids are 0..94.
+
+### 4. WAVs and INDEX
+- `tools/mksounds.cpp` walks the current library in picker order and writes
+  `<shape>-<n>-<name>.wav` plus INDEX.md with **file, shape, n, voice, id, name, notes, ms, peak**.
+  The 54 old files are deleted; 41 new ones are in `docs/sounds/`.
+- The renderer now fails on a silent, clipped or non-zero-edged render. This found one real defect:
+  the tail fade divided by the fade length without reaching zero, so a held Beep ended on -1. The
+  fade is now `(total - 1 - i)`, i.e. exactly zero on the last sample.
+- Independent check with Python's `wave` on all 41 files: 1 ch, 16 bit, 16 kHz; first sample 0,
+  last sample exactly 0; peaks 6,021..27,000 (never 32,767); lengths 80 ms..1,350 ms (only the
+  alert above 400 ms); INDEX has 41 rows, 41 unique files.
+
+### Build and tests
+- `pio run -e om_lite_l2` exit 0: **RAM 156,752 B** (47.8% of 327,680), **flash 2,799,289 B**
+  (42.7% of 6,553,600), `firmware.bin` **2,799,648 B**. EST-368 was RAM 156,752 (unchanged), flash
+  2,799,933, bin 2,800,304, so the smaller library saves 644 B of flash and 656 B of image.
+- `sh test/host/run.sh` exit 0. `test/host/test_est369.cpp` replaces `test_est359.cpp` (deleted) and
+  proves: `soundCount()` 95 (retired 0..53 plus current 54..94), 41 current sounds, ten in Solo, Duo,
+  Trio and Multi and one in Alert; each shape's note count and length range; every name unique, voice
+  first, and at least four voices per pickable shape; no two note sequences equal; the seven kept
+  duos are the same recipes; TK-TK is still D7 (2349 Hz), a gap, F7 (2794 Hz) by window RMS and tone
+  correlation; message sits above new node; the battery warning is 1.35 s at peak 27,000 and
+  DND-exempt; every render's peak equals `RenderInfo.peak`, no clipping, first sample 0 or +-1, last
+  exactly 0; every retired id resolves to a current sound and renders byte-identical samples; the
+  EST-359 migration; and the USB `play` accept/refuse set (including `play boot 300` and `-1`).
+  All other host tests still pass.
+
+### Could not check (no device, no speaker in the sandbox)
+- How the new voices sound on the L2's small speaker (organ and kalimba especially), and whether 80
+  ms Solo sounds are long enough there; the picker's 49-row scroll and the shape sections on the
+  glass; the one-time resolution of an old EST-361 id in real NVS; `render_us` per sound on the S3
+  (host rendering is a few ms; the longest buffer is unchanged at 48 KB of PSRAM).
+
+### Next step for Claude (one reader on the USB port)
+1. Flash `firmware.bin` (2,799,648 B). Boot should still play TK-TK.
+2. `tools/cmd.py play boot`, `play message`, `play newnode`, `play dm`, `play error`, `play sent`,
+   `play battery`: each reply/log line must show a current name and the expected ms. Then
+   `play battery 94`, `play message 54` (a Multi as a message), and `play message 0` (a retired id:
+   the log must say `Bell TK-TK`, not id 0's old name).
+3. Settings > Sound > Message: the picker must show SOLO, DUO, TRIO, MULTI, ALERT; names start with
+   the voice; the stored choice's row is marked; tags and Use are in the same places. Tap a Solo beep,
+   a Trio and a Multi: three clearly different previews. Use one and confirm the Sound row shows it.
+4. Leave one event on an old EST-361 choice if a device still has one (e.g. message id 9, "Soft High
+   Fifth", if the pre-flash NVS had it): it must now be named/played as Soft Hi and the next save
+   must store id 65. This cannot be forced from the host; the log line after boot is the evidence.
+5. Filip listens to `docs/sounds/` (41 files, names carry shape and voice).
+
+## 2026-11-10 23:40 (Claude): EST-369 on the device
+- 41 WAVs checked (0 clipped, edges at zero, none silent): Solo 10 (beeps included: Beep Clean, Beep High, Soft Tick ...), Duo 10, Trio 10, Multi 10, Alert 1. Built in the sandbox (exit 0, RAM 156,752 B, flash 2,799,289 B), tests exit 0, reviewed binary flashed (2,799,648 B); `chats` 0 mismatches; `play message` -> "Soft Hi" (a migrated choice). Listening: Filip.

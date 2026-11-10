@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: MIT
-// EST-361: render the shared OM Lite sound library to WAVs on the host, plus INDEX.md.
+// EST-369: render the shared OM Lite sound library to WAVs on the host, plus INDEX.md.
 //
 // This is the SAME sound_synth.cpp the firmware compiles, at the codec's 16 kHz, 16-bit mono, so the
 // file Filip listens to is the waveform the device streams (the ES8311 output stage adds only its
 // own analog gain). Nothing here runs on the device.
 //
 // Build and run from the firmware folder:
-//   g++ -std=c++17 -O2 -I src tools/mksounds.cpp src/sound_synth.cpp -o /tmp/mksounds
-//   /tmp/mksounds docs/sounds
+//   g++ -std=c++17 -O2 -Isrc tools/mksounds.cpp src/sound_synth.cpp -o mksounds
+//   ./mksounds docs/sounds
 //
-// One file per library sound, named <event>-<n>-<name>.wav where event is the sound's home event and
-// n is its index in that event's own set. The index lists the global library id too, so the id in
-// NVS and the preview file can be matched. A clipped or empty render fails the tool with non-zero.
+// One file per CURRENT library sound, named <shape>-<n>-<name>.wav where n is the sound's index
+// inside its shape (Solo, Duo, Trio, Multi, Alert). The index lists the global library id too, so the
+// id in NVS and the preview file can be matched. A clipped, silent or non-zero-edged render fails
+// the tool with a non-zero exit.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -105,64 +106,73 @@ int main(int argc, char** argv) {
   int written = 0;
   int failed = 0;
   std::vector<std::string> index;
-  index.push_back("# OM Lite sound library (EST-361)");
+  index.push_back("# OM Lite sound library (EST-369)");
   index.push_back("");
   index.push_back("Every file is the exact waveform the device streams (16 kHz, 16-bit mono, the same "
                   "sound_synth.cpp). `id` is the shared-library id stored in NVS; `n` is the sound's "
-                  "index in its home event's own set. Any sound may be chosen for any notification.");
+                  "index inside its shape. Any sound may be chosen for any notification.");
   index.push_back("");
-  index.push_back("| file | event | n | id | family | name | notes (Hz@at+dur ms) | ms | peak |");
-  index.push_back("|---|---|---:|---:|---|---|---|---:|---:|");
+  index.push_back("Shapes, in the picker's order: **Solo** (one note), **Duo** (two notes), **Trio** "
+                  "(three notes), **Multi** (four or more notes, a short phrase or chord) and "
+                  "**Alert** (the long low-battery warning). The voice starts the name.");
+  index.push_back("");
+  index.push_back("| file | shape | n | voice | id | name | notes (Hz@at+dur ms) | ms | peak |");
+  index.push_back("|---|---|---:|---|---:|---|---|---:|---:|");
 
-  printf("%-8s %-2s %-3s %-18s %-7s %5s %7s %8s %8s\n", "event", "n", "id", "name", "family", "ms",
+  printf("%-6s %-2s %-3s %-8s %-16s %5s %7s %8s %8s\n", "shape", "n", "id", "voice", "name", "ms",
          "samples", "peak", "rms");
-  for (int e = 0; e < kEventCount; ++e) {
-    const Event ev = (Event)e;
-    for (int v = 0; v < variantCount(ev); ++v) {
-      const uint8_t id = variantSoundId(ev, (uint8_t)v);
-      if (!validSound(id)) {
-        printf("FAIL no id for %s v%d\n", eventKey(ev), v);
-        ++failed;
-        continue;
-      }
-      RenderInfo info{};
-      const int n = renderSound(id, buf, kMaxSamples, &info);
-      if (n <= 0) {
-        printf("FAIL render %s v%d (%s)\n", eventKey(ev), v, soundName(id));
-        ++failed;
-        continue;
-      }
-      int peak = 0;
-      bool clipped = false;
-      double rms = 0.0;
-      for (int i = 0; i < n; ++i) {
-        const int m = buf[i] < 0 ? -buf[i] : buf[i];
-        if (m > peak) peak = m;
-        if (buf[i] == 32767 || buf[i] == -32768) clipped = true;
-        rms += (double)buf[i] * (double)buf[i];
-      }
-      rms = sqrt(rms / (double)n);
-      if (clipped || peak > kPeakTarget || buf[n - 1] != 0) {
-        printf("FAIL headroom/end %s v%d: peak=%d last=%d\n", eventKey(ev), v, peak, buf[n - 1]);
-        ++failed;
-      }
-      char name[80];
-      snprintf(name, sizeof(name), "%s-%d-%s.wav", eventKey(ev), v, slug(soundName(id)).c_str());
-      const std::string path = dir + "/" + name;
-      if (!writeWav(path, buf, n)) {
-        printf("FAIL write %s\n", path.c_str());
-        ++failed;
-        continue;
-      }
-      ++written;
-      printf("%-8s v%-2d %-3u %-18s %-7s %5d %7d %8d %8.1f  %s\n", eventKey(ev), v, (unsigned)id,
-             soundName(id), familyName(soundFamily(id)), soundMs(id), n, peak, rms, name);
-      char row[320];
-      snprintf(row, sizeof(row), "| %s | %s | %d | %u | %s | %s | %s | %d | %d |", name,
-               eventKey(ev), v, (unsigned)id, familyName(soundFamily(id)), soundName(id),
-               notesText(id).c_str(), soundMs(id), peak);
-      index.push_back(row);
+  int nInShape[kShapeCount] = {};
+  for (int i = 0; i < libraryCount(); ++i) {
+    const uint8_t id = libraryId(i);
+    const Shape shape = soundShape(id);
+    const int n = nInShape[(int)shape]++;
+    if (!validSound(id) || !soundIsCurrent(id)) {
+      printf("FAIL id %u is not a current library sound\n", (unsigned)id);
+      ++failed;
+      continue;
     }
+    RenderInfo info{};
+    const int samples = renderSound(id, buf, kMaxSamples, &info);
+    if (samples <= 0) {
+      printf("FAIL render %s (%s)\n", soundName(id), shapeName(shape));
+      ++failed;
+      continue;
+    }
+    int peak = 0;
+    bool clipped = false;
+    double rms = 0.0;
+    for (int k = 0; k < samples; ++k) {
+      const int m = buf[k] < 0 ? -buf[k] : buf[k];
+      if (m > peak) peak = m;
+      if (buf[k] == 32767 || buf[k] == -32768) clipped = true;
+      rms += (double)buf[k] * (double)buf[k];
+    }
+    rms = sqrt(rms / (double)samples);
+    const int first = buf[0] < 0 ? -buf[0] : buf[0];
+    if (clipped || peak > kPeakTarget || first > 1 || buf[samples - 1] != 0 || peak <= 1000) {
+      printf("FAIL headroom/edges %s: peak=%d first=%d last=%d\n", soundName(id), peak, buf[0],
+             buf[samples - 1]);
+      ++failed;
+    }
+    char base[80];
+    const std::string shapeSlug = slug(shapeName(shape));
+    snprintf(base, sizeof(base), "%s-%d-%s", shapeSlug.c_str(), n,
+             slug(soundName(id)).c_str());
+    const std::string name = std::string(base) + ".wav";
+    const std::string path = dir + "/" + name;
+    if (!writeWav(path, buf, samples)) {
+      printf("FAIL write %s\n", path.c_str());
+      ++failed;
+      continue;
+    }
+    ++written;
+    printf("%-6s %-2d %-3u %-8s %-16s %5d %7d %8d %8.1f  %s\n", shapeName(shape), n, (unsigned)id,
+           soundVoice(id), soundName(id), soundMs(id), samples, peak, rms, name.c_str());
+    char row[320];
+    snprintf(row, sizeof(row), "| %s | %s | %d | %s | %u | %s | %s | %d | %d |", name.c_str(),
+             shapeName(shape), n, soundVoice(id), (unsigned)id, soundName(id),
+             notesText(id).c_str(), soundMs(id), peak);
+    index.push_back(row);
   }
 
   std::ofstream idx(dir + "/INDEX.md");
@@ -178,7 +188,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  printf("\n%d WAV file(s) in %s, %d failure(s); INDEX.md lists all %d\n", written, dir.c_str(),
-         failed, written);
-  return failed == 0 && written == soundCount() ? 0 : 1;
+  printf("\n%d WAV file(s) in %s, %d failure(s); INDEX.md lists all %d sounds\n", written,
+         dir.c_str(), failed, written);
+  return failed == 0 && written == libraryCount() ? 0 : 1;
 }

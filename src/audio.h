@@ -22,9 +22,9 @@ bool audioBegin();
 // 0..100, codec hardware volume.
 void audioVolume(uint8_t pct);
 
-// Queue one library sound for an event. `soundId` is a sound::soundCount() id (the event only labels
-// the log line; any sound can be chosen for any event). Returns false when the audio path is not
-// open, the id is not real, or the small queue is full (the newest request is dropped rather than
+// Queue one library sound for an event. `soundId` is any sound::validSound() id (the event only
+// labels the log line; any sound can be chosen for any event). Returns false when the audio path is
+// not open, the id is not real, or the small queue is full (the newest request is dropped rather than
 // stacking old chimes). Rendering happens in the audio task, never here.
 bool audioPlay(sound::Event ev, uint8_t soundId);
 

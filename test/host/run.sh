@@ -184,11 +184,13 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est358.cpp \
   ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN24"
 "$BIN24"
 
-# EST-359/361: the shared sound library. The synth is the same sound_synth.cpp the firmware and
-# tools/mksounds.cpp build: 54 sounds, >=6 per event, unique names and note sequences, all lengths in
-# range (low battery 1.0..1.5 s and near the cap), the boot D7-gap-F7 phrase, no clipping at full
-# scale, the EST-359 choice migration, and the `play <event> [sound-id]` USB command.
-g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est359.cpp \
+# EST-369: the shared sound library, organised by shape. The synth is the same sound_synth.cpp the
+# firmware and tools/mksounds.cpp build: 41 current sounds (ten Solo, ten Duo, ten Trio, ten Multi and
+# the one long Alert), the voice starts every name, unique names and note sequences, the shape's note
+# count and length range, the kept TK-TK / soft voices / duos / Glass Trio / battery warning, retired
+# EST-361 ids resolving to a kept sound with the same waveform, edges at zero, no clipping, the
+# EST-359 choice migration, and the `play <event> [sound-id]` USB command.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est369.cpp \
   ../../src/sound_synth.cpp ../../src/usb_cmd_logic.cpp -o "$BIN25"
 "$BIN25"
 

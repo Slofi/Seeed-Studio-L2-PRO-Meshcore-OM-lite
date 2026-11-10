@@ -46,7 +46,8 @@ BIN25="$(mktemp /tmp/om-lite-est359.XXXXXX)"
 BIN26="$(mktemp /tmp/om-lite-est360.XXXXXX)"
 BIN27="$(mktemp /tmp/om-lite-est362.XXXXXX)"
 BIN28="$(mktemp /tmp/om-lite-est363.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28"' EXIT
+BIN29="$(mktemp /tmp/om-lite-est364.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -172,9 +173,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est356.cpp \
 # strings), the discovery list, the login state machine and its timeouts, the status decode, the
 # neighbour/region parsers, the two-step confirm, the admin row table, the admin layout's hit test
 # and the `rptr` USB command.
+# EST-364: the model now formats every clock in LOCAL time, i.e. through om::localCivil() in
+# timekeeper.cpp, so the tests that link it link the real timekeeper too.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est358.cpp \
   ../../src/rptr_model.cpp ../../src/ui/rptr_layout.cpp ../../src/usb_cmd_logic.cpp \
-  ../../src/sound_synth.cpp -o "$BIN24"
+  ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN24"
 "$BIN24"
 
 # EST-359/361: the shared sound library. The synth is the same sound_synth.cpp the firmware and
@@ -191,7 +194,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est359.cpp \
 # guard (our clock unset refused, the one-day ceiling, the repeater ahead), the clock reply parser,
 # battery volts, and the keyboard's RptrRegion field (it calls the same rule as the model).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est360.cpp \
-  ../../src/rptr_model.cpp ../../src/ui/chat_layout.cpp -o "$BIN26"
+  ../../src/rptr_model.cpp ../../src/ui/chat_layout.cpp ../../src/timekeeper.cpp -o "$BIN26"
 "$BIN26"
 
 # EST-362: the RPTR section's redesigned interaction. The page model before and after login, one
@@ -200,7 +203,8 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est360.cpp \
 # console (log lines are not rows and nothing in them is tappable), the read-back parsers, the list
 # order and the one pop-up's Cancel/Confirm/outside.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est362.cpp \
-  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp -o "$BIN27"
+  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp \
+  ../../src/timekeeper.cpp -o "$BIN27"
 
 # EST-363: the RPTR page model at its largest inputs (every page, the longest names, kMaxRegions,
 # kMaxNeighbours, a full console log) with every text buffer checked to be NUL-terminated inside its
@@ -208,6 +212,18 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est362.cpp \
 # loop stack; and the three layout defects from the 20:08 screenshot (title vs subtitle band, the
 # hint that was cut, and the Signal row's value under the Log in button).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est363.cpp \
-  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp -o "$BIN28"
+  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp \
+  ../../src/timekeeper.cpp -o "$BIN28"
 "$BIN27"
 "$BIN28"
+
+# EST-364: the 20:34 Argus run. The confirmed clock set becomes the page's clock (its own stamp or
+# the epoch we sent) in LOCAL time with no banner; a status without an answer says "Status  no answer
+# yet" in dim ink (never "Refused") with the 8 s floor and its one retry; the position is a PAIR
+# (the "14.501452, 0.00000" longitude-in-latitude run is reproduced and must stay hidden), the
+# advert's own lat-then-lon byte order is pinned down, the refresh icon has its own gutter and a
+# 40x40 target, no RPTR screen says "UTC", and the badge counts to 99 ("99+" above).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est364.cpp \
+  ../../src/rptr_model.cpp ../../src/rptr_page.cpp ../../src/ui/rptr_layout.cpp \
+  ../../src/timekeeper.cpp -o "$BIN29"
+"$BIN29"

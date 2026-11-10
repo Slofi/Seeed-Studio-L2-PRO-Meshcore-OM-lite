@@ -157,6 +157,9 @@ const char* signalWord(int8_t snr4);
 struct StatusCell {
   char label[10] = "";
   char value[26] = "";
+  // EST-364: a cell that is a state, not a reading ("Status  no answer yet") is drawn dim, so it
+  // never looks like a number the repeater sent.
+  bool dim = false;
 };
 
 // What the page shows before login, from the scan answer and the anonymous regions read.
@@ -188,6 +191,10 @@ struct ScreenIn {
   bool resultOk = false;
   bool resultPending = false;
   bool clockWrong = false;
+  // EST-364: a status request went out and nothing has come back yet (after the automatic retry).
+  // The card then says "Status  no answer yet" in dim ink, with the refresh beside it: a request
+  // without an answer is not a refusal, so nothing turns red.
+  bool statusWait = false;
   const char* const* log = nullptr;
   int logCount = 0;
   const char* consoleInput = "";

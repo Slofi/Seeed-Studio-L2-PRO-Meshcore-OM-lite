@@ -123,7 +123,7 @@ static void testBeforeAndAfterLogin() {
   CHECK_TEXT(s.cells[1].value, "-112 dBm");
   CHECK_TEXT(s.cells[2].label, "Uptime");
   CHECK_TEXT(s.cells[4].label, "Clock");
-  CHECK_TEXT(s.cells[4].value, "19:00 UTC");   // the card is compact; the page line has the date
+  CHECK_TEXT(s.cells[4].value, "20:00");   // EST-364: LOCAL time, compact; the banner has the date
   CHECK(!s.bigButton);
   CHECK(!s.hasApply);
   static const char* const kOrder[] = {"Name", "Position", "Radio", "TX power", "Regions",
@@ -293,14 +293,16 @@ static void testClockGuard() {
   CHECK(!clockWrong(true, our, our, false));   // our clock unset: nothing to compare
   char t[96];
   clockStampText(t, sizeof(t), 1794337200u);
-  CHECK_TEXT(t, "2026-11-10 19:00 UTC");
+  // EST-364: 19:00 UTC is 20:00 in Ljubljana (CET), and no line carries a "UTC" label any more.
+  CHECK_TEXT(t, "2026-11-10 20:00");
   clockStampText(t, sizeof(t), 1715779092u);
   CHECK_TEXT(t, "not set (2024-05-15)");
   clockStampText(t, sizeof(t), 0);
   CHECK_TEXT(t, "not set");
   clockJumpText(t, sizeof(t), 1715779092u, 1794337200u);
-  CHECK(strstr(t, "2024-05-15 13:18") != nullptr);
-  CHECK(strstr(t, "2026-11-10 19:00") != nullptr);
+  CHECK(strstr(t, "15.05.2024 15:18") != nullptr);   // the 2024 restart clock, local
+  CHECK(strstr(t, "10.11.2026 20:00") != nullptr);   // Filip writes dates dotted
+  CHECK(strstr(t, "UTC") == nullptr);
 
   // The pop-up is only for a jump over a day.
   CHECK(!confirmClock(our - 3600u, our).need);
@@ -308,7 +310,8 @@ static void testClockGuard() {
   const ConfirmAsk ask = confirmClock(our - 86400u - 1u, our);
   CHECK(ask.need);
   CHECK_TEXT(ask.verb, "Set clock");
-  CHECK(strstr(ask.text, "2026-11-10") != nullptr);
+  CHECK(strstr(ask.text, "10.11.2026") != nullptr);
+  CHECK(strstr(ask.text, "UTC") == nullptr);
 }
 
 // --- which actions confirm ----------------------------------------------------------------------

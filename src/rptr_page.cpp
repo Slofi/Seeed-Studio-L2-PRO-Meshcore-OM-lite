@@ -35,13 +35,16 @@ const char* regionName(const Region& r) { return r.name[0] ? r.name : "*"; }
 
 bool regionIsWildcard(const Region& r) { return r.wildcard || strcmp(regionName(r), "*") == 0; }
 
-// "46.25000" from MeshCore's micro-degrees, five decimals (the store is a float).
+// "46.25000" from MeshCore's micro-degrees: five decimals (the store is a float) and always the same
+// width. EST-364: the old "%05u" printed SIX digits whenever the fraction started with a digit, so
+// Argus's "14.501452" and "46.05000" did not line up and the wrong field read as a real number.
 void coordText(char* out, size_t cap, int32_t e6) {
   if (out == nullptr || cap == 0) return;
   const bool neg = e6 < 0;
-  const int64_t a = neg ? -(int64_t)e6 : (int64_t)e6;
-  snprintf(out, cap, "%s%lld.%05u", neg ? "-" : "", (long long)(a / 1000000),
-           (unsigned)(a % 1000000));
+  const int64_t micro = neg ? -(int64_t)e6 : (int64_t)e6;
+  const int64_t five = (micro + 5) / 10;   // 1e-5 degrees, rounded
+  snprintf(out, cap, "%s%lld.%05u", (neg && five != 0) ? "-" : "", (long long)(five / 100000),
+           (unsigned)(five % 100000));
 }
 
 void positionText(char* out, size_t cap, const Facts& f) {
@@ -54,6 +57,12 @@ void positionText(char* out, size_t cap, const Facts& f) {
   char lon[20];
   coordText(lat, sizeof(lat), f.latE6);
   coordText(lon, sizeof(lon), f.lonE6);
+  // EST-364: a repeater that shares no position answers two zeroes. "0.00000, 0.00000" looks like a
+  // place in the Gulf of Guinea, so the row says what it means.
+  if (positionNotShared(f.latE6, f.lonE6)) {
+    copyText(out, cap, "not shared");
+    return;
+  }
   snprintf(out, cap, "%s, %s", lat, lon);
 }
 
@@ -342,7 +351,11 @@ int buildScreen(const ScreenIn& in, ScreenOut* out) {
         uptimeText(v, sizeof(v), st->airtimeSec);
         cell("Airtime", v);
       } else {
-        cell("Status", "tap refresh");
+        // EST-364: a status request that has not been answered yet says exactly that, in dim ink
+        // beside the refresh icon. It is not a refusal, so nothing here is red and nothing says
+        // "Refused"; only an answered request fills the numbers in.
+        cell("Status", in.statusWait ? "no answer yet" : "tap refresh");
+        if (out->cellCount > 0) out->cells[out->cellCount - 1].dim = true;
         cell("Battery", "n/a");
         cell("Noise", "n/a");
         cell("Uptime", "n/a");

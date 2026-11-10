@@ -72,7 +72,16 @@ RptrPageLayout rptrPageLayoutFor(const Layout& L, bool hasCard, bool hasBanner, 
   int16_t y = (int16_t)(top + kRptrPageHeadH + 1);
   if (hasCard) {
     a.card = Rect{8, y, (int16_t)(L.width - 16), kRptrCardH};
-    a.refresh = Rect{(int16_t)(a.card.right() - 24), (int16_t)(a.card.y + 3), 21, 21};
+    // EST-364: the gutter at the card's right belongs to the refresh alone. Both value columns stop
+    // before it, so no value can run under the icon (the 20:34 screenshot: "-119 dBm" did).
+    a.cardColW = (int16_t)((a.card.w - 16 - kRptrCardGutter) / 2);
+    // The icon: kRptrRefreshIcon square in the gutter's top corner. The finger target is a
+    // kRptrRefreshTap square around it, kept inside the card (the card is 44 px tall, so 40 fits).
+    const int16_t iconX = (int16_t)(a.card.right() - 8 - kRptrRefreshIcon);
+    a.refresh = Rect{iconX, (int16_t)(a.card.y + 2), kRptrRefreshIcon, kRptrRefreshIcon};
+    const int16_t tapX = (int16_t)(a.card.right() - 2 - kRptrRefreshTap);
+    const int16_t tapY = (int16_t)(a.card.y + (kRptrCardH - kRptrRefreshTap) / 2);
+    a.refreshTap = Rect{tapX, tapY, kRptrRefreshTap, kRptrRefreshTap};
     y = (int16_t)(a.card.bottom() + 3);
   }
   if (hasBanner) {
@@ -145,7 +154,7 @@ RptrHitResult rptrPageHitAt(const RptrPageLayout& a, const rptr::ScreenOut& scre
     out.kind = RptrHit::Back;
     return out;
   }
-  if (!a.refresh.empty() && a.refresh.contains(x, y)) {
+  if (!a.refreshTap.empty() && a.refreshTap.contains(x, y)) {
     out.kind = RptrHit::Refresh;
     return out;
   }

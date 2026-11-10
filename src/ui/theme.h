@@ -148,14 +148,17 @@ constexpr int16_t kTabPadY    = 3;   // icon top: 2 px selected line + 1 px; lea
 constexpr int16_t kTabLabelPadB = 5; // label centre, in px up from the tab bar's floor
 
 // The unread badge on the Chat tab (Filip, 2026-11-10: "too fuzzy, make it sharper"). One red shape
-// for every count that sits on kBad: a 13 px circle for one digit, a 19x13 pill for two ("9+"),
+// for every count that sits on kBad: a 13 px circle for one digit, a 19x13 pill for two ("10"),
 // drawn with LovyanGFX's anti-aliased fills, with a 1 px ring in the bar colour so it separates from
 // the icon underneath. The digits are a pixel face (ui/badge_font.h), never a smooth font: at this
 // size the smooth face's coverage bled white into the red and read pink.
 // Placement: the top-right corner of the tab icon, starting 1 px under the selected tab's gold line
 // (2 px) and ending 1 px above the tab label's line box, so it never touches either.
 constexpr int16_t kBadgeD      = 13;              // diameter, 2 * 6 + 1
-constexpr int16_t kBadgePillW  = 19;              // "9+" (two 5 px digits and a 1 px gap, centred)
+constexpr int16_t kBadgePillW  = 19;              // two digits (two 5 px glyphs and a 1 px gap, centred)
+// EST-364: above 99 the badge says "99+", three glyphs (5+1+5+1+5 = 17 px) and the same 3 px of
+// padding on each side as the 19 px pill.
+constexpr int16_t kBadgePill3W = 23;              // "99+"
 constexpr int16_t kBadgeRing   = 1;               // the separating ring, in the bar colour
 constexpr int16_t kBadgeTop    = kTabTopLine + 1; // tab top -> badge top (clear of the gold line)
 constexpr int16_t kBadgeCxOfs  = kTabIcon / 2;    // tab centre -> badge centre: the icon's right edge
@@ -186,7 +189,7 @@ constexpr int16_t kHeadChevronW = 7;   // the down chevron drawn after the name 
 constexpr int16_t kHeadChevronGap = 5;
 constexpr int16_t kElsewhereDot = 5;   // the gold dot: something is waiting in another chat
 constexpr int16_t kElsewhereGap = 4;
-constexpr int16_t kElsewhereW   = 14;  // room kept for its count ("9+"), so the name never jumps
+constexpr int16_t kElsewhereW   = 20;  // room kept for its count ("99+"), so the name never jumps
 
 // The chat selector (the dropdown over the message area). Section labels, two-line chat rows and the
 // pinned "Manage channels" row at the panel's floor.

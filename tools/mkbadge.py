@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the unread badge preview: 1:1 and 8x, for counts 1, 7 and "9+".
+"""Render the unread badge preview: 1:1 and 8x, for counts 1, 10, 99 and "99+".
 
 The digits come from the SAME table the firmware draws (src/ui/badge_font.h), and the geometry from
 theme.h, so this contact sheet cannot drift from the device. The circle/pill edge is the only thing
@@ -80,10 +80,24 @@ def composite(img, box, shape, colour):
     img.paste(layer, (x, y), shape)
 
 
+def badge_text(count):
+    """The same rule as src/ui/badge_font.h badgeText(): the exact count to 99, then "99+"."""
+    if count < 1:
+        return ""
+    if count <= 99:
+        return str(count)
+    return "99+"
+
+
 def draw_badge(img, tab_x, tab_y, count, g):
     """The same order the widget draws in: ring first, then the fill, then the pixel digits."""
-    chars = "9+" if count > 9 else str(count)
-    w = g["kBadgePillW"] if len(chars) > 1 else g["kBadgeD"]
+    chars = badge_text(count)
+    if len(chars) <= 1:
+        w = g["kBadgeD"]
+    elif len(chars) == 2:
+        w = g["kBadgePillW"]
+    else:
+        w = g["kBadgePill3W"]
     h = g["kBadgeD"]
     cx = tab_x + g["kTabW"] // 2 + g["kBadgeCxOfs"]
     cy = tab_y + g["kBadgeTop"] + h // 2
@@ -141,24 +155,25 @@ def main():
     }
     g["kTabW"] = theme.get("kScreenW", 320) // 4      # four tabs split the bar
     for key in ("kTabH", "kTabTopLine", "kTabPadY", "kTabIcon", "kTabLabelPadB",
-                "kBadgeD", "kBadgePillW", "kBadgeRing", "kBadgeTop", "kBadgeCxOfs"):
+                "kBadgeD", "kBadgePillW", "kBadgePill3W", "kBadgeRing", "kBadgeTop",
+                "kBadgeCxOfs"):
         g[key] = theme[key]
 
     label_font = ImageFont.truetype(FONT, 9)
     title_font = ImageFont.truetype(FONT, 13)
     cap_font = ImageFont.truetype(FONT, 10)
 
-    counts = [1, 7, 10]   # 10 draws as "9+"
+    counts = [1, 10, 99, 120]   # 120 draws as "99+" (EST-364: the badge counts to 99)
     zoom = 8
     tab_w, tab_h = g["kTabW"], g["kTabH"]
     pad = 10
     # one column holds the 1:1 tab AND the 8x crop (the pill plus a 10 px margin each side)
-    col_w = max(tab_w, (g["kBadgePillW"] + 20) * zoom) + 16
+    col_w = max(tab_w, (g["kBadgePill3W"] + 20) * zoom) + 16
     width = pad * 2 + col_w * len(counts)
     ones = Image.new("RGB", (width, 320), rgb(COLOURS["kBar"]))
     d = ImageDraw.Draw(ones)
     d.text((pad, 6), "OM Lite unread badge, 1:1 then 8x", font=title_font, fill=rgb(COLOURS["kInk"]))
-    d.text((pad, 24), "pixel digits, 13 px circle / 19x13 pill, 1 px bar ring, clear of the gold line",
+    d.text((pad, 24), "pixel digits, 13 px circle / 19x13 pill / 23x13 for 99+, 1 px ring, clear of the gold line",
            font=cap_font, fill=rgb(COLOURS["kDim"]))
 
     y1 = 44
@@ -167,7 +182,7 @@ def main():
         draw_tab(ones, ox, y1, g, label_font)
         box = draw_badge(ones, ox, y1, count, g)
         d.text((pad + i * col_w + col_w // 2, y1 + tab_h + 4),
-               "%d -> %s" % (count, "9+" if count > 9 else str(count)),
+               "%d -> %s" % (count, badge_text(count)),
                font=cap_font, anchor="ma", fill=rgb(COLOURS["kDim"]))
         # 8x of the badge, cropped from the 1:1 tab so every pixel is the device's
         # the whole tab height and a margin either side: the gold line above the badge and the

@@ -275,7 +275,8 @@ static void testClockReply() {
   CHECK(!clockReplyParse(nullptr, &epoch));
   char t[24];
   clockText(t, sizeof(t), 1794319320u);
-  CHECK_TEXT(t, "14:02 UTC");
+  // EST-364: 14:02 UTC is 15:02 in Ljubljana (CET), shown without a zone label.
+  CHECK_TEXT(t, "15:02");
 }
 
 // --- battery ------------------------------------------------------------------------------------

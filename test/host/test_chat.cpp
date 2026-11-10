@@ -657,16 +657,22 @@ static void testComposeBudget() {
 // the selected tab's gold line nor the tab label.
 static void testBadge() {
   const Rect tab = l2().tab(Tab::Chat);
-  const Rect one = countBadgeRect(tab, false);
-  const Rect two = countBadgeRect(tab, true);
+  const Rect one = countBadgeRect(tab, 1);
+  const Rect two = countBadgeRect(tab, 2);
+  const Rect three = countBadgeRect(tab, 3);
 
-  // Geometry from theme.h: a 13 px circle, a 19x13 pill, both on the same centre.
+  // Geometry from theme.h: a 13 px circle, a 19x13 pill for two digits, a 23x13 pill for "99+",
+  // all on the same centre (EST-364).
   CHECK(one.w == kBadgeD && one.h == kBadgeD);
   CHECK(one.w == 13 && one.h == 13);
   CHECK(two.w == kBadgePillW && two.h == kBadgeD);
   CHECK(two.w == 19 && two.h == 13);
+  CHECK(three.w == kBadgePill3W && three.h == kBadgeD);
+  CHECK(three.w == 23 && three.h == 13);
   CHECK(one.x + one.w / 2 == two.x + two.w / 2);
+  CHECK(one.x + one.w / 2 == three.x + three.w / 2);
   CHECK(one.y == two.y && one.bottom() == two.bottom());
+  CHECK(one.y == three.y && one.bottom() == three.bottom());
 
   // Clear of the gold selected-tab line (the tab's top 2 px) and of the tab label's line box.
   CHECK(one.y >= tab.y + kTabTopLine + 1);
@@ -677,18 +683,26 @@ static void testBadge() {
   // Inside the tab, to the right of its centre: the icon's top-right corner.
   CHECK(one.x >= tab.x && one.right() <= tab.right());
   CHECK(two.x >= tab.x && two.right() <= tab.right());
+  CHECK(three.x >= tab.x && three.right() <= tab.right());
   CHECK(one.x + one.w / 2 > tab.x + tab.w / 2);
 
-  // The count rule: 1..9, then "9+" (never a bare "9" above nine).
+  // The count rule (EST-364): the exact number up to 99, then "99+".
   char b[4];
   CHECK(badgeText(0, b, sizeof(b)) == 0 && b[0] == 0);
   CHECK(badgeText(1, b, sizeof(b)) == 1 && strcmp(b, "1") == 0);
   CHECK(badgeText(7, b, sizeof(b)) == 1 && strcmp(b, "7") == 0);
   CHECK(badgeText(9, b, sizeof(b)) == 1 && strcmp(b, "9") == 0);
-  CHECK(badgeText(10, b, sizeof(b)) == 2 && strcmp(b, "9+") == 0);
-  CHECK(badgeText(99, b, sizeof(b)) == 2 && strcmp(b, "9+") == 0);
+  CHECK(badgeText(10, b, sizeof(b)) == 2 && strcmp(b, "10") == 0);
+  CHECK(badgeText(42, b, sizeof(b)) == 2 && strcmp(b, "42") == 0);
+  CHECK(badgeText(99, b, sizeof(b)) == 2 && strcmp(b, "99") == 0);
+  CHECK(badgeText(100, b, sizeof(b)) == 3 && strcmp(b, "99+") == 0);
+  CHECK(badgeText(1000, b, sizeof(b)) == 3 && strcmp(b, "99+") == 0);
   CHECK(badgeText(1, nullptr, 4) == 0);
   CHECK(badgeText(1, b, 1) == 0);
+  // Two digits fit the 19 px pill and three the 23 px one (5 px glyphs, 1 px gaps).
+  CHECK(badgeTextWidth(2) == 11 && badgeTextWidth(3) == 17);
+  CHECK(badgeTextWidth(2) <= kBadgePillW - 8);
+  CHECK(badgeTextWidth(3) <= kBadgePill3W - 6);
 
   // The pixel face: 5x7, only the five low bits used, every digit and the plus present, and both
   // glyphs of "9+" fit inside the pill's rounded ends.
@@ -700,9 +714,10 @@ static void testBadge() {
     CHECK(badgeGlyphRows(kBadgeFace[i].ch) == kBadgeFace[i].rows);
     for (int r = 0; r < kBadgeGlyphH; ++r) CHECK((kBadgeFace[i].rows[r] & 0xE0) == 0);
   }
-  for (char ch = '1'; ch <= '9'; ++ch) CHECK(badgeGlyphRows(ch) != nullptr);
+  for (char ch = '0'; ch <= '9'; ++ch) CHECK(badgeGlyphRows(ch) != nullptr);
   CHECK(badgeGlyphRows('+') != nullptr);
-  CHECK(badgeGlyphRows('0') == nullptr);   // zero is never drawn: an empty badge disappears
+  // '0' is a glyph now (a two-digit count needs it) but a count of zero still draws nothing.
+  CHECK(badgeText(0, b, sizeof(b)) == 0);
 }
 
 // The message sheet: the rows each message kind gets (and the ones that are left out because they

@@ -37,6 +37,20 @@ constexpr uint32_t kLoginExtraMs = 2500;
 // The anonymous regions query is one direct request/response; the repeater delays a server reply a
 // little, so allow a few seconds on top of the airtime estimate.
 constexpr uint32_t kRegionsExtraMs = 4000;
+// EST-364: a status request's deadline never drops under this, whatever upstream's airtime estimate
+// says. On Argus the estimate plus kLoginExtraMs came to 3.2 s and cut off an answer that was on its
+// way; one automatic retry follows a silence, and only then does the card say "no answer yet".
+constexpr uint32_t kStatusMinMs = 8000;
+// The same floor for one CLI line (a read or a write): the repeater's own CLI answers took 3-4 s
+// on the same run, so the shell's old fixed 3 s deadline threw away answers that had arrived.
+constexpr uint32_t kCliMinMs = 8000;
+// How long one request may wait: upstream's own est_timeout plus the caller's margin, never under
+// the floor. The link (status) and the shell (CLI lines) both call this, so the host test proves the
+// arithmetic the device runs.
+constexpr uint32_t requestDeadlineMs(uint32_t estMs, uint32_t extraMs, uint32_t floorMs) {
+  const uint32_t wanted = estMs + extraMs;
+  return wanted > floorMs ? wanted : floorMs;
+}
 
 // ------------------------------------------------------------------------------------------- password
 // The admin password is taken literally: printable ASCII only, and MeshCore compares it with strcmp.
@@ -282,14 +296,29 @@ const char* clockVerdictText(ClockVerdict v);
 // True when the logged-in page must show the "Clock is wrong" line: no clock read yet, an unset
 // repeater clock, or a difference of more than a minute either way.
 bool clockWrong(bool rptrKnown, uint32_t rptrEpoch, uint32_t ourEpoch, bool ourReal);
-// "2026-11-10 19:05 UTC", and "not set (2024-05-15)" for the MeshCore restart clock (below the
-// kClockRealSince cut-off). This is the form the repeater page and the jump confirm show.
+// LOCAL TIME EVERYWHERE (EST-364, Filip: "UTC +1h!", the pop-up said 19:33 UTC at 20:33 local).
+// The repeater keeps UTC on the air and in its own prefs; only what the glass shows is converted.
+// Every helper below goes through om::localCivil() in timekeeper.cpp, i.e. the ONE Europe/Ljubljana
+// rule (CET-1CEST,M3.5.0,M10.5.0/3) the status bar and ui/age.cpp already use. No line the RPTR
+// section draws carries a "UTC" label any more.
+//
+// "2026-11-10 20:05" local, and "not set (2024-05-15)" for the MeshCore restart clock (below the
+// kClockRealSince cut-off). This is the form the repeater page's banner shows.
 int clockStampText(char* out, size_t cap, uint32_t epoch);
-// The confirm's one sentence: "Set the repeater's clock from 2024-05-15 13:18 to 2026-11-10 19:05?"
+// The confirm's one sentence, both sides local and dotted like Filip writes them:
+// "Set the repeater's clock from not set to 10.11.2026 20:33?"
 int clockJumpText(char* out, size_t cap, uint32_t fromEpoch, uint32_t toEpoch);
 // CommonCLI's `clock` reply: "14:02 - 10/11/2026 UTC" -> epoch seconds (UTC), false for anything
-// else. Used for the after-sync read, because the answer carries no epoch.
+// else. The answer itself stays UTC; every displayed form of it goes through the helpers above.
 bool clockReplyParse(const char* text, uint32_t* epoch);
+// The answer to our own `time <epoch>`: "OK - clock set: 19:33 - 10/11/2026 UTC" (run-verified on
+// Argus, EST-363) -> epoch seconds (UTC). This is the repeater's OWN confirmation, so the page takes
+// the new clock from it instead of waiting for a second `clock` read that may time out (EST-364).
+bool clockSetReplyParse(const char* text, uint32_t* epoch);
+// One CLI answer for the console log, with a clock answer converted to local time and its "UTC"
+// label dropped: "OK - clock set: 19:33 - 10/11/2026 UTC" -> "OK - clock set: 20:33 - 10.11.2026".
+// Anything else is copied unchanged. Returns the length written.
+int localClockAnswer(const char* text, char* out, size_t cap);
 
 // ------------------------------------------------------------------------------------- admin values
 // The radio draft: the mock's +/- steppers. Nothing is sent until Apply, exactly as the mock does
@@ -412,7 +441,7 @@ int batteryRawText(char* out, size_t cap, uint16_t milliVolts);   // "4120 mV"
 // A battery voltage as a percentage of a 3.0..4.2 V single cell, -1 when out of range.
 int batteryPercent(uint16_t milliVolts);
 
-// "14:02 UTC" from the repeater's clock (its login answer), for a compact line.
+// "20:33" local from the repeater's clock (its login answer), for the card's compact line.
 int clockText(char* out, size_t cap, uint32_t epoch);
 
 // ------------------------------------------------------------------------------------ read-backs
@@ -432,9 +461,48 @@ int clockText(char* out, size_t cap, uint32_t epoch);
 bool valueReplyParse(const char* text, char* out, size_t cap);
 bool intReplyParse(const char* text, int32_t* out);
 bool radioReplyParse(const char* text, RadioValues* out);   // freq/bw/sf/cr, tx untouched
-bool coordReplyParse(const char* text, int32_t* e6);        // degrees -> micro-degrees
+// Which field an answer is allowed to be: a latitude is within +-90 degrees, a longitude within
+// +-180. `Any` is the old, looser check and is only for a caller that does not know the field.
+enum class CoordAxis : uint8_t { Any = 0, Lat, Lon };
+constexpr int32_t kCoordLatLimitE6 = 90000000;
+constexpr int32_t kCoordLonLimitE6 = 180000000;
+bool coordReplyParse(const char* text, int32_t* e6, CoordAxis axis = CoordAxis::Any);
 bool switchReplyParse(const char* text, bool* on);          // "on"/"off"
 bool loopReplyParse(const char* text, LoopDetect* out);
+
+// --------------------------------------------------------------------------- the coordinate pair
+// EST-364: Argus showed "14.501452, 0.00000" after login, i.e. its LONGITUDE in the latitude field.
+// The cause is not an offset: a CLI answer carries no command name, so rptr_link matches answers to
+// commands by the order it sent them, and one answer that never arrives shifts every later answer
+// one command back. "get lon" then lands on "get lat" and its 14.501452 becomes the latitude.
+// Two rules close it:
+//   1. the shell tells the link when a line is abandoned (rptrForgetPending), so the ring stays
+//      exact, and
+//   2. the pair below: a position is shown ONLY when both answers arrived in one clean run. Any
+//      abandoned line in between marks the run unclean, so a late answer can never be paired.
+struct CoordRun {
+  bool lat = false;
+  bool lon = false;
+  bool clean = true;
+  int32_t latE6 = 0;
+  int32_t lonE6 = 0;
+
+  void reset();
+  void takeLat(int32_t e6);
+  void takeLon(int32_t e6);
+  // A line timed out: whatever arrives next cannot be trusted as this pair (see above).
+  void abandon();
+  // Both halves arrived and no line was abandoned in between: the page may show them.
+  bool complete() const { return lat && lon && clean; }
+};
+// Both fields zero means the repeater shares no position at all, which the page says in words
+// ("not shared") instead of printing "0.000000, 0.000000".
+bool positionNotShared(int32_t latE6, int32_t lonE6);
+
+// Does `text` look like the answer to `cmd`? The shell's backstop for rule 1 above: a reply that
+// cannot be that command's answer is never parsed as one (an "OK - clock set" line can never become
+// a `get radio` value, and a switch answer can never become a coordinate).
+bool replyFitsCmd(const char* cmd, const char* text);
 // An answered `region save` (and every other write) comes back as "OK", "OK - ..." or an error.
 bool answerOk(const char* text);
 // "OK - reboot to apply" -> "Applied, restart the repeater to use it"; an error -> its own words

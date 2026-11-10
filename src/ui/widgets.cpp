@@ -431,10 +431,12 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, Tab active, int unread, boo
   }
 
   // The unread count sits on the Chat icon, top-right, on the badge widget (theme.h holds its
-  // geometry). The ring is the bar colour, so the circle separates from the icon under it.
+  // geometry). The ring is the bar colour, so the circle separates from the icon under it. EST-364:
+  // the box is as wide as the text the face draws (one digit, two, or "99+").
   if (unread > 0) {
-    const Rect box = countBadgeRect(L.tab(Tab::Chat), unread > 9);
-    drawCountBadge(d, box, unread, kBar);
+    char badgeChars[4];
+    const int chars = badgeText(unread, badgeChars, (int)sizeof(badgeChars));
+    if (chars > 0) drawCountBadge(d, countBadgeRect(L.tab(Tab::Chat), chars), unread, kBar);
   }
 
   // EST-342: a small gold dot on the Nodes tab while a contact added since the screen was last

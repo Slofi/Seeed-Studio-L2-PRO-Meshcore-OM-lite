@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+// The one Europe/Ljubljana local-time rule (EST-364): om::localCivil() below is the same function
+// the status bar and ui/age.cpp use, so the RPTR section cannot invent its own zone.
+#include "timekeeper.h"
+
 namespace om {
 namespace rptr {
 namespace {
@@ -888,7 +892,8 @@ int clockAgoText(char* out, size_t cap, int32_t deltaSecs) {
 }
 
 namespace {
-// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm), UTC only.
+// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm). Used to turn the repeater's
+// own UTC clock text into an epoch; the DISPLAY never prints UTC (EST-364).
 int64_t daysFromCivil(int y, int m, int d) {
   y -= m <= 2 ? 1 : 0;
   const int era = (y >= 0 ? y : y - 399) / 400;
@@ -898,30 +903,81 @@ int64_t daysFromCivil(int y, int m, int d) {
   return (int64_t)era * 146097 + (int64_t)doe - 719468;
 }
 
-// The UTC year of an epoch. Used only for the "not set (2024)" label, so a small walk after a mean
-// year estimate is enough (and exact for every value the repeaters send).
-int utcYear(uint32_t epoch) {
-  int year = 1970 + (int)(epoch / 31556952u);
-  while (daysFromCivil(year + 1, 1, 1) * 86400 <= (int64_t)epoch) ++year;
-  while (daysFromCivil(year, 1, 1) * 86400 > (int64_t)epoch) --year;
-  return year;
+// The LOCAL year of an epoch, for the "not set (2024)" label. Everything this section shows is local
+// (EST-364), and around New Year local and UTC are not even in the same year.
+int localYear(uint32_t epoch) {
+  int y = 0, mo = 0, d = 0, hh = 0, mi = 0;
+  if (om::localCivil(epoch, y, mo, d, hh, mi)) return y;
+  return 1970 + (int)(epoch / 31556952u);
+}
+
+// The same instant in the repeater's own order, but local and dotted: "20:33 - 10.11.2026". The
+// console log keeps the answer's shape, only the time and the date change.
+void stampClockAnswer(char* out, size_t cap, uint32_t epoch) {
+  if (out == nullptr || cap == 0) return;
+  if (epoch < 1600000000u) {
+    snprintf(out, cap, "not set");
+    return;
+  }
+  int y = 0, mo = 0, d = 0, hh = 0, mi = 0;
+  if (!om::localCivil(epoch, y, mo, d, hh, mi)) {
+    snprintf(out, cap, "not set");
+    return;
+  }
+  snprintf(out, cap, "%02d:%02d - %02d.%02d.%04d", hh, mi, d, mo, y);
+}
+
+// The same instant as Filip writes a date: "10.11.2026 20:33" (the Set clock pop-up's own wording).
+void stampDotted(char* out, size_t cap, uint32_t epoch) {
+  if (out == nullptr || cap == 0) return;
+  if (epoch < 1600000000u) {
+    snprintf(out, cap, "not set");
+    return;
+  }
+  int y = 0, mo = 0, d = 0, hh = 0, mi = 0;
+  if (!om::localCivil(epoch, y, mo, d, hh, mi)) {
+    snprintf(out, cap, "not set");
+    return;
+  }
+  snprintf(out, cap, "%02d.%02d.%04d %02d:%02d", d, mo, y, hh, mi);
+}
+
+// The repeater's own clock text, "HH:MM - DD/MM/YYYY UTC" (CommonCLI prints UTC), at the start of
+// `text`. The `clock` read and the `OK - clock set: ...` confirmation carry the same shape, so both
+// parsers below share this one. Returns a pointer just past the parsed text, or nullptr.
+const char* parseRepeaterClock(const char* text, uint32_t* epoch) {
+  if (text == nullptr || epoch == nullptr) return nullptr;
+  int hh = 0, mm = 0, dd = 0, mo = 0, yy = 0, used = 0;
+  char tail[8] = "";
+  if (sscanf(text, "%d:%d - %d/%d/%d %7s%n", &hh, &mm, &dd, &mo, &yy, tail, &used) != 6) {
+    return nullptr;
+  }
+  if (strcmp(tail, "UTC") != 0) return nullptr;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || dd < 1 || dd > 31 || mo < 1 || mo > 12 ||
+      yy < 2020 || yy > 2100) {
+    return nullptr;
+  }
+  *epoch = (uint32_t)(daysFromCivil(yy, mo, dd) * 86400 + hh * 3600 + mm * 60);
+  return text + used;
 }
 }  // namespace
 
 bool clockReplyParse(const char* text, uint32_t* epoch) {
+  // CommonCLI's `clock`: exactly "HH:MM - DD/MM/YYYY UTC", nothing after it.
+  const char* end = parseRepeaterClock(text, epoch);
+  if (end == nullptr) return false;
+  while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') ++end;
+  return *end == 0;
+}
+
+bool clockSetReplyParse(const char* text, uint32_t* epoch) {
+  // "OK - clock set: 19:33 - 10/11/2026 UTC" is the repeater's confirmation that it took our `time`.
+  // The prefix is its own wording, so it is found rather than assumed; the clock text after it is
+  // parsed by the same code as the `clock` read.
   if (text == nullptr || epoch == nullptr) return false;
-  // CommonCLI's `clock`: "%02d:%02d - %d/%d/%d UTC" (UTC, so no zone work).
-  int hh = 0, mm = 0, dd = 0, mo = 0, yy = 0;
-  char tail[8] = "";
-  if (sscanf(text, "%d:%d - %d/%d/%d %7s", &hh, &mm, &dd, &mo, &yy, tail) != 6) return false;
-  if (strcmp(tail, "UTC") != 0) return false;
-  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || dd < 1 || dd > 31 || mo < 1 || mo > 12 ||
-      yy < 2020 || yy > 2100) {
-    return false;
-  }
-  const int64_t days = daysFromCivil(yy, mo, dd);
-  *epoch = (uint32_t)(days * 86400 + hh * 3600 + mm * 60);
-  return true;
+  const char* at = strstr(text, "clock set:");
+  if (at == nullptr) return false;
+  return parseRepeaterClock(at + 10, epoch) != nullptr;
 }
 
 // ----------------------------------------------------------------------------------------- battery
@@ -1006,14 +1062,57 @@ int clockText(char* out, size_t cap, uint32_t epoch) {
   if (out == nullptr || cap == 0) return 0;
   if (epoch < kClockRealSince) {
     // The MeshCore restart clock reads 2024: say the year so "Sync clock" is the obvious next step.
-    if (epoch >= 1600000000u) snprintf(out, cap, "not set (%d)", utcYear(epoch));
+    if (epoch >= 1600000000u) snprintf(out, cap, "not set (%d)", localYear(epoch));
     else snprintf(out, cap, "not set");
     return (int)strlen(out);
   }
-  const uint32_t secs = epoch % 86400u;
-  const int n = snprintf(out, cap, "%02u:%02u UTC", (unsigned)(secs / 3600u),
-                         (unsigned)((secs / 60u) % 60u));
+  // LOCAL time (EST-364): the repeater answers UTC, Filip reads Ljubljana.
+  int y = 0, mo = 0, d = 0, hh = 0, mi = 0;
+  if (!om::localCivil(epoch, y, mo, d, hh, mi)) {
+    snprintf(out, cap, "not set");
+    return (int)strlen(out);
+  }
+  const int n = snprintf(out, cap, "%02d:%02d", hh, mi);
   return n > 0 ? n : 0;
+}
+
+int localClockAnswer(const char* text, char* out, size_t cap) {
+  // The console log is raw CLI text, but a clock answer is still a time Filip reads: rewrite it in
+  // local time and drop the repeater's "UTC" label (EST-364). "OK - clock set: 19:33 - 10/11/2026
+  // UTC" becomes "OK - clock set: 20:33 - 10.11.2026"; anything that is not a clock answer is
+  // copied through untouched.
+  if (out == nullptr || cap == 0) return 0;
+  out[0] = 0;
+  if (text == nullptr) return 0;
+  // Where the clock text starts: right after "clock set: " when the answer confirms a set, else at
+  // the start of the answer (the `clock` read).
+  const char* start = nullptr;
+  const char* marker = strstr(text, "clock set:");
+  if (marker != nullptr && marker[10] == ' ') {
+    start = marker + 11;
+  } else {
+    const char* p = text;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p == '>' && p[1] == ' ') p += 2;
+    start = p;
+  }
+  const uint32_t at = (uint32_t)(start - text);
+  uint32_t epoch = 0;
+  const char* end = parseRepeaterClock(start, &epoch);
+  if (end == nullptr) {
+    snprintf(out, cap, "%s", text);
+    return (int)strlen(out);
+  }
+  char local[24];
+  stampClockAnswer(local, sizeof(local), epoch);
+  const size_t prefix = at < cap ? at : cap - 1;
+  memcpy(out, text, prefix);
+  out[prefix] = 0;
+  char tail[16] = "";
+  while (*end == ' ' || *end == '\t') ++end;
+  snprintf(tail, sizeof(tail), "%s", end);
+  const int n = snprintf(out + prefix, cap - prefix, "%s%s%s", local, tail[0] ? " " : "", tail);
+  return n > 0 ? (int)(prefix + (size_t)n) : (int)prefix;
 }
 
 // -------------------------------------------------------------------------------------- clock guard
@@ -1053,23 +1152,8 @@ bool clockWrong(bool rptrKnown, uint32_t rptrEpoch, uint32_t ourEpoch, bool ourR
 
 namespace {
 
-// Days since 1970-01-01 -> civil date (Howard Hinnant's inverse, UTC only).
-void civilFromDays(int64_t z, int* outY, int* outM, int* outD) {
-  z += 719468;
-  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
-  const unsigned doe = (unsigned)(z - era * 146097);
-  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-  const int64_t y = (int64_t)yoe + era * 400;
-  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-  const unsigned mp = (5 * doy + 2) / 153;
-  const unsigned d = doy - (153 * mp + 2) / 5 + 1;
-  const unsigned m = mp < 10 ? mp + 3 : mp - 9;
-  *outY = (int)(y + (m <= 2 ? 1 : 0));
-  *outM = (int)m;
-  *outD = (int)d;
-}
-
-// "2026-11-10 19:05" (no zone), or "not set" for the restart clock.
+// The LOCAL stamp of an epoch, "2026-11-10 20:05". EST-364: the zone comes from om::localCivil(),
+// the same Europe/Ljubljana rule the status bar and ui/age.cpp use, and no line says "UTC".
 void stampShort(char* out, size_t cap, uint32_t epoch) {
   if (out == nullptr || cap == 0) return;
   // A 2020..2024 stamp is MeshCore's restart clock: it is still a date, and a jump confirmation
@@ -1078,11 +1162,12 @@ void stampShort(char* out, size_t cap, uint32_t epoch) {
     snprintf(out, cap, "not set");
     return;
   }
-  int y = 0, mo = 0, d = 0;
-  civilFromDays((int64_t)(epoch / 86400u), &y, &mo, &d);
-  const uint32_t secs = epoch % 86400u;
-  snprintf(out, cap, "%04d-%02d-%02d %02u:%02u", y, mo, d, (unsigned)(secs / 3600u),
-           (unsigned)((secs / 60u) % 60u));
+  int y = 0, mo = 0, d = 0, hh = 0, mi = 0;
+  if (!om::localCivil(epoch, y, mo, d, hh, mi)) {
+    snprintf(out, cap, "not set");
+    return;
+  }
+  snprintf(out, cap, "%04d-%02d-%02d %02d:%02d", y, mo, d, hh, mi);
 }
 
 }  // namespace
@@ -1091,8 +1176,11 @@ int clockStampText(char* out, size_t cap, uint32_t epoch) {
   if (out == nullptr || cap == 0) return 0;
   if (epoch < kClockRealSince) {
     if (epoch >= 1600000000u) {
-      int y = 0, mo = 0, d = 0;
-      civilFromDays((int64_t)(epoch / 86400u), &y, &mo, &d);
+      int y = 0, mo = 0, d = 0, hh = 0, mi = 0;
+      if (!om::localCivil(epoch, y, mo, d, hh, mi)) {
+        snprintf(out, cap, "not set");
+        return (int)strlen(out);
+      }
       snprintf(out, cap, "not set (%04d-%02d-%02d)", y, mo, d);
     } else {
       snprintf(out, cap, "not set");
@@ -1101,7 +1189,7 @@ int clockStampText(char* out, size_t cap, uint32_t epoch) {
   }
   char s[32];
   stampShort(s, sizeof(s), epoch);
-  const int n = snprintf(out, cap, "%s UTC", s);
+  const int n = snprintf(out, cap, "%s", s);
   return n > 0 ? n : 0;
 }
 
@@ -1109,9 +1197,9 @@ int clockJumpText(char* out, size_t cap, uint32_t fromEpoch, uint32_t toEpoch) {
   if (out == nullptr || cap == 0) return 0;
   char from[32];
   char to[32];
-  stampShort(from, sizeof(from), fromEpoch);
-  stampShort(to, sizeof(to), toEpoch);
-  const int n = snprintf(out, cap, "Set the repeater's clock from %s to %s UTC?", from, to);
+  stampDotted(from, sizeof(from), fromEpoch);
+  stampDotted(to, sizeof(to), toEpoch);
+  const int n = snprintf(out, cap, "Set the repeater's clock from %s to %s?", from, to);
   return n > 0 ? n : 0;
 }
 
@@ -1172,7 +1260,7 @@ bool radioReplyParse(const char* text, RadioValues* out) {
   return true;
 }
 
-bool coordReplyParse(const char* text, int32_t* e6) {
+bool coordReplyParse(const char* text, int32_t* e6, CoordAxis axis) {
   if (e6 == nullptr) return false;
   char v[24];
   replyValue(text, v, sizeof(v));
@@ -1182,10 +1270,49 @@ bool coordReplyParse(const char* text, int32_t* e6) {
   if (end == v || end == nullptr) return false;
   while (*end == ' ') ++end;
   if (*end != 0) return false;
-  if (deg < -180.0 || deg > 180.0) return false;
-  *e6 = (int32_t)lround(deg * 1000000.0);
+  // Per-field limits (EST-364): a latitude above 90 degrees is not a latitude, whatever else it may
+  // be. These catch a wrong field whenever the swapped value is outside the range (a longitude of
+  // 120 cannot become a latitude); the pair rule below is what catches the ones inside it.
+  const double limit = axis == CoordAxis::Lat ? 90.0 : (axis == CoordAxis::Lon ? 180.0 : 180.0);
+  if (!(deg >= -limit && deg <= limit)) return false;
+  const int32_t micro = (int32_t)lround(deg * 1000000.0);
+  if (axis == CoordAxis::Lat && (micro < -kCoordLatLimitE6 || micro > kCoordLatLimitE6)) return false;
+  if (axis == CoordAxis::Lon && (micro < -kCoordLonLimitE6 || micro > kCoordLonLimitE6)) return false;
+  *e6 = micro;
   return true;
 }
+
+// ------------------------------------------------------------------------------- the coordinate pair
+void CoordRun::reset() { *this = CoordRun(); }
+
+void CoordRun::takeLat(int32_t e6) {
+  // A latitude after a completed pair starts a NEW pair: the old longitude belonged to the old read.
+  if (lon) reset();
+  latE6 = e6;
+  lat = true;
+}
+
+void CoordRun::takeLon(int32_t e6) {
+  // A longitude with no latitude before it means the order was lost: nothing from this run is shown.
+  if (!lat) {
+    abandon();
+    return;
+  }
+  lonE6 = e6;
+  lon = true;
+}
+
+void CoordRun::abandon() {
+  // The line before this answer never came back, so the answers that follow cannot be paired by
+  // order any more. Forgetting the whole run is the honest thing: nothing is shown from it.
+  clean = false;
+  lat = false;
+  lon = false;
+  latE6 = 0;
+  lonE6 = 0;
+}
+
+bool positionNotShared(int32_t latE6, int32_t lonE6) { return latE6 == 0 && lonE6 == 0; }
 
 bool switchReplyParse(const char* text, bool* on) {
   if (on == nullptr) return false;
@@ -1205,6 +1332,54 @@ bool loopReplyParse(const char* text, LoopDetect* out) {
   if (strcmp(v, "moderate") == 0) { *out = LoopDetect::Moderate; return true; }
   if (strcmp(v, "strict") == 0) { *out = LoopDetect::Strict; return true; }
   return false;
+}
+
+// ------------------------------------------------------------------------------- reply/command fit
+bool replyFitsCmd(const char* cmd, const char* text) {
+  // A CLI answer carries no command name, so the link names it by the order it sent the commands, and
+  // the shell can only trust that name as far as the answer's SHAPE agrees with it (EST-364). This
+  // is the backstop: an answer that cannot be this command's answer is never parsed as one. An
+  // implementation note: every check below is the parser the caller is about to run, so the two can
+  // never disagree.
+  if (cmd == nullptr || cmd[0] == 0) return false;   // no name at all: never a read-back value
+  if (text == nullptr) return false;
+  const char* p = text;
+  while (*p == ' ' || *p == '\t') ++p;
+  // An ERROR is a legal answer to any line (a read can fail too): the caller's parser decides.
+  if (strncmp(p, "Err", 3) == 0 || strncmp(p, "Error", 5) == 0) return true;
+  // An OK is only a write's answer. A read returns a value, so "OK - clock set: ..." can never be
+  // the latitude, the radio or the clock of a read line.
+  if (strncmp(p, "OK", 2) == 0) {
+    const bool write = strncmp(cmd, "set ", 4) == 0 || strncmp(cmd, "time ", 5) == 0 ||
+                       strcmp(cmd, "reboot") == 0 || strncmp(cmd, "region ", 7) == 0 ||
+                       strncmp(cmd, "discover.", 9) == 0 || strcmp(cmd, "advert") == 0 ||
+                       strcmp(cmd, "advert.zerohop") == 0 || strncmp(cmd, "gps advert", 10) == 0;
+    return write;
+  }
+  int32_t number = 0;
+  RadioValues radio;
+  bool on = false;
+  LoopDetect loop = LoopDetect::Moderate;
+  uint32_t epoch = 0;
+  if (strcmp(cmd, "get lat") == 0) return coordReplyParse(text, &number, CoordAxis::Lat);
+  if (strcmp(cmd, "get lon") == 0) return coordReplyParse(text, &number, CoordAxis::Lon);
+  if (strcmp(cmd, "get radio") == 0) return radioReplyParse(text, &radio);
+  if (strcmp(cmd, "get repeat") == 0) return switchReplyParse(text, &on);
+  if (strcmp(cmd, "get loop.detect") == 0) return loopReplyParse(text, &loop);
+  if (strcmp(cmd, "clock") == 0) return clockReplyParse(text, &epoch);
+  if (strcmp(cmd, "get tx") == 0 || strcmp(cmd, "get flood.max") == 0 ||
+      strcmp(cmd, "get advert.interval") == 0 || strcmp(cmd, "get flood.advert.interval") == 0 ||
+      strcmp(cmd, "get path.hash.mode") == 0) {
+    return intReplyParse(text, &number);
+  }
+  // The remaining read-backs are text of their own shape: a name is one bare line, the region list is
+  // one short name per line, and `neighbors` is "prefix:secs:snr" lines (or "-none-").
+  if (strcmp(cmd, "neighbors") == 0) {
+    return strstr(p, ":") != nullptr || strstr(p, "-none-") != nullptr;
+  }
+  // `region`, `region home`, `region default`, `get name`, `get owner.info` and every console line:
+  // no shape of their own that a different answer could not also have, so nothing is refused here.
+  return true;
 }
 
 bool answerOk(const char* text) {

@@ -17,15 +17,17 @@ namespace ui {
 
 constexpr int kBadgeGlyphW = 5;
 constexpr int kBadgeGlyphH = 7;
-constexpr int kBadgeGlyphGap = 1;   // between two glyphs ("9+")
+constexpr int kBadgeGlyphGap = 1;   // between two glyphs ("10", "99+")
 
 struct BadgeGlyph {
   char ch;
   uint8_t rows[kBadgeGlyphH];   // bit 4 = the leftmost pixel of the row, top row first
 };
 
-// 1..9 and the "+" of "9+" (the count above nine is never drawn as a bare "9").
+// 0..9 (a two-digit count needs '0') and the "+" of "99+".
 constexpr BadgeGlyph kBadgeFace[] = {
+    // EST-364: '0' was missing while counts stopped at nine; a two-digit count needs it.
+    {'0', {0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110}},
     {'1', {0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110}},
     {'2', {0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111}},
     {'3', {0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110}},
@@ -47,23 +49,33 @@ constexpr const uint8_t* badgeGlyphRows(char ch) {
   return nullptr;
 }
 
-// A count as the badge writes it: 1..9, and "9+" for anything above nine.
+// A count as the badge writes it (EST-364, Filip: "the two numbers would fit just fine, so please add
+// it"): 1..99 exactly, and "99+" above that. The faces are the same 5x7 pixel digits, so two of them
+// fit the 19 px pill and three ("99+") the 23 px one (theme.h holds both widths).
 constexpr int badgeText(int count, char* out, int cap) {
   if (out == nullptr || cap < 2) return 0;
-  if (count > 9) {
-    if (cap < 3) return 0;
-    out[0] = '9';
-    out[1] = '+';
-    out[2] = 0;
-    return 2;
-  }
   if (count < 1) {
     out[0] = 0;
     return 0;
   }
-  out[0] = (char)('0' + count);
-  out[1] = 0;
-  return 1;
+  if (count <= 9) {
+    out[0] = (char)('0' + count);
+    out[1] = 0;
+    return 1;
+  }
+  if (count <= 99) {
+    if (cap < 3) return 0;
+    out[0] = (char)('0' + count / 10);
+    out[1] = (char)('0' + count % 10);
+    out[2] = 0;
+    return 2;
+  }
+  if (cap < 4) return 0;
+  out[0] = '9';
+  out[1] = '9';
+  out[2] = '+';
+  out[3] = 0;
+  return 3;
 }
 
 // Pixels a badge text occupies: one glyph or two plus the gap between them.

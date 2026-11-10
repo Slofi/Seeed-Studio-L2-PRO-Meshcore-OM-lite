@@ -23,6 +23,12 @@ constexpr int16_t kRptrPageRowH = 30;   // a page row: label + value (or one lin
 constexpr int16_t kRptrBackW = 62;
 constexpr int16_t kRptrCardH = 44;      // the status card (2 columns x 3 rows)
 constexpr int16_t kRptrCardRowH = 14;
+// EST-364: the refresh icon used to be drawn on top of the right column's values ("-119 dBm" ran
+// under it in docs/shots/2026-11-10-2034-argus-logged-in.png). It now has a gutter of its own at the
+// card's right edge, outside both value columns, and a 40x40 finger target.
+constexpr int16_t kRptrRefreshIcon = 20;   // the ring that is drawn
+constexpr int16_t kRptrRefreshTap = 40;    // the finger target around it
+constexpr int16_t kRptrCardGutter = 42;    // reserved at the card's right: the 40 px target + 2
 // EST-363: the page's own header is two lines. In EST-362 the title was drawn at the vertical centre
 // of a 26 px band and the subtitle at the centre of a band that started 16 px below the top, so the
 // two glyph rows sat on top of each other (docs/shots/2026-11-10-2008-rptr-page.png). One band per
@@ -67,7 +73,9 @@ struct RptrPageLayout {
   Rect title;
   Rect sub;
   Rect card;           // empty (w 0) when the page has no status card
-  Rect refresh;        // the card's refresh icon
+  Rect refresh;        // the card's refresh ICON (kRptrRefreshIcon square, in its own gutter)
+  Rect refreshTap;     // the finger target: kRptrRefreshTap square around the icon
+  int16_t cardColW = 0;   // the width of ONE value column: the gutter is not part of it
   Rect banner;         // empty when there is no line to say
   Rect bannerButton;   // "Set clock" inside the banner
   Rect body;           // the scrolling rows

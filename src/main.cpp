@@ -1582,6 +1582,15 @@ static int g_rptrOutHead = 0;
 static char g_rptrInFlight[80] = "";
 static uint8_t g_rptrInFlightKind = 0xFF;
 static uint32_t g_rptrInFlightMs = 0;
+static uint32_t g_rptrInFlightDeadlineMs = 0;   // EST-364: from the link's own est_timeout
+// EST-364: the `time <epoch>` line we sent last, so the repeater's OK can become the page's clock
+// even when the follow-up `clock` read never answers.
+static uint32_t g_rptrClockSent = 0;
+// EST-364: the position read-back pair. Only a clean run (both answers, no line abandoned in
+// between) may reach the page: a lost answer shifts the CLI reply order, and that is what put
+// Argus's longitude in the latitude field.
+static om::rptr::CoordRun g_rptrCoord;
+static bool g_rptrStatusWait = false;   // a status request is out / gave up: "no answer yet", dim
 
 // --- Apply
 static bool g_rptrApplyPending = false;
@@ -1679,6 +1688,10 @@ static void rptrClearSession() {
   g_rptrApplyWritesLeft = 0;
   g_rptrResult[0] = 0;
   g_rptrResultPending = false;
+  g_rptrStatusWait = false;
+  g_rptrCoord.reset();
+  g_rptrClockSent = 0;
+  g_rptrInFlightDeadlineMs = 0;
   g_rptrPageScroll = 0;
   g_rptrLoginWait = 0;
   g_rptrFoundIndex = 255;
@@ -1861,6 +1874,7 @@ static void rptrSetClockNow() {
   }
   char lines[1][80];
   snprintf(lines[0], sizeof(lines[0]), "%s", line);
+  g_rptrClockSent = our;   // EST-364: if the answer is OK, this is the repeater's new clock
   rptrApplyLines(lines, 1);
   rptrQueue(om::rptr::kCliClockRead, kRptrOutRead);
 }
@@ -1971,7 +1985,39 @@ static om::rptr::Page rptrReadPage(const char* cmd) {
 // the console. A write's answer is the Apply's result.
 static void rptrTakeReply(const om::RptrReply& rep) {
   g_rptrDirty = true;
-  rptrLog("<", rep.text);
+  // The console shows the repeater's words; a clock answer is shown in LOCAL time (EST-364).
+  {
+    char shown[88];
+    om::rptr::localClockAnswer(rep.text, shown, sizeof(shown));
+    rptrLog("<", shown);
+  }
+  // A confirmed clock set is the page's new clock, wherever this answer landed (EST-364). Argus
+  // answered "OK - clock set: 19:33 - 10/11/2026 UTC" while the shell had already given up on the
+  // write, so it arrived as an answer to the follow-up `clock` read; the timestamp in it is the
+  // repeater's own, so it is used no matter which command the answer is labelled with.
+  uint32_t clockSet = 0;
+  if (om::rptr::clockSetReplyParse(rep.text, &clockSet)) {
+    g_rptrFacts.clock = clockSet;
+    g_rptrFacts.hasClock = true;
+    g_rptrClockSent = 0;
+    if (!g_rptrResultPending && !g_rptrResultOk && g_rptrResult[0] != 0) {
+      // The red "no answer" that the write's own deadline produced is no longer true.
+      snprintf(g_rptrResult, sizeof(g_rptrResult), "Clock set");
+      g_rptrResultOk = true;
+    }
+    g_rptrDirty = true;
+  }
+  if (rep.kind == (uint8_t)om::RptrReplyKind::Status) {
+    g_rptrStatusWait = false;
+    return;
+  }
+  if (rep.kind == (uint8_t)om::RptrReplyKind::StatusWait) {
+    // EST-364: a request without an answer is not a refusal. The card says "Status  no answer yet"
+    // in dim ink; no result line, no red, no "Refused".
+    g_rptrStatusWait = true;
+    g_rptrDirty = true;
+    return;
+  }
   if (g_rptrInFlightKind != 0xFF && strcmp(rep.cmd, g_rptrInFlight) == 0) {
     const uint8_t kind = g_rptrInFlightKind;
     g_rptrInFlightKind = 0xFF;
@@ -1981,6 +2027,13 @@ static void rptrTakeReply(const om::RptrReply& rep) {
       if (!om::rptr::answerOk(rep.text)) {
         g_rptrApplyErr = true;
         om::rptr::answerPlainText(rep.text, g_rptrApplyErrText, sizeof(g_rptrApplyErrText));
+      } else if (g_rptrClockSent != 0 && strncmp(rep.cmd, "time ", 5) == 0) {
+        // EST-364: an OK for our `time <epoch>` line IS the new repeater clock. The answer's own
+        // stamp was already taken above when it had one; this is the fallback the ticket allows
+        // ("take the epoch we sent when the answer is OK").
+        g_rptrFacts.clock = g_rptrClockSent;
+        g_rptrFacts.hasClock = true;
+        g_rptrClockSent = 0;
       }
       rptrCheckApplyDone();
     }
@@ -1998,15 +2051,39 @@ static void rptrTakeReply(const om::RptrReply& rep) {
   int32_t number = 0;
   const char* cmd = rep.cmd;
   bool read = true;
+  // EST-364: an answer is named by its position in the send order, so only an answer whose SHAPE
+  // fits that command may become its value. A mismatch is logged and dropped, never parsed (the
+  // 20:34 run had a "get lon" answer parsed as "get lat").
+  if (!om::rptr::replyFitsCmd(cmd, rep.text)) {
+    Serial.printf("[rptr] answer does not fit \"%s\", ignored: %s\n", cmd, rep.text);
+    return;
+  }
   if (strcmp(cmd, "get name") == 0) {
     if (om::rptr::valueReplyParse(rep.text, value, sizeof(value))) {
       snprintf(g_rptrFacts.name, sizeof(g_rptrFacts.name), "%s", value);
       g_rptrFacts.nameKnown = true;
     }
   } else if (strcmp(cmd, "get lat") == 0) {
-    if (om::rptr::coordReplyParse(rep.text, &g_rptrFacts.latE6)) g_rptrFacts.posKnown = true;
+    // EST-364: a position is a PAIR. Both answers, in one clean run, or the page keeps what it had.
+    int32_t e6 = 0;
+    if (om::rptr::coordReplyParse(rep.text, &e6, om::rptr::CoordAxis::Lat)) {
+      g_rptrCoord.takeLat(e6);
+      if (g_rptrCoord.complete()) {
+        g_rptrFacts.latE6 = g_rptrCoord.latE6;
+        g_rptrFacts.lonE6 = g_rptrCoord.lonE6;
+        g_rptrFacts.posKnown = true;
+      }
+    }
   } else if (strcmp(cmd, "get lon") == 0) {
-    if (om::rptr::coordReplyParse(rep.text, &g_rptrFacts.lonE6)) g_rptrFacts.posKnown = true;
+    int32_t e6 = 0;
+    if (om::rptr::coordReplyParse(rep.text, &e6, om::rptr::CoordAxis::Lon)) {
+      g_rptrCoord.takeLon(e6);
+      if (g_rptrCoord.complete()) {
+        g_rptrFacts.latE6 = g_rptrCoord.latE6;
+        g_rptrFacts.lonE6 = g_rptrCoord.lonE6;
+        g_rptrFacts.posKnown = true;
+      }
+    }
   } else if (strcmp(cmd, "get radio") == 0) {
     if (om::rptr::radioReplyParse(rep.text, &g_rptrFacts.radio)) {
       g_rptrFacts.radio.tx = g_rptrFacts.tx;
@@ -2095,14 +2172,19 @@ static void rptrTakeReply(const om::RptrReply& rep) {
 
 // One line on the air at a time. A write's silence is an error, not a hang.
 static void rptrPumpOutbox() {
-  if (g_rptrInFlightKind != 0xFF && millis() - g_rptrInFlightMs > 3000) {
+  if (g_rptrInFlightKind != 0xFF && (int32_t)(millis() - g_rptrInFlightDeadlineMs) >= 0) {
     if (g_rptrInFlightKind == kRptrOutWrite && g_rptrApplyPending && g_rptrApplyWritesLeft > 0) {
       --g_rptrApplyWritesLeft;
       g_rptrApplyErr = true;
       snprintf(g_rptrApplyErrText, sizeof(g_rptrApplyErrText), "No answer from the repeater");
       rptrCheckApplyDone();
     }
-    Serial.printf("[rptr] no answer to %s\n", g_rptrInFlight);
+    Serial.printf("[rptr] no answer to %s within %lu ms\n", g_rptrInFlight,
+                  (unsigned long)(g_rptrInFlightDeadlineMs - g_rptrInFlightMs));
+    // EST-364: a line we gave up on leaves the reply order too, and any position pair in progress is
+    // dropped: the next answer cannot be trusted to belong to the command it is labelled with.
+    om::rptrForgetPending(g_rptrInFlight);
+    g_rptrCoord.abandon();
     g_rptrDirty = true;
     g_rptrInFlightKind = 0xFF;
     g_rptrInFlight[0] = 0;
@@ -2116,6 +2198,8 @@ static void rptrPumpOutbox() {
   snprintf(g_rptrInFlight, sizeof(g_rptrInFlight), "%s", o.line);
   g_rptrInFlightKind = o.kind;
   g_rptrInFlightMs = millis();
+  // EST-364: a `get lat` opens a new position pair, so a pair left over from the last read is gone.
+  if (strcmp(o.line, "get lat") == 0) g_rptrCoord.reset();
   if (!om::rptrCliSend(o.line, 0)) {
     Serial.printf("[rptr] not sent (no login): %s\n", o.line);
     g_rptrInFlightKind = 0xFF;
@@ -2125,6 +2209,14 @@ static void rptrPumpOutbox() {
       snprintf(g_rptrApplyErrText, sizeof(g_rptrApplyErrText), "Not logged in, nothing sent");
       rptrCheckApplyDone();
     }
+  } else {
+    // EST-364: the per-line deadline is upstream's own est_timeout plus the margin, never under the
+    // floor. The old fixed 3 s cut off Argus's CLI answers (3-4 s) and threw a confirmed clock set
+    // away.
+    const uint32_t est = om::rptrCliEstimateMs();
+    const uint32_t deadline = om::rptr::requestDeadlineMs(est, om::rptr::kLoginExtraMs,
+                                                          om::rptr::kCliMinMs);
+    g_rptrInFlightDeadlineMs = g_rptrInFlightMs + deadline;
   }
   if (g_rptrOutHead >= g_rptrOutCount) g_rptrOutHead = g_rptrOutCount = 0;
 }
@@ -2260,6 +2352,7 @@ static void rptrBuildPage(om::ui::RptrView& v) {
   in.clockWrong = g_rptrLoggedIn && om::rptr::clockWrong(g_rptrFacts.hasClock, g_rptrFacts.clock,
                                                          om::timeKeeper().now(),
                                                          om::timeKeeper().realSinceBoot());
+  in.statusWait = g_rptrStatusWait;
   const char* logs[kRptrLogLines] = {};
   for (int i = 0; i < g_rptrLogCount && i < kRptrLogLines; ++i) logs[i] = g_rptrLog[i];
   in.log = logs;

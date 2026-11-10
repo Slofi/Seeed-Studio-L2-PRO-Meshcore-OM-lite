@@ -472,7 +472,8 @@ static void testStatus() {
   clockText(t, sizeof(t), 1715779092u);   // Argus's 2024-05-15 MeshCore restart clock
   CHECK_TEXT(t, "not set (2024)");
   clockText(t, sizeof(t), 1735689600u);   // 2025-01-01 00:00 UTC is real
-  CHECK_TEXT(t, "00:00 UTC");
+  // EST-364: shown in LOCAL time (Ljubljana, CET = UTC+1 in January) and without a zone label.
+  CHECK_TEXT(t, "01:00");
   clockText(t, sizeof(t), 0);
   CHECK_TEXT(t, "not set");
 }

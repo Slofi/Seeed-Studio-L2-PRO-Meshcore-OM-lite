@@ -45,6 +45,7 @@ uint32_t s_statusTag = 0;
 bool s_statusPending = false;
 uint32_t s_statusSentMs = 0;
 uint32_t s_statusDeadlineMs = 0;
+bool s_statusRetried = false;   // EST-364: one automatic retry before the card says "no answer yet"
 bool s_statusLogged = false;   // EST-360: the raw status bytes are logged once for Claude
 
 // --- the anonymous nearby-regions read (EST-360) -------------------------------------------------
@@ -72,9 +73,12 @@ int s_replyHead = 0;
 int s_replyCount = 0;
 uint32_t s_replySerial = 0;
 char s_lastCmd[80] = "";
+uint32_t s_cliEstMs = 0;   // upstream's est_timeout for the last line sent (EST-364)
 // The CLI reply carries no tag, so the only link to the command is ORDER: every line sent is kept
 // here and the answer takes the oldest one. A multi-line action (silent mode, apply, or a region
-// change plus its follow-up read) then names the right line for each reply.
+// change plus its follow-up read) then names the right line for each reply. EST-364: an entry leaves
+// this order when it is answered OR when the shell gives up on it (rptrForgetPending), so a lost
+// answer cannot shift every later one onto the wrong command.
 constexpr int kPendingCmds = 8;
 char s_pending[kPendingCmds][80];
 int s_pendingHead = 0;
@@ -309,8 +313,27 @@ void rptrLinkLoop() {
   }
   if (s_statusPending && (int32_t)(now - s_statusDeadlineMs) >= 0) {
     s_statusPending = false;
-    queueReply((uint8_t)RptrReplyKind::Error, "status", "no answer", now);
-    Serial.printf("[rptr] status from %s: no answer\n", s_currentName);
+    // EST-364: one automatic retry before the page gives up. The ticket's rule: a request without an
+    // answer is NOT a refusal, so a silence reports StatusWait ("no answer yet", drawn dim) rather
+    // than an Error the shell paints red as "Refused: no answer".
+    const uint32_t waitedMs = now - s_statusSentMs;
+    bool retried = false;
+    if (!s_statusRetried && s_login.loggedIn()) {
+      // rptrStatusRequest() sets its own deadline (est_timeout plus the margin, never under the
+      // floor) and clears the flag, so the once-only rule is re-armed right after it.
+      if (rptrStatusRequest()) {
+        s_statusRetried = true;
+        retried = true;
+        Serial.printf("[rptr] status from %s: no answer in %lu ms, asked once more (deadline %lu ms)\n",
+                      s_currentName, (unsigned long)waitedMs,
+                      (unsigned long)rptrStatusDeadlineMs());
+      }
+    }
+    if (!retried) {
+      queueReply((uint8_t)RptrReplyKind::StatusWait, "status", "no answer yet", now);
+      Serial.printf("[rptr] status from %s: no answer yet after %lu ms\n", s_currentName,
+                    (unsigned long)waitedMs);
+    }
   }
   if (s_regionsPending && (int32_t)(now - s_regionsDeadlineMs) >= 0) {
     const int idx = s_regionsRow;
@@ -457,6 +480,7 @@ bool rptrLoginStart(const char* name, const char* password) {
   s_login.begin(millis(), est);
   s_status = Status();
   s_statusPending = false;
+  s_statusRetried = false;
   s_pendingHead = 0;
   s_pendingCount = 0;
   Serial.printf("[rptr] login sent to %s (%s), deadline %lu ms\n", s_currentName,
@@ -471,6 +495,7 @@ void rptrLogout() {
   s_currentName[0] = 0;
   memset(s_currentKey, 0, sizeof(s_currentKey));
   s_statusPending = false;
+  s_statusRetried = false;
   s_status = Status();
   s_pendingHead = 0;
   s_pendingCount = 0;
@@ -524,14 +549,21 @@ bool rptrStatusRequest() {
   s_statusTag = tag;
   s_statusPending = true;
   s_statusSentMs = millis();
-  s_statusDeadlineMs = s_statusSentMs + est + kLoginExtraMs;
-  Serial.printf("[rptr] status request to %s, deadline %lu ms\n", s_currentName,
-                (unsigned long)est);
+  // EST-364: upstream's own estimate plus the margin, but never under kStatusMinMs. On Argus the
+  // estimate plus 2.5 s was 3.2 s and cut off an answer that arrived a moment later.
+  const uint32_t deadline = rptr::requestDeadlineMs(est, kLoginExtraMs, rptr::kStatusMinMs);
+  s_statusDeadlineMs = s_statusSentMs + deadline;
+  s_statusRetried = false;   // a fresh request (or the one retry) starts its own count
+  Serial.printf("[rptr] status request to %s, est %lu ms, deadline %lu ms\n", s_currentName,
+                (unsigned long)est, (unsigned long)deadline);
   return true;
 }
 
 const Status& rptrStatus() { return s_status; }
 uint32_t rptrStatusSerial() { return s_statusSerial; }
+uint32_t rptrStatusDeadlineMs() {
+  return s_statusPending ? (uint32_t)(s_statusDeadlineMs - s_statusSentMs) : 0;
+}
 
 // ------------------------------------------------------------------------------------------------ CLI
 bool rptrCliSend(const char* line, uint8_t tag) {
@@ -546,10 +578,27 @@ bool rptrCliSend(const char* line, uint8_t tag) {
   const int rc = rptrMesh().sendCommandData(ci, ts, 0, TXT_TYPE_CLI_DATA, line, est);
   if (rc == MSG_SEND_FAILED) return false;
   snprintf(s_lastCmd, sizeof(s_lastCmd), "%s", line);
+  s_cliEstMs = est;
   pushPending(line);
   (void)tag;   // the CLI frame carries no tag; the pending ring above is how a reply names it
-  Serial.printf("[rptr] cli -> %s: %s\n", s_currentName, line);
+  Serial.printf("[rptr] cli -> %s: %s (est %lu ms)\n", s_currentName, line, (unsigned long)est);
   return true;
+}
+
+uint32_t rptrCliEstimateMs() { return s_cliEstMs; }
+
+void rptrForgetPending(const char* line) {
+  // EST-364: the shell gave up on this line. Its entry has to leave the order too, or every answer
+  // after it is matched one command too early (that is how Argus's `get lon` answer became its
+  // `get lat`). Only the OLDEST entry can be the one in flight: one line is on the air at a time.
+  if (s_pendingCount <= 0) return;
+  if (line != nullptr && line[0] != 0 && strcmp(s_pending[s_pendingHead], line) != 0) {
+    // A late call for an entry that is no longer the oldest: it already left, nothing to do.
+    return;
+  }
+  s_pendingHead = (s_pendingHead + 1) % kPendingCmds;
+  --s_pendingCount;
+  Serial.printf("[rptr] gave up on %s, reply order re-synced\n", line == nullptr ? "?" : line);
 }
 
 const char* rptrLastCmd() { return s_lastCmd; }
@@ -622,6 +671,7 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
       st.clockValid = s_login.answer.clockValid;
       s_status = st;
       s_statusPending = false;
+      s_statusRetried = false;
       ++s_statusSerial;
       if (!s_statusLogged) {
         // Once, for the reviewer: exactly the bytes the Listener handed over (no tag). EST-360's
@@ -686,9 +736,13 @@ void rptrOnCliReply(const char* fromName, const char* text) {
     return;
   }
   char cmd[48] = "";
-  if (!popPending(cmd, sizeof(cmd))) snprintf(cmd, sizeof(cmd), "%s", s_lastCmd);
+  // EST-364: with nothing outstanding, this answer has no command: it is labelled "" (the shell
+  // logs it in the console and parses nothing from it) instead of being pinned on the last line
+  // sent, which is how a late "OK - clock set" used to become a `get radio` answer.
+  popPending(cmd, sizeof(cmd));
   queueReply((uint8_t)RptrReplyKind::Cli, cmd, text, millis());
-  Serial.printf("[rptr] cli <- %s: %s\n", s_currentName, text == nullptr ? "" : text);
+  Serial.printf("[rptr] cli <- %s: %s%s\n", s_currentName, text == nullptr ? "" : text,
+                cmd[0] ? "" : " (no command outstanding)");
 }
 
 // ---------------------------------------------------------------------------------- remembered list

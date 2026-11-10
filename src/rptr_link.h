@@ -31,7 +31,9 @@ struct RptrReply {
   uint32_t atMs = 0;
 };
 
-enum class RptrReplyKind : uint8_t { Cli = 1, Status = 2, Login = 3, Error = 4 };
+// EST-364: StatusWait is a status request that has not been answered (yet): the shell shows
+// "Status  no answer yet" in dim ink instead of the red "Refused" line an Error produces.
+enum class RptrReplyKind : uint8_t { Cli = 1, Status = 2, Login = 3, Error = 4, StatusWait = 5 };
 
 bool rptrLinkBegin();   // NVS: the remembered repeaters and the auto-login switch
 void rptrLinkLoop();    // the scan window and the login deadline
@@ -60,6 +62,9 @@ void rptrLoginResultText(char* out, size_t cap);
 bool rptrStatusRequest();
 const rptr::Status& rptrStatus();
 uint32_t rptrStatusSerial();
+// The deadline of the request now in flight (upstream's est_timeout plus the margin, never under
+// rptr::kStatusMinMs). EST-364: the old est + 2.5 s came to 3.2 s on Argus and cut a real answer off.
+uint32_t rptrStatusDeadlineMs();
 
 // --- nearby regions, anonymous, no login (EST-360) -----------------------------------------------
 // The phone app's mechanism (OverMesh mesh_mc.py _mc_query_responder_regions): after the 0-hop
@@ -78,6 +83,12 @@ bool rptrRegionsBusy();
 // in the answer, so the shell can route a `neighbors` reply to the neighbour list and a `region`
 // reply to the region list. False when nothing went on the air.
 bool rptrCliSend(const char* line, uint8_t tag);
+// Upstream's est_timeout for the line just handed to the radio (0 when nothing went out). The shell
+// sizes its own per-line deadline from it, so a slow repeater answer is not labelled "no answer".
+uint32_t rptrCliEstimateMs();
+// A line the shell gave up on: remove it from the reply-matching order, so the answer to the NEXT
+// command cannot be matched to this one (EST-364; the Argus position bug).
+void rptrForgetPending(const char* line);
 const char* rptrLastCmd();
 uint32_t rptrReplySerial();
 // Oldest queued answer, or false when the queue is empty.

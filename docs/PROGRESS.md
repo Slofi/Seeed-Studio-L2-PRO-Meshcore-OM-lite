@@ -989,3 +989,195 @@
 
 ## 2026-11-10 10:45 (Claude): EST-339 checked
 - Built in the sandbox (exit 0, RAM 88,988 B, flash 866,385 B), tests exit 0. Committed before flashing because the L2 is outside for a GPS run; flash + device check when it is back.
+
+## 2026-11-10 10:41 (Claude): GPS outdoor read-back + EST-339 on the device
+- After the balcony (Filip saw up to 17 on the screen): `expected=21(g10 l8 b3) maxheard=19 best=46` dB-Hz. **GLONASS is on**: 8 GLONASS satellites now listed. Whether the factory mode had it or `$PCAS04,7` switched it on is not provable from this log, and no longer matters.
+- EST-339 flashed (OTA ok, 866,752 B; size matches the 10:45 sandbox build). Boot log quiet: 91 lines in 30 s (was 4,000+), one `[gps] mode 7 sent`.
+- **Process hazard found:** DS builds into the same build dir (`~/.cache/pio-om-lite/build`), so while a DS ticket runs, the `firmware.bin` there may be DS's in-progress build, not the reviewed one. From now on Claude copies the reviewed binary out right after the fenced build and flashes the copy.
+
+## 2026-11-10 10:58 (DeepSeek): EST-340 — the mesh now runs on MeshCore's own companion code
+
+- **Vendored, not adapted.** `lib/meshcore_companion/` now holds upstream `examples/companion_radio`
+  at tag `companion-v1.18.0` (commit `81dbae5`): `MyMesh.cpp/.h`, `DataStore.cpp/.h`, `NodePrefs.h`,
+  `AbstractUITask.h`. All six are byte-identical to `reference/meshcore-companion-v1.18.0/` (cmp, each
+  one). `lib/meshcore` was not touched (git status shows no change; the manifest test hashes all 163
+  files). The only local files in that folder are `README.md`, `LICENSE-MeshCore-MIT.txt` and
+  `library.json` (PlatformIO metadata).
+- **Board glue in `src/target.h` + `src/target.cpp`**, following MeshCore's own MIT
+  `variants/xiao_s3_wio`: `OmBoard` (our ADS1115 battery, reboot, MCU temperature, no-op dynamic prefs),
+  `OmSX1262Wrapper` (the EST-337 radio-fault mark: a failed `startSendRaw` or a >15 s TX sets Tx, a
+  good `onSendFinished` clears it), `OmRTCClock` (the timekeeper; `bootstrapRTCfromContacts` during
+  `begin()` never marks a real source, `CMD_SET_DEVICE_TIME` after it goes through
+  `setFromSource(..., Phone, ...)`), `OmSensors` (the latest GPS fix for adverts/telemetry and the
+  `gps`/`gps_interval` settings the phone can change), `radio_init`/`radio_new_identity`/the radio
+  helpers, and a null serial interface because Bluetooth is OFF in this ticket.
+- **`src/mesh_link.cpp` is now a facade over `the_mesh`.** Kept: the 32-message ring with the
+  monotonic seq, wall time + `real` flag, hops/SNR/path, heard-repeat count, per-channel unread and
+  mute, contact list/signature/path-hop names, and `mesh_link.h` exactly as the screens use it.
+  Two new fields: `meshNodeName()` (NodePrefs) and `meshDmUnread()`; `meshDmCount/Name/Available` are
+  real now (one thread per contact, same seq/time rules, unread counts). The composer budget takes
+  the runtime name (`meshOwnTextMaxFor`); the static_asserts against `MAX_TEXT_LEN` and
+  `ContactInfo::name` stay.
+- **One-time migration at first boot** (`mig` in NVS namespace `mcnet`):
+  - identity: old and new both use MeshCore's own `IdentityStore` at `/identity/_main.id`, so it is
+    read, never rewritten. The boot log prints exactly `[mc] identity <16 hex>` (first 8 bytes) and a
+    second line `same as before` / `CHANGED` when an old file was found.
+  - channels: the 16-byte NVS keys go into MeshCore's 32-byte group secret (`[0..15]` copied,
+    `[16..31]` zero, so `setChannel()` derives the same sha256(secret,16) hash); names and all slots
+    are written to `/channels2`.
+  - node name seeded `"OM Lite"`, `path_hash_mode = NVS "phs" - 1` (so phs=2 stays 2B; the out-of-range
+    fallback is also 2B), both saved to `/prefs.json`.
+  - `/contacts` (EST-329 format, header + CRC) is decoded and rewritten as `/contacts3` before
+    `the_mesh.begin()` loads it; the old file is left in place for one release.
+  - mute flags stay ours but are now keyed by channel hash (`m<hh>`); the old `m<i>` key is still
+    read as a fallback and still written, so a rollback keeps them. Old NVS keys (`n/k/e/m<i>`, `phs`,
+    `crashed`, `fails`) are never deleted.
+- **Storage** (DataStore, SPIFFS): `/identity/_main.id` 96 B (32 pub + 64 private, unchanged),
+  `/prefs.json` JSON text (a few hundred bytes; the boot log prints the exact size), `/channels2`
+  68 B per slot x 8 slots = 544 B, `/contacts3` 152 B per contact, `/contacts` old 12 + 152 x n B kept,
+  `/bl/<hex>` only if the advert blob cache is used. The boot log prints every file's real size.
+- **Removed**: `src/contact_store.h` (the EST-329 store), `src/mc_board.h/.cpp` (replaced by
+  `target.*`), `test/host/test_contact_store.cpp` (its decode moved to `src/mesh_migration.h` and
+  `test/host/test_mesh_migration.cpp`).
+- **Build shims needed because the sandbox has no network** (no upstream file edited; Claude decides
+  if he wants real libraries):
+  - `src/meshcore_common_radio_prefs.cpp` includes `lib/meshcore/helpers/CommonRadioPrefs.cpp`
+    unchanged, because `lib/meshcore/library.json` (a local file we must not edit) excludes it and
+    MyMesh's `NodePrefs::RadioPrefs` vtable needs `setByKey/getByKey`.
+  - `src/CayenneLPP.h` is a minimal encoder for the four methods MyMesh uses (`reset`, `addVoltage`,
+    `addTemperature`, `addGPS`, `getSize`, `getBuffer`); the full ElectronicCats library would need
+    ArduinoJson, which is not cached.
+  - `src/RTClib.h` is an empty include shim: `MyMesh.h` includes it but uses nothing from it.
+- **`tools/update_meshcore.py <tag>`** clones/fetches the tag (or uses `--repo` as a local clone),
+  replaces `lib/meshcore` from `src/` (keeping `library.json`), the six companion files, and
+  `reference/meshcore-companion-<tag>/` from `examples/companion_radio`, writes
+  `lib/MESHCORE_VERSION` (tag, commit, sha256 manifest), prints the companion_radio diff between the
+  old and new tag, and never writes `src/`. `--dry-run` works offline on a local clone. Tested here:
+  dry run against the local 1.15.0 clone; a real run on a throw-away copy replaced lib/ (149 files),
+  left src/ byte-identical and the manifest test passed.
+- **Host tests**: `test/host/run.sh` exit 0 (11 C++ binaries + `test_shot.py`'s 9 tests + the
+  manifest check). New `test_mesh_migration.cpp` (identity bytes, 16->32 channel mapping, path-hash
+  mode, legacy contacts decode/CRC/reserved/type/name) and `test_meshcore_manifest.py` (all 181 files
+  in the three vendored folders match `lib/MESHCORE_VERSION`; proven to fail on a one-line hand edit).
+- **Build** (REBUILD.md command): exit 0, SUCCESS. RAM **116,716 B** of 327,680 (35.6 %, previous
+  88,988, **+27,728 B**), flash **912,361 B** of 6,553,600 (13.9 %, previous 866,385, **+45,976 B**),
+  `firmware.bin` **912,720 B** (previous 866,752, **+45,968 B**). Most of the RAM is MeshCore itself:
+  100 contacts instead of 32 (+~11 KB), the 32-message DM ring + 16 threads (~9 KB), the one-time
+  migration buffers (~9.7 KB) and the 40 contact stamps (~1.9 KB).
+- **Could not check** (no device in the sandbox): the same key on the glass (the boot line is the
+  proof; compare before/after), the migration on the real NVS/SPIFFS state, the channel list arriving
+  from `/channels2` on the second boot, chat both ways on air and the 2B path hash on gandalf, DM
+  reception (needs another node to send one), GPS in adverts/telemetry (`advert_loc_policy` is still
+  0 by default), the exact SPIFFS sizes (logged at boot, expected as above), and boot stability with
+  the new global MeshCore objects (upstream requires `extern MyMesh the_mesh`; the crash guard still
+  covers `meshLinkBegin`, but the global constructors now run before USB exists — a new risk, noted).
+- **Next step**: Claude flashes and checks, in this order: `[mc] identity <hex>` equals the key from
+  the old firmware; `[mc] migration: name "OM Lite", path hash 2B (NVS phs=2)`; the `[mc] store:`
+  size lines; the Nodes list still shows the migrated contacts; one channel chat each way; the
+  advert/message on gandalf is 2 bytes per hop. Then the next ticket: the DM chat screen + the
+  sheet's "Direct message" row, and Bluetooth through upstream's own interface with our toggle
+  (default off), including channel/radio changes from the phone.
+
+
+## 2026-11-10 11:10 (Claude): EST-340 crashed on the device; rolled back
+- Reviewed first: identity stays (old and upstream both use `/identity` + `_main` on ESP32 SPIFFS, DataStore.cpp), channel hashes stay (BaseChatMesh::setChannel hashes 16 bytes when the upper half is zero). Built in the sandbox (exit 0, RAM 116,716 B, flash 912,361 B), tests exit 0; binary copied out before flashing; rollback binary of aee3c5b built in the sandbox first.
+- Flashed 11:02: boot stops after `[mc] 3 store + mesh begin` (USB drops); `migrate /contacts -> /contacts3: 10 contacts, 0 bytes`. Guard: fail 2/3, 3/3, mesh FAILED, parked.
+- Rolled back to aee3c5b: **mesh still off**, the parked guard in NVS `mcnet` applies to every image and nothing clears it. Recovered with `docs/unpark-crash-guard.patch` (a new image resets the guard; NVS `gbuild`), built in the sandbox from a temporary worktree, flashed 11:08: mesh up, 10 contacts, Nodes list as before. The device runs aee3c5b + that patch (not committed on main; the next ticket carries the rule).
+- EST-340's tree stays uncommitted; ELF saved by Claude for decoding the stored core dump (core dump to flash is on, partition at 0xFF0000).
+
+## 2026-11-10 11:32 (DeepSeek): EST-341 — the boot crash found (one class, two layouts), crash reporter, idempotent migration, guard unpark
+
+- **1. The crash, by reading (and proved against the saved EST-340 ELF).** `MAX_CONTACTS` was 32 in
+  `mesh_link.cpp` and in `lib/meshcore/helpers/BaseChatMesh.cpp` (BaseChatMesh.h's default), but 100 in
+  `MyMesh.cpp` (MyMesh.h defines it before including BaseChatMesh.h). So `BaseChatMesh` had **two
+  layouts**: `sizeof(BaseChatMesh)` was 9,376 B in mesh_link.cpp and 22,160 B in MyMesh.cpp, and
+  `sizeof(MyMesh)` was 15,312 B where the global `the_mesh` was created but 28,096 B where MyMesh.cpp
+  writes it. In the saved EST-340 ELF the `the_mesh` symbol is 0x3bd0 = **15,312 B** (it sits 12,784 B
+  short), while the surviving `MyMesh` DWARF entry says 28,096. Concretely:
+  - `MyMesh::savePrefs()` is inline in MyMesh.h, so the copy used in mesh_link.cpp reads `_store` at
+    offset 9,380 (`addmi a3,a2,0x2400; l32i a10,a3,164` in the old ELF). The MyMesh constructor
+    (MyMesh.cpp, 100-contact layout) had written `_store` at 24,164 instead, so offset 9,380 stayed
+    zero → `_store->savePrefs()` called `DataStore::savePrefs` with a **NULL `_store`** → panic
+    (InstFetch/LoadProhibited). `store.saveChannels(&the_mesh)` had the same problem one step later:
+    the `DataStoreHost` sub-object at the 32-contact offset has a zero vptr, so the first
+    `getChannelForSave()` jumps through 0.
+  - That is exactly the flash window: `[mc] 3 store + mesh begin` printed, `identity`/`migration`
+    lines were lost in the USB CDC buffer when the port dropped.
+  - **Fix:** `-D MAX_CONTACTS=100` in `build_flags` (build_flags reaches library TUs, build_src_flags
+    would not), `MyMesh.h` included before `<helpers/BaseChatMesh.h>` in mesh_link.cpp, and a
+    `static_assert(MAX_CONTACTS == 100)` there. Verified in the new ELF: `BaseChatMesh` has exactly
+    one size (22,160), `MyMesh` 28,096, `the_mesh` symbol 0x6dc0 = 28,096. `test/host/test_build_flags.py`
+    guards the define (and that it is not in build_src_flags).
+- **2. Crash reporter** (`src/crash_report.*`, pure logic in `crash_report_logic.*`, host-tested). At
+  the very start of `setup()`, after `Serial.begin` and **before `boardBegin()`**: prints
+  `[crash] previous boot ended in <reason>; last checkpoint "<step>" (seq N)` when the reset reason is
+  panic or a watchdog (software reset/power-on does not count), one `[crash] reset reason: N (token)`
+  line (esp_reset_reason), and one `[crash] stored core dump: task <name>, PC 0x..., exc cause N (name),
+  vaddr 0x..., backtrace 0x... ...` line from `esp_core_dump_image_check()`/`get_summary()`, plus the
+  dump's app sha256 (so the ELF can be matched), then **erases** the dump so it prints once. No dump:
+  `[crash] stored core dump: none`. A dump that checks but cannot be summarised is reported and **kept**
+  (evidence, not erased). The checkpoint is an `RTC_NOINIT_ATTR` block (magic/seq/32-byte step) written
+  at every `[mc] N ...` step (0 guard, 1 spiffs, 1b identity, 1c contacts, 2 radio, 3 store + mesh
+  begin, 3a store.begin, 3b the_mesh.begin, 3c interface, 4 prefs, 5 channels, 5b mig gate,
+  6 advert, up) and at `[om] board.begin / prefs + clock / audio / radio / mesh begin`; it survives a
+  panic, a watchdog and `ESP.restart()`, and the magic rejects random RTC RAM after a power-on.
+- **3. The unpark rule is in the new `mesh_link.cpp`** (the exact rule from
+  `docs/unpark-crash-guard.patch`): NVS `gbuild` holds `__DATE__ " " __TIME__`; a different image
+  clears `crashed`/`fails` on its first boot, so a parked guard can never outlive the image that
+  crashed. A reboot of the same image keeps the guard.
+- **4. Migration is now idempotent and verified.** `mig` is set **only** when all four outputs pass a
+  write-and-read-back check: `/prefs.json` exists, is non-empty and parses with MeshCore's own
+  `loadSerial` (into a scratch `NodePrefs`); `/channels2` is exactly `kMaxChannels` 68-byte entries
+  whose name/secret match the channel table just written; `/contacts3` is a whole number of 152-byte
+  records and, when this boot wrote it, byte-identical to the image that was just written (tmp file,
+  `flush`, close, reopen, `memcmp` every byte, rename, reopen again). A failure logs why, leaves `mig`
+  unset and retries on the next boot; a *valid* `/contacts3` is never rewritten (MeshCore owns it
+  after the first migration and appends new adverts). The `mig` condition no longer marks the move
+  complete before the channels are written.
+  - **Why `/contacts3` reported 0 bytes:** the old code asked `File::size()` **before `flush()`/
+    `close()`**; ESP-IDF's SPIFFS `stat()` does not see the stdio buffer, so it reported 0 (the writes
+    themselves had returned their full sizes, which is why the "short write" branch did not fire). The
+    new code never trusts `size()` before close and compares the bytes after reopening. (The file was
+    openable and SPIFFS writable before `store.begin()`: `store.begin()` only creates `/bl`, so path
+    and mount were never the problem.)
+  - Added pure helpers in `mesh_migration.h`: `encodeContacts3()` (the whole image in one place),
+    `contactsFileComplete()`, `channelsFileComplete()`; the host test round-trips the image through a
+    decoder that mirrors `DataStore::loadContacts()`'s field order. That test caught a real off-by-one
+    in my first draft (sync_since at 67, not 68), now fixed and pinned by hard-coded wire offsets.
+- **5. The other things the ticket asked to check** (all clean, against upstream
+  `reference/meshcore-companion-v1.18.0/main.cpp`): board.begin (main.cpp) → SPIFFS.begin →
+  radio_init → `fast_rng.begin(radio_get_rng_seed())` → `store.begin()` → `the_mesh.begin()` →
+  interface start; `sensors.begin()` is not called by upstream's mesh path and our `OmSensors::begin()`
+  is a no-op. Global constructors touch no hardware and no Serial: `MyMesh` only stores references and
+  does `new ArduinoMillis()` / `new StaticPoolPacketManager(16)`; `DataStore`/`OmSensors`/`OmBoard`/
+  `OmRTCClock` are trivial. `loadPrefs` on a missing `/prefs.json` is guarded by `exists()` first, so
+  the constructor defaults (869.618 / BW 62.5 / SF8 / CR8 / 22 dBm) stay. `MyMesh::begin()` runs in
+  `setup()` on the Arduino `loopTask` (8,192 B stack): measured frames are setup 96 B, meshLinkBegin
+  240 B, MyMesh::begin 144 B, DataStore::loadContacts 510 B — no stack risk. `target.cpp` returns no
+  unexpected nullptr (only `OmSensors::getSettingName/Value` for out-of-range `i`, as documented).
+- **Build** (`pio run -e om_lite_l2`, the REBUILD.md command): exit 0, SUCCESS. RAM **135,208 B** of
+  327,680 (41.3 %, previous 116,716, **+18,492 B**: `the_mesh` +12,784 is the real fix, the
+  contacts read-back image +4,864, the prefs scratch +384, reporter ~240, `.data` +220). Flash
+  **919,801 B** of 6,553,600 (14.0 %, previous 912,361, **+7,440 B**), `firmware.bin` **920,160 B**
+  (previous 912,720, **+7,440 B**). Only the two pre-existing RadioLib `#warning`s.
+- **Tests**: `test/host/run.sh` exit 0 (12 C++ binaries + 10 python checks). New
+  `test_crash_report.cpp` (reset reasons that count, checkpoint magic/truncation/seq, the two formats,
+  bounded buffers), new `test_build_flags.py`, `test_mesh_migration.cpp` gained the `/contacts3` image
+  round trip and the file-completeness rules.
+- **Could not check** (no device in the sandbox): the caught panic itself (the stored dump should now
+  print on the first boot of this image and be erased); the real `/contacts3`/`/channels2` sizes on the
+  device; whether `RTC_NOINIT` keeps the checkpoint across this board's reset; the on-glass behaviour
+  (not touched by this ticket).
+- **Next step**: Claude flashes this image. Expect, in order: (a) a `[crash]` block whose core-dump
+  line names the EST-340 fault (that is the post-mortem, decode the addresses with the saved ELF);
+  (b) `[mc] new firmware image (...): crash guard reset` (the unpark rule, so the old parked guard
+  cannot block it); (c) `[mc] migrate /contacts -> /contacts3: 10 contacts, 1520 bytes written and read
+  back`, `[mc] migration: complete (prefs, channels and contacts read back)`; (d) `[mc] up` and the
+  nodes list with the 10 contacts. On the second boot `/contacts3` must be reported `already valid`
+  and `mig` must stay set.
+
+## 2026-11-10 11:36 (Claude): EST-340 + EST-341 on the device: the new core boots
+- Built in the sandbox (exit 0, RAM 135,208 B, flash 919,801 B), tests exit 0, the reviewed binary copied out and flashed (920,160 B). Boot: the stored dump printed and was erased, `new firmware image ...: crash guard reset`, `[mc] identity 564f7689850aa060` + **`identity same as before`**, `migration: name "OM Lite", path hash 2B`, `channels: 5 from NVS (saved to /channels2)`, `migration: complete (... read back)`, store sizes (/prefs.json 433 B, /channels2 544 B, /contacts3 1520 B), `[mc] up: 869.6 MHz SF8, path hash 2B`, mesh up, heap 207,784 B. Nodes list intact (`docs/shots/2026-11-10-1136-core-up.png`).
+- **Post-mortem of the EST-340 crash, decoded by Claude** (dump sha `c0ce7515c7b2a618` = sha256 of the saved EST-340 ELF): `LoadProhibited` at vaddr 0 in `fs::FS::mkdir` <- `DataStore::begin()` (DataStore.cpp:62, `_fs->mkdir("/bl")`) <- `meshLinkBegin` (mesh_link.cpp:569, `store.begin()`). So the panic was in `store.begin()`, with `store._fs` == NULL, not in `savePrefs` as DS reasoned. Same root cause, different victim: the_mesh was allocated with the 32-contact size (15,312 B) while MyMesh's constructor writes the 100-contact layout (28,096 B), so it wrote ~12.8 KB past the object into the neighbouring globals, `store` among them. DS's fix (one MAX_CONTACTS for every TU + static_assert) removes the cause; the boot proves it.
+- Seen: `/contacts3 already valid (1520 B, 12 in /contacts), kept`: EST-340's run had written /contacts3 with 10 contacts; the 2 contacts heard later on the rollback image are not in it. They come back with their next advert. Acceptable, recorded.
+- To do on the air (Filip): chat both ways on Don't Panic, and a DM to the L2.

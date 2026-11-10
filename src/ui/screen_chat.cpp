@@ -310,7 +310,7 @@ void drawDraft(lgfx::LovyanGFX* d, const Rect& field, uint16_t bg, const ChatVie
   const char* draft = v.draft ? v.draft : "";
   // MeshCore counts "<our name>: " against MAX_TEXT_LEN, so our budget is that much smaller, and a
   // reply spends another "@Name " before the draft even starts.
-  const int allow = composeAllowance(v.replySeq != 0, v.replyName);
+  const int allow = composeAllowance(v.replySeq != 0, v.replyName, v.ownName);
   const int left = composeRemaining(allow, (int)strlen(draft));
 
   char count[8];

@@ -5,11 +5,15 @@ set -eu
 cd "$(dirname "$0")"
 # -B: no __pycache__ left behind in the tree the reviewer diffs.
 python3 -B test_shot.py
+# The vendored MeshCore folders must match lib/MESHCORE_VERSION (a hand edit fails this).
+python3 -B test_meshcore_manifest.py
+# EST-341: one MAX_CONTACTS for every TU (a second layout made the global MyMesh too small).
+python3 -B test_build_flags.py
 
-# Layout / hit testing and the contact file + save policy are pure C++ (no Arduino): build them
+# Layout / hit testing, the migration bytes and the other pure-C++ logic (no Arduino): build them
 # with the system g++.
 BIN="$(mktemp /tmp/om-lite-layout.XXXXXX)"
-BIN2="$(mktemp /tmp/om-lite-contacts.XXXXXX)"
+BIN2="$(mktemp /tmp/om-lite-migration.XXXXXX)"
 BIN3="$(mktemp /tmp/om-lite-chat.XXXXXX)"
 BIN4="$(mktemp /tmp/om-lite-time.XXXXXX)"
 BIN5="$(mktemp /tmp/om-lite-gate.XXXXXX)"
@@ -19,10 +23,13 @@ BIN8="$(mktemp /tmp/om-lite-bar.XXXXXX)"
 BIN9="$(mktemp /tmp/om-lite-gpsmode.XXXXXX)"
 BIN10="$(mktemp /tmp/om-lite-fault.XXXXXX)"
 BIN11="$(mktemp /tmp/om-lite-fade.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11"' EXIT
+BIN12="$(mktemp /tmp/om-lite-crash.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
-g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_contact_store.cpp -o "$BIN2"
+# Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
+# path-hash mode and the old EST-329 /contacts file decode.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_mesh_migration.cpp -o "$BIN2"
 "$BIN2"
 # Chat: the word wrapper and its UTF-8 fallback, the header and the chat selector arithmetic, the
 # message band, the keyboard sheet, the message sheet (rows per message kind, hit rects, path
@@ -57,6 +64,10 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_radio_fault.cpp -o "$
 # many distinct 8-bit levels, a wake reverses a fade-out.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_fade.cpp \
   ../../src/fade.cpp -o "$BIN11"
+# The boot crash reporter (EST-341): reset reasons that count as a crash, the RTC_NOINIT checkpoint
+# (magic, truncation, seq), and the two one-line formats (task/PC/cause/backtrace, none/corrupt).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_crash_report.cpp \
+  ../../src/crash_report_logic.cpp -o "$BIN12"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -66,3 +77,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_fade.cpp \
 "$BIN9"
 "$BIN10"
 "$BIN11"
+"$BIN12"

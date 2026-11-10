@@ -1,0 +1,22 @@
+diff --git a/src/mesh_link.cpp b/src/mesh_link.cpp
+index 1d6202c..b4aa126 100644
+--- a/src/mesh_link.cpp
++++ b/src/mesh_link.cpp
+@@ -594,6 +594,17 @@ bool meshLinkBegin() {
+ 
+   s_netPrefs.begin("mcnet", false);
+   s_prefsBegun = true;
++  // A newly installed firmware gets a fresh start: the crash guard belongs to the image that crashed,
++  // and a parked guard is otherwise permanent (S494 rollback: the old image stayed parked too).
++  {
++    const char* build = __DATE__ " " __TIME__;
++    if (s_netPrefs.getString("gbuild", "") != build) {
++      s_netPrefs.putBool("crashed", false);
++      s_netPrefs.putUChar("fails", 0);
++      s_netPrefs.putString("gbuild", build);
++      Serial.printf("[mc] new firmware image (%s): crash guard reset\n", build);
++    }
++  }
+   if (s_netPrefs.getBool("crashed", false)) {
+     const uint8_t fails = (uint8_t)(s_netPrefs.getUChar("fails", 0) + 1);
+     s_netPrefs.putUChar("fails", fails);

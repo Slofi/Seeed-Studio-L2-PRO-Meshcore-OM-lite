@@ -1,96 +1,98 @@
 // SPDX-License-Identifier: MIT
-// MeshCore channel link for OM Lite.
+// OM Lite <-> MeshCore link, now a facade over upstream's companion code.
 //
-// Every object is created lazily inside meshLinkBegin(): nothing may run before setup(), because a
-// fault in a global constructor happens before USB CDC exists and is then invisible. A crash during
-// init leaves a flag in NVS; the next boot sees it, skips the mesh and stays reachable over OTA.
-// Send "MESHON" over serial to clear the flag and retry (the device reboots).
+// The mesh itself is MeshCore's own examples/companion_radio (vendored unmodified in
+// lib/meshcore_companion/): MyMesh owns the identity store, channel table, contact table,
+// prefs, path hash mode and every phone command. This file only:
+//   * gives it a board/radio/clock/sensors through src/target.*,
+//   * runs the one-time migration from the old OM Lite storage,
+//   * keeps the screens' API (mesh_link.h) working: channels, contacts, the message ring,
+//     direct messages, path hash and node name,
+//   * keeps the three local facts the UI needs that MyMesh does not model itself: message
+//     timestamps, the heard-repeat count and the radio fault mark.
+//
+// Every object that touches hardware is created at global construction time because MyMesh.h
+// declares `extern MyMesh the_mesh`; the old lazy-init guard is kept for the crash flag, but
+// the objects themselves are now MeshCore's required globals.
 #include "mesh_link.h"
 
 #if defined(OM_ENABLE_MESH)
 
+#include <Arduino.h>
 #include <Preferences.h>
 #include <SPIFFS.h>
+#include <math.h>
 
 #include <helpers/ArduinoHelpers.h>
-#include <helpers/BaseChatMesh.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/SimpleMeshTables.h>
-#include <helpers/StaticPoolPacketManager.h>
-#include <helpers/radiolib/CustomSX1262.h>
-#include <helpers/radiolib/CustomSX1262Wrapper.h>
 
+// MyMesh.h comes FIRST among the MeshCore headers: it sets MAX_CONTACTS=100 before it pulls in
+// BaseChatMesh.h, and BaseChatMesh sizes its contact table from that value. Everything else follows
+// the build flag -D MAX_CONTACTS=100 (platformio.ini), because lib/meshcore/helpers/BaseChatMesh.cpp
+// is compiled on its own and never sees MyMesh.h.
+#include "MyMesh.h"
+#include <helpers/BaseChatMesh.h>
+
+#include "DataStore.h"
 #include "audio.h"
 #include "channels.h"
-#include "contact_store.h"
-#include "mc_board.h"
+#include "crash_report.h"
+#include "mesh_migration.h"
 #include "mesh_text.h"
 #include "radio_fault.h"
 #include "target.h"
 #include "timekeeper.h"
 
+// The two upstream limits the rest of the file is sized from. A MeshCore upgrade that changes
+// either stops the build here instead of silently cutting a message or a name.
+static_assert(om::kMeshTextMax == MAX_TEXT_LEN, "mesh_text.h must follow BaseChatMesh.h MAX_TEXT_LEN");
+static_assert(om::kMeshNameMax == sizeof(ContactInfo::name), "mesh_text.h must follow ContactInfo::name");
+// EST-341: the global MyMesh was instantiated with BaseChatMesh's 32-contact default (15,312 B)
+// while MyMesh.cpp wrote it as the 100-contact layout (28,096 B). `_store` was read from an
+// uninitialised offset, the first savePrefs() called through a NULL DataStore and the boot
+// panicked at [mc] 3 store + mesh begin. One define must reach every TU, libraries included.
+static_assert(MAX_CONTACTS == 100,
+              "MAX_CONTACTS must be 100 for every TU: -D MAX_CONTACTS=100 in platformio.ini "
+              "(lib/meshcore is compiled without MyMesh.h)");
+
 namespace om {
 namespace {
-
-// The ring and every copy in this file are sized from MeshCore's own limits (mesh_text.h). The two
-// static_asserts tie them to the upstream constants, so a MeshCore upgrade that widens MAX_TEXT_LEN or
-// the contact name stops the build here instead of silently truncating a message again (EST-334).
-static_assert(kMeshTextMax == MAX_TEXT_LEN, "mesh_text.h must follow BaseChatMesh.h MAX_TEXT_LEN");
-static_assert(kMeshNameMax == sizeof(ContactInfo::name), "mesh_text.h must follow ContactInfo::name");
 
 char s_lastText[kMeshTextCap];
 int s_lastChannel = -1;
 bool s_ready = false;
-
-// Path hash size for every packet this node SENDS (MeshCore's sendFlood parameter): 1..3 bytes, 2 by
-// default because SLO runs 2-byte hashes and enforces them. NVS-backed ("phs" in "mcnet"); the
-// received side needs nothing, MeshCore reads the size from each packet.
-uint8_t s_pathHashBytes = 2;
-char s_pathHashLabel[4] = "2B";
 bool s_prefsBegun = false;
 
-// Contact persistence (see contact_store.h). The scheduler lives here so the callbacks below only
-// mark it dirty; the actual SPIFFS write happens at most once per interval, from meshLinkLoop().
-// static_assert ties the file format's record capacity to MeshCore's contact table.
-static_assert(kMaxContactRecords >= MAX_CONTACTS, "contact file must hold every real contact");
-static_assert(kContactKeySize == PUB_KEY_SIZE, "key size");
-static_assert(kContactPathSize == MAX_PATH_SIZE, "path size");
-
-constexpr const char* kContactsPath = "/contacts";
-constexpr const char* kContactsTmpPath = "/contacts.tmp";
-ContactSaveScheduler s_contactSaver;
-// Shared by load and save, never both at once: 4.9 KB + 4.9 KB would not fit the loop task stack
-// and two copies of each would waste 9.8 KB of static RAM.
-uint8_t s_contactFileBuf[kContactMaxFileSize];
-StoredContact s_contactRecs[kMaxContactRecords];
-
+// --- message ring --------------------------------------------------------------------------------
 struct Msg {
   uint8_t ch;
   uint8_t mine;
   int8_t hops;     // packet path hops, -1 = local echo / unknown
   int8_t snr4;     // SNR x 4 (MeshCore's unit), 0 = unknown
-  uint8_t pathHashSize;   // bytes per path hash of the received packet
-  uint8_t pathCount;      // repeaters the packet came over
-  uint8_t repeats;        // own message: times we heard our packet repeated by others
-  uint32_t ts;     // uptime seconds when it was stored (monotonic: a GPS sync cannot disturb ages)
-  uint32_t wall;   // system-clock seconds at that moment (0 = unknown)
-  uint8_t wallReal;   // the clock was a real source then; the age fallback needs this
-  uint32_t seq;    // stable message id across ring shifts, see meshMsgSeq()
+  uint8_t pathHashSize;
+  uint8_t pathCount;
+  uint8_t repeats;   // own message: times we heard our packet repeated by others
+  uint32_t ts;       // uptime seconds when stored (monotonic, clock-jump proof)
+  uint32_t wall;     // system-clock seconds at that moment (0 = unknown)
+  uint8_t wallReal;  // the clock was a real source then
+  uint32_t seq;      // stable message id across ring shifts
   char name[kMeshNameCap];
   char text[kMeshTextCap];
-  uint8_t path[MAX_PATH_SIZE];   // the packet's path as it arrived, pathCount * pathHashSize
+  uint8_t path[MAX_PATH_SIZE];
 };
 constexpr int kMsgRing = 32;
 Msg s_msgs[kMsgRing];
-uint32_t s_msgSeq = 0;   // messages ever stored; the next slot is s_msgSeq % kMsgRing
-int s_msgCount = 0;      // readable messages, capped at kMsgRing
+uint32_t s_msgSeq = 0;
+int s_msgCount = 0;
 uint8_t s_unread[8] = {0};
+uint32_t s_storeSerial = 0;   // changes on every stored message (channel or DM)
 
-// Per-contact stamp bookkeeping. MeshCore's ContactInfo has lastmod but no room for "was the clock
-// real when that was written", and no uptime. This small side table is filled from
-// onDiscoveredContact (lastmod is already set there, checked in BaseChatMesh.cpp) and read by
-// fillContact(). A contact restored from flash has no entry: its lastmod is judged by the fixed
-// 2025-01-01 cut-off in ui/age.h, exactly like the old 2024 clock.
+int slotFor(int idx) {
+  return (int)((s_msgSeq - (uint32_t)s_msgCount + (uint32_t)idx) % (uint32_t)kMsgRing);
+}
+
+// --- per-contact timestamps ----------------------------------------------------------------------
 struct ContactStamp {
   uint8_t key[PUB_KEY_SIZE];
   uint32_t wall;
@@ -131,23 +133,18 @@ void markContactStamp(const ContactInfo& ci) {
   slot->used = ++s_contactStampClock;
 }
 
-// MeshTables with one extra job: counting the times our OWN packet is heard again, repeated by
-// someone else. This uses only MeshCore's public virtual interface (markSeen/wasSeen), no library
-// edit: MeshCore calls markSeen() on the packet it is about to send, so while our send is in flight
-// that hash is remembered as ours; when a copy of it comes back from a repeater, wasSeen() is the
-// first thing MeshCore calls, and it lands here before the duplicate is dropped. The repeat is then
-// counted on the local echo that carries the same message id.
+// --- own-packet repeat counting ------------------------------------------------------------------
+// SimpleMeshTables with one extra job: while our own send is in flight, remember its packet hash;
+// when a copy comes back from a repeater, wasSeen() is the first thing MeshCore calls, so the
+// repeat is counted on the local echo that carries the same message id. Public virtual API only.
 class OmMeshTables : public SimpleMeshTables {
  public:
-  // seq = the message id the local echo will get (s_msgSeq + 1 when the send succeeds).
   void beginOwnSend(uint32_t seq) {
     s_pendingSeq = seq;
     s_pendingSlot = -1;
   }
   void endOwnSend(bool stored) {
-    if (!stored && s_pendingSlot >= 0) {
-      s_own[s_pendingSlot].seq = 0;   // the send failed, so the echo was not stored
-    }
+    if (!stored && s_pendingSlot >= 0) s_own[s_pendingSlot].seq = 0;
     s_pendingSeq = 0;
     s_pendingSlot = -1;
   }
@@ -192,246 +189,166 @@ class OmMeshTables : public SimpleMeshTables {
   int s_pendingSlot = -1;
 };
 
-// idx 0 is the oldest readable message. Deriving the slot from s_msgSeq (not from the count)
-// keeps the order right after the ring wraps; the old version silently reordered at 32.
-int slotFor(int idx) {
-  return (int)((s_msgSeq - (uint32_t)s_msgCount + (uint32_t)idx) % (uint32_t)kMsgRing);
+// --- direct messages -----------------------------------------------------------------------------
+// Stored here (not in MeshCore) because the UI owns the presentation: one thread per contact,
+// the same seq / wall / real / hops / SNR rules as channel messages, an unread count per thread.
+// The DM chat screen and the sheet's "Direct message" row are the next ticket; this is the data.
+struct DmMsg {
+  uint8_t thread;
+  int8_t hops;
+  int8_t snr4;
+  uint8_t pathHashSize;
+  uint8_t pathCount;
+  uint32_t seq;
+  uint32_t ts;
+  uint32_t wall;
+  uint8_t wallReal;
+  char name[kMeshNameCap];
+  char text[kMeshTextCap];
+  uint8_t path[MAX_PATH_SIZE];
+};
+constexpr int kDmRing = 32;
+DmMsg s_dms[kDmRing];
+uint32_t s_dmSeq = 0;
+int s_dmMsgCount = 0;
+
+struct DmThread {
+  uint8_t key[PUB_KEY_SIZE];
+  char name[kMeshNameCap];
+  uint16_t unread;
+  uint32_t lastWall;
+  bool used;
+};
+constexpr int kDmThreads = 16;
+DmThread s_dmThreads[kDmThreads];
+int s_dmThreadCount = 0;
+
+int findDmThread(const uint8_t* key) {
+  for (int i = 0; i < kDmThreads; ++i) {
+    if (s_dmThreads[i].used && memcmp(s_dmThreads[i].key, key, PUB_KEY_SIZE) == 0) return i;
+  }
+  return -1;
 }
 
-class OmChat : public BaseChatMesh {
-public:
-  OmChat(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc,
-         mesh::PacketManager& mgr, mesh::MeshTables& tables)
-      : BaseChatMesh(radio, ms, rng, rtc, mgr, tables) {}
-
-  bool beginStore() {
-    Serial.println("[mc] 6a BaseChatMesh::begin");
-    BaseChatMesh::begin();
-    Serial.println("[mc] 6b identity store");
-    IdentityStore store(SPIFFS, "/identity");
-    store.begin();   // mkdir /identity
-    // Two-argument load: the 4-arg overload writes display_name[n-1] and crashes with a 0-size buffer.
-    if (!store.load("_main", self_id)) {
-      ((StdRNG*)getRNG())->begin(millis());
-      self_id = mesh::LocalIdentity(getRNG());
-      int tries = 0;
-      while (tries < 10 && (self_id.pub_key[0] == 0x00 || self_id.pub_key[0] == 0xFF)) {
-        self_id = mesh::LocalIdentity(getRNG());
-        ++tries;
-      }
-      Serial.println("[mc] 6c new identity");
-      store.save("_main", self_id);
+int ensureDmThread(const ContactInfo& from) {
+  int idx = findDmThread(from.id.pub_key);
+  if (idx >= 0) return idx;
+  for (int i = 0; i < kDmThreads; ++i) {
+    if (!s_dmThreads[i].used) {
+      s_dmThreads[i].used = true;
+      memcpy(s_dmThreads[i].key, from.id.pub_key, PUB_KEY_SIZE);
+      snprintf(s_dmThreads[i].name, sizeof(s_dmThreads[i].name), "%s", from.name);
+      s_dmThreads[i].unread = 0;
+      s_dmThreads[i].lastWall = 0;
+      ++s_dmThreadCount;
+      return i;
     }
-    Serial.println("[mc] 6e contacts");
-    loadContacts();
-    return true;
+  }
+  return -1;   // table full: the message is still counted in the ring, just without a thread
+}
+
+void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
+  const int thread = ensureDmThread(from);
+  const int slot = (int)(s_dmSeq % (uint32_t)kDmRing);
+  DmMsg& m = s_dms[slot];
+  memset(&m, 0, sizeof(m));
+  m.thread = (uint8_t)(thread < 0 ? 0 : thread);
+  m.seq = ++s_dmSeq;
+  m.ts = millis() / 1000;
+  m.wall = timeKeeper().now();
+  m.wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
+  m.hops = pkt ? (int8_t)pkt->getPathHashCount() : -1;
+  m.snr4 = pkt ? (int8_t)lroundf(pkt->getSNR() * 4.0f) : 0;
+  {
+    uint8_t hs = pkt ? pkt->getPathHashSize() : 0;
+    uint8_t hc = pkt ? pkt->getPathHashCount() : 0;
+    if (pkt == nullptr || hs < 1 || hs > 3 || (int)hc * (int)hs > MAX_PATH_SIZE) {
+      hs = 0;
+      hc = 0;
+    }
+    m.pathHashSize = hs;
+    m.pathCount = hc;
+    if (hc > 0) memcpy(m.path, pkt->path, (size_t)hc * hs);
+  }
+  snprintf(m.name, sizeof(m.name), "%s", from.name);
+  snprintf(m.text, sizeof(m.text), "%s", text ? text : "");
+  if (s_dmMsgCount < kDmRing) ++s_dmMsgCount;
+  ++s_storeSerial;
+  if (thread >= 0) {
+    DmThread& t = s_dmThreads[thread];
+    if (t.unread < 0xFFFF) ++t.unread;
+    t.lastWall = m.wall;
+    snprintf(t.name, sizeof(t.name), "%s", from.name);
+  }
+  Serial.printf("[mc] DM from %s: %s (hops %d snr %.2f)\n", from.name, text ? text : "",
+                (int)m.hops, (double)m.snr4 / 4.0);
+}
+
+// --- MeshCore objects ----------------------------------------------------------------------------
+StdRNG fast_rng;
+OmMeshTables tables;
+DataStore store(SPIFFS, rtc_clock);
+MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store);
+
+// New contacts are only lazily written by MyMesh when they change later, so schedule one save for
+// a new advert too. Updates are already handled by MyMesh's own dirty timer.
+bool s_newContact = false;
+uint32_t s_newContactAt = 0;
+constexpr uint32_t kNewContactSaveMs = 5000;
+Preferences s_netPrefs;
+
+class OmListener : public MyMesh::Listener {
+ public:
+  void onMessageRecv(mesh::Packet* pkt, const ContactInfo& from, uint8_t txt_type,
+                     uint32_t, const char* text) override {
+    if (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN) {
+      storeDm(from, pkt, text);
+    }
   }
 
-  // --- contact persistence ---------------------------------------------------------------------
-  // The table is read and written only through BaseChatMesh's public API (getContactByIdx,
-  // addContact, getTotalContactSlots). The file format itself is ours (src/contact_store.h).
-  bool loadContacts() {
-    if (!SPIFFS.exists(kContactsPath)) {
-      Serial.println("[mc] contacts: none stored, starting empty");
-      return true;
-    }
-    File f = SPIFFS.open(kContactsPath, "r");
-    if (!f) {
-      Serial.println("[mc] contacts: open failed, starting empty");
-      return false;
-    }
-    const size_t len = (size_t)f.size();
-    if (len < kContactHeaderSize || len > kContactMaxFileSize) {
-      Serial.printf("[mc] contacts: corrupt file (%u bytes), starting empty\n", (unsigned)len);
-      f.close();
-      return false;
-    }
-    // File-scope buffer, not stack: 4.9 KB would not fit the loop task's stack.
-    const size_t got = (size_t)f.read(s_contactFileBuf, len);
-    f.close();
-    if (got != len) {
-      Serial.printf("[mc] contacts: short read %u of %u, starting empty\n", (unsigned)got,
-                    (unsigned)len);
-      return false;
-    }
-
-    const int n = contactDecode(s_contactFileBuf, len, s_contactRecs, kMaxContactRecords);
-    if (n < 0) {
-      Serial.println("[mc] contacts: corrupt file (magic/version/size/CRC), starting empty");
-      return false;
-    }
-    const int total = getTotalContactSlots();
-    if (total + n > MAX_ANON_CONTACTS + MAX_CONTACTS) {
-      Serial.printf("[mc] contacts: %d stored but the table has %d free slots, starting empty\n", n,
-                    MAX_ANON_CONTACTS + MAX_CONTACTS - total);
-      return false;
-    }
-
-    int added = 0;
-    for (int i = 0; i < n; ++i) {
-      ContactInfo ci{};
-      memcpy(ci.id.pub_key, s_contactRecs[i].pub_key, sizeof(ci.id.pub_key));
-      snprintf(ci.name, sizeof(ci.name), "%s", s_contactRecs[i].name);
-      ci.type = s_contactRecs[i].type;
-      ci.flags = s_contactRecs[i].flags;
-      ci.out_path_len = s_contactRecs[i].out_path_len;
-      memcpy(ci.out_path, s_contactRecs[i].out_path, sizeof(ci.out_path));
-      ci.last_advert_timestamp = s_contactRecs[i].last_advert_ts;
-      ci.lastmod = s_contactRecs[i].lastmod;
-      ci.gps_lat = s_contactRecs[i].gps_lat;
-      ci.gps_lon = s_contactRecs[i].gps_lon;
-      ci.sync_since = s_contactRecs[i].sync_since;
-      if (addContact(ci)) ++added;
-    }
-    // Do NOT call MeshCore's bootstrapRTCfromContacts(): it sets the clock to latest contact lastmod+1,
-    // which is a timestamp from an older boot (2024-era under VolatileRTCClock) and would move the
-    // new floor-backed clock backwards. Our clock already starts at max(saved floor, build time).
-    Serial.printf("[mc] contacts: loaded %d of %d from flash\n", added, n);
-    return added == n;
-  }
-
-  bool saveContacts() {
-    int n = 0;
-    const int total = getTotalContactSlots();
-    for (int idx = MAX_ANON_CONTACTS; idx < total && n < kMaxContactRecords; ++idx) {
-      ContactInfo ci;
-      if (!getContactByIdx((uint32_t)idx, ci)) continue;
-      if (ci.type == ADV_TYPE_NONE || ci.name[0] == 0) continue;
-      StoredContact& r = s_contactRecs[n++];
-      memset(&r, 0, sizeof(r));
-      memcpy(r.pub_key, ci.id.pub_key, sizeof(r.pub_key));
-      snprintf(r.name, sizeof(r.name), "%s", ci.name);
-      r.type = ci.type;
-      r.flags = ci.flags;
-      r.out_path_len = ci.out_path_len;
-      memcpy(r.out_path, ci.out_path, sizeof(r.out_path));
-      r.last_advert_ts = ci.last_advert_timestamp;
-      r.lastmod = ci.lastmod;
-      r.gps_lat = ci.gps_lat;
-      r.gps_lon = ci.gps_lon;
-      r.sync_since = ci.sync_since;
-    }
-
-    const size_t len = contactEncode(s_contactRecs, n, s_contactFileBuf, sizeof(s_contactFileBuf));
-    if (len == 0) {
-      Serial.println("[mc] contacts: encode failed, not saved");
-      return false;
-    }
-    // Write a temp file and swap it in: a power cut mid-write leaves the previous file intact
-    // instead of a half table. A cut between remove and rename leaves no file, and the next boot
-    // starts empty (logged), which is the documented fallback.
-    File f = SPIFFS.open(kContactsTmpPath, "w");
-    if (!f) {
-      Serial.println("[mc] contacts: cannot open temp file, not saved");
-      return false;
-    }
-    const size_t put = (size_t)f.write(s_contactFileBuf, len);
-    f.close();
-    if (put != len) {
-      Serial.printf("[mc] contacts: short write %u of %u, not saved\n", (unsigned)put,
-                    (unsigned)len);
-      SPIFFS.remove(kContactsTmpPath);
-      return false;
-    }
-    if (SPIFFS.exists(kContactsPath)) SPIFFS.remove(kContactsPath);
-    if (!SPIFFS.rename(kContactsTmpPath, kContactsPath)) {
-      Serial.println("[mc] contacts: rename failed, not saved");
-      SPIFFS.remove(kContactsTmpPath);
-      return false;
-    }
-    Serial.printf("[mc] contacts: saved %d (%u bytes)\n", n, (unsigned)len);
-    return true;
-  }
-
-  void sendAdvert() {
-    mesh::Packet* pkt = createAdvert(self_id);
-    // A flood with OUR configured path hash size, like upstream's companion does for
-    // CMD_SEND_SELF_ADVERT: sendPacket() would leave the route type and the hash size at whatever
-    // createAdvert() left them (1-byte hashes, transport-flood route).
-    if (pkt) sendFlood(pkt, 0, s_pathHashBytes);
-  }
-
-  // MeshCore's own sendFloodScoped() calls sendFlood(pkt, delay) and so always sends 1-byte path
-  // hashes, whatever the node is configured for. Both variants are virtual for exactly this: pass
-  // the configured size, the way upstream's companion does (_prefs.path_hash_mode + 1). Every
-  // channel message, ACK, path reply and direct-message flood goes through these.
-  void sendFloodScoped(const ContactInfo&, mesh::Packet* pkt, uint32_t delay_millis) override {
-    sendFlood(pkt, delay_millis, s_pathHashBytes);
-  }
-  void sendFloodScoped(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t delay_millis) override {
-    sendFlood(pkt, delay_millis, s_pathHashBytes);
-  }
-
-  // Any advert that lands in the table, and every learned return path, marks it for a (rate
-  // limited) save. New contacts, name/type/position updates and path updates all come through
-  // onDiscoveredContact; onContactPathUpdated covers a path learned from a later packet.
-  void onDiscoveredContact(ContactInfo& contact, bool, uint8_t, const uint8_t*) override {
-    markContactStamp(contact);   // lastmod is set just before this call (BaseChatMesh.cpp)
-    s_contactSaver.markDirty(millis());
-  }
-  ContactInfo* processAck(const uint8_t*) override { return nullptr; }
-  void onContactPathUpdated(const ContactInfo&) override {
-    s_contactSaver.markDirty(millis());
-  }
-  void onContactOverwrite(const uint8_t*) override { s_contactSaver.markDirty(millis()); }
-  void onMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
-  void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
-  void onCLICommandRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*, char*) override {}
-  void onSignedMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const uint8_t*,
-                           const char*) override {}
-  uint32_t calcFloodTimeoutMillisFor(uint32_t) const override { return 6000; }
-  uint32_t calcDirectTimeoutMillisFor(uint32_t, uint8_t) const override { return 6000; }
-  void onSendTimeout() override {}
-  uint8_t onContactRequest(const ContactInfo&, uint32_t, const uint8_t*, uint8_t, uint8_t*) override {
-    return 0;
-  }
-  void onContactResponse(const ContactInfo&, const uint8_t*, uint8_t) override {}
-
-  void onChannelMessageRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t,
+  void onChannelMessageRecv(mesh::Packet* pkt, ChannelDetails& channel_details,
                             const char* text) override {
-    s_lastChannel = -1;
+    int channelIdx = -1;
     for (int i = 0; i < mcChannelCount(); ++i) {
-      ChannelDetails cd;
-      if (getChannel(i, cd) && memcmp(cd.channel.hash, channel.hash, sizeof(channel.hash)) == 0) {
-        s_lastChannel = i;
+      if (mcChannel(i).hash == channel_details.channel.hash[0]) {
+        channelIdx = i;
         break;
       }
     }
-    if (s_lastChannel < 0) {   // not one of ours (or a removed channel still in the mesh table)
+    s_lastChannel = channelIdx;
+    if (channelIdx < 0) {
       Serial.printf("[mc] message for an unknown channel, ignored: %s\n", text ? text : "");
       return;
     }
-    // MeshCore dispatches one packet per matching slot, and an emptied slot still has a (zero-key) hash
-    // that can collide with a real channel's 1/256 of the time. Drop an immediate repeat.
+    // MeshCore can dispatch one packet to more than one matching slot; drop an immediate repeat
+    // (same channel, same text, within 2 s) so the ring and the unread count stay honest.
     {
       static int lastCh = -1;
       static uint32_t lastTs = 0;
       static char lastText[kMeshTextCap];
       const uint32_t now = millis() / 1000;
-      if (s_lastChannel == lastCh && (now - lastTs) <= 2 &&
+      if (channelIdx == lastCh && (now - lastTs) <= 2 &&
           strncmp(lastText, text ? text : "", kMeshTextMax) == 0) {
         Serial.println("[mc] duplicate dispatch, ignored");
         return;
       }
-      lastCh = s_lastChannel;
+      lastCh = channelIdx;
       lastTs = now;
       snprintf(lastText, sizeof(lastText), "%s", text ? text : "");
     }
+
     snprintf(s_lastText, sizeof(s_lastText), "%s", text ? text : "");
     const int slot = slotFor(s_msgCount);
-    s_msgs[slot].seq = s_msgSeq + 1;
-    s_msgs[slot].ch = (uint8_t)(s_lastChannel < 0 ? 0 : s_lastChannel);
-    s_msgs[slot].mine = 0;
-    s_msgs[slot].ts = millis() / 1000;
-    s_msgs[slot].wall = timeKeeper().now();
-    s_msgs[slot].wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
-    // What the air gave us: hops travelled and SNR at the last hop (Dispatcher sets _snr on RX).
-    s_msgs[slot].hops = pkt ? (int8_t)pkt->getPathHashCount() : -1;
-    s_msgs[slot].snr4 = pkt ? (int8_t)lroundf(pkt->getSNR() * 4.0f) : 0;
-    // The repeaters the packet came over: the hash bytes exactly as they arrived. MeshCore's own
-    // size travels in the packet, so the UI names each entry by matching that prefix against a known
-    // repeater's public key (the path hash IS the pub_key prefix, Identity.h).
-    s_msgs[slot].repeats = 0;
+    Msg& m = s_msgs[slot];
+    memset(&m, 0, sizeof(m));
+    m.seq = s_msgSeq + 1;
+    m.ch = (uint8_t)channelIdx;
+    m.mine = 0;
+    m.ts = millis() / 1000;
+    m.wall = timeKeeper().now();
+    m.wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
+    m.hops = pkt ? (int8_t)pkt->getPathHashCount() : -1;
+    m.snr4 = pkt ? (int8_t)lroundf(pkt->getSNR() * 4.0f) : 0;
     {
       uint8_t hs = pkt ? pkt->getPathHashSize() : 0;
       uint8_t hc = pkt ? pkt->getPathHashCount() : 0;
@@ -439,153 +356,275 @@ public:
         hs = 0;
         hc = 0;
       }
-      s_msgs[slot].pathHashSize = hs;
-      s_msgs[slot].pathCount = hc;
-      memset(s_msgs[slot].path, 0, sizeof(s_msgs[slot].path));
-      if (hc > 0) memcpy(s_msgs[slot].path, pkt->path, (size_t)hc * hs);
+      m.pathHashSize = hs;
+      m.pathCount = hc;
+      if (hc > 0) memcpy(m.path, pkt->path, (size_t)hc * hs);
     }
     const char* body = text ? text : "";
     const char* sep = strstr(body, ": ");
-    // "<name>: <text>" is one MAX_TEXT_LEN string on the air, so the name can be as long as
-    // ContactInfo::name allows; anything longer than that separator is not a name.
-    if (sep && (size_t)(sep - body) < sizeof(s_msgs[slot].name)) {
+    if (sep && (size_t)(sep - body) < sizeof(m.name)) {
       const size_t n = (size_t)(sep - body);
-      memcpy(s_msgs[slot].name, body, n);
-      s_msgs[slot].name[n] = 0;
+      memcpy(m.name, body, n);
+      m.name[n] = 0;
       body = sep + 2;
     } else {
-      snprintf(s_msgs[slot].name, sizeof(s_msgs[slot].name), "?");
+      snprintf(m.name, sizeof(m.name), "?");
     }
-    snprintf(s_msgs[slot].text, sizeof(s_msgs[slot].text), "%s", body);
+    snprintf(m.text, sizeof(m.text), "%s", body);
     if (s_msgCount < kMsgRing) ++s_msgCount;
     ++s_msgSeq;
-    if (s_lastChannel >= 0 && s_lastChannel < 8) ++s_unread[s_lastChannel];
-    const bool muted = (s_lastChannel >= 0) && mcChannelMuted(s_lastChannel);
-    Serial.printf("[mc] channel %d: %s (hops %d snr %.2f)%s\n", s_lastChannel, s_lastText,
-                  (int)s_msgs[slot].hops, (double)s_msgs[slot].snr4 / 4.0,
-                  muted ? " [muted]" : "");
-    // A muted channel still stores the message and still counts unread: mute is about the chime only.
+    ++s_storeSerial;
+    if (channelIdx < 8) ++s_unread[channelIdx];
+    const bool muted = mcChannelMuted(channelIdx);
+    Serial.printf("[mc] channel %d: %s (hops %d snr %.2f)%s\n", channelIdx, s_lastText,
+                  (int)m.hops, (double)m.snr4 / 4.0, muted ? " [muted]" : "");
+    // A muted channel still stores and counts unread; mute is about the chime only.
     if (!muted) {
       audioTone(1318, 70);
       audioTone(1760, 90);
     }
   }
-};
 
-// MeshCore's clock is the system clock. It used to be VolatileRTCClock, which restarted at 15 May
-// 2024 on every boot (so other nodes dropped our adverts as a replay). OmRTCClock reads and writes
-// what timekeeper.h owns; setCurrentTime() is plumbing and never marks a trusted source.
-class OmRTCClock : public mesh::RTCClock {
- public:
-  uint32_t getCurrentTime() override { return om::timeKeeper().now(); }
-  void setCurrentTime(uint32_t time) override { om::timeKeeper().setHardware(time); }
-  void tick() override {}
-};
+  void onQueueSizeChanged(int msgcount) override { (void)msgcount; }
 
-// MeshCore's own send path queues a packet and reports success before the radio has transmitted;
-// RadioLibWrapper::startSendRaw() is where the SX1262 actually answers. This subclass is the only
-// place the status bar's TX fault can be honest:
-//   * startSendRaw() false: a RadioLib startTransmit error (no chip answer, bad params, ...) -> fault;
-//   * a send that never completes inside kTxTimeoutMs (RadioLib TX timeout) -> fault;
-//   * onSendFinished(): the TX completed, so the mark clears.
-// Nothing here looks at received traffic: a quiet band can never set the mark.
-class OmSX1262Wrapper : public CustomSX1262Wrapper {
- public:
-  OmSX1262Wrapper(CustomSX1262& radio, mesh::MainBoard& board)
-      : CustomSX1262Wrapper(radio, board) {}
-
-  bool startSendRaw(const uint8_t* bytes, int len) override {
-    const bool ok = CustomSX1262Wrapper::startSendRaw(bytes, len);
-    if (!ok) {
-      txWaiting_ = false;
-      txTimedOut_ = false;
-      if (radioFaultState().set(RadioFault::Tx)) {
-        Serial.printf("[radio] fault: %s\n", radioFaultToken(RadioFault::Tx));
-      }
-      return false;
-    }
-    txWaiting_ = true;
-    txTimedOut_ = false;
-    txStartMs_ = millis();
-    return true;
-  }
-
-  bool isSendComplete() override {
-    const bool done = CustomSX1262Wrapper::isSendComplete();
-    if (done) {
-      txWaiting_ = false;
-      return true;
-    }
-    if (txWaiting_ && (uint32_t)(millis() - txStartMs_) > kTxTimeoutMs) {
-      txWaiting_ = false;
-      txTimedOut_ = true;   // a late completion still clears the mark in onSendFinished()
-      if (radioFaultState().set(RadioFault::Tx)) {
-        Serial.printf("[radio] fault: %s\n", radioFaultToken(RadioFault::Tx));
-      }
-    }
-    return false;
-  }
-
-  void onSendFinished() override {
-    CustomSX1262Wrapper::onSendFinished();
-    const bool wasSending = txWaiting_ || txTimedOut_;
-    txWaiting_ = false;
-    txTimedOut_ = false;
-    if (wasSending && radioFaultState().onTxOk()) {
-      Serial.println("[radio] fault cleared");
+  void onDiscoveredContact(ContactInfo& contact, bool is_new, uint8_t, const uint8_t*) override {
+    markContactStamp(contact);
+    if (is_new) {
+      s_newContact = true;
+      s_newContactAt = millis();
     }
   }
-
- private:
-  static constexpr uint32_t kTxTimeoutMs = 15000;   // longer than any legal packet's airtime
-  bool txWaiting_ = false;
-  bool txTimedOut_ = false;
-  uint32_t txStartMs_ = 0;
 };
 
-// Lazily created; the constructor only runs inside meshLinkBegin(), after USB is up.
-struct Ctx {
-  Ctx() : mod(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi), radio(&mod) {}
+OmListener s_listener;
 
-  SPIClass spi{FSPI};
-  Module mod;
-  CustomSX1262 radio;
-  OmBoard board;
-  StdRNG rng;
-  ArduinoMillis ms;
-  OmRTCClock rtc;
-  StaticPoolPacketManager mgr{16};
-  OmMeshTables tables;
-  CustomSX1262Wrapper* wrapper = nullptr;
-  OmChat* mesh = nullptr;
-};
+// --- one-time migration --------------------------------------------------------------------------
+// The `mig` flag may only be set after every output below has been written AND read back. A failed
+// step logs why, leaves the flag unset and is retried on the next boot.
+constexpr const char* kOldContactsPath = "/contacts";
+constexpr const char* kNewContactsPath = "/contacts3";
+constexpr const char* kContactsTmpPath = "/contacts3.tmp";
+constexpr const char* kPrefsPath = "/prefs.json";
+constexpr const char* kChannelsPath = "/channels2";
 
-Ctx* s_ctx = nullptr;
-Preferences s_netPrefs;
+enum class MigrateResult : uint8_t { Ok, Skipped, Failed };
 
-// One place that sets the setting and the label together, so Settings > Radio can never disagree
-// with what goes on the air.
-void applyPathHashBytes(uint8_t bytes) {
-  if (bytes < 1) bytes = 1;
-  if (bytes > 3) bytes = 3;
-  s_pathHashBytes = bytes;
-  snprintf(s_pathHashLabel, sizeof(s_pathHashLabel), "%uB", (unsigned)bytes);
+// Reopens path and compares it with the image just written: size first, then every byte. This is
+// the check EST-340 lacked: it asked File::size() before flush/close, ESP-IDF's SPIFFS stat then
+// reported 0 for a file whose data was still in the stdio buffer, and the log said "0 bytes".
+bool readBackExact(const char* path, const uint8_t* expected, size_t expectedLen) {
+  if (expected == nullptr && expectedLen != 0) return false;
+  if (!SPIFFS.exists(path)) return false;
+  File f = SPIFFS.open(path, "r");
+  if (!f) return false;
+  bool ok = (size_t)f.size() == expectedLen;
+  uint8_t chunk[kLegacyContactRecordSize];
+  size_t off = 0;
+  while (ok && off < expectedLen) {
+    const size_t want = (expectedLen - off) < sizeof(chunk) ? (expectedLen - off) : sizeof(chunk);
+    if ((size_t)f.read(chunk, want) != want || memcmp(chunk, expected + off, want) != 0) {
+      ok = false;
+    } else {
+      off += want;
+    }
+  }
+  f.close();
+  return ok;
+}
+
+// /contacts -> /contacts3. Idempotent: a structurally valid /contacts3 is never rewritten, because
+// after the first migration MeshCore owns it and updates it from adverts. The bad states are a size
+// that is not a whole number of 152-byte records (a torn write) and 0 bytes while /contacts still
+// holds contacts (exactly what the EST-340 crash could have left behind).
+MigrateResult copyLegacyContactsIfNeeded() {
+  if (!SPIFFS.exists(kOldContactsPath)) {
+    Serial.printf("[mc] migrate /contacts: no old file (/contacts3 %s)\n",
+                  SPIFFS.exists(kNewContactsPath) ? "kept" : "absent");
+    return MigrateResult::Skipped;
+  }
+  File in = SPIFFS.open(kOldContactsPath, "r");
+  if (!in) {
+    Serial.println("[mc] migrate /contacts: open failed, left for the next boot");
+    return MigrateResult::Failed;
+  }
+  const size_t len = (size_t)in.size();
+  if (len < kLegacyContactHeaderSize || len > kLegacyContactMaxFileSize) {
+    Serial.printf("[mc] migrate /contacts: bad size %u, not migrated\n", (unsigned)len);
+    in.close();
+    return MigrateResult::Failed;
+  }
+  static uint8_t s_legacyBuf[kLegacyContactMaxFileSize];
+  const size_t got = (size_t)in.read(s_legacyBuf, len);
+  in.close();
+  if (got != len) {
+    Serial.printf("[mc] migrate /contacts: short read %u of %u, not migrated\n", (unsigned)got,
+                  (unsigned)len);
+    return MigrateResult::Failed;
+  }
+
+  static LegacyContact recs[kLegacyMaxContactRecords];
+  const int n = decodeLegacyContacts(s_legacyBuf, len, recs, kLegacyMaxContactRecords);
+  if (n < 0) {
+    Serial.println("[mc] migrate /contacts: corrupt (magic/version/CRC), not migrated");
+    return MigrateResult::Failed;
+  }
+  if (n == 0) {
+    Serial.println("[mc] migrate /contacts: 0 contacts, no /contacts3 needed");
+    return MigrateResult::Ok;
+  }
+
+  static uint8_t s_image[kLegacyMaxContactRecords * kLegacyContactRecordSize];
+  size_t imageLen = 0;
+  if (!encodeContacts3(recs, n, s_image, sizeof(s_image), &imageLen)) {
+    Serial.println("[mc] migrate /contacts: cannot build the /contacts3 image");
+    return MigrateResult::Failed;
+  }
+
+  if (SPIFFS.exists(kNewContactsPath)) {
+    size_t existing = 0;
+    File cur = SPIFFS.open(kNewContactsPath, "r");
+    if (cur) {
+      existing = (size_t)cur.size();
+      cur.close();
+    }
+    const bool wholeRecords = (existing % kLegacyContactRecordSize) == 0;
+    const bool emptyButData = (existing == 0);
+    if (wholeRecords && !emptyButData) {
+      Serial.printf("[mc] migrate /contacts: /contacts3 already valid (%u B, %d in /contacts), kept\n",
+                    (unsigned)existing, n);
+      return MigrateResult::Ok;
+    }
+    Serial.printf("[mc] migrate /contacts: /contacts3 not usable (%u B, %d decoded), rebuilding\n",
+                  (unsigned)existing, n);
+  }
+
+  File out = SPIFFS.open(kContactsTmpPath, "w");
+  if (!out) {
+    Serial.println("[mc] migrate /contacts: cannot open /contacts3.tmp");
+    return MigrateResult::Failed;
+  }
+  const size_t wrote = (size_t)out.write(s_image, imageLen);
+  out.flush();   // push the stdio buffer into SPIFFS before anyone asks for the file's size
+  out.close();
+  if (wrote != imageLen) {
+    SPIFFS.remove(kContactsTmpPath);
+    Serial.printf("[mc] migrate /contacts: short write %u of %u, not migrated\n", (unsigned)wrote,
+                  (unsigned)imageLen);
+    return MigrateResult::Failed;
+  }
+  if (!readBackExact(kContactsTmpPath, s_image, imageLen)) {
+    SPIFFS.remove(kContactsTmpPath);
+    Serial.println("[mc] migrate /contacts: /contacts3.tmp did not read back, not migrated");
+    return MigrateResult::Failed;
+  }
+  if (SPIFFS.exists(kNewContactsPath)) SPIFFS.remove(kNewContactsPath);
+  if (!SPIFFS.rename(kContactsTmpPath, kNewContactsPath)) {
+    SPIFFS.remove(kContactsTmpPath);
+    Serial.println("[mc] migrate /contacts: rename failed, not migrated");
+    return MigrateResult::Failed;
+  }
+  if (!readBackExact(kNewContactsPath, s_image, imageLen)) {
+    Serial.println("[mc] migrate /contacts: /contacts3 did not read back after rename");
+    return MigrateResult::Failed;
+  }
+  // /contacts stays in place for one release, so a rollback still finds it.
+  Serial.printf("[mc] migrate /contacts -> /contacts3: %d contacts, %u bytes written and read back "
+                "(old file kept)\n",
+                n, (unsigned)imageLen);
+  return MigrateResult::Ok;
+}
+
+void pushChannelsFromNvs(bool save) {
+  const int count = mcChannelCount();
+  for (int i = 0; i < kMaxChannels; ++i) {
+    ChannelDetails cd;
+    memset(&cd, 0, sizeof(cd));
+    if (i < count) {
+      snprintf(cd.name, sizeof(cd.name), "%s", mcChannelName(i));
+      memcpy(cd.channel.secret, mcChannel(i).secret, 16);
+    }
+    the_mesh.setChannel(i, cd);
+  }
+  if (save) store.saveChannels(&the_mesh);
+  Serial.printf("[mc] channels: %d from NVS%s\n", count, save ? " (saved to /channels2)" : "");
+}
+
+// /prefs.json exists, is not empty and parses with MeshCore's own reader. A scratch NodePrefs, so
+// the live one the mesh already loaded is never disturbed by the check.
+bool prefsFileParses() {
+  if (!SPIFFS.exists(kPrefsPath)) return false;
+  File f = SPIFFS.open(kPrefsPath, "r");
+  if (!f) return false;
+  const size_t size = (size_t)f.size();
+  static NodePrefs s_scratch;   // NodePrefs is large: keep it out of the loop task's stack
+  const bool parsed = size > 0 && s_scratch.loadSerial(f);
+  f.close();
+  return parsed;
+}
+
+// /channels2 holds exactly kMaxChannels 68-byte entries and every name/secret matches the channel
+// table that was just written. That is the read-back for the channel step.
+bool channelsFileMatchesMesh() {
+  if (!SPIFFS.exists(kChannelsPath)) return false;
+  File f = SPIFFS.open(kChannelsPath, "r");
+  if (!f) return false;
+  bool ok = channelsFileComplete((size_t)f.size(), kMaxChannels);
+  for (int i = 0; ok && i < kMaxChannels; ++i) {
+    uint8_t unused[4];
+    char name[sizeof(ChannelDetails::name)];
+    uint8_t secret[sizeof(ChannelDetails::channel.secret)];
+    ChannelDetails want;
+    if (f.read(unused, sizeof(unused)) != sizeof(unused) ||
+        f.read((uint8_t*)name, sizeof(name)) != sizeof(name) ||
+        f.read(secret, sizeof(secret)) != sizeof(secret) || !the_mesh.getChannel(i, want) ||
+        memcmp(name, want.name, sizeof(name)) != 0 ||
+        memcmp(secret, want.channel.secret, sizeof(secret)) != 0) {
+      ok = false;
+    }
+  }
+  f.close();
+  return ok;
+}
+
+void logFileSize(const char* path) {
+  if (!SPIFFS.exists(path)) {
+    Serial.printf("[mc] store: %s missing\n", path);
+    return;
+  }
+  File f = SPIFFS.open(path, "r");
+  if (!f) {
+    Serial.printf("[mc] store: %s unreadable\n", path);
+    return;
+  }
+  Serial.printf("[mc] store: %s %u B\n", path, (unsigned)f.size());
+  f.close();
 }
 
 }  // namespace
 
+// ------------------------------------------------------------------------------------------------
 bool meshLinkReady() { return s_ready; }
 const char* meshLinkLastMessage() { return s_lastText; }
 int meshLinkLastChannel() { return s_lastChannel; }
+const char* meshNodeName() { return the_mesh.getNodeName(); }
 
-uint8_t meshPathHashBytes() { return s_pathHashBytes; }
-const char* meshPathHashLabel() { return s_pathHashLabel; }
+uint8_t meshPathHashBytes() {
+  const uint8_t mode = the_mesh.getNodePrefs()->path_hash_mode;
+  return (uint8_t)(mode > 2 ? 3 : mode + 1);
+}
+
+const char* meshPathHashLabel() {
+  static char label[4];
+  snprintf(label, sizeof(label), "%uB", (unsigned)meshPathHashBytes());
+  return label;
+}
 
 bool meshPathHashSet(uint8_t bytes) {
   if (bytes < 1 || bytes > 3) return false;
-  applyPathHashBytes(bytes);
-  if (s_prefsBegun) s_netPrefs.putUChar("phs", bytes);
-  Serial.printf("[mc] path hash set to %s (saved)\n", s_pathHashLabel);
+  the_mesh.getNodePrefs()->path_hash_mode = (uint8_t)(bytes - 1);
+  the_mesh.savePrefs();
+  if (s_prefsBegun) s_netPrefs.putUChar("phs", bytes);   // old key kept for rollback
+  Serial.printf("[mc] path hash set to %s (saved in prefs.json)\n", meshPathHashLabel());
   return true;
 }
 
@@ -594,12 +633,25 @@ bool meshLinkBegin() {
 
   s_netPrefs.begin("mcnet", false);
   s_prefsBegun = true;
+  crashCheckpoint("[mc] 0 guard");
+  // A newly installed firmware gets a fresh start: the crash guard belongs to the image that
+  // crashed, and a parked guard is otherwise permanent (S494 rollback: the old image stayed parked
+  // too, because `crashed`/`fails` live in NVS and nothing cleared them). A new image has a new
+  // __DATE__ " " __TIME__, so its first boot clears the guard; a reboot of the same image keeps it.
+  {
+    const char* build = __DATE__ " " __TIME__;
+    if (s_netPrefs.getString("gbuild", "") != build) {
+      s_netPrefs.putBool("crashed", false);
+      s_netPrefs.putUChar("fails", 0);
+      s_netPrefs.putString("gbuild", build);
+      Serial.printf("[mc] new firmware image (%s): crash guard reset\n", build);
+    }
+  }
   if (s_netPrefs.getBool("crashed", false)) {
     const uint8_t fails = (uint8_t)(s_netPrefs.getUChar("fails", 0) + 1);
     s_netPrefs.putUChar("fails", fails);
     Serial.printf("[mc] previous init crashed (fail %u/3)\n", fails);
     if (fails < 3) {
-      // Retry once automatically: clear the flag, give OTA a moment, reboot.
       s_netPrefs.putBool("crashed", false);
       delay(1500);
       ESP.restart();
@@ -609,110 +661,176 @@ bool meshLinkBegin() {
   }
   s_netPrefs.putBool("crashed", true);   // cleared only after a full successful init
 
-  // The path hash size goes on the air with every packet, so it is read before the first advert.
-  applyPathHashBytes(s_netPrefs.getUChar("phs", 2));
-  Serial.printf("[mc] path hash %s (NVS phs=%u)\n", s_pathHashLabel,
-                (unsigned)s_netPrefs.getUChar("phs", 2));
-
+  crashCheckpoint("[mc] 1 spiffs");
   Serial.println("[mc] 1 spiffs");
   if (!SPIFFS.begin(true)) {
     Serial.println("[mc] SPIFFS mount failed");
     return false;
   }
 
-  Serial.println("[mc] 2 objects");
-  s_ctx = new Ctx();
-  if (!s_ctx) return false;
+  // The old identity file is MeshCore's own IdentityStore format at the same path. Read it
+  // BEFORE begin() so the boot log can prove the key did not change.
+  crashCheckpoint("[mc] 1b identity");
+  mesh::LocalIdentity oldIdentity;
+  bool hadOldIdentity = false;
+  {
+    IdentityStore ids(SPIFFS, "/identity");
+    ids.begin();
+    hadOldIdentity = ids.load("_main", oldIdentity);
+  }
 
-  Serial.println("[mc] 3 radio std_init");
-  s_ctx->spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI, P_LORA_NSS);
-  if (!s_ctx->radio.std_init(&s_ctx->spi)) {
+  // /contacts (EST-329) -> /contacts3 must happen before begin() loads contacts. The result is part
+  // of the `mig` gate below: a failed contact migration must not mark the move complete.
+  crashCheckpoint("[mc] 1c contacts");
+  const MigrateResult contactsMig = copyLegacyContactsIfNeeded();
+  const bool hadChannelsFile = SPIFFS.exists(kChannelsPath);
+
+  crashCheckpoint("[mc] 2 radio");
+  Serial.println("[mc] 2 radio");
+  if (!radio_init()) {
     Serial.println("[mc] radio init failed");
-    // The chip itself did not answer, which outranks "MeshCore did not start": the status bar's
-    // toast should name the radio, not the layer above it.
     if (radioFaultState().set(RadioFault::Radio)) {
       Serial.printf("[radio] fault: %s\n", radioFaultToken(RadioFault::Radio));
     }
     return false;
   }
+  fast_rng.begin(radio_get_rng_seed());
 
-  Serial.println("[mc] 4 tx power");
-  s_ctx->radio.setOutputPower(LORA_TX_POWER);
+  crashCheckpoint("[mc] 3 store + mesh begin");
+  Serial.println("[mc] 3 store + mesh begin");
+  crashCheckpoint("[mc] 3a store.begin");
+  store.begin();
+  // EST-341 crash window: the_mesh is a global whose layout must agree with MyMesh.cpp (see the
+  // MAX_CONTACTS static_assert at the top of this file).
+  crashCheckpoint("[mc] 3b the_mesh.begin");
+  the_mesh.begin();
+  crashCheckpoint("[mc] 3c interface");
+  target_mesh_begun = true;   // from here on setCurrentTime() is the phone source
+  the_mesh.setListener(&s_listener);
+  the_mesh.setBLEPin(0);      // Bluetooth stays OFF in this ticket
+  the_mesh.startInterface(null_serial);
 
-  Serial.println("[mc] 5 wrapper");
-  s_ctx->wrapper = new OmSX1262Wrapper(s_ctx->radio, s_ctx->board);
-  if (!s_ctx->wrapper) return false;
+  // Identity proof for the flash check: exactly `[mc] identity <first 8 bytes hex>`.
+  {
+    char hex[17];
+    identityPrefixHex(the_mesh.self_id.pub_key, hex, sizeof(hex));
+    Serial.printf("[mc] identity %s\n", hex);
+    if (hadOldIdentity) {
+      Serial.printf("[mc] identity %s\n",
+                    identityPreserved(oldIdentity.pub_key, the_mesh.self_id.pub_key)
+                        ? "same as before"
+                        : "CHANGED");
+    } else {
+      Serial.println("[mc] identity: no previous /identity/_main (new node)");
+    }
+  }
 
-  Serial.println("[mc] 6 chat object");
-  s_ctx->mesh = new OmChat(*s_ctx->wrapper, s_ctx->ms, s_ctx->rng, s_ctx->rtc, s_ctx->mgr,
-                           s_ctx->tables);
-  if (!s_ctx->mesh) return false;
+  // One-time migration: node name, path hash mode, channels. Old NVS keys are left untouched for
+  // a rollback; the old /contacts file likewise stays next to /contacts3 for one release.
+  // `mig` is set ONLY when every output below has been written and read back; a failure retries on
+  // the next boot (EST-341).
+  const bool migrated = s_netPrefs.getBool("mig", false);
+  bool migrateOk = true;
 
-  s_ctx->mesh->beginStore();
+  crashCheckpoint("[mc] 4 prefs");
+  // A missing/empty/unparsable file is rewritten (retry), not just reported: otherwise one bad boot
+  // would leave the node without preferences forever. The scratch parse in prefsFileParses() does
+  // not disturb the prefs the mesh already loaded.
+  const bool prefsOk = prefsFileParses();
+  if (!migrated || !prefsOk) {
+    NodePrefs* prefs = the_mesh.getNodePrefs();
+    snprintf(prefs->node_name, sizeof(prefs->node_name), "%s", kMeshOwnName);
+    const uint8_t phs = s_netPrefs.getUChar("phs", 2);
+    prefs->path_hash_mode = pathHashModeFromLegacy(phs);
+    the_mesh.savePrefs();
+    if (!prefsFileParses()) {
+      Serial.println("[mc] migration: /prefs.json missing, empty or did not parse, mig not set");
+      migrateOk = false;
+    } else {
+      Serial.printf("[mc] migration: name \"%s\", path hash %uB (NVS phs=%u), prefs read back\n",
+                    prefs->node_name, (unsigned)meshPathHashBytes(), (unsigned)phs);
+    }
+  }
 
-  // The reference firmware sets the radio params AFTER mesh.begin(); doing it before left the
-  // receive path unconfigured (TX worked, RX never delivered).
-  Serial.println("[mc] 6d setParams + tx power (after begin)");
-  s_ctx->wrapper->setParams(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR);
-  s_ctx->wrapper->setTxPower(LORA_TX_POWER);
+  // Only the first boot after the move seeds from our NVS. Later boots let MeshCore load
+  // /channels2, so a channel added by the phone (next ticket) is not thrown away. A malformed file
+  // is rewritten and checked again.
+  crashCheckpoint("[mc] 5 channels");
+  if (!migrated || !hadChannelsFile || !channelsFileMatchesMesh()) {
+    pushChannelsFromNvs(true);
+    if (!channelsFileMatchesMesh()) {
+      Serial.println("[mc] migration: /channels2 size or entries wrong, mig not set");
+      migrateOk = false;
+    }
+  }
 
-  Serial.println("[mc] 7 channels");
-  meshLinkReloadChannels();
+  if (contactsMig == MigrateResult::Failed) {
+    Serial.println("[mc] migration: /contacts3 incomplete, mig not set");
+    migrateOk = false;
+  }
 
-  // The chip answered std_init and the mesh is built, so a startup mark is resolved here, BEFORE the
-  // first advert: an advert TX failure after this must still be able to set the mark.
+  crashCheckpoint("[mc] 5b mig gate");
+  if (migrateOk) {
+    s_netPrefs.putBool("mig", true);
+    Serial.println("[mc] migration: complete (prefs, channels and contacts read back)");
+  } else {
+    Serial.println("[mc] migration: INCOMPLETE, retrying next boot (mig not set)");
+  }
+
+  logFileSize("/identity/_main.id");
+  logFileSize("/prefs.json");
+  logFileSize("/channels2");
+  logFileSize("/contacts3");
+  logFileSize("/contacts");   // old EST-329 file, kept for one release
+
+  // The chip answered and the mesh is built: a startup mark is resolved here, before the advert,
+  // so an advert TX failure after this still sets the mark.
   if (radioFaultState().onRadioReinit()) Serial.println("[radio] fault cleared");
 
-  s_ready = true;   // before advert/hello, because meshLinkSend() checks it
+  s_ready = true;
 
-  Serial.println("[mc] 8 advert");
-  s_ctx->mesh->sendAdvert();
-
-  // No automatic "OM Lite online" on boot: it put a message on a real channel on every power cycle
-  // (Filip, S492). The advert above still announces the node without occupying a channel.
+  // One flood advert at boot (the old firmware did this; upstream's companion UI sends it from
+  // its own advert action). The path hash size is whatever the prefs hold, so SLO stays on 2B.
+  crashCheckpoint("[mc] 6 advert");
+  mesh::Packet* pkt = nullptr;
+  if (the_mesh.getNodePrefs()->advert_loc_policy != 0 &&
+      (sensors.node_lat != 0 || sensors.node_lon != 0)) {
+    pkt = the_mesh.createSelfAdvert(the_mesh.getNodeName(), sensors.node_lat, sensors.node_lon);
+  } else {
+    pkt = the_mesh.createSelfAdvert(the_mesh.getNodeName());
+  }
+  if (pkt) the_mesh.sendFlood(pkt, 0, meshPathHashBytes());
 
   s_netPrefs.putBool("crashed", false);
   s_netPrefs.putUChar("fails", 0);
-  Serial.printf("[mc] up: %.3f MHz SF%u\n", LORA_FREQ, (unsigned)LORA_SF);
+  crashCheckpoint("[mc] up");
+  Serial.printf("[mc] up: %.1f MHz SF%u, path hash %s, name \"%s\"\n",
+                (double)the_mesh.getNodePrefs()->freq, (unsigned)the_mesh.getNodePrefs()->sf,
+                meshPathHashLabel(), the_mesh.getNodeName());
   return true;
 }
 
 void meshLinkLoop() {
-  if (!s_ready || !s_ctx || !s_ctx->mesh) return;
-  s_ctx->mesh->loop();
+  if (!s_ready) return;
+  the_mesh.loop();
 
-  // Persist the contact table after the mesh has processed this pass, at most once per
-  // kContactSaveMinIntervalMs. A failed write stays dirty and is retried after the interval.
   const uint32_t now = millis();
-  if (s_contactSaver.due(now)) {
-    if (s_ctx->mesh->saveContacts()) s_contactSaver.onSaveOk(now);
-    else s_contactSaver.onSaveFailed(now);
+  if (s_newContact && (uint32_t)(now - s_newContactAt) >= kNewContactSaveMs) {
+    store.saveContacts(&the_mesh);
+    Serial.println("[mc] contacts: saved a new advert to /contacts3");
+    s_newContact = false;
   }
 }
 
 bool meshLinkReloadChannels() {
-  // Deliberately not gated on s_ready: this is also called from meshLinkBegin() while the mesh is
-  // being brought up, before s_ready flips (a gate here left the node with no channels at all).
-  if (!s_ctx || !s_ctx->mesh) return false;
-  const int count = mcChannelCount();
-  for (int i = 0; i < kMaxChannels; ++i) {
-    ChannelDetails cd;
-    memset(&cd, 0, sizeof(cd));
-    if (i < count) {
-      snprintf(cd.name, sizeof(cd.name), "%s", mcChannelName(i));
-      memcpy(cd.channel.secret, mcChannel(i).secret, 16);
-    }
-    s_ctx->mesh->setChannel(i, cd);
-    if (i < count) {
-      // Print OUR hash: setChannel() recomputes it inside the mesh, so cd still holds zeros here.
-      Serial.printf("[mc] channel %d '%s' hash %02x\n", i, mcChannelName(i), mcChannel(i).hash);
-    }
-  }
+  if (!s_prefsBegun) return false;
+  pushChannelsFromNvs(true);
   return true;
 }
 
+// --- message accessors ---------------------------------------------------------------------------
 int meshMsgCount() { return s_msgCount; }
-uint32_t meshMsgSerial() { return s_msgSeq; }
+uint32_t meshMsgSerial() { return s_storeSerial; }
 
 const char* meshMsgText(int idx) {
   if (idx < 0 || idx >= s_msgCount) return "";
@@ -789,24 +907,24 @@ void meshClearUnread(int channelIdx) {
   if (channelIdx >= 0 && channelIdx < 8) s_unread[channelIdx] = 0;
 }
 
-// --- direct messages -------------------------------------------------------------------------------
-// The DM store arrives with upstream's companion code (work order item 5: onMessageRecv is still an
-// empty override). Until then there is no DM, and the chat selector says "No direct messages yet"
-// instead of inventing a list. The UI asks this facade, never a placeholder list.
-int meshDmCount() { return 0; }
+// --- direct messages -----------------------------------------------------------------------------
+int meshDmCount() { return s_dmThreadCount; }
 
 const char* meshDmName(int idx) {
-  (void)idx;
-  return "";
+  if (idx < 0 || idx >= kDmThreads) return "";
+  if (!s_dmThreads[idx].used) return "";
+  return s_dmThreads[idx].name;
 }
 
-// A DM row in the message sheet needs a real DM store behind it; false today, and the row is left
-// out of the sheet rather than shown greyed (EST-336).
-bool meshDmAvailable() { return meshDmCount() > 0; }
+int meshDmUnread(int idx) {
+  if (idx < 0 || idx >= kDmThreads) return 0;
+  if (!s_dmThreads[idx].used) return 0;
+  return (int)s_dmThreads[idx].unread;
+}
 
-// --- node DB ---------------------------------------------------------------------------------------
-// The UI gets a copy, never a pointer into contacts[]: the mesh may overwrite a slot on the next
-// advert while the screen is being built.
+bool meshDmAvailable() { return s_dmThreadCount > 0; }
+
+// --- node DB -------------------------------------------------------------------------------------
 namespace {
 bool validContact(const ContactInfo& c) {
   return c.type != ADV_TYPE_NONE && c.name[0] != 0;
@@ -823,9 +941,6 @@ void fillContact(const ContactInfo& ci, MeshContact& mc) {
     mc.lastmodUp = mark->uptime;
     mc.lastmodReal = mark->real;
   } else {
-    // Restored from flash: no uptime and no "was it real" bit survived. The fixed 2025-01-01 cut-off
-    // is the fallback: a stamp inside the sane range is treated as real (the EST-338 rule), a 2024
-    // stamp from the old VolatileRTCClock is not and prints "--".
     mc.lastmodUp = 0;
     mc.lastmodReal = saneEpoch(ci.lastmod);
   }
@@ -836,15 +951,14 @@ void fillContact(const ContactInfo& ci, MeshContact& mc) {
 }  // namespace
 
 int meshContactList(MeshContact* out, int max) {
-  if (!out || max <= 0 || !s_ctx || !s_ctx->mesh) return 0;
-  const int total = s_ctx->mesh->getTotalContactSlots();
+  if (!out || max <= 0) return 0;
+  const int total = the_mesh.getTotalContactSlots();
   int n = 0;
   for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
     ContactInfo ci;
-    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    if (!the_mesh.getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
     MeshContact mc;
     fillContact(ci, mc);
-    // Insert newest first; the newest max contacts win when the table is larger than the view.
     int pos = n;
     while (pos > 0 && out[pos - 1].lastmod < mc.lastmod) --pos;
     if (pos >= max) continue;
@@ -856,11 +970,11 @@ int meshContactList(MeshContact* out, int max) {
 }
 
 bool meshContactByName(const char* name, MeshContact* out) {
-  if (name == nullptr || name[0] == 0 || out == nullptr || !s_ctx || !s_ctx->mesh) return false;
-  const int total = s_ctx->mesh->getTotalContactSlots();
+  if (name == nullptr || name[0] == 0 || out == nullptr) return false;
+  const int total = the_mesh.getTotalContactSlots();
   for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
     ContactInfo ci;
-    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    if (!the_mesh.getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
     if (strcmp(ci.name, name) != 0) continue;
     fillContact(ci, *out);
     return true;
@@ -868,17 +982,14 @@ bool meshContactByName(const char* name, MeshContact* out) {
   return false;
 }
 
-// MeshCore's path hash is the first 1..3 bytes of the node's public key (Identity.h copyHashTo), so a
-// path entry names a repeater when its prefix equals that repeater's pub_key prefix. Repeaters only:
-// a room server or a client in the path stays hex rather than being named as something it is not.
 const char* meshPathHopName(const uint8_t* hash, uint8_t len, char* buf, size_t cap) {
   if (buf == nullptr || cap == 0) return "";
   buf[0] = 0;
-  if (hash == nullptr || len < 1 || len > MAX_HASH_SIZE || !s_ctx || !s_ctx->mesh) return buf;
-  const int total = s_ctx->mesh->getTotalContactSlots();
+  if (hash == nullptr || len < 1 || len > MAX_HASH_SIZE) return buf;
+  const int total = the_mesh.getTotalContactSlots();
   for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
     ContactInfo ci;
-    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    if (!the_mesh.getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
     if (ci.type != ADV_TYPE_REPEATER) continue;
     if (memcmp(ci.id.pub_key, hash, len) != 0) continue;
     snprintf(buf, cap, "%s", ci.name);
@@ -889,11 +1000,10 @@ const char* meshPathHopName(const uint8_t* hash, uint8_t len, char* buf, size_t 
 
 uint32_t meshContactSignature() {
   uint32_t h = 2166136261u;
-  if (!s_ctx || !s_ctx->mesh) return h;
-  const int total = s_ctx->mesh->getTotalContactSlots();
+  const int total = the_mesh.getTotalContactSlots();
   for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
     ContactInfo ci;
-    if (!s_ctx->mesh->getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
+    if (!the_mesh.getContactByIdx((uint32_t)idx, ci) || !validContact(ci)) continue;
     h = (h ^ ci.lastmod) * 16777619u;
     h = (h ^ ci.type) * 16777619u;
     for (const char* p = ci.name; *p; ++p) h = (h ^ (uint8_t)*p) * 16777619u;
@@ -901,55 +1011,43 @@ uint32_t meshContactSignature() {
   return h;
 }
 
-uint32_t meshNow() { return (s_ctx && s_ctx->mesh) ? s_ctx->mesh->getRTCClock()->getCurrentTime() : 0; }
+uint32_t meshNow() { return the_mesh.getRTCClock()->getCurrentTime(); }
 
 bool meshLinkSend(int channelIdx, const char* text) {
-  Serial.printf("[mc] send ch%d ready=%d ctx=%d mesh=%d\n", channelIdx, (int)s_ready,
-                s_ctx != nullptr, s_ctx && s_ctx->mesh != nullptr);
-  if (!s_ready || !s_ctx || !s_ctx->mesh || !text || !*text) return false;
-  // MeshCore's sendGroupMessage() would quietly cut the text to fit MAX_TEXT_LEN. Refuse instead: the
-  // composer already counts these bytes, so a cut here would only hide a counting bug (EST-334).
-  if ((int)strlen(text) + kMeshOwnPrefix > kMeshTextMax) {
+  Serial.printf("[mc] send ch%d ready=%d\n", channelIdx, (int)s_ready);
+  if (!s_ready || text == nullptr || *text == 0) return false;
+  const int prefix = (int)strlen(the_mesh.getNodeName()) + 2;   // "<name>: "
+  if ((int)strlen(text) + prefix > kMeshTextMax) {
     Serial.printf("[mc] send: %u bytes + %d prefix > %d, refused\n", (unsigned)strlen(text),
-                  kMeshOwnPrefix, kMeshTextMax);
+                  prefix, kMeshTextMax);
     return false;
   }
   ChannelDetails cd;
-  if (!s_ctx->mesh->getChannel(channelIdx, cd)) {
+  if (!the_mesh.getChannel(channelIdx, cd)) {
     Serial.println("[mc] send: no such channel");
     return false;
   }
-  Serial.printf("[mc] send: hash %02x secret %02x textlen %d\n", cd.channel.hash[0],
-                cd.channel.secret[0], (int)strlen(text));
-  // Let the tables remember this packet's hash as OURS, so a copy repeated back by someone else can
-  // be counted on the local echo below (MeshCore calls markSeen() on the outgoing packet).
-  s_ctx->tables.beginOwnSend(s_msgSeq + 1);
-  const bool ok = s_ctx->mesh->sendGroupMessage(meshNow(), cd.channel, kMeshOwnName, text,
-                                                (int)strlen(text));
-  s_ctx->tables.endOwnSend(ok);
+  tables.beginOwnSend(s_msgSeq + 1);
+  const bool ok = the_mesh.sendGroupMessage(meshNow(), cd.channel, the_mesh.getNodeName(), text,
+                                            (int)strlen(text));
+  tables.endOwnSend(ok);
   Serial.printf("[mc] sendGroupMessage -> %d\n", (int)ok);
-  // The TX fault is NOT read from this return value: MeshCore queues the packet and returns true
-  // before the radio transmits. OmSX1262Wrapper's startSendRaw()/isSendComplete()/onSendFinished()
-  // are the real RadioLib result and own the mark (see the class above).
   if (ok) {
-    // Locally echo what we sent, so the channel view shows the outgoing message too.
     const int slot = slotFor(s_msgCount);
-    s_msgs[slot].seq = s_msgSeq + 1;
-    s_msgs[slot].ch = (uint8_t)channelIdx;
-    s_msgs[slot].mine = 1;
-    s_msgs[slot].ts = millis() / 1000;
-    s_msgs[slot].wall = timeKeeper().now();
-    s_msgs[slot].wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
-    s_msgs[slot].hops = -1;   // we know it is local; the air has not told us anything yet
-    s_msgs[slot].snr4 = 0;
-    s_msgs[slot].pathHashSize = 0;
-    s_msgs[slot].pathCount = 0;
-    s_msgs[slot].repeats = 0;
-    memset(s_msgs[slot].path, 0, sizeof(s_msgs[slot].path));
-    snprintf(s_msgs[slot].name, sizeof(s_msgs[slot].name), "%s", kMeshOwnName);
-    snprintf(s_msgs[slot].text, sizeof(s_msgs[slot].text), "%s", text);
+    Msg& m = s_msgs[slot];
+    memset(&m, 0, sizeof(m));
+    m.seq = s_msgSeq + 1;
+    m.ch = (uint8_t)channelIdx;
+    m.mine = 1;
+    m.ts = millis() / 1000;
+    m.wall = timeKeeper().now();
+    m.wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
+    m.hops = -1;
+    snprintf(m.name, sizeof(m.name), "%s", the_mesh.getNodeName());
+    snprintf(m.text, sizeof(m.text), "%s", text);
     if (s_msgCount < kMsgRing) ++s_msgCount;
     ++s_msgSeq;
+    ++s_storeSerial;
   }
   return ok;
 }

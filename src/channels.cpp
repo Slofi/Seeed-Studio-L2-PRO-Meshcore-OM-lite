@@ -47,7 +47,12 @@ void writeSlot(int i) {
   s_prefs.putBytes(key, s_chan[i].secret, sizeof(s_chan[i].secret));
   snprintf(key, sizeof(key), "e%d", i);
   s_prefs.putBool(key, s_enabled[i]);
+  // Mute stays ours, keyed by the CHANNEL HASH so removing/reordering slots cannot move a mute to
+  // another channel (EST-340). The old m<i> key is still written for one release, so a rollback to
+  // the pre-companion firmware keeps the user's mute settings.
   snprintf(key, sizeof(key), "m%d", i);
+  s_prefs.putBool(key, s_muted[i]);
+  snprintf(key, sizeof(key), "m%02x", s_chan[i].hash);
   s_prefs.putBool(key, s_muted[i]);
 }
 
@@ -90,9 +95,16 @@ void ensureBegun() {
     s_prefs.getBytes(key, s_chan[i].secret, 16);
     snprintf(key, sizeof(key), "e%d", i);
     s_enabled[i] = s_prefs.getBool(key, true);
-    snprintf(key, sizeof(key), "m%d", i);
-    s_muted[i] = s_prefs.getBool(key, false);
     s_chan[i].hash = hashFor(s_chan[i].secret);
+    char hashKey[8];
+    snprintf(hashKey, sizeof(hashKey), "m%02x", s_chan[i].hash);
+    snprintf(key, sizeof(key), "m%d", i);
+    if (s_prefs.isKey(hashKey)) {
+      s_muted[i] = s_prefs.getBool(hashKey, false);
+    } else {
+      s_muted[i] = s_prefs.getBool(key, false);   // old per-index key, one release
+      s_prefs.putBool(hashKey, s_muted[i]);       // remember the hash-keyed value from now on
+    }
   }
 }
 

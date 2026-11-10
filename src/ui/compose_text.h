@@ -18,9 +18,12 @@ namespace om {
 namespace ui {
 
 // Bytes the draft may hold: MAX_TEXT_LEN, minus our own "<name>: " prefix, minus "@<reply name> ".
-// A negative reply-name length would be nonsense, so the answer never goes below 0.
-inline int composeAllowance(bool replying, const char* replyName) {
-  int allow = kMeshOwnTextMax;
+// The name is MeshCore's NodePrefs name at runtime (the phone can change it); the constant is the
+// host-test/default fallback. A negative reply-name length would be nonsense, so the answer never
+// goes below 0.
+inline int composeAllowance(bool replying, const char* replyName,
+                            const char* ownName = kMeshOwnName) {
+  int allow = meshOwnTextMaxFor(ownName);
   if (replying && replyName != nullptr && replyName[0] != 0) {
     allow -= 1 + (int)strlen(replyName) + 1;
   }

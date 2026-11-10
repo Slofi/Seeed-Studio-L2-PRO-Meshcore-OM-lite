@@ -40,22 +40,26 @@ uint32_t meshMsgSeq(int idx);
 int meshUnread(int channelIdx);
 void meshClearUnread(int channelIdx);
 
-// Direct messages, fed from the same store the core will fill once upstream's companion code is in
-// (work order item 5). Empty today: the chat selector shows "No direct messages yet" rather than a
-// made-up list. meshDmName() is "" for an index that does not exist.
+// Direct messages, now fed by upstream's companion code: one thread per contact, with the same
+// seq / wall / real / hops / SNR rules as channel messages and an unread count. The DM chat screen
+// and the sheet's "Direct message" row are the next ticket; the data is here.
 int meshDmCount();
 const char* meshDmName(int idx);
+int meshDmUnread(int idx);   // messages received from that contact since it was last cleared
 // Whether a DM can actually be opened at all: false while the DM store is empty, so the message
 // sheet leaves "Direct message" out instead of offering a row that cannot work.
 bool meshDmAvailable();
 
+// The name this node sends with, from MeshCore's NodePrefs (the phone can change it later; the
+// composer budget must read this, not a constant).
+const char* meshNodeName();
+
 // --- path hash size (every packet we SEND) ---------------------------------------------------------
-// MeshCore's `sendFlood(pkt, delay, path_hash_size)` takes the number of hash bytes per hop, and its
-// default is 1. SLO runs 2-byte hashes and enforces them, so the node's setting is 2 by default,
-// saved in NVS, allowed 1..3. Every send goes through it (the two sendFloodScoped variants and the
-// self advert); the received side needs nothing, MeshCore reads the size from each packet.
+// MeshCore's NodePrefs::path_hash_mode (0 = 1B, 1 = 2B, 2 = 3B) is the single source now; it is
+// seeded from our old NVS "phs" at the migration and every MyMesh send reads it. The old NVS key is
+// kept in sync for a rollback. The received side needs nothing: MeshCore reads the size per packet.
 uint8_t meshPathHashBytes();
-bool meshPathHashSet(uint8_t bytes);   // 1..3; saved in NVS, false for a bad value
+bool meshPathHashSet(uint8_t bytes);   // 1..3; saved in NodePrefs, false for a bad value
 const char* meshPathHashLabel();       // "1B" / "2B" / "3B", for Settings > Radio
 
 // --- node DB for the Nodes screen -----------------------------------------------------------------

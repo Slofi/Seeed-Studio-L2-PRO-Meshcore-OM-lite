@@ -13,6 +13,7 @@
 
 #include "audio.h"
 #include "board.h"
+#include "crash_report.h"
 #include "map.h"
 #include "mesh_link.h"
 #include "channels.h"
@@ -20,6 +21,7 @@
 #include "ota.h"
 #include "radio.h"
 #include "radio_fault.h"
+#include "target.h"
 #include "timekeeper.h"
 #include "touch_gate.h"
 #include "fonts.h"
@@ -690,6 +692,7 @@ static void refreshChats() {
     c = om::ui::ChatEntry();
     snprintf(c.name, sizeof(c.name), "DM: %s", om::meshDmName(i));
     c.dm = true;
+    c.unread = (uint16_t)om::meshDmUnread(i);
   }
   g_dmCount = g_chatCount - g_channelCount;
 
@@ -749,6 +752,7 @@ static void buildChatView(om::ui::ChatView& v) {
   v.shift = g_kbShift;
   v.nums = g_kbNums;
   v.draft = g_kbText;
+  v.ownName = om::meshNodeName();
   // The UI holds message ids, never indexes: when the 32-message ring shifts, the reply target and
   // the open sheet resolve to the same message. A name copied at REPLY time survives even if the
   // message itself falls out of the ring.
@@ -821,7 +825,7 @@ static bool chatSend() {
   const int chan = chatChannel(g_chatSel);
   if (chan < 0 || g_kbText[0] == 0) return false;
   const bool replying = g_replySeq != 0 && g_replyName[0] != 0;
-  const int allow = om::ui::composeAllowance(replying, g_replyName);
+  const int allow = om::ui::composeAllowance(replying, g_replyName, om::meshNodeName());
   if ((int)strlen(g_kbText) > allow) {
     Serial.printf("[chat] send refused: %u bytes, %d allowed\n", (unsigned)strlen(g_kbText), allow);
     return false;
@@ -842,7 +846,7 @@ static bool chatSend() {
 // nothing at all (Filip, 2026-11-10: no silent cut on send).
 static void chatKey(const om::ui::ChatHitResult& hit) {
   const bool replying = g_replySeq != 0 && g_replyName[0] != 0;
-  const int allow = om::ui::composeAllowance(replying, g_replyName);
+  const int allow = om::ui::composeAllowance(replying, g_replyName, om::meshNodeName());
   switch (hit.keyKind) {
     case om::ui::KeyKind::Shift:
       g_kbShift = !g_kbShift;
@@ -902,7 +906,7 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       // COPY takes the whole text, cut only by the composer's own byte budget: on a code point
       // boundary and with an ellipsis when it has to shorten (composeCopy).
       om::ui::composeCopy(g_kbText, (int)sizeof(g_kbText), m.text,
-                          om::ui::composeAllowance(false, nullptr));
+                          om::ui::composeAllowance(false, nullptr, om::meshNodeName()));
       g_replySeq = 0;
       g_replyName[0] = 0;
       g_bubMenuSeq = 0;
@@ -914,7 +918,7 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       char tag[om::kMeshNameCap + 3];
       snprintf(tag, sizeof(tag), "@%s ", m.name);
       om::ui::composeAppend(g_kbText, (int)sizeof(g_kbText), tag,
-                            om::ui::composeAllowance(false, nullptr));
+                            om::ui::composeAllowance(false, nullptr, om::meshNodeName()));
       g_replySeq = 0;
       g_replyName[0] = 0;
       g_bubMenuSeq = 0;
@@ -1258,6 +1262,11 @@ void setup() {
   Serial.println("======================================");
   Serial.printf("build: %s %s\n", __DATE__, __TIME__);
 
+  // Before anything that can crash: print the previous boot's ending, its RTC_NOINIT checkpoint and
+  // one core-dump summary line (then erase a dump that printed). EST-341.
+  om::crashReportBegin();
+  om::crashCheckpoint("[om] board.begin");
+
   g_boardOk = om::boardBegin();
   g_fade.reset(om::kScreenBrightness);   // boardBegin lit the panel already
   Serial.printf("[om] board: %s\n", g_boardOk ? "ok" : "FAILED");
@@ -1265,6 +1274,7 @@ void setup() {
   om::omFrameInit();
   om::ui::loadFonts();                // anti-aliased VLW tables, needed before the first Nodes draw
 
+  om::crashCheckpoint("[om] prefs + clock");
   g_prefs.begin("omlite", false);
   // One clock, seeded before MeshCore exists: max(saved floor, build time). It is not real time yet;
   // buildStatus() keeps showing "--:--" until GPS (or a later Wi-Fi/phone/manual source) sets it.
@@ -1291,6 +1301,7 @@ void setup() {
                 g_soundOn, g_volume, g_sndMsg, g_sndDm, g_sndMen, g_dnd, g_touchSnd,
                 g_touchIdx);
 
+  om::crashCheckpoint("[om] audio");
   const bool audioOk = om::audioBegin();
   Serial.printf("[audio] %s\n", audioOk ? "ok" : "FAILED");
   if (audioOk) {
@@ -1298,11 +1309,13 @@ void setup() {
     if (g_welcome) playWelcome();
   }
 
+  om::crashCheckpoint("[om] radio");
   om::RadioInfo ri;
   const bool radioOk = om::radioBegin(ri);
   Serial.printf("[radio] %s status=%d\n", radioOk ? "ok" : "FAILED", ri.status);
 
 #if defined(OM_ENABLE_MESH)
+  om::crashCheckpoint("[om] mesh begin");
   const bool meshOk = om::meshLinkBegin();
   Serial.printf("[mc] mesh: %s\n", meshOk ? "up" : "FAILED");
   // The status bar's red mark, second of its three reasons: MeshCore did not start (its radio,
@@ -1975,6 +1988,7 @@ void loop() {
   }
 
   om::gpsPoll(g_gps);
+  om::targetSetGpsFix(g_gps.lat, g_gps.lon, g_gps.valid);   // MeshCore adverts/telemetry
   // Feed the GPS time to the one clock. RMC repeats every second; timekeeper refreshes the source's
   // 6-hour hold each time but only writes/NVS-saves when the clock is off by more than a second.
   {

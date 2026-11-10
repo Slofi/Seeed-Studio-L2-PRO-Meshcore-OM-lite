@@ -21,7 +21,9 @@ constexpr int kMeshTextCap = kMeshTextMax + 1;   // + the terminator
 constexpr int kMeshNameMax = 32;    // sizeof(ContactInfo::name), terminator included
 constexpr int kMeshNameCap = kMeshNameMax;       // the field already holds its own terminator
 
-// The name this node sends with: MeshCore writes "<this>: " in front of every channel text.
+// The default name this node sends with: MeshCore writes "<this>: " in front of every channel
+// text. The running name comes from MeshCore's NodePrefs (meshNodeName()), because the phone can
+// change it; this constant is the migration seed and the host-test default.
 constexpr const char* kMeshOwnName = "OM Lite";
 
 constexpr int cstrLen(const char* s) {
@@ -35,6 +37,12 @@ constexpr int kMeshOwnPrefix = cstrLen(kMeshOwnName) + 2;
 
 // The longest text the air will carry from us: MAX_TEXT_LEN minus our own prefix.
 constexpr int kMeshOwnTextMax = kMeshTextMax - kMeshOwnPrefix;
+
+// The same budget for the real node name (NodePrefs::node_name, at most 31 characters).
+inline int meshOwnTextMaxFor(const char* name) {
+  const int n = cstrLen(name);
+  return kMeshTextMax - (n > 0 ? n : 1) - 2;
+}
 
 static_assert(kMeshOwnTextMax > 0, "our name must leave room for a message");
 

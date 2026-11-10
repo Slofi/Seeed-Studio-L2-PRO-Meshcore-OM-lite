@@ -41,6 +41,7 @@ struct ChatView {
   bool shift = false;
   bool nums = false;
   const char* draft = "";
+  const char* ownName = "OM Lite";   // MeshCore NodePrefs name, for the composer byte budget
   uint32_t replySeq = 0;    // held message id, 0 = no reply
   const char* replyName = "";   // copied at the moment REPLY was tapped
   int menuMsg = -1;         // resolved index into msgs, -1 = closed / fell out of the ring

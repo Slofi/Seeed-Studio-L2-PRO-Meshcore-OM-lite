@@ -1,0 +1,16 @@
+{
+  "name": "meshcore_companion",
+  "version": "1.18.0",
+  "description": "MeshCore companion_radio (MIT), vendored unmodified; board glue lives in src/target.*",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "meshcore"
+    }
+  ],
+  "build": {
+    "srcFilter": [
+      "+<*.cpp>"
+    ]
+  }
+}

@@ -275,6 +275,26 @@ Command parseCommand(char* line) {
     return c;
   }
 
+  // EST-356: Bluetooth is read and switched from the host. Like `wifi`, the subcommand list is the
+  // whole surface: there is deliberately no word that reads the pairing PIN back.
+  if (strcmp(verb, "ble") == 0) {
+    c.kind = Kind::Ble;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    const bool known = strcmp(sub, "status") == 0 || strcmp(sub, "on") == 0 ||
+                       strcmp(sub, "off") == 0;
+    if (!known) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
+
   // Everything else, including anything that tries to read a key or a secret, is refused here and
   // never reaches a handler.
   c.error = "unknown";

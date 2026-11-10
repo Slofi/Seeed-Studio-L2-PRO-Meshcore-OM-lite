@@ -2480,3 +2480,189 @@ always 40 + push + 17 ms.
 ## 2026-11-10 17:35 (Claude): EST-355 on the device
 - Built in the sandbox (exit 0, RAM 197,576 B, flash 2,132,309 B), tests exit 0, reviewed binary flashed (2,132,672 B).
 - Tab switches by USB: `Nodes -> Map: ... dip` (composed in 101 ms inside the dark), `Map -> Nodes: luma 160 -> 14 (measured), dip`, `Nodes -> Chat: ... instant`. Wi-Fi came back on by itself after the reboot (`state=connected`). Whether the dip hides the diagonal and how it feels: Filip.
+
+## 2026-11-10 17:45 (DS): EST-356, Bluetooth as a MeshCore companion node (off by default)
+
+Built with the REBUILD.md command, **exit 0**: RAM 220,744 B of 327,680 (67.4 %), flash 2,716,597 B of
+6,553,600 (41.5 %), `firmware.bin` 2,716,960 B. `test/host/run.sh` **exit 0** (all suites, including
+the new `test_est356.cpp`). Baseline (EST-355): RAM 197,576 B, flash 2,132,309 B, bin 2,132,672 B, so
+this ticket costs **+23,168 B RAM and +584,288 B flash**.
+
+**1. The transport is upstream's, not a second protocol.** `src/ble_transport.cpp` gives
+`lib/meshcore/helpers/esp32/SerialBLEInterface.cpp` one translation unit by including it (that file is
+not in `lib/meshcore`'s `library.json` `srcFilter`, `+<helpers/*.cpp>` does not reach `helpers/esp32/`)
+and wraps it in `BleSerial : BaseSerialInterface`. The wrapper is what `the_mesh.startInterface()` now
+receives instead of `null_serial`, and it exists for three reasons: the switch (MyMesh calls
+`enable()` at boot, so it must be a no-op while the switch is off), the phone's outgoing frames (see
+4), and the heap numbers. `lib/` is untouched. No `lib/` file was edited.
+
+**2. Switch, PIN, states.** NVS namespace `omble`, key `on`, **default OFF**: with the switch off at
+boot the BLE stack is not even allocated (no `BLEDevice::init()`), so an unused feature costs no heap.
+Switching on: a 6-digit PIN is made at the first enable (`ble_pin.h`, `esp_random()` mapped to
+100000..999999, 123456 refused), written to `NodePrefs::ble_pin` + `savePrefs()` (exactly
+CMD_SET_DEVICE_PIN's path, `meshBlePinSet()`), then `BLEDevice::init("MeshCore-" + node name, pin)`.
+States are `off / advertising / connected`, from the transport's own `isConnected()`.
+- Switching off stops the service and advertising and disconnects; the controller stays initialized
+  (the radio is off, the heap comes back at reboot only). Re-initialising bluedroid on every toggle
+  is the one sequence that cannot be proved without the device, so it was not done. The page's
+  "New PIN" (and the phone's CMD_SET_DEVICE_PIN) updates `BLESecurity::setStaticPIN` live, so the
+  next pairing uses the new PIN without a reboot; a phone already connected stays connected.
+- The BLE advertised name is read at bring-up. A phone-side rename changes the node name (messages,
+  adverts, the screens) immediately; the BLE name follows on the next switch-on/reboot. That is
+  upstream's behaviour, not a second name.
+- `ble status` can report `pin_set=1/0` but **never the PIN**; the reply is
+  `[cmd] ok ble switch=... state=... peer="..." pin_set=... heap=... psram=... wifi=... mesh_serial=...`.
+  The transport stores no peer name, so a connected peer is `peer="unknown"`; when none is connected
+  it is `peer="-"`.
+
+**3. Settings and the status bar.** Settings > General > Connections > Bluetooth no longer says "Not
+built yet.": a Toggle (default OFF), State (off / advertising / connected), PIN (six digits, or "made
+when switched on"), a New PIN button and a one-line note (off / advertising / phone connected). The
+General row shows `off` / `on` / `connected`. The status bar's EST-332 Bluetooth mask is absent when
+off, dim while advertising, ink while a phone is connected; the bar redraws on the switch and phase
+serials.
+
+**4. One node, two faces: the screens now read MeshCore's own stores on every draw.**
+- **Channels**: `mcChannelCount()/mcChannel()/mcChannelName()` used to read our NVS mirror; they now
+  read `BaseChatMesh`'s channel table (MyMesh + `/channels2`) on every call, with a UI index mapped to
+  a MeshCore slot (empty slots are skipped). Our adds, renames and removes write that table and call
+  the same `DataStore::saveChannels()` the phone's CMD_SET_CHANNEL calls. The old NVS store ("mcch")
+  is kept only as the one-time migration seed (`mcLegacyChannel*`; `pushChannelsFromNvs()` uses it,
+  so a phone-added channel is never overwritten at boot) and as the home of the two flags MeshCore
+  does not model: per-channel enabled and mute.
+- **Unread** counts are now keyed by the channel HASH (first byte of sha256(secret), MeshCore's own
+  match) instead of the UI index, so a phone-side add/remove cannot move a badge to another channel.
+- **Radio prefs** were already NodePrefs; after a phone radio change the Settings page's small cached
+  copy (`g_radio`) is re-read from NodePrefs. **Name** is `meshNodeName()` (NodePrefs) on every draw.
+  **Contacts** were already the MeshCore contact table.
+- **Toasts**: a poll in `meshLinkLoop()` compares channel / radio / name signatures once per pass. Our
+  own setters bump per-store write counters, so a value the glass just wrote is never reported as the
+  phone's. An outside change queues `Channels changed from the phone`, `Radio changed from the phone`
+  or `Name changed from the phone` (one toast, one redraw that rebuilds the screen from the stores).
+- **Messages the phone sends** never reach the listener (it only sees what arrives), so the transport
+  taps the two send commands (`CMD_SEND_CHANNEL_TXT_MSG`, `CMD_SEND_TXT_MSG`) before MyMesh handles
+  them and stores them in our chat ring as ours (`[ble] phone sent chN: ...`). A phone-sent DM is
+  stored as `Sending`: the frame is MyMesh's, so our ACK table cannot match its ACK, and claiming
+  Delivered would be a guess. Caveat: the tap stores the message optimistically, so a send MyMesh
+  refuses (packet pool full) would still show in our ring.
+- **Messages received** are queued for the phone by upstream (its offline queue, up to 16) AND stored
+  in our ring + unread by the listener. The two counts are independent: the phone pulling messages
+  from its queue does not clear our per-channel unread, and opening the chat here does not remove
+  anything from the phone's queue. Pulling on the phone does not touch our ring.
+- **Time**: checked, no change needed. `OmRTCClock::setCurrentTime()` sends CMD_SET_DEVICE_TIME to
+  `timeKeeper().setFromSource(..., TimeSource::Phone)` once `target_mesh_begun` is set, ranked below
+  GPS and Wi-Fi.
+
+**5. Wi-Fi + BLE on the ESP32-S3: what is measured and what to move to PSRAM.** The statics this
+ticket adds are +23,168 B of DRAM (mostly the bluedroid/BLE glue the linker now keeps). Runtime heap
+must be measured on the device: `[ble] driver up in N ms: heap A -> B (...), psram ...` and
+`[ble] coexist (BLE on): heap=... psram=... wifi=...`, plus `[ble] wifi changed:` when Wi-Fi's phase
+changes while BLE is up, and `ble status` gives heap/psram on demand. Expected: EST-354 measured
+Wi-Fi alone at ~90 KB free; the BLE controller/bluedroid take their memory from the same internal
+heap, so both on is the number to watch. From this ELF (`nm`), the DRAM blocks big enough to matter:
+`the_mesh` 28,096 B, `s_dmRing` 10,708 B, `g_dmScratch` 9,472 B, `s_msgs` 9,216 B, `s_jpeg` 17,884 B.
+If `[ble] coexist` shows less than ~25 KB free, the order I propose is: (a) the two message rings plus
+the chat scratch (29,396 B) into PSRAM, allocated once at boot (they are our structs, no DMA);
+(b) the JPEG decode buffer (17,884 B) into PSRAM (slower decode, small images); (c) `the_mesh`
+(28,096 B) last, because it needs a pointer indirection through `target.h` and a MyMesh allocated into
+PSRAM. The mesh loop and the history flush are untouched by this ticket; the heartbeat and
+`hist_worst_us` are the check.
+
+**6. USB surface for the reviewer:** `ble status`, `ble on`, `ble off`. `ble` alone, `ble pin` and
+extra words are refused (the parser test proves it). No reply prints the PIN.
+
+**Host tests prove** (`test_est356.cpp`): the switch starts off and follows off -> advertising ->
+connected -> advertising -> off with one serial bump per visible change and none on a poll; the phase
+words for the row/page/USB; the PIN generator over a million random words (always 100000..999999,
+never 123456, 123456 pushed to 123457, both ends reachable), `pinValid()` and the six-digit text; the
+change watch (first poll is a baseline, an outside change is the phone's, our own write is not, the
+three bits are independent, three changes in one pass are all reported, the toast texts and a short
+buffer); the `ble` command (status/on/off accepted, bare/pin/extra refused) and that `wifi`/`status`
+still parse.
+
+**Exact `tools/cmd.py` steps for Claude** (`OM_PORT=/dev/ttyACM0`; `tools/shot.py docs/shots/<name>.png`
+after each step that matters):
+1. Flash `firmware.bin` (2,716,960 B). Boot still prints `[om] colour push probe ... OK`, the map tile
+   probe, `[mc] identity ...`, `[mc] sizes: MyMesh=28096 B, ...`, and `[ble] off at boot: switch=off
+   pin_set=0 heap=... psram=...`. `tools/cmd.py ble status` -> `switch=off state=off pin_set=0`.
+2. Settings > General: the Bluetooth row says `off`; open it: the Toggle is OFF, State `off`, PIN
+   `made when switched on`, a New PIN button. Shot `2026-11-10-est356-bt-off`.
+3. `ble on` -> serial `[ble] first switch-on: a 6-digit PIN was made and saved`, `[ble] driver up in
+   N ms: heap A -> B (...)`, `[ble] coexist (BLE on): heap=... psram=... wifi=...`. `ble status` ->
+   `state=advertising pin_set=1`, and **no six-digit number anywhere in the reply**. The page now
+   shows the PIN; the status bar icon is dim. Shot `...-est356-bt-advertising`.
+4. Filip pairs the MeshCore app with that PIN. Serial `[ble] connected: heap=...`; `ble status` ->
+   `state=connected peer="unknown"`; the icon turns ink. Shot `...-est356-bt-connected`.
+5. From the phone: add or rename a channel -> toast `Channels changed from the phone`, and Settings >
+   Channels / the Chat tab show it; change radio params or TX power -> `Radio changed from the phone`
+   and Settings > Radio shows the new values; rename the node -> `Name changed from the phone`.
+6. From the phone: send a channel message -> `[ble] phone sent chN: ...` and the message appears in
+   our chat as ours. From another node: send a message to a channel -> it appears in our chat with
+   unread, and the phone also gets it from its queue. Note the two unread counts are independent.
+7. `ble off` -> `[ble] off (stack kept until reboot)`, icon gone, page `off`; `ble on` again -> no new
+   PIN (pin_set stays 1); `ble status` confirms.
+8. Wi-Fi + BLE together: `wifi on` (saved network auto-connects), then `ble on`; `ble status` and
+   `wifi status` give heap/psram on both sides and `[ble] coexist` / `[ble] wifi changed` lines carry
+   the delta. `tools/cmd.py status` must still show `mesh=up`, a growing `hist_worst_us` without
+   `hist_dropped` growth, and `loop_stack_free` at the EST-350 level.
+9. PIN privacy: search the serial log of steps 3-8 for the six digits shown on the page; it must not
+   appear. `ble status`/`ble on`/`ble off` replies must never carry it.
+10. New PIN: press it; the page shows another six-digit number, `pin_set=1`; if the phone is asked to
+    re-pair, it must take the new number (the live passkey path, see "could not check").
+
+**Could not check** (no device, no flash, no serial): that `btStart()`/bluedroid come up on this
+board's PSRAM/flash config at all; the real heap with BLE alone and with Wi-Fi + BLE (the numbers in
+step 3 are the answer); that `BLESecurity::setStaticPIN` at runtime (New PIN / CMD_SET_DEVICE_PIN)
+really changes the passkey the phone is asked for, or whether a BLE restart is needed; pairing and
+bonding with the Android/iOS app; that the app's channel add/remove/rename commands land in
+`/channels2` and show here; that a phone-sent message is stored once (not twice) and that a phone-sent
+DM's "sending" state is acceptable; behaviour under Wi-Fi/BLE coexistence on air (both radios share
+one controller); the actual screen of the Bluetooth page (PIN, note, button fits); and the status
+bar icon colour transition.
+
+**Next step:** flash, run steps 1-10, and report the `[ble] driver up` / `[ble] coexist` numbers, the
+pairing result and whether the phone's channel/radio edits show up with their toasts. If the heap with
+both radios is below ~25 KB, the PSRAM move in 5(a) is the next ticket; if the live New PIN does not
+take, an explicit BLE restart belongs to that ticket too.
+
+## 2026-11-10 18:05 (Claude): EST-356 crashed and boot-looped the device; recovered by esptool
+- Built in the sandbox (exit 0, RAM 220,744 B = 67.4 %, flash 2,716,597 B), tests exit 0, reviewed binary flashed 17:52 (2,716,960 B). `ble status`: off, heap 53,948 B with Wi-Fi connected.
+- `ble on` -> USB dropped. The switch was saved on, so every boot started BLE after Wi-Fi and panicked: boot loop, no window for OTA (a "ble off" spammer did not get in). Filip put the chip in download mode (BOOT+RESET); Claude wrote `est355.bin` to 0x10000 and erased otadata (0xe000, 0x2000) with esptool, Filip tapped RESET: EST-355 runs, mesh up, Wi-Fi connected, history intact.
+- Decoded core dump (EST-356 ELF): assert in Bluedroid's hash_map_set <- btu_start_timer <- BTM_ReadLocalDeviceNameFromController: an internal-RAM allocation failed. Out of internal RAM with Wi-Fi up.
+- Correction of Claude's first read: the fonts are NOT in RAM (nm shows them as D, but their addresses are flash rodata 0x3c2...). The movable internal RAM is the list in the next ticket (~75-80 KB).
+
+## 2026-11-10 18:10 (DS): EST-357 internal RAM for Bluetooth: PSRAM move, start guard, crash guard
+- Build in the sandbox (REBUILD command, `EXIT:0`): **RAM 136,224 B = 41.6 %** (was 220,744 B = 67.4 %, **-84,520 B**); **flash 2,703,221 B = 41.2 %**; `firmware.bin` 2,703,584 B. Host tests `sh test/host/run.sh` exit 0 (every suite, including EST-356's).
+- `EXT_RAM_BSS_ATTR`: checked, **not usable on this core**. `esp_common/include/esp_attr.h` defines it only under `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY`, which is off in the esp32s3 `sdkconfig`; the macro expands to nothing. So the move is runtime `ps_malloc`, one allocation each, with an internal-RAM fallback that the log names.
+- New `src/psram_alloc.h` (one zeroed, constructed PSRAM array/object; `ps_calloc`/`ps_malloc`, fallback to `calloc`/`malloc`) and `src/mem_stats.h` (the one number: `heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)` and its largest block, plus the `[mem]` line).
+- **What moved out of internal `.bss`** (nm before -> after):
+  - `s_jpeg` (JPEGDEC) 17,884 B -> PSRAM object in `mapBegin()`; the four calls now go through the pointer.
+  - `copyLegacyContactsIfNeeded()`'s `s_legacyBuf` + `recs` + `s_image`, 14,592 B -> a local `Scratch` that allocates only when the migration runs and frees in its destructor on every return path.
+  - `s_dmRing` 10,708 B -> PSRAM object in `meshLinkBegin()` (placement new, `reset()`); the facade's DM getters now answer empty instead of dereferencing a null.
+  - `s_msgs` 9,216 B -> PSRAM array in `meshLinkBegin()`.
+  - One `allocUiBuffers()` call at boot (PSRAM): `g_dmScratch` 9,472, `g_chatMsgs` 3,584, `g_chats` 3,024, `g_nodes` 4,480, `g_setRows` 5,768, and `refreshNodes()`'s contact copy 5,888 = 32,216 B. The old `sizeof(array)/sizeof(array[0])` counts are now named capacities (a pointer has no element count).
+  - The only static arrays left are the small ones (two `MeshContact list[32]` locals in RPTR paths, text buffers); `the_mesh` (28,096 B) stays, as the previous ticket proposed last.
+- **Not dropped: TinyUSB `_dfu_ctx` 4,116 B + `_mscd_buf` 4,096 B.** They are not used by this board's USB path (USB-Serial-JTAG, `ARDUINO_USB_MODE=0`), but they come from the precompiled `libarduino_tinyusb.a`: `usbd.c.obj`'s class-init table pulls `msc_device.c.obj` and `dfu_rt_device.c.obj` in unconditionally, so a build flag cannot remove them without rebuilding the core. They are 8,212 B and the target is met without them.
+- **Expected internal heap on the device**: EST-356 measured 53,948 B free with Wi-Fi up and BLE off; the move removes 84,520 B of `.bss`, so expect about **138 KB** free before a BLE start (target >= 120 KB). This is an arithmetic expectation from the build, not a measurement: the boot log's `[mem]`, `[wifi] connected` and `[ble] driver up` lines are the real answer.
+- **Start guard** (`ble_link.cpp`): before the first Bluedroid allocation it requires `internal >= 81,920 B` **and** `largest internal block >= 8,192 B` (`kStartNeedFree` / `kStartNeedBlock`). A refusal prints `[ble] not started: N B free (largest M B), need 81920 B free and 8192 B largest`, a toast `Bluetooth: N B free, need M B`, and saves the switch OFF so it cannot retry every pass. No panic path. The 80 KB figure is provisional: the EST-356 panic at 53,948 B free is the hard lower bound, and the exact peak is the internal delta on `[ble] driver up ... internal A -> B`; replace the constant with that peak plus margin once Claude has the line.
+- **Deferred auto-start**: a saved "on" is not applied while Wi-Fi is `Scanning` or `Connecting`; the guard then measures the coexistence heap, not the pre-Wi-Fi one. A manual `ble on` still measures immediately.
+- **Crash guard**: NVS `omble/crashed` is set true *before* `bleTransport().begin()` and cleared after the driver is up (or after a clean init refusal). `bleBegin()` reads it: if it is true, the switch is forced off and saved off, the log says `[ble] previous boot died while starting Bluetooth: switch forced off (guard)` and the toast says `Bluetooth off: the last start crashed`. A new image (`__DATE__ " " __TIME__` in `omble/gbuild`) clears the flag, like the mesh guard. The EST-356 `on=1` therefore cannot boot-loop this image: the worst case is one auto-start, one reboot, then off.
+- **Heap printed at all three points**: `[mem] boot (before Wi-Fi, before BLE)`, `[mem] boot (Wi-Fi stack off)`, `[mem] ui buffers ...`, `[wifi] driver up ... internal A -> B, largest ...`, `[wifi] connected ... internal= largest=` (+ `[mem] wifi connected`), `[ble] off at boot ... internal= largest=`, `[ble] driver up ... internal A -> B, largest ...`, `[ble] coexist (BLE on): ... internal= largest=`, and the USB replies `status ... internal= internal_max= heap= psram=`, `ble status ... internal= internal_max= need= need_block= ...`, `wifi ... internal= internal_max=`. `ota.cpp`'s command reply buffer went 256 -> 384 B so `status` cannot truncate its new tail (loop stack is 16 KB).
+- **EST-356 features untouched**: PIN (made once, never printed, `pin_set`), page rows, status icon, toasts, `ble on/off/status`, the phone change toasts. The only UI change is the guard's own toast (and "Bluetooth on" is not claimed when the guard refused).
+- **Could not check** (no device, no flash, no serial): the real internal heap at boot/with Wi-Fi/with BLE; Bluedroid's real peak (the 80 KB/8 KB constants must be confirmed from the live delta); that PSRAM JPEGDEC decoding still draws map tiles at an acceptable speed; the crash guard end to end (a deliberate panic); the refusal path's toast on the glass.
+- **Exact `tools/cmd.py` steps for Claude** (`OM_PORT=/dev/ttyACM0`; `tools/shot.py docs/shots/<name>.png` after the steps that matter). NVS still has `omble/on=1` and the PIN, so the first boot is the guard's first real test:
+  1. Flash `firmware.bin` (2,703,584 B). Boot must print `[mem] boot ...`, `[mem] ui buffers ... in PSRAM`, `[ble] new firmware image ... crash guard reset`, `[ble] off at boot: switch=on ... internal=...`. With the saved Wi-Fi: `[wifi] driver up ... internal A -> B, largest ...`, `[wifi] connected ... internal=... largest=...`, `[mem] wifi connected`. Then the deferred BLE start: `[ble] driver up ... internal A -> B, largest ...` and `[ble] coexist ... internal=... largest=...`. If the start panics, the reboot must print the crash-guard line and stay up with BLE off (no loop).
+  2. `tools/cmd.py status` -> `internal=`, `internal_max=`, `heap=`, `psram=`; record `internal` with Wi-Fi connected (and BLE up, if step 1 started it).
+  3. `tools/cmd.py ble status` -> `switch=`, `state=`, `pin_set=1`, `internal=`, `internal_max=`, `need=81920`, `need_block=8192`; no six digits.
+  4. **`ble on` with Wi-Fi connected first** (the ticket): `tools/cmd.py wifi status`, wait for `state=connected`, `tools/cmd.py ble on` (or `ble off` then `on`); record the `[ble] driver up ... internal A -> B` delta, which is Bluedroid's peak need. If it is above ~80 KB, say so and the constant gets replaced.
+  5. `tools/cmd.py wifi status`, `tools/cmd.py status`, and `tools/shot.py` the Bluetooth page (`Switch`, `State`, `PIN`) and the status bar icon.
+  6. Re-run Claude's EST-356 steps 3-10 (PIN on the page, pairing, phone channel/radio/name toasts, phone-sent message, `ble off`/`ble on` no new PIN, PIN privacy search).
+  7. To exercise the refusal: with Wi-Fi connected and BLE off, the serial must show the same fields; a start below the threshold (hard to force now, but possible with `the_mesh`/PSRAM absent) must not panic, only `[ble] not started: ...` and the toast.
+- **Next step:** flash and report the four internal numbers (boot, Wi-Fi up, BLE up, BLE delta). If the delta says the guard is too tight or too loose, the constants change in one place; if the map stutters with PSRAM JPEGDEC, that decoder goes back to internal RAM (its 17,884 B would then come from the UI buffers' margin). Then commit as Slofi.
+
+
+## 2026-11-10 18:30 (Claude): EST-356 + EST-357 on the device: Bluetooth up, with and without Wi-Fi
+- Built in the sandbox (exit 0, RAM 136,224 B = 41.6 %, -84,520 B; flash 2,703,221 B), tests exit 0, reviewed binary flashed (2,703,584 B). The NVS switch from the crashed run was still on: the device booted cleanly and BLE started (Filip had Wi-Fi off).
+- `ble status`: state=advertising, pin_set=1 (PIN never printed), internal free 113,132 B (largest block 102,388) with BLE up and Wi-Fi off.
+- `wifi on` with BLE running: connected; internal 75,196 B free (largest 65,524); `send "Don't Panic" ...` ok, mesh up, history dropped 0. `wifi off` again afterwards (Filip's setting): internal 96,864 B.
+- Not yet: the actual phone pairing and the companion protocol against the MeshCore app (Filip).

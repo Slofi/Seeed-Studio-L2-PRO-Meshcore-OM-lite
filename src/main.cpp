@@ -11,6 +11,7 @@
 #include <esp32-hal-psram.h>
 
 #include "audio.h"
+#include "ble_link.h"
 #include "board.h"
 #include "crash_report.h"
 #include "map.h"
@@ -19,7 +20,9 @@
 #include "fade.h"
 #include "frame_metrics.h"
 #include "history_store.h"
+#include "mem_stats.h"
 #include "ota.h"
+#include "psram_alloc.h"
 #include "radio.h"
 #include "radio_fault.h"
 #include "screen_change.h"
@@ -146,7 +149,10 @@ static int g_setSoundEvent = 0;      // 0 message, 1 direct, 2 mention, 3 new no
 static int g_setSoundPending = 0;    // the picker's chosen row (kSoundOff = Off)
 static om::ui::CivilTime g_setTime;  // the manual-time steppers' civil time
 static uint8_t g_setBrightness = om::kScreenBrightness;
-static om::ui::SettingRow g_setRows[28];
+// EST-357: PSRAM, allocated once in allocUiBuffers(). (The capacity constants are what the old
+// sizeof(array)/sizeof(array[0]) sites now use: a pointer has no element count.)
+static constexpr int kSetRowsCap = 28;
+static om::ui::SettingRow* g_setRows = nullptr;
 static int g_setRowCount = 0;
 static om::ui::RadioPrefsStore g_radio;
 static om::ui::RadioPrefs g_custom;
@@ -200,7 +206,7 @@ static char g_kbText[om::kMeshTextCap];   // the draft, sized like MeshCore's lo
 static uint32_t g_bubMenuSeq = 0; // the message sheet's target: monotonic message id, 0 = closed
 static uint32_t g_replySeq = 0;   // the message the next send answers (id), 0 = none
 static char g_replyName[om::kMeshNameCap] = "";   // the sender, copied when REPLY was tapped
-static om::ui::ChatEntry g_chats[om::ui::kMaxChats];
+static om::ui::ChatEntry* g_chats = nullptr;   // PSRAM, allocUiBuffers()
 static int g_chatCount = 0;
 static int g_channelCount = 0;
 static int g_dmCount = 0;
@@ -214,12 +220,13 @@ static bool g_histPageOk = false;
 static int g_histPageCount = 0;   // messages in g_histPage, oldest first
 static bool g_histMore = true;    // an older page may exist
 static int g_histChat = -1;       // the chat the buffer belongs to
-static om::ui::ChatMsgView g_chatMsgs[om::ui::kMaxChatMsgs + kHistWindow];
+static constexpr int kChatMsgsCap = om::ui::kMaxChatMsgs + kHistWindow;
+static om::ui::ChatMsgView* g_chatMsgs = nullptr;   // PSRAM, allocUiBuffers()
 static int g_chatMsgCount = 0;
 // One copy buffer for the DM ring, shared by refreshChats() and refreshChatMessages(): they run one
 // after the other inside buildChatView(), never nested, so one copy of the ring is enough. Two
 // copies cost ~9 KB of RAM each (EST-342).
-static om::MeshDm g_dmScratch[om::ui::kMaxChatMsgs];
+static om::MeshDm* g_dmScratch = nullptr;   // PSRAM, allocUiBuffers()
 
 static bool g_touchSnd = true;    // a short click on every tap
 static bool g_welcome = true;     // the slower boot chime
@@ -257,7 +264,10 @@ static uint8_t g_tabLuma[4] = {0, 0, 0, 0};
 static bool g_tabLumaKnown[4] = {false, false, false, false};
 
 // Nodes tab state. The rows are copied out of mesh_link's contact table, never sample data.
-static om::ui::NodeItem g_nodes[64];
+static constexpr int kNodeCap = 64;
+static om::ui::NodeItem* g_nodes = nullptr;   // PSRAM, allocUiBuffers()
+// refreshNodes()'s copy of the contact table (64 x 92 B): also PSRAM, never the loop stack.
+static om::MeshContact* g_contactScratch = nullptr;
 static int g_nodeCount = 0;
 static int g_nodeLastHour = 0;       // contacts heard in the last hour, only when times are real
 static bool g_nodeLastHourKnown = false;
@@ -283,6 +293,33 @@ static bool g_newNodeDot = false;          // a contact was added since Nodes wa
 // The RPTR tab that "Log in (RPTR)" opens remembers its node; the login exchange itself is not part
 // of this ticket (the tab is still the placeholder, see PROGRESS.md).
 static char g_rptrNode[32] = "";
+
+// EST-357: every UI scratch array above is one PSRAM allocation, made once here. The crash that
+// started this ticket was an internal-RAM allocation inside Bluedroid while Wi-Fi held 37.6 KB; these
+// ~27 KB of per-screen scratch no longer compete with the radio stacks. The one-time contact copy is
+// here too. A board whose PSRAM did not come up gets internal RAM back from the allocator's own
+// fallback (psram_alloc.h) and the log says which one answered.
+static void allocUiBuffers() {
+  const size_t nodesB = sizeof(om::ui::NodeItem) * (size_t)kNodeCap;
+  const size_t chatsB = sizeof(om::ui::ChatEntry) * (size_t)om::ui::kMaxChats;
+  const size_t chatMsgsB = sizeof(om::ui::ChatMsgView) * (size_t)kChatMsgsCap;
+  const size_t dmB = sizeof(om::MeshDm) * (size_t)om::ui::kMaxChatMsgs;
+  const size_t setB = sizeof(om::ui::SettingRow) * (size_t)kSetRowsCap;
+  const size_t contactsB = sizeof(om::MeshContact) * (size_t)kNodeCap;
+  g_nodes = om::psramArray<om::ui::NodeItem>(kNodeCap);
+  g_chats = om::psramArray<om::ui::ChatEntry>(om::ui::kMaxChats);
+  g_chatMsgs = om::psramArray<om::ui::ChatMsgView>(kChatMsgsCap);
+  g_dmScratch = om::psramArray<om::MeshDm>(om::ui::kMaxChatMsgs);
+  g_setRows = om::psramArray<om::ui::SettingRow>(kSetRowsCap);
+  g_contactScratch = om::psramArray<om::MeshContact>(kNodeCap);
+  const uint32_t total = (uint32_t)(nodesB + chatsB + chatMsgsB + dmB + setB + contactsB);
+  const bool ok = g_nodes && g_chats && g_chatMsgs && g_dmScratch && g_setRows && g_contactScratch;
+  Serial.printf("[mem] ui buffers %u B in %s: nodes %u, chats %u, chat msgs %u, dm scratch %u, "
+                "set rows %u, contacts %u\n",
+                (unsigned)total, ok ? "PSRAM" : "INTERNAL (PSRAM refused)",
+                (unsigned)nodesB, (unsigned)chatsB, (unsigned)chatMsgsB, (unsigned)dmB,
+                (unsigned)setB, (unsigned)contactsB);
+}
 
 // The one-line toast (a tap on the radio fault mark, the new-node notice, a ping result, a trace) is
 // no longer text in the shell: ui/toast.h owns the text and its deadline, and every frame carries the
@@ -515,9 +552,11 @@ static int unreadTotal() {
 }
 
 static void refreshNodes() {
-  // Static, not stack: 64 x ContactInfo-sized copies would eat ~3 KB of the loop task's stack.
-  static om::MeshContact list[64];
-  const int n = om::meshContactList(list, 64);
+  // EST-357: the copy is 64 x MeshContact in PSRAM (g_contactScratch), not internal .bss and not the
+  // loop task's stack.
+  om::MeshContact* list = g_contactScratch;
+  if (list == nullptr) return;
+  const int n = om::meshContactList(list, kNodeCap);
   const uint32_t nowWall = om::timeKeeper().now();
   const uint32_t nowUp = millis() / 1000;
   const bool nowReal = om::timeKeeper().realSinceBoot();
@@ -644,9 +683,11 @@ static void buildStatus(om::ui::StatusModel& s) {
   s.gpsTalked = g_gps.sentences > 0;
   s.batteryPct = batteryPercent(g_battMv);
   // The status icons that appear only when they are on. Wi-Fi (EST-354): present when the switch is
-  // on, ink once the station has an IP and dim while it does not. Bluetooth is still a later ticket.
+  // on, ink once the station has an IP and dim while it does not. Bluetooth (EST-356): present when
+  // the switch is on, ink with a phone connected, dim while advertising, absent when off.
   s.dnd = g_dnd;
-  s.bt = false;
+  s.bt = om::bleIsEnabled();
+  s.btConnected = om::bleConnected();
   s.wifi = om::wifiIsEnabled();
   const om::wifi::Status& wst = om::wifiStatus();
   s.wifiConnected = wst.phase == om::wifi::Phase::Connected ||
@@ -876,7 +917,7 @@ static void refreshChatMessages() {
   // EST-348: page messages first (oldest), then the RAM ring. A paged message gets a synthetic seq
   // with the top bit set: the log id is stable across reboots and cannot collide with this boot's
   // per-ring sequence numbers, so REPLY / the message sheet still resolve to the tapped message.
-  for (int i = 0; i < g_histPageCount && g_chatMsgCount < (int)(sizeof(g_chatMsgs) / sizeof(g_chatMsgs[0])); ++i) {
+  for (int i = 0; i < g_histPageCount && g_chatMsgCount < kChatMsgsCap; ++i) {
     const om::history::Msg& h = g_histPage[i];
     om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
     m.seq = 0x80000000u | (h.logId & 0x7FFFFFFFu);
@@ -941,7 +982,7 @@ static void refreshChatMessages() {
     return;
   }
   if (chan < 0) return;
-  for (int i = 0; i < om::meshMsgCount() && g_chatMsgCount < (int)(sizeof(g_chatMsgs) / sizeof(g_chatMsgs[0])); ++i) {
+  for (int i = 0; i < om::meshMsgCount() && g_chatMsgCount < kChatMsgsCap; ++i) {
     if (om::meshMsgChannel(i) != chan) continue;
     om::ui::ChatMsgView& m = g_chatMsgs[g_chatMsgCount++];
     m.seq = om::meshMsgSeq(i);
@@ -1549,7 +1590,7 @@ static void drawRptrTab() {
 // the action id in a row.
 enum SetAct : uint16_t {
   A_None = 0,
-  A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_Sound,
+  A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_BtToggle, A_BtNewPin, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
   A_Apply, A_Cancel,
   A_MapRecentre, A_MapClear, A_RptrForget,
@@ -1582,7 +1623,7 @@ static void setResetRows() { g_setRowCount = 0; }
 
 static void setAdd(om::ui::SetRowKind kind, uint16_t id, const char* label, const char* value = "",
                    bool on = false, bool danger = false) {
-  if (g_setRowCount >= (int)(sizeof(g_setRows) / sizeof(g_setRows[0]))) return;
+  if (g_setRowCount >= kSetRowsCap) return;
   om::ui::SettingRow& r = g_setRows[g_setRowCount++];
   r = om::ui::SettingRow();
   r.kind = kind;
@@ -1745,7 +1786,7 @@ static void buildSettingsRows() {
       else if (om::wifiStatus().phase == om::wifi::Phase::Connected) snprintf(v, sizeof(v), "connected");
       else snprintf(v, sizeof(v), "on");
       setAdd(om::ui::SetRowKind::Chevron, A_Wifi, "Wi-Fi", v);
-      setAdd(om::ui::SetRowKind::Chevron, A_Bt, "Bluetooth", "");
+      setAdd(om::ui::SetRowKind::Chevron, A_Bt, "Bluetooth", om::ble::phaseLabel(om::blePhase()));
 
       setSection("SOUND");
       setAdd(om::ui::SetRowKind::Chevron, A_Sound, "Sound", g_soundOn ? "on" : "off");
@@ -2110,8 +2151,28 @@ static void buildSettingsRows() {
       break;
     }
     case SetPage::Bt: {
+      char pin[8];
       snprintf(g_setTitle, sizeof(g_setTitle), "Bluetooth");
-      setAdd(om::ui::SetRowKind::Note, A_None, "Not built yet.");
+      setSection("BLUETOOTH");
+      setAdd(om::ui::SetRowKind::Toggle, A_BtToggle, "Bluetooth", "ON", om::bleIsEnabled());
+      setAdd(om::ui::SetRowKind::Value, A_None, "State", om::ble::phaseToken(om::blePhase()));
+      if (om::blePin() != 0) {
+        om::blePinText(pin, sizeof(pin));
+        setAdd(om::ui::SetRowKind::Value, A_None, "PIN", pin);
+      } else {
+        setAdd(om::ui::SetRowKind::Value, A_None, "PIN", "made when switched on");
+      }
+      setAdd(om::ui::SetRowKind::Button, A_BtNewPin, "New PIN");
+      if (om::bleConnected()) {
+        setAdd(om::ui::SetRowKind::Note, A_None,
+               "Phone connected. Changes made there are saved here.");
+      } else if (om::bleIsEnabled()) {
+        setAdd(om::ui::SetRowKind::Note, A_None,
+               "Advertising. Pair from the MeshCore app with the PIN above.");
+      } else {
+        setAdd(om::ui::SetRowKind::Note, A_None,
+               "Off. The phone app uses this node as a MeshCore companion.");
+      }
       break;
     }
 
@@ -2359,6 +2420,23 @@ static void handleSettingsRow(uint16_t id) {
       break;
     case A_WifiSaved: setGo(SetPage::WifiSaved); break;
     case A_Bt:       setGo(SetPage::Bt); break;
+    case A_BtToggle: {
+      const bool on = !om::bleIsEnabled();
+      om::bleSetEnabled(on);
+      // EST-357: the start guard may have refused (not enough internal RAM); its own notice already
+      // carries the numbers, so "Bluetooth on" must not overwrite it with a claim that is not true.
+      if (!on) {
+        showToast("Bluetooth off");
+      } else if (om::bleIsEnabled()) {
+        showToast("Bluetooth on");
+      }
+      break;
+    }
+    case A_BtNewPin: {
+      const uint32_t pin = om::bleNewPin();
+      showToast(pin != 0 ? "New PIN saved" : "New PIN failed");
+      break;
+    }
     case A_Sound:    setGo(SetPage::Sound); break;
     case A_Time:     setGo(SetPage::Time); break;
     case A_TimeManual:
@@ -2920,6 +2998,9 @@ void setup() {
   // (EST-344). Register it once, before any screen can be drawn.
   om::omFrameSetOverlay(om::ui::drawToastOverlay);
   om::ui::loadFonts();                // anti-aliased VLW tables, needed before the first Nodes draw
+  // EST-357: the one-time PSRAM move, and the boot number the Bluetooth guard is built from.
+  allocUiBuffers();
+  om::printMemLine("boot (before Wi-Fi, before BLE)");
 
   om::crashCheckpoint("[om] prefs + clock");
   g_prefs.begin("omlite", false);
@@ -2960,6 +3041,7 @@ void setup() {
   // EST-354: the Wi-Fi switch and its five saved networks. Default off; the radio is not touched
   // until the switch is on (or a saved "on" is applied by the first loop pass).
   om::wifiBegin();
+  om::printMemLine("boot (Wi-Fi stack off)");
   Serial.printf("[prefs] sound=%d vol=%u msg=%u dm=%u men=%u new=%u dnd=%d tsnd=%d tone=%u emoji_rec=%u\n",
                 g_soundOn, g_volume, g_sndMsg, g_sndDm, g_sndMen, g_sndNew, g_dnd, g_touchSnd,
                 g_touchIdx, (unsigned)g_emojiRecent.count);
@@ -2991,6 +3073,13 @@ void setup() {
   // EST-347: Settings edits the radio through NodePrefs. The store is loaded (and seeded from the
   // build values when /prefs.json has none) before the first page can be opened.
   settingsBegin();
+  // EST-356: the Bluetooth switch, OFF by default. Reading it here means the PIN in NodePrefs is
+  // available and the first loop pass can bring the transport up if it was saved on.
+  // EST-357: the guard's refusals and its crash notice arrive as toasts on the screen. Registered
+  // before bleBegin so a parked guard left by the crashed EST-356 image can say so on the first loop
+  // pass (bleBegin only queues the text; the draw happens after setup finished).
+  om::bleSetNotice(showToast);
+  om::bleBegin();
 #endif
 
   om::gpsBegin();
@@ -3473,6 +3562,10 @@ void loop() {
   // serviced here, and the model's timeouts are checked on the same pass. The status bar, a packet
   // and the history flush keep their own cadence.
   om::wifiLoop();
+  // EST-356: the Bluetooth switch and its transport. The transport's receive pump runs inside
+  // MyMesh::loop() (it is MyMesh's serial interface); this only applies the switch, the PIN and the
+  // connected/disconnected state, and prints the heap when both radios are up.
+  om::bleLoop();
   static uint32_t lastBeat = 0;
   static bool screenOn = true;
   static bool sleepPending = false;   // the backlight is fading out; the panel is still awake
@@ -3720,8 +3813,49 @@ void loop() {
       if (screenOn && g_setEditor == om::ui::SettingsEditor::None) redrawCurrentScreen();
     }
   }
+  // EST-356: the Bluetooth page and the status icon follow the switch and the phase (off /
+  // advertising / connected, and a new PIN). One redraw per visible change.
+  {
+    static uint32_t seenBle = 0;
+    const uint32_t bs = om::bleSerial();
+    if (bs != seenBle) {
+      seenBle = bs;
+      if (screenOn && g_setEditor == om::ui::SettingsEditor::None) redrawCurrentScreen();
+    }
+  }
 #if defined(OM_ENABLE_MESH)
   om::meshLinkLoop();
+
+  // EST-356: the phone changed a store through MyMesh (channels, radio, name). One toast says so and
+  // the redraw rebuilds the screen from the same stores, so the change is visible at once.
+  {
+    static uint32_t seenPhone = 0;
+    const uint32_t ps = om::meshPhoneChangeSerial();
+    if (ps != seenPhone) {
+      seenPhone = ps;
+      uint8_t kind = 0;
+      bool radioChanged = false;
+      char text[48] = "";
+      char last[48] = "";
+      while (om::meshPhoneChangeTake(&kind)) {
+        if (kind & om::ble::kChangeRadio) radioChanged = true;
+        om::ble::phoneChangeText(kind, text, sizeof(text));
+        if (text[0] != 0) snprintf(last, sizeof(last), "%s", text);
+      }
+      // The Settings page keeps a small cached copy of the radio values; re-read it so the phone's
+      // new frequency/SF/CR/TX shows there. The cache is filled from NodePrefs, not a second store.
+      if (radioChanged) {
+        g_radio.load();
+        g_custom = g_radio.prefs();
+      }
+      if (last[0] != 0) {
+        Serial.printf("[ble] %s\n", last);
+        if (screenOn) showToast(last);
+      } else if (screenOn && g_setEditor == om::ui::SettingsEditor::None) {
+        redrawCurrentScreen();
+      }
+    }
+  }
 
   // --- EST-342: the asynchronous mesh events -----------------------------------------------------
   // 1) A contact was ADDED by an advert: one toast for om::ui::kToastMs, a dot on the Nodes tab, the "New node"
@@ -4527,14 +4661,17 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       snprintf(reply, cap,
                "[cmd] ok status mesh=%s name=\"%s\" path=%s channels=%d contacts=%d dm=%d "
                "unread=%d clock=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
-               "hist_worst_us=%lu hist_dropped=%lu loop_stack_free=%u loop_stack_size=%u",
+               "hist_worst_us=%lu hist_dropped=%lu loop_stack_free=%u loop_stack_size=%u "
+               "internal=%u internal_max=%u heap=%u psram=%u",
                om::meshLinkReady() ? "up" : "down", name, path, om::mcChannelCount(), g_nodeCount,
                om::meshDmCount(), unreadTotal(),
                om::timeSourceName(om::timeKeeper().source()),
                !hs.ready ? "off" : (hs.sd ? "sd" : "spiffs"), (unsigned long)hs.bytes, hs.slots,
                (unsigned long)hs.records, (unsigned long)hs.worstFlushUs,
                (unsigned long)hs.dropped, (unsigned)uxTaskGetStackHighWaterMark(nullptr),
-               kLoopStackSize);
+               kLoopStackSize, (unsigned)om::internalFreeBytes(),
+               (unsigned)om::internalLargestBlock(), (unsigned)ESP.getFreeHeap(),
+               (unsigned)ESP.getFreePsram());
       return;
     }
 
@@ -4594,8 +4731,10 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       if (strcmp(sub, "on") == 0 || strcmp(sub, "off") == 0) {
         const bool on = strcmp(sub, "on") == 0;
         om::wifiSetEnabled(on);
-        snprintf(reply, cap, "[cmd] ok wifi switch=%s state=%s heap=%u psram=%u",
+        snprintf(reply, cap,
+                 "[cmd] ok wifi switch=%s state=%s internal=%u internal_max=%u heap=%u psram=%u",
                  on ? "on" : "off", om::wifi::phaseToken(om::wifiStatus().phase),
+                 (unsigned)om::internalFreeBytes(), (unsigned)om::internalLargestBlock(),
                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
         return;
       }
@@ -4628,12 +4767,42 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       cmdSafe(ssid, sizeof(ssid), st.ssid);
       snprintf(reply, cap,
                "[cmd] ok wifi switch=%s state=%s ssid=\"%s\" ip=%s rssi=%d reason=\"%s\" "
-               "saved=%d scan=%d source=%s heap=%u psram=%u service_us_max=%lu mesh_serial=%lu",
+               "saved=%d scan=%d source=%s internal=%u internal_max=%u heap=%u psram=%u "
+               "service_us_max=%lu mesh_serial=%lu",
                om::wifiIsEnabled() ? "on" : "off", om::wifi::phaseToken(st.phase), ssid,
                st.ip[0] ? st.ip : "-", (int)st.rssi, st.reason, om::wifiSavedCount(),
                om::wifiScanCount(), om::timeSourceName(om::timeKeeper().source()),
+               (unsigned)om::internalFreeBytes(), (unsigned)om::internalLargestBlock(),
                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram(),
                (unsigned long)om::wifiServiceWorstUs(), (unsigned long)om::meshMsgSerial());
+      return;
+    }
+
+    case om::usb::Kind::Ble: {
+      // EST-356. The PIN is never printed on this surface: `pin_set` answers whether one exists.
+      const char* sub = cmd.target;
+      if (sub == nullptr) {
+        cmdError(reply, cap, "args");
+        return;
+      }
+      const bool on = strcmp(sub, "on") == 0;
+      if (on || strcmp(sub, "off") == 0) {
+        om::bleSetEnabled(on);
+      }
+      // The ESP32 BLE transport keeps no peer name (the phone never sends one in MeshCore's protocol
+      // and the upstream class does not store the GAP name), so a connected peer is reported as
+      // unknown rather than invented.
+      const char* peer = om::bleConnected() ? "unknown" : "-";
+      snprintf(reply, cap,
+               "[cmd] ok ble switch=%s state=%s peer=\"%s\" pin_set=%d internal=%u internal_max=%u "
+               "need=%u need_block=%u heap=%u psram=%u wifi=%s mesh_serial=%lu",
+               om::bleIsEnabled() ? "on" : "off", om::ble::phaseToken(om::blePhase()), peer,
+               om::blePin() != 0 ? 1 : 0, (unsigned)om::internalFreeBytes(),
+               (unsigned)om::internalLargestBlock(), (unsigned)om::bleStartNeedFree(),
+               (unsigned)om::bleStartNeedBlock(), (unsigned)om::bleFreeHeap(),
+               (unsigned)om::bleFreePsram(),
+               om::wifiIsEnabled() ? om::wifi::phaseToken(om::wifiStatus().phase) : "off",
+               (unsigned long)om::meshMsgSerial());
       return;
     }
 

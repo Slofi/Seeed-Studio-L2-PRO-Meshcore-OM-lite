@@ -39,9 +39,13 @@
 #include "channels.h"
 #include "crash_report.h"
 #include "history_store.h"
+#include "ble_model.h"
+#include "ble_transport.h"
 #include "mesh_migration.h"
 #include "mesh_path.h"
 #include "mesh_text.h"
+#include "mem_stats.h"
+#include "psram_alloc.h"
 #include "seq_ring.h"
 #include "radio_fault.h"
 #include "target.h"
@@ -79,6 +83,9 @@ namespace {
 // would bind to MyMesh.h's global `extern MyMesh the_mesh` instead of our file-local object and
 // then fail to link, so the object is declared here first (EST-342).
 extern MyMesh the_mesh;
+// EST-356: the channel writers save through the same DataStore the phone's commands use; its
+// definition is further down with the other MeshCore globals.
+extern DataStore store;
 
 char s_lastText[kMeshTextCap];
 int s_lastChannel = -1;
@@ -104,13 +111,43 @@ struct Msg {
   uint8_t path[MAX_PATH_SIZE];
 };
 constexpr int kMsgRing = 32;
-Msg s_msgs[kMsgRing];
+// EST-357: 9,216 B of internal .bss, now one PSRAM allocation in meshLinkBegin() (psram_alloc.h).
+Msg* s_msgs = nullptr;
 // Message `seq` lives in slot `seq % kMsgRing`; SeqRing is the ONE allocation path (EST-344). The
 // old slotFor() was a second rule (newest-1 based) and the own-repeat counter assumed a third, so a
 // repeat was looked up in the wrong slot. Reads and writes now share SeqRing::slotOf().
 SeqRing<kMsgRing> s_msgRing;
-uint8_t s_unread[8] = {0};
+// EST-356: unread counts are keyed by the channel HASH, not by the UI index, because the phone can
+// add or remove a channel and shift every index after it. MeshCore itself matches a packet to a
+// channel by the first byte of sha256(secret), so one byte is the identity it already uses.
+struct UnreadEntry {
+  uint8_t hash;
+  uint8_t count;
+  bool used;
+};
+UnreadEntry s_unread[8] = {};
 uint32_t s_storeSerial = 0;   // changes on every stored message (channel or DM)
+
+int unreadEntryFor(uint8_t hash, bool create) {
+  for (int i = 0; i < 8; ++i) {
+    if (s_unread[i].used && s_unread[i].hash == hash) return i;
+  }
+  if (!create) return -1;
+  for (int i = 0; i < 8; ++i) {
+    if (!s_unread[i].used) {
+      s_unread[i].used = true;
+      s_unread[i].hash = hash;
+      s_unread[i].count = 0;
+      return i;
+    }
+  }
+  return -1;
+}
+
+int unreadForHash(uint8_t hash) {
+  const int at = unreadEntryFor(hash, false);
+  return at < 0 ? 0 : s_unread[at].count;
+}
 
 // --- EST-348: the on-card history ----------------------------------------------------------------
 // The RAM rings above are the view; the card is the truth across a reboot. Every stored message
@@ -139,10 +176,100 @@ int histChannelSlot(int ch) {
 }
 
 // The unread count a received channel message leaves behind, capped at the RAM field's 8 bits.
-uint16_t histNextUnread8(int ch) {
-  if (ch < 0 || ch >= 8) return 0;
-  return s_unread[ch] < 255 ? (uint16_t)(s_unread[ch] + 1) : 255;
+uint16_t histNextUnread8(uint8_t hash) {
+  const int at = unreadEntryFor(hash, true);
+  if (at < 0) return 0;
+  return s_unread[at].count < 255 ? (uint16_t)(s_unread[at].count + 1) : 255;
 }
+
+// --- EST-356: MeshCore's channel table is the one list the screens read ---------------------------
+// A UI index maps to a MeshCore slot. Empty slots (name empty and secret all zero, which is how a
+// removed channel is stored) are skipped, so a phone-side delete leaves no nameless row behind.
+int s_chanSlot[MAX_GROUP_CHANNELS] = {};
+int s_chanCount = 0;
+uint32_t s_chanSig = 0;
+bool s_chanSigValid = false;
+uint32_t s_ownChannelWrites = 0;   // our screens' writes: the change watch must not blame the phone
+uint32_t s_ownRadioWrites = 0;
+
+uint32_t fnvBytes(uint32_t h, const void* data, size_t len) {
+  const uint8_t* p = (const uint8_t*)data;
+  for (size_t i = 0; i < len; ++i) {
+    h ^= p[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
+bool channelSlotEmpty(const ChannelDetails& cd) {
+  if (cd.name[0] != 0) return false;
+  for (size_t i = 0; i < sizeof(cd.channel.secret); ++i) {
+    if (cd.channel.secret[i] != 0) return false;
+  }
+  return true;
+}
+
+uint32_t channelSignatureNow() {
+  uint32_t h = 2166136261u;
+  for (int slot = 0; slot < MAX_GROUP_CHANNELS; ++slot) {
+    ChannelDetails cd;
+    if (!the_mesh.getChannel(slot, cd)) continue;
+    h = fnvBytes(h, &slot, sizeof(slot));
+    h = fnvBytes(h, cd.name, sizeof(cd.name));
+    h = fnvBytes(h, cd.channel.secret, sizeof(cd.channel.secret));
+  }
+  return h;
+}
+
+void ensureChannelMap() {
+  const uint32_t sig = channelSignatureNow();
+  if (s_chanSigValid && sig == s_chanSig) return;
+  s_chanSig = sig;
+  s_chanSigValid = true;
+  s_chanCount = 0;
+  for (int slot = 0; slot < MAX_GROUP_CHANNELS; ++slot) {
+    ChannelDetails cd;
+    if (!the_mesh.getChannel(slot, cd)) continue;
+    if (channelSlotEmpty(cd)) continue;
+    s_chanSlot[s_chanCount++] = slot;
+  }
+}
+
+int uiIndexForSlot(int slot) {
+  ensureChannelMap();
+  for (int i = 0; i < s_chanCount; ++i) {
+    if (s_chanSlot[i] == slot) return i;
+  }
+  return -1;
+}
+
+// One store write + one DataStore save, exactly what the phone's CMD_SET_CHANNEL does.
+bool writeChannelSlot(int slot, const ChannelDetails& cd) {
+  if (!the_mesh.setChannel(slot, cd)) return false;
+  store.saveChannels(&the_mesh);
+  ++s_ownChannelWrites;
+  s_chanSigValid = false;
+  ensureChannelMap();
+  return true;
+}
+
+// --- EST-356: the phone's changes, one event queue ------------------------------------------------
+constexpr int kPhoneEvents = 4;
+uint8_t s_phoneEvents[kPhoneEvents] = {};
+int s_phoneEventCount = 0;
+uint32_t s_phoneSerial = 0;
+
+void queuePhoneChange(uint8_t change) {
+  if (change == ble::kChangeNone) return;
+  if (s_phoneEventCount >= kPhoneEvents) {   // drop the oldest, never the newest
+    for (int i = 1; i < kPhoneEvents; ++i) s_phoneEvents[i - 1] = s_phoneEvents[i];
+    --s_phoneEventCount;
+  }
+  s_phoneEvents[s_phoneEventCount++] = change;
+  ++s_phoneSerial;
+  if (s_phoneSerial == 0) s_phoneSerial = 1;
+}
+
 
 // --- favourites (EST-342) ------------------------------------------------------------------------
 // MeshCore's ContactInfo has a favourite FLAG but no public setter (addContact() allocates a new
@@ -330,7 +457,8 @@ class OmMeshTables : public SimpleMeshTables {
 // another, which no screen-level test could have caught. This file only adapts it to MeshCore: a
 // received packet fills the allocated message, sendMessage()/ACK update it by sequence (EST-342).
 using ui::DmMsg;   // the ring's message layout (ui/dm_ring.h), also the facade's MeshDm
-om::ui::DmRing s_dmRing;
+// EST-357: 10,708 B of internal .bss moved to a PSRAM allocation in meshLinkBegin().
+om::ui::DmRing* s_dmRing = nullptr;
 
 // The sent DMs waiting for an ACK. The companion's own timeout (est_timeout from sendMessage) is
 // what decides "not confirmed", and the same 4-byte hash proves "delivered".
@@ -357,24 +485,24 @@ history::Msg histFromDm(const DmMsg& m) {
 
 // The history slot of a DM, by the contact's public key (the ticket's chat id).
 int histDmSlot(int thread) {
-  const om::ui::DmThread* t = s_dmRing.thread(thread);
+  const om::ui::DmThread* t = s_dmRing->thread(thread);
   if (t == nullptr || !t->used) return -1;
   return history::store().ensureDm(t->key, t->name);
 }
 
 // Unread after one more received DM (the thread field is 16-bit).
 uint16_t histNextUnreadDm(int thread) {
-  const int n = s_dmRing.unread(thread);
+  const int n = s_dmRing->unread(thread);
   return n < 0xFFFF ? (uint16_t)(n + 1) : 0xFFFF;
 }
 
 int ensureDmThread(const ContactInfo& from) {
-  return s_dmRing.ensureThread(from.id.pub_key, from.name);
+  return s_dmRing->ensureThread(from.id.pub_key, from.name);
 }
 
 // The contact behind a thread, so a send can use MeshCore's own ContactInfo.
 bool contactForThread(int thread, ContactInfo* out) {
-  const om::ui::DmThread* t = s_dmRing.thread(thread);
+  const om::ui::DmThread* t = s_dmRing->thread(thread);
   if (t == nullptr || !t->used || out == nullptr) return false;
   const int total = the_mesh.getTotalContactSlots();
   for (int idx = MAX_ANON_CONTACTS; idx < total; ++idx) {
@@ -389,8 +517,8 @@ bool contactForThread(int thread, ContactInfo* out) {
 }
 
 void setDmState(uint32_t seq, om::ui::DmState state) {
-  DmMsg* m = s_dmRing.find(seq);
-  if (!s_dmRing.setState(seq, (uint8_t)state)) return;
+  DmMsg* m = s_dmRing->find(seq);
+  if (!s_dmRing->setState(seq, (uint8_t)state)) return;
   Serial.printf("[mc] DM seq %lu: %s\n", (unsigned long)seq, om::ui::dmStateToken(state));
   // EST-348: the delivery state outlives the reboot as a small update record.
   if (m != nullptr && m->logId != 0) {
@@ -405,7 +533,7 @@ void setDmState(uint32_t seq, om::ui::DmState state) {
 void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
   const int thread = ensureDmThread(from);
   // THE allocation, shared with meshDmSend(): seq = newest + 1, slot = seq % ring, committed here.
-  DmMsg& m = *s_dmRing.alloc((uint8_t)(thread < 0 ? om::ui::kDmNoThread : thread), false);
+  DmMsg& m = *s_dmRing->alloc((uint8_t)(thread < 0 ? om::ui::kDmNoThread : thread), false);
   m.state = (uint8_t)om::ui::DmState::Delivered;   // received: nothing to confirm
   m.ts = millis() / 1000;
   m.wall = timeKeeper().now();
@@ -428,8 +556,8 @@ void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
   // EST-348: store it before the unread count changes, so the Meta record carries the new count.
   m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m),
                                        thread >= 0 ? histNextUnreadDm(thread) : 0);
-  s_dmRing.bumpRecvSerial();
-  if (thread >= 0) s_dmRing.noteReceived(thread, from.name, m.wall);
+  s_dmRing->bumpRecvSerial();
+  if (thread >= 0) s_dmRing->noteReceived(thread, from.name, m.wall);
   Serial.printf("[mc] DM from %s: %s (hops %d snr %.2f)\n", from.name, text ? text : "",
                 (int)m.hops, (double)m.snr4 / 4.0);
 }
@@ -437,7 +565,7 @@ void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
 // Resend one DM with the next attempt (the companion app's retry): the same text and the same wire
 // timestamp, so the recipient sees one message, and a new frame hash, so the ACK matches that frame.
 bool resendDm(uint32_t seq, uint8_t attempt) {
-  DmMsg* m = s_dmRing.find(seq);
+  DmMsg* m = s_dmRing->find(seq);
   if (m == nullptr) return false;
   ContactInfo ci;
   if (!contactForThread(m->thread, &ci)) {
@@ -557,10 +685,10 @@ class OmListener : public MyMesh::Listener {
     // The ACK update goes through the ring too: same seq -> slot rule as the list (EST-344).
     const uint32_t ackWall = timeKeeper().now();
     const bool ackReal = timeKeeper().realSinceBoot();
-    s_dmRing.markDelivered(seq, ackWall, ackReal);
+    s_dmRing->markDelivered(seq, ackWall, ackReal);
     // EST-348: append the ACK as an update record so the thread still says "delivered" after a
     // reboot, with the same wall clock.
-    DmMsg* dm = s_dmRing.find(seq);
+    DmMsg* dm = s_dmRing->find(seq);
     if (dm != nullptr && dm->logId != 0) {
       history::Update u;
       u.logId = dm->logId;
@@ -630,10 +758,15 @@ class OmListener : public MyMesh::Listener {
 
   void onChannelMessageRecv(mesh::Packet* pkt, ChannelDetails& channel_details,
                             const char* text) override {
+    // EST-356: match the packet's secret against MeshCore's table, then map the slot to the UI
+    // index. The table (not a copy) is what the screens draw, so a phone-side edit is visible here
+    // on the very next packet.
     int channelIdx = -1;
-    for (int i = 0; i < mcChannelCount(); ++i) {
-      if (mcChannel(i).hash == channel_details.channel.hash[0]) {
-        channelIdx = i;
+    for (int slot = 0; slot < MAX_GROUP_CHANNELS; ++slot) {
+      ChannelDetails cd;
+      if (!the_mesh.getChannel(slot, cd)) continue;
+      if (memcmp(cd.channel.secret, channel_details.channel.secret, 16) == 0) {
+        channelIdx = uiIndexForSlot(slot);
         break;
       }
     }
@@ -696,10 +829,12 @@ class OmListener : public MyMesh::Listener {
     snprintf(m.text, sizeof(m.text), "%s", body);
     // EST-348: the message goes to the card before the RAM unread count changes, so the Meta
     // record written with it already carries the new count.
+    const uint8_t msgHash = channel_details.channel.hash[0];
     m.logId = history::store().appendMsg(histChannelSlot(channelIdx), histFromChannel(m),
-                                         histNextUnread8(channelIdx));
+                                         histNextUnread8(msgHash));
     ++s_storeSerial;
-    if (channelIdx < 8) ++s_unread[channelIdx];
+    const int unreadAt = unreadEntryFor(msgHash, true);
+    if (unreadAt >= 0 && s_unread[unreadAt].count < 255) ++s_unread[unreadAt].count;
     const bool muted = mcChannelMuted(channelIdx);
     Serial.printf("[mc] channel %d: %s (hops %d snr %.2f)%s\n", channelIdx, s_lastText,
                   (int)m.hops, (double)m.snr4 / 4.0, muted ? " [muted]" : "");
@@ -785,8 +920,34 @@ MigrateResult copyLegacyContactsIfNeeded() {
     in.close();
     return MigrateResult::Failed;
   }
-  static uint8_t s_legacyBuf[kLegacyContactMaxFileSize];
-  const size_t got = (size_t)in.read(s_legacyBuf, len);
+  // EST-357: the one-time migration's 14,592 B of scratch (legacy file, decoded records, /contacts3
+  // image) is allocated only when the migration really runs and freed on every exit. As statics it
+  // lived in internal .bss for the whole boot, competing with the radio stacks for the heap.
+  struct Scratch {
+    uint8_t* legacy = (uint8_t*)ps_malloc(kLegacyContactMaxFileSize);
+    LegacyContact* recs = (LegacyContact*)ps_malloc(sizeof(LegacyContact) * kLegacyMaxContactRecords);
+    uint8_t* image =
+        (uint8_t*)ps_malloc((size_t)kLegacyMaxContactRecords * kLegacyContactRecordSize);
+    Scratch() {
+      if (legacy == nullptr) legacy = (uint8_t*)malloc(kLegacyContactMaxFileSize);
+      if (recs == nullptr) recs = (LegacyContact*)malloc(sizeof(LegacyContact) * kLegacyMaxContactRecords);
+      if (image == nullptr) {
+        image = (uint8_t*)malloc((size_t)kLegacyMaxContactRecords * kLegacyContactRecordSize);
+      }
+    }
+    ~Scratch() {
+      free(legacy);
+      free(recs);
+      free(image);
+    }
+    bool ok() const { return legacy != nullptr && recs != nullptr && image != nullptr; }
+  } scratch;
+  if (!scratch.ok()) {
+    in.close();
+    Serial.println("[mc] migrate /contacts: out of memory, left for the next boot");
+    return MigrateResult::Failed;
+  }
+  const size_t got = (size_t)in.read(scratch.legacy, len);
   in.close();
   if (got != len) {
     Serial.printf("[mc] migrate /contacts: short read %u of %u, not migrated\n", (unsigned)got,
@@ -794,8 +955,7 @@ MigrateResult copyLegacyContactsIfNeeded() {
     return MigrateResult::Failed;
   }
 
-  static LegacyContact recs[kLegacyMaxContactRecords];
-  const int n = decodeLegacyContacts(s_legacyBuf, len, recs, kLegacyMaxContactRecords);
+  const int n = decodeLegacyContacts(scratch.legacy, len, scratch.recs, kLegacyMaxContactRecords);
   if (n < 0) {
     Serial.println("[mc] migrate /contacts: corrupt (magic/version/CRC), not migrated");
     return MigrateResult::Failed;
@@ -805,9 +965,9 @@ MigrateResult copyLegacyContactsIfNeeded() {
     return MigrateResult::Ok;
   }
 
-  static uint8_t s_image[kLegacyMaxContactRecords * kLegacyContactRecordSize];
   size_t imageLen = 0;
-  if (!encodeContacts3(recs, n, s_image, sizeof(s_image), &imageLen)) {
+  if (!encodeContacts3(scratch.recs, n, scratch.image,
+                       (size_t)kLegacyMaxContactRecords * kLegacyContactRecordSize, &imageLen)) {
     Serial.println("[mc] migrate /contacts: cannot build the /contacts3 image");
     return MigrateResult::Failed;
   }
@@ -835,7 +995,7 @@ MigrateResult copyLegacyContactsIfNeeded() {
     Serial.println("[mc] migrate /contacts: cannot open /contacts3.tmp");
     return MigrateResult::Failed;
   }
-  const size_t wrote = (size_t)out.write(s_image, imageLen);
+  const size_t wrote = (size_t)out.write(scratch.image, imageLen);
   out.flush();   // push the stdio buffer into SPIFFS before anyone asks for the file's size
   out.close();
   if (wrote != imageLen) {
@@ -844,7 +1004,7 @@ MigrateResult copyLegacyContactsIfNeeded() {
                   (unsigned)imageLen);
     return MigrateResult::Failed;
   }
-  if (!readBackExact(kContactsTmpPath, s_image, imageLen)) {
+  if (!readBackExact(kContactsTmpPath, scratch.image, imageLen)) {
     SPIFFS.remove(kContactsTmpPath);
     Serial.println("[mc] migrate /contacts: /contacts3.tmp did not read back, not migrated");
     return MigrateResult::Failed;
@@ -855,7 +1015,7 @@ MigrateResult copyLegacyContactsIfNeeded() {
     Serial.println("[mc] migrate /contacts: rename failed, not migrated");
     return MigrateResult::Failed;
   }
-  if (!readBackExact(kNewContactsPath, s_image, imageLen)) {
+  if (!readBackExact(kNewContactsPath, scratch.image, imageLen)) {
     Serial.println("[mc] migrate /contacts: /contacts3 did not read back after rename");
     return MigrateResult::Failed;
   }
@@ -866,19 +1026,25 @@ MigrateResult copyLegacyContactsIfNeeded() {
   return MigrateResult::Ok;
 }
 
+// EST-356: the ONE-TIME seed from the legacy NVS store into MeshCore's table (first boot after the
+// move, or a /channels2 that does not read back). The legacy accessors are used on purpose: the
+// screen-facing mcChannel* now reads MeshCore's table, so seeding from it would copy the table onto
+// itself and lose the NVS channels.
 void pushChannelsFromNvs(bool save) {
-  const int count = mcChannelCount();
+  const int count = mcLegacyChannelCount();
   for (int i = 0; i < kMaxChannels; ++i) {
     ChannelDetails cd;
     memset(&cd, 0, sizeof(cd));
     if (i < count) {
-      snprintf(cd.name, sizeof(cd.name), "%s", mcChannelName(i));
-      memcpy(cd.channel.secret, mcChannel(i).secret, 16);
+      snprintf(cd.name, sizeof(cd.name), "%s", mcLegacyChannel(i).name);
+      memcpy(cd.channel.secret, mcLegacyChannel(i).secret, 16);
     }
     the_mesh.setChannel(i, cd);
   }
   if (save) store.saveChannels(&the_mesh);
-  Serial.printf("[mc] channels: %d from NVS%s\n", count, save ? " (saved to /channels2)" : "");
+  s_chanSigValid = false;
+  Serial.printf("[mc] channels: %d from the legacy NVS store%s\n", count,
+                save ? " (saved to /channels2)" : "");
 }
 
 // /prefs.json exists, is not empty and parses with MeshCore's own reader. A scratch NodePrefs, so
@@ -955,6 +1121,7 @@ bool meshPathHashSet(uint8_t bytes) {
   if (bytes < 1 || bytes > 3) return false;
   the_mesh.getNodePrefs()->path_hash_mode = (uint8_t)(bytes - 1);
   the_mesh.savePrefs();
+  ++s_ownRadioWrites;
   if (s_prefsBegun) s_netPrefs.putUChar("phs", bytes);   // old key kept for rollback
   Serial.printf("[mc] path hash set to %s (saved in prefs.json)\n", meshPathHashLabel());
   return true;
@@ -986,6 +1153,7 @@ bool meshRadioPrefsSet(const MeshRadioPrefs& p) {
   prefs->bw = (float)p.bw_hz / 1000.0f;
   prefs->tx_power_dbm = (p.tx < -9) ? -9 : (p.tx > MAX_LORA_TX_POWER ? MAX_LORA_TX_POWER : p.tx);
   the_mesh.savePrefs();
+  ++s_ownRadioWrites;
   radio_driver.setParams(prefs->freq, prefs->bw, prefs->sf, prefs->cr);
   radio_driver.setTxPower(prefs->tx_power_dbm);
   Serial.printf("[mc] radio set: %.3f MHz bw %.1f sf %u cr %u tx %d dBm (saved in prefs.json)\n",
@@ -999,6 +1167,7 @@ bool meshTxPowerSet(int8_t dbm) {
   NodePrefs* prefs = the_mesh.getNodePrefs();
   prefs->tx_power_dbm = dbm;
   the_mesh.savePrefs();
+  ++s_ownRadioWrites;
   radio_driver.setTxPower(dbm);
   Serial.printf("[mc] tx power %d dBm (saved in prefs.json)\n", (int)dbm);
   return true;
@@ -1009,6 +1178,7 @@ bool meshNodeNameSet(const char* name) {
   NodePrefs* prefs = the_mesh.getNodePrefs();
   snprintf(prefs->node_name, sizeof(prefs->node_name), "%s", name);
   the_mesh.savePrefs();   // the CMD_SET_ADVERT_NAME path
+  ++s_ownRadioWrites;
   Serial.printf("[mc] node name \"%s\" (saved in prefs.json)\n", prefs->node_name);
   return true;
 }
@@ -1021,6 +1191,7 @@ bool meshAdvertPosPolicySet(bool share) {
   // CMD_SET_OTHER_PARAMS writes exactly this field, then saves.
   the_mesh.getNodePrefs()->advert_loc_policy = share ? ADVERT_LOC_SHARE : ADVERT_LOC_NONE;
   the_mesh.savePrefs();
+  ++s_ownRadioWrites;
   Serial.printf("[mc] advert position %s (saved in prefs.json)\n", share ? "shared" : "off");
   return true;
 }
@@ -1035,6 +1206,18 @@ bool meshPubKeyShort(char* out, size_t cap) {
 
 bool meshLinkBegin() {
   if (s_ready) return true;
+
+  // EST-357: the two message rings moved out of internal .bss and into PSRAM, allocated once here
+  // (before anything can store a message). Without PSRAM the helper falls back to internal RAM.
+  if (s_msgs == nullptr) s_msgs = psramArray<Msg>(kMsgRing);
+  if (s_dmRing == nullptr) s_dmRing = psramObject<om::ui::DmRing>();
+  if (s_msgs == nullptr || s_dmRing == nullptr) {
+    Serial.println("[mc] message rings: out of memory, mesh not started");
+    return false;
+  }
+  s_dmRing->reset();
+  Serial.printf("[mc] message rings: channel %u B, DM %u B in PSRAM\n",
+                (unsigned)(sizeof(Msg) * kMsgRing), (unsigned)sizeof(om::ui::DmRing));
 
   s_netPrefs.begin("mcnet", false);
   s_prefsBegun = true;
@@ -1114,8 +1297,10 @@ bool meshLinkBegin() {
   crashCheckpoint("[mc] 3c interface");
   target_mesh_begun = true;   // from here on setCurrentTime() is the phone source
   the_mesh.setListener(&s_listener);
-  the_mesh.setBLEPin(0);      // Bluetooth stays OFF in this ticket
-  the_mesh.startInterface(null_serial);
+  // EST-356: Bluetooth is a switch, off by default. MyMesh keeps the transport pointer from here on;
+  // BleSerial::enable() is a no-op until the switch is on, so the BLE stack is not allocated at boot.
+  the_mesh.setBLEPin(the_mesh.getNodePrefs()->ble_pin);
+  the_mesh.startInterface(bleTransport());
 
   // Identity proof for the flash check: exactly `[mc] identity <first 8 bytes hex>`.
   {
@@ -1235,6 +1420,12 @@ bool meshLinkBegin() {
   s_netPrefs.putBool("crashed", false);
   s_netPrefs.putUChar("fails", 0);
   crashCheckpoint("[mc] up");
+  // The sizes the Bluetooth/Wi-Fi heap ticket needs for a PSRAM proposal: the MeshCore object (the
+  // 100-contact table dominates it) and our two message rings, all in internal DRAM today.
+  Serial.printf("[mc] sizes: MyMesh=%u B, channel ring=%u B, DM ring=%u B, DM threads=%u B\n",
+                (unsigned)sizeof(the_mesh), (unsigned)(sizeof(Msg) * kMsgRing),
+                (unsigned)(sizeof(om::ui::DmMsg) * om::ui::kDmRing),
+                (unsigned)(sizeof(om::ui::DmThread) * om::ui::kDmThreads));
   Serial.printf("[mc] up: %.1f MHz SF%u, path hash %s, name \"%s\"\n",
                 (double)the_mesh.getNodePrefs()->freq, (unsigned)the_mesh.getNodePrefs()->sf,
                 meshPathHashLabel(), the_mesh.getNodeName());
@@ -1246,6 +1437,19 @@ void meshLinkLoop() {
   // task, outside the mesh and USB call paths and outside any lock. This function never touches SD.
   if (!s_ready) return;
   the_mesh.loop();
+
+  // EST-356: the phone's writes land in MyMesh's stores with no callback; poll the two store
+  // signatures once per pass. Our own setters bump the generation counters, so a value the glass
+  // just wrote is not reported as "from the phone".
+  {
+    static ble::ChangeWatch watch;
+    const uint8_t changes = watch.poll(meshChannelSignature(), meshRadioSignature(),
+                                       meshNameSignature(), s_ownChannelWrites, s_ownRadioWrites);
+    if (changes != ble::kChangeNone) {
+      queuePhoneChange(changes);
+      Serial.printf("[ble] phone changed the stores (0x%02x)\n", (unsigned)changes);
+    }
+  }
 
   const uint32_t now = millis();
   if (s_newContact && (uint32_t)(now - s_newContactAt) >= kNewContactSaveMs) {
@@ -1280,7 +1484,10 @@ void meshLinkLoop() {
 
 bool meshLinkReloadChannels() {
   if (!s_prefsBegun) return false;
-  pushChannelsFromNvs(true);
+  // EST-356: our own channel edits now write MeshCore's table directly (meshChannelSetName/Add/
+  // Remove), so there is nothing to copy. The map's signature is refreshed on the next read.
+  s_chanSigValid = false;
+  ensureChannelMap();
   return true;
 }
 
@@ -1360,43 +1567,48 @@ int meshMsgHeardRepeats(int idx) {
 }
 
 int meshUnread(int channelIdx) {
-  if (channelIdx < 0 || channelIdx >= 8) return 0;
-  return s_unread[channelIdx];
+  if (channelIdx < 0 || channelIdx >= mcChannelCount()) return 0;
+  return unreadForHash(mcChannel(channelIdx).hash);
 }
 
 void meshClearUnread(int channelIdx) {
-  if (channelIdx >= 0 && channelIdx < 8) {
-    s_unread[channelIdx] = 0;
-    // EST-348: the seen point moves with it, so a reboot does not resurrect the badge.
-    history::store().markSeen(histChannelSlot(channelIdx));
-  }
+  if (channelIdx < 0 || channelIdx >= mcChannelCount()) return;
+  const int at = unreadEntryFor(mcChannel(channelIdx).hash, false);
+  if (at >= 0) s_unread[at].count = 0;
+  // EST-348: the seen point moves with it, so a reboot does not resurrect the badge.
+  history::store().markSeen(histChannelSlot(channelIdx));
 }
 
 // --- direct messages -----------------------------------------------------------------------------
-int meshDmCount() { return s_dmRing.threadCount(); }
+// EST-357: the ring is a PSRAM pointer now, so the facade's read side answers empty if the allocation
+// never happened (meshLinkBegin refused). Nothing here may dereference a null on a draw path.
+int meshDmCount() { return s_dmRing != nullptr ? s_dmRing->threadCount() : 0; }
 
 const char* meshDmName(int idx) {
-  const om::ui::DmThread* t = s_dmRing.thread(idx);
+  if (s_dmRing == nullptr) return "";
+  const om::ui::DmThread* t = s_dmRing->thread(idx);
   return (t != nullptr && t->used) ? t->name : "";
 }
 
-int meshDmUnread(int idx) { return s_dmRing.unread(idx); }
+int meshDmUnread(int idx) { return s_dmRing != nullptr ? s_dmRing->unread(idx) : 0; }
 
-bool meshDmAvailable() { return s_dmRing.threadCount() > 0; }
+bool meshDmAvailable() { return s_dmRing != nullptr && s_dmRing->threadCount() > 0; }
 
-uint32_t meshDmSerial() { return s_dmRing.serial(); }
+uint32_t meshDmSerial() { return s_dmRing != nullptr ? s_dmRing->serial() : 0; }
 
-uint32_t meshDmRecvSerial() { return s_dmRing.recvSerial(); }
+uint32_t meshDmRecvSerial() { return s_dmRing != nullptr ? s_dmRing->recvSerial() : 0; }
 
 void meshDmClearUnread(int thread) {
-  s_dmRing.clearUnread(thread);
+  if (s_dmRing == nullptr) return;
+  s_dmRing->clearUnread(thread);
   history::store().markSeen(histDmSlot(thread));
 }
 
 int meshDmList(int thread, MeshDm* out, int max) {
   // The ring walks its own live sequence range (firstSeq..newest) and reads slot seq % ring, so the
   // list and the allocator can never disagree (EST-344). MeshDm is DmMsg itself.
-  return s_dmRing.list(thread, out, max);
+  if (s_dmRing == nullptr) return 0;
+  return s_dmRing->list(thread, out, max);
 }
 
 bool meshDmOpenByName(const char* name, int* threadOut) {
@@ -1432,7 +1644,7 @@ bool meshDmSend(int thread, const char* text) {
   const uint32_t wireTs = the_mesh.getRTCClock()->getCurrentTime();
   // THE same allocation storeDm() uses: seq = newest + 1, slot = seq % ring, committed here. The
   // reply that arrives next gets the following sequence, so it cannot overwrite this message.
-  DmMsg& m = *s_dmRing.alloc((uint8_t)thread, true);
+  DmMsg& m = *s_dmRing->alloc((uint8_t)thread, true);
   const uint32_t seq = m.seq;
   m.state = (uint8_t)om::ui::DmState::Sending;
   m.ts = millis() / 1000;
@@ -1457,7 +1669,7 @@ bool meshDmSend(int thread, const char* text) {
   // EST-348: the sent DM is on the card as "sending"; the ACK later appends its update record.
   m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m), 0);
   s_dmDelivery.begin(seq, ack, est, millis());
-  s_dmRing.clearUnread(thread);
+  s_dmRing->clearUnread(thread);
   Serial.printf("[mc] DM to %s (%d B) -> %s, ack %08lx, timeout %lu ms\n", ci.name, len,
                 rc == MSG_SEND_SENT_FLOOD ? "flood" : "direct", (unsigned long)ack,
                 (unsigned long)est);
@@ -1513,8 +1725,11 @@ bool meshHistoryBegin(bool sdOk) {
       snprintf(m.text, sizeof(m.text), "%s", h.text);
       ++channelMsgs;
     }
-    const uint16_t unread = hs.scanUnread();
-    s_unread[i] = unread > 255 ? 255 : (uint8_t)unread;
+    const int uat = unreadEntryFor(mcChannel(i).hash, true);
+    if (uat >= 0) {
+      const uint16_t unread = hs.scanUnread();
+      s_unread[uat].count = unread > 255 ? 255 : (uint8_t)unread;
+    }
   }
 
   // Every dm-*.log on the card becomes a thread again, with its contact key and name from the Chat
@@ -1526,14 +1741,14 @@ bool meshHistoryBegin(bool sdOk) {
     char threadName[kMeshNameCap];
     snprintf(threadName, sizeof(threadName), "%s", hs.slotName(slot));
     contactNameByKey(key, threadName, sizeof(threadName));
-    const int thread = s_dmRing.ensureThread(key, threadName);
+    const int thread = s_dmRing->ensureThread(key, threadName);
     if (thread < 0) continue;
     const int n = hs.loadNewest(slot, om::ui::kDmRing);
     uint32_t newestWall = 0;
     for (int j = 0; j < n; ++j) {
       const history::Msg& h = hs.scanMsg(j);
       const bool mine = h.mine();
-      DmMsg& m = *s_dmRing.alloc((uint8_t)thread, mine);
+      DmMsg& m = *s_dmRing->alloc((uint8_t)thread, mine);
       m.logId = h.logId;
       m.ts = h.uptime;
       m.wall = h.wall;
@@ -1551,7 +1766,7 @@ bool meshHistoryBegin(bool sdOk) {
       newestWall = h.wall;
       ++dmMsgs;
     }
-    om::ui::DmThread* t = s_dmRing.thread(thread);
+    om::ui::DmThread* t = s_dmRing->thread(thread);
     if (t != nullptr) {
       t->unread = hs.scanUnread();
       if (newestWall != 0) t->lastWall = newestWall;
@@ -1559,7 +1774,7 @@ bool meshHistoryBegin(bool sdOk) {
   }
 
   ++s_storeSerial;
-  s_dmRing.bumpSerial();
+  s_dmRing->bumpSerial();
   Serial.printf("[hist] restored %d channel message(s), %d DM message(s) from %s\n", channelMsgs,
                 dmMsgs, history::status().sd ? "the card" : "SPIFFS");
   return true;
@@ -1931,6 +2146,196 @@ bool meshNewNodeTake(char* nameOut, size_t nameCap, uint8_t* advTypeOut) {
 
 uint32_t meshNow() { return the_mesh.getRTCClock()->getCurrentTime(); }
 
+// --- EST-356: the channel table, the PIN and the phone's own messages -------------------------------
+int meshChannelCount() {
+  ensureChannelMap();
+  return s_chanCount;
+}
+
+int meshChannelSlot(int idx) {
+  ensureChannelMap();
+  return (idx >= 0 && idx < s_chanCount) ? s_chanSlot[idx] : -1;
+}
+
+const char* meshChannelName(int idx) {
+  static char s_names[MAX_GROUP_CHANNELS][kMeshNameMax];
+  ensureChannelMap();
+  if (idx < 0 || idx >= s_chanCount) return "";
+  ChannelDetails cd;
+  if (!the_mesh.getChannel(s_chanSlot[idx], cd)) return "";
+  snprintf(s_names[idx], sizeof(s_names[idx]), "%s", cd.name);
+  return s_names[idx];
+}
+
+bool meshChannelCopy(int idx, char* name, size_t cap, uint8_t secret[16], uint8_t* hash) {
+  if (name == nullptr || secret == nullptr || hash == nullptr || cap == 0) return false;
+  ensureChannelMap();
+  if (idx < 0 || idx >= s_chanCount) return false;
+  ChannelDetails cd;
+  if (!the_mesh.getChannel(s_chanSlot[idx], cd)) return false;
+  snprintf(name, cap, "%s", cd.name);
+  memcpy(secret, cd.channel.secret, 16);
+  *hash = cd.channel.hash[0];
+  return true;
+}
+
+bool meshChannelSetName(int idx, const char* name) {
+  if (!s_ready || name == nullptr) return false;
+  ensureChannelMap();
+  if (idx < 0 || idx >= s_chanCount) return false;
+  const int slot = s_chanSlot[idx];
+  ChannelDetails cd;
+  if (!the_mesh.getChannel(slot, cd)) return false;
+  StrHelper::strncpy(cd.name, name, sizeof(cd.name));
+  if (!writeChannelSlot(slot, cd)) return false;
+  Serial.printf("[mc] channel slot %d renamed to \"%s\" (saved to /channels2)\n", slot, name);
+  return true;
+}
+
+int meshChannelAdd(const char* name, const uint8_t secret[16]) {
+  if (!s_ready || name == nullptr || name[0] == 0 || secret == nullptr) return -1;
+  ensureChannelMap();
+  // The same key twice is almost certainly a mistake (or a channel already joined): return the slot
+  // that already holds it instead of creating a second entry receiving the same traffic twice.
+  for (int slot = 0; slot < MAX_GROUP_CHANNELS; ++slot) {
+    ChannelDetails cd;
+    if (!the_mesh.getChannel(slot, cd)) continue;
+    if (channelSlotEmpty(cd)) continue;
+    if (memcmp(cd.channel.secret, secret, 16) == 0) return uiIndexForSlot(slot);
+  }
+  int slot = -1;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
+    ChannelDetails cd;
+    if (!the_mesh.getChannel(i, cd)) continue;
+    if (channelSlotEmpty(cd)) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) return -1;
+  ChannelDetails cd;
+  memset(&cd, 0, sizeof(cd));
+  StrHelper::strncpy(cd.name, name, sizeof(cd.name));
+  memcpy(cd.channel.secret, secret, 16);
+  if (!writeChannelSlot(slot, cd)) return -1;
+  const int ui = uiIndexForSlot(slot);
+  Serial.printf("[mc] channel added at slot %d: \"%s\" (saved to /channels2)\n", slot, name);
+  return ui;
+}
+
+bool meshChannelRemove(int idx) {
+  if (!s_ready) return false;
+  ensureChannelMap();
+  if (idx < 0 || idx >= s_chanCount) return false;
+  const int slot = s_chanSlot[idx];
+  ChannelDetails empty;
+  memset(&empty, 0, sizeof(empty));
+  if (!writeChannelSlot(slot, empty)) return false;
+  Serial.printf("[mc] channel slot %d removed (saved to /channels2)\n", slot);
+  return true;
+}
+
+uint32_t meshChannelSignature() {
+  ensureChannelMap();
+  return s_chanSig;
+}
+
+uint32_t meshRadioSignature() {
+  NodePrefs* p = the_mesh.getNodePrefs();
+  if (p == nullptr) return 0;
+  uint32_t h = 2166136261u;
+  h = fnvBytes(h, &p->freq, sizeof(p->freq));
+  h = fnvBytes(h, &p->bw, sizeof(p->bw));
+  h = fnvBytes(h, &p->sf, sizeof(p->sf));
+  h = fnvBytes(h, &p->cr, sizeof(p->cr));
+  h = fnvBytes(h, &p->tx_power_dbm, sizeof(p->tx_power_dbm));
+  h = fnvBytes(h, &p->path_hash_mode, sizeof(p->path_hash_mode));
+  h = fnvBytes(h, &p->advert_loc_policy, sizeof(p->advert_loc_policy));
+  h = fnvBytes(h, &p->multi_acks, sizeof(p->multi_acks));
+  h = fnvBytes(h, &p->rx_delay_base, sizeof(p->rx_delay_base));
+  h = fnvBytes(h, &p->airtime_factor, sizeof(p->airtime_factor));
+  h = fnvBytes(h, &p->tx_delay_factor, sizeof(p->tx_delay_factor));
+  h = fnvBytes(h, &p->direct_tx_delay_factor, sizeof(p->direct_tx_delay_factor));
+  return h;
+}
+
+uint32_t meshNameSignature() {
+  const char* name = the_mesh.getNodeName();
+  return fnvBytes(2166136261u, name, strlen(name));
+}
+
+uint32_t meshBlePin() { return the_mesh.getNodePrefs()->ble_pin; }
+
+bool meshBlePinSet(uint32_t pin) {
+  // CMD_SET_DEVICE_PIN's own validation: zero, or a six-digit PIN. The generator never makes
+  // 123456; a PIN the user typed on the phone is theirs to choose.
+  if (pin != 0 && (pin < 100000 || pin > 999999)) return false;
+  the_mesh.getNodePrefs()->ble_pin = pin;
+  the_mesh.savePrefs();          // the same save the phone's command performs
+  the_mesh.setBLEPin(pin);       // and the active one, so the next enable uses it
+  return true;
+}
+
+void meshBlePinActivate() { the_mesh.setBLEPin(the_mesh.getNodePrefs()->ble_pin); }
+
+uint32_t meshPhoneChangeSerial() { return s_phoneSerial; }
+
+bool meshPhoneChangeTake(uint8_t* change) {
+  if (s_phoneEventCount <= 0) return false;
+  if (change != nullptr) *change = s_phoneEvents[0];
+  for (int i = 1; i < s_phoneEventCount; ++i) s_phoneEvents[i - 1] = s_phoneEvents[i];
+  --s_phoneEventCount;
+  return true;
+}
+
+void meshPhoneChannelSent(uint8_t channelIdx, const char* text) {
+  if (!s_ready || text == nullptr || text[0] == 0) return;
+  const int ui = uiIndexForSlot(channelIdx);
+  if (ui < 0) {
+    Serial.printf("[ble] phone sent to slot %u, not in our table, not shown\n", (unsigned)channelIdx);
+    return;
+  }
+  const uint32_t seq = s_msgRing.alloc();
+  Msg& m = s_msgs[SeqRing<kMsgRing>::slotOf(seq)];
+  memset(&m, 0, sizeof(m));
+  m.seq = seq;
+  m.ch = (uint8_t)ui;
+  m.mine = 1;
+  m.ts = millis() / 1000;
+  m.wall = timeKeeper().now();
+  m.wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
+  m.hops = -1;
+  snprintf(m.name, sizeof(m.name), "%s", the_mesh.getNodeName());
+  snprintf(m.text, sizeof(m.text), "%s", text);
+  // EST-348: our own message is stored (mine, no unread Meta), exactly like a send from the glass.
+  m.logId = history::store().appendMsg(histChannelSlot(ui), histFromChannel(m), 0);
+  ++s_storeSerial;
+  Serial.printf("[ble] phone sent ch%d: %s\n", ui, m.text);
+}
+
+void meshPhoneDmSent(const uint8_t* prefix, uint8_t prefixLen, const char* text) {
+  if (!s_ready || prefix == nullptr || text == nullptr || text[0] == 0) return;
+  ContactInfo* ci = the_mesh.lookupContactByPubKey(prefix, prefixLen);
+  if (ci == nullptr) {
+    Serial.println("[ble] phone sent a DM to an unknown contact, not shown");
+    return;
+  }
+  const int thread = ensureDmThread(*ci);
+  DmMsg& m = *s_dmRing->alloc((uint8_t)(thread < 0 ? om::ui::kDmNoThread : thread), true);
+  // We did not compose the frame, so we cannot know the ACK it expects; "sending" is the honest
+  // state (MyMesh confirms it on the phone side, and our ACK table does not track this frame).
+  m.state = (uint8_t)om::ui::DmState::Sending;
+  m.ts = millis() / 1000;
+  m.wall = timeKeeper().now();
+  m.wallReal = timeKeeper().realSinceBoot() ? 1 : 0;
+  m.hops = -1;
+  snprintf(m.name, sizeof(m.name), "%s", the_mesh.getNodeName());
+  snprintf(m.text, sizeof(m.text), "%s", text);
+  m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m), 0);
+  if (thread >= 0) s_dmRing->clearUnread(thread);
+  Serial.printf("[ble] phone sent a DM to %s: %s\n", ci->name, m.text);
+}
+
 bool meshLinkSend(int channelIdx, const char* text) {
   Serial.printf("[mc] send ch%d ready=%d\n", channelIdx, (int)s_ready);
   if (!s_ready || text == nullptr || *text == 0) return false;
@@ -1941,7 +2346,8 @@ bool meshLinkSend(int channelIdx, const char* text) {
     return false;
   }
   ChannelDetails cd;
-  if (!the_mesh.getChannel(channelIdx, cd)) {
+  const int slot = meshChannelSlot(channelIdx);
+  if (slot < 0 || !the_mesh.getChannel(slot, cd)) {
     Serial.println("[mc] send: no such channel");
     return false;
   }

@@ -40,7 +40,8 @@ BIN19="$(mktemp /tmp/om-lite-history.XXXXXX)"
 BIN20="$(mktemp /tmp/om-lite-est351.XXXXXX)"
 BIN21="$(mktemp /tmp/om-lite-wifi.XXXXXX)"
 BIN22="$(mktemp /tmp/om-lite-est355.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22"' EXIT
+BIN23="$(mktemp /tmp/om-lite-est356.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -136,6 +137,10 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_wifi.cpp \
 # (the map on either side, or a brightness difference above the threshold).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est355.cpp \
   ../../src/screen_change.cpp ../../src/fade.cpp ../../src/touch_gate.cpp -o "$BIN22"
+# EST-356: the Bluetooth switch and its three states, the PIN generator (six digits, never 123456),
+# the change watch that separates the phone's writes from ours, and the `ble` USB command.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est356.cpp \
+  ../../src/usb_cmd_logic.cpp -o "$BIN23"
 "$BIN3"
 "$BIN4"
 "$BIN5"
@@ -156,3 +161,4 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est355.cpp \
 "$BIN20"
 "$BIN21"
 "$BIN22"
+"$BIN23"

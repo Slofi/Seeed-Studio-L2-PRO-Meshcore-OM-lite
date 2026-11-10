@@ -62,8 +62,8 @@ struct StatusCellWidths {
   int gps = 0;                // "GPS 14" or "GPS --"
 };
 
-// Which optional cells are on. Bluetooth and Wi-Fi are reserved slots: drawn only when true, and no
-// firmware path sets them yet (later tickets).
+// Which optional cells are on. Wi-Fi (EST-354) and Bluetooth (EST-356) are drawn only when their
+// switch is on; the icons sit in the reserved slots, nearest the GPS cell is the one drawn last.
 struct StatusCellFlags {
   bool fault = false;
   bool dnd = false;

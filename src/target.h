@@ -102,8 +102,9 @@ class OmSensors : public SensorManager {
   bool fix_valid_ = false;
 };
 
-// No phone link in this ticket (Bluetooth is off). MyMesh::loop() dereferences _serial, so it
-// gets this null interface instead of a real transport; writes are dropped.
+// A no-op transport, kept for builds without the phone link. Since EST-356 MyMesh gets the real BLE
+// transport (src/ble_transport.*), whose BleSerial::enable() is a no-op while the switch is off, so
+// MyMesh::loop() never dereferences a null _serial either way.
 class OmNullSerialInterface : public BaseSerialInterface {
  public:
   void enable() override {}

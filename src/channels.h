@@ -32,8 +32,15 @@ struct McRadioPlan {
 
 const McRadioPlan& mcRadioPlan();
 
+// EST-356: the list itself is MeshCore's channel table (MyMesh + DataStore), read on every call, so
+// a channel the phone adds, renames or removes is what the screens show. The old NVS store below is
+// only the one-time seed (the migration) and the home of our two flags, enabled and mute.
 int mcChannelCount();
 const McChannel& mcChannel(int idx);
+
+// The legacy NVS store, for the migration seed only (mesh_link.cpp). Never a screen's truth.
+int mcLegacyChannelCount();
+const McChannel& mcLegacyChannel(int idx);
 
 // Names, the enabled flag and the per-channel notification mute are editable and persisted in NVS
 // ("mcch"). Mute is about *sound* only: a muted channel still receives, still counts unread, and still

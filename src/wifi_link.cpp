@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "mem_stats.h"
 #include "timekeeper.h"
 
 // The SNTP reply is captured here instead of being written straight into the system clock. The
@@ -207,7 +208,9 @@ void onConnected(uint32_t nowMs) {
   clearPendingPass();
   s_autoActive = false;
   bump();
-  Serial.printf("[wifi] connected to \"%s\" ip=%s rssi=%d\n", ssid, ipText, rssi);
+  Serial.printf("[wifi] connected to \"%s\" ip=%s rssi=%d internal=%u largest=%u\n", ssid, ipText,
+                rssi, (unsigned)internalFreeBytes(), (unsigned)internalLargestBlock());
+  printMemLine("wifi connected");
   startNtp(nowMs);
 }
 
@@ -256,6 +259,7 @@ void autoTryNext(uint32_t nowMs) {
 void startDriver(uint32_t nowMs) {
   const uint32_t heap0 = ESP.getFreeHeap();
   const uint32_t psram0 = ESP.getFreePsram();
+  const uint32_t internal0 = internalFreeBytes();
   const uint32_t t0 = millis();
 
   // The IDF keeps its own copy of the credentials by default. Ours is the NVS blob above, so the
@@ -289,10 +293,12 @@ void startDriver(uint32_t nowMs) {
 
   const uint32_t heap1 = ESP.getFreeHeap();
   const uint32_t psram1 = ESP.getFreePsram();
-  Serial.printf("[wifi] driver up in %lu ms: heap %u -> %u (%+ld B), PSRAM %u -> %u (%+ld B)\n",
+  Serial.printf("[wifi] driver up in %lu ms: heap %u -> %u (%+ld B), internal %u -> %u (%+ld B), "
+                "largest %u B, PSRAM %u -> %u (%+ld B)\n",
                 (unsigned long)(millis() - t0), (unsigned)heap0, (unsigned)heap1,
-                (long)heap1 - (long)heap0, (unsigned)psram0, (unsigned)psram1,
-                (long)psram1 - (long)psram0);
+                (long)heap1 - (long)heap0, (unsigned)internal0, (unsigned)internalFreeBytes(),
+                (long)internalFreeBytes() - (long)internal0, (unsigned)internalLargestBlock(),
+                (unsigned)psram0, (unsigned)psram1, (long)psram1 - (long)psram0);
   // Coexistence, measured rather than assumed: the SX1262 is on SPI2 (radio.h) with its own IRQ,
   // the display on SPI3, the card on SPI2/1-bit; Wi-Fi is the SoC's internal radio and shares no bus
   // or pin with any of them. What it does share is CPU time: the Wi-Fi/lwIP tasks run on the other

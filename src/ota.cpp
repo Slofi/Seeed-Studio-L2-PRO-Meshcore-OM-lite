@@ -120,7 +120,9 @@ bool otaActive() { return s_active; }
 void otaCommandPoll() {
   if (!s_cmdReady) return;
   s_cmdReady = false;   // freed before running: a command that takes a while must not block the host
-  char reply[256];
+  // EST-357: `status` grew the internal heap fields; 256 cut the psram field on a long node name.
+  // The loop task's stack is 16 KB (SET_LOOP_TASK_STACK_SIZE), so the extra 128 B is cheap.
+  char reply[384];
   om::usbCommandExecute(s_cmd, reply, sizeof(reply));
   Serial.println(reply);
   s_cmd[0] = 0;

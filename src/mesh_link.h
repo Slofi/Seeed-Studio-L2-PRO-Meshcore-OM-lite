@@ -202,5 +202,39 @@ bool meshContactPathText(const char* name, char* out, size_t cap);
 uint32_t meshContactSignature();
 // MeshCore's current clock, for age arithmetic. 0 when the mesh is not up.
 uint32_t meshNow();
+
+// --- EST-356: one channel table, the phone's -----------------------------------------------------
+// The list is MyMesh's own channel table, read on every call: a channel the phone adds, renames or
+// removes is what the screens draw on the next frame. A UI index maps to a MeshCore slot, so an
+// empty slot left by a delete is skipped instead of shown as a nameless row.
+int meshChannelCount();
+int meshChannelSlot(int idx);
+const char* meshChannelName(int idx);
+bool meshChannelCopy(int idx, char* name, size_t cap, uint8_t secret[16], uint8_t* hash);
+bool meshChannelSetName(int idx, const char* name);
+int meshChannelAdd(const char* name, const uint8_t secret[16]);
+bool meshChannelRemove(int idx);
+// FNV-1a over every slot's name and secret. Changes when the channel table changes, ours or the
+// phone's; the change watch uses it to tell the two apart.
+uint32_t meshChannelSignature();
+
+// --- EST-356: the PIN and the phone's changes ----------------------------------------------------
+// NodePrefs::ble_pin is the one field the phone's CMD_SET_DEVICE_PIN writes; these are that path.
+uint32_t meshBlePin();
+bool meshBlePinSet(uint32_t pin);     // writes the field, savePrefs(), and makes it the active PIN
+void meshBlePinActivate();            // boot: NodePrefs::ble_pin -> MyMesh's active PIN
+
+uint32_t meshRadioSignature();        // freq/bw/sf/cr/tx/tuning/path hash/advert position
+uint32_t meshNameSignature();         // the advert name
+// A changed store that our own screens did NOT write, i.e. the phone. Queued as ble::PhoneChange
+// bits (ble_model.h); the shell shows one toast and rebuilds the affected screen.
+uint32_t meshPhoneChangeSerial();
+bool meshPhoneChangeTake(uint8_t* change);
+
+// The phone's own outgoing messages, tapped from its BLE frames before MyMesh handles them: the
+// listener only sees what arrives, so without this a message sent from the phone would be missing
+// from our chat. `channelIdx` is MeshCore's slot (what the app sends).
+void meshPhoneChannelSent(uint8_t channelIdx, const char* text);
+void meshPhoneDmSent(const uint8_t* prefix, uint8_t prefixLen, const char* text);
 }
 #endif  // OM_ENABLE_MESH

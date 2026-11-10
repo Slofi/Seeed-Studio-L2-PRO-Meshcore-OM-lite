@@ -14,6 +14,7 @@
 #include <math.h>
 
 #include "board.h"
+#include "psram_alloc.h"
 #include "ui/rgb565.h"
 #include "ui/theme.h"
 
@@ -59,7 +60,9 @@ uint8_t* s_index = nullptr;
 uint32_t s_count = 0;
 uint8_t* s_tile = nullptr;
 uint16_t* s_canvas = nullptr;   // kViewW x kViewH composite
-JPEGDEC s_jpeg;
+// EST-357: 17,884 B, now one PSRAM allocation in mapBegin() instead of internal .bss. JPEGDEC reads
+// its work buffers from ordinary memory (no DMA), and map tiles are small, so PSRAM is fine.
+JPEGDEC* s_jpeg = nullptr;
 uint16_t* s_decodeTarget = nullptr;   // frame being decoded (JPEGDEC pUser is not set)
 bool s_ready = false;
 
@@ -230,10 +233,11 @@ uint16_t* cacheGet(int z, int tx, int ty) {
   s_cacheNext = (s_cacheNext + 1) % kCache;
   e.z = -1;   // invalid until the decode succeeds
   s_decodeTarget = e.frame;
-  if (!s_jpeg.openRAM(s_tile, (int)r.len, drawCb)) return nullptr;
-  s_jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-  const int ok = s_jpeg.decode(0, 0, 0);
-  s_jpeg.close();
+  if (s_jpeg == nullptr) return nullptr;
+  if (!s_jpeg->openRAM(s_tile, (int)r.len, drawCb)) return nullptr;
+  s_jpeg->setPixelType(RGB565_LITTLE_ENDIAN);
+  const int ok = s_jpeg->decode(0, 0, 0);
+  s_jpeg->close();
   if (!ok) return nullptr;
   e.z = z;
   e.tx = tx;
@@ -302,16 +306,18 @@ bool mapBegin() {
   s_index = (uint8_t*)ps_malloc(idxSize);
   s_tile = (uint8_t*)ps_malloc(kMaxTile);
   s_canvas = (uint16_t*)ps_malloc((size_t)kViewW * kViewH * 2);
+  if (s_jpeg == nullptr) s_jpeg = psramObject<JPEGDEC>();
   bool framesOk = true;
   for (int i = 0; i < kCache; ++i) {
     s_cache[i].frame = (uint16_t*)ps_malloc((size_t)kTile * kTile * 2);
     framesOk = framesOk && s_cache[i].frame;
   }
-  if (!s_index || !s_tile || !s_canvas || !framesOk) {
+  if (!s_index || !s_tile || !s_canvas || s_jpeg == nullptr || !framesOk) {
     Serial.println("[map] PSRAM allocation failed");
     idx.close();
     return false;
   }
+  Serial.printf("[map] JPEG decoder %u B in PSRAM\n", (unsigned)sizeof(JPEGDEC));
   if (idx.read(s_index, idxSize) != idxSize) {
     Serial.println("[map] index read failed");
     idx.close();

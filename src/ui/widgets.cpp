@@ -380,7 +380,8 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   if (flags.wifi) {
     drawIcon(d, kIconWifi, rects.wifi.x, rects.wifi.y, m.wifiConnected ? kInk : kDim, kBar);
   }
-  if (flags.bt) drawIcon(d, kIconBluetooth, rects.bt.x, rects.bt.y, kDim, kBar);
+  // EST-356: present while the switch is on, dim while advertising, ink once the phone is connected.
+  if (flags.bt) drawIcon(d, kIconBluetooth, rects.bt.x, rects.bt.y, m.btConnected ? kInk : kDim, kBar);
 }
 
 void drawToast(lgfx::LovyanGFX* d, const Layout& L, const char* text) {

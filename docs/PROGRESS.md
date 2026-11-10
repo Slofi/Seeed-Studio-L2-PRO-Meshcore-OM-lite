@@ -2666,3 +2666,103 @@ take, an explicit BLE restart belongs to that ticket too.
 - `ble status`: state=advertising, pin_set=1 (PIN never printed), internal free 113,132 B (largest block 102,388) with BLE up and Wi-Fi off.
 - `wifi on` with BLE running: connected; internal 75,196 B free (largest 65,524); `send "Don't Panic" ...` ok, mesh up, history dropped 0. `wifi off` again afterwards (Filip's setting): internal 96,864 B.
 - Not yet: the actual phone pairing and the companion protocol against the MeshCore app (Filip).
+
+## 2026-11-10 18:40 (DS): EST-358 RPTR does real work (scan, login, status, admin set)
+
+Built with the REBUILD.md command, **exit 0**: RAM **143,912 B of 327,680 (43.9 %)**, flash
+**2,733,297 B of 6,553,600 (41.7 %)**, `firmware.bin` **2,733,664 B**. `sh test/host/run.sh`
+**exit 0** (every suite, including the new `test_est358.cpp`). Baseline (EST-357): RAM 136,224 B,
+flash 2,703,221 B, bin 2,703,584 B, so this ticket costs **+7,688 B RAM and +30,076 B flash**.
+
+**1. Scan is upstream's own discovery, not a new protocol.** `src/rptr_link.cpp` builds MeshCore's
+control-data request itself (`Mesh::createControlData()` + `sendZeroHop()`, the exact body the
+companion's `CMD_SEND_CONTROL_DATA` handler builds: type `0x80`, filter `1 << ADV_TYPE_REPEATER`,
+random tag, `since = 0`) and listens 20 s. `MyMesh::onControlDataRecv` hands every zero-hop control
+packet to the listener (Mesh.cpp does that for `payload[0] & 0x80`), so `mesh_link.cpp`'s `OmListener`
+now overrides it and calls `om::rptrOnControlData()`. An answer is one row: public-key prefix, name
+from OUR contact table (the answer carries only the key), the SNR the repeater heard us at (`payload[1]`),
+the SNR we heard it at (`packet->getSNR()`), the hop count and the heard time. A repeater already in
+contacts is marked `saved`. The header says `listening` / `N found, listening` / `N found` /
+`none answered`, and the empty state says the request is in flight, so the list is never silently empty.
+`FoundList` never grows on a duplicate key, and a stale tag from an older scan is refused.
+
+**2. Login is upstream's `sendLogin`, with the real outcomes.** `BaseChatMesh::sendLogin()` is public,
+and the answer arrives at `onUnhandledResponse` (the phone's own `CMD_SEND_LOGIN` path sets MyMesh's
+private `pending_login`, so it cannot be reused without editing `lib/`). The answer is decoded by
+`om::rptr::loginParse`: current MeshCore (`RESP_SERVER_LOGIN_OK`, `is_admin`, permissions, firmware
+level, and the repeater's clock from the tag) and the legacy `"OK"` form. The state machine is
+`Idle / Sending / Admin / Guest / Refused / NoAnswer`, with upstream's own `est_timeout` **plus
+2,500 ms**; the sheet shows `admin · 1.6 s` with the measured round trip. **A wrong password is
+silent on MeshCore v1.18**: `handleLoginReq` returns 0 and the repeater sends nothing, so "refused"
+can only be said when a reply arrives that is neither login form; a wrong password therefore reads
+"no answer (wrong password, or out of range)". That is the protocol, not a UI shortcut.
+The password is typed on the shared keyboard sheet (`KeyboardField::RptrPassword`: printable ASCII,
+**15 bytes**, MeshCore's `sendLogin` limit), drawn as dots only. A successful login is remembered per
+repeater in NVS (`rptr` namespace, 4 slots, `{name, password}`); it is never logged, never handed to
+a reply line and never drawn again. `Forget` removes it. Auto-login (Settings > RPTR, default off)
+opens the remembered repeater straight into its admin panel.
+
+**3. Status is upstream's `sendRequest(REQ_TYPE_GET_STATUS)`.** The reply is `RepeaterStats`
+(56 bytes, the layout of the repeater's own `MyMesh.h`), decoded in `rptr_model.cpp` with explicit
+offsets. The Overview card shows uptime, battery (volts and a 3.0-4.2 V percentage), airtime, packets
+rx/tx, noise floor, last SNR, firmware level (from the login answer) and the repeater's clock (also
+from the login answer, `HH:MM UTC`), with a `Read all` refresh row. Before the first answer the card
+says `not read yet, tap Read` instead of zeros.
+
+**4. The admin set sends exactly the mock's CLI lines.** Every control goes through
+`BaseChatMesh::sendCommandData(..., TXT_TYPE_CLI_DATA, line)` (the companion's text-CLI frame), and
+the repeater's answer comes back as `TXT_TYPE_CLI_DATA` and is queued for the strip under the rows
+(`> set radio 869.525,62.5,8,5` / `OK - reboot to apply`). The lines are built in `rptr_model.cpp`
+and the host test compares them with the mock's own strings: `set radio 869.525,62.5,8,5` +
+`set tx 14` (Apply; steppers are local until Apply, as the mock does), `region allowf/denyf <name>`,
+`region home`, `region default`, `region save`, the 7-command SI chain, `set path.hash.mode 0|1|2`,
+`set loop.detect off|minimal|moderate|strict`, `set advert.interval`, `set flood.advert.interval`
+(never 1-2 h), `set flood.max`, `set repeat on|off`, `set powersaving on|off`, `gps advert prefs|none`,
+`set name`, `set owner.info`, `set lat <5dp>` + `set lon <5dp>`, `advert.zerohop`, `advert`,
+`clock sync`, the 4-line silent and resume chains, and `reboot`. Regions are read with the repeater's
+own `region` reply (`RegionMap::exportTo` text) and neighbours with `neighbors`
+(`hex:secs:snr4` lines, names resolved from our contact table, heard shown as a clock time).
+`discover.neighbors` is the Discover action. Two-step confirm (`Confirm`, 6 s) for **reboot** and
+**silent mode**; the mock has no factory-defaults control and the repeater's `erase` is serial-only
+(`sender_timestamp == 0`), so no such command is offered: a remote factory reset does not exist.
+
+**5. USB for Claude:** `rptr scan` (starts a scan and prints the rows known so far; run it again after
+~20 s for the answers) and `rptr status <name>` (uses the remembered password when the session is not
+on that repeater, otherwise asks for the status and prints it when it is queued). Neither prints a
+password: the reply says `login=sent` at most. `rptr`, `rptr password ...` and extra words are refused
+by the parser (host-tested).
+
+**Host tests prove** (`test_est358.cpp`): every CLI line above (including the mock's exact
+`set radio 869.525,62.5,8,5`, `region allowf lj`, `region home lj`, `set name rptr`,
+`set lat 46.25000`, `discover.neighbors`, the 7 SI commands and the 4 silent/resume lines), the
+bands' formatting (`62.5`, `125`, `31.25`), the stepper clamps (freq 300-2500, SF 5-12, CR 5-8,
+TX 1-22, local 0-240, flood 0/3-168, flood.max 0-64 step 4); the password filter (printable ASCII,
+15 bytes, control bytes dropped, exact truncation at the buffer edge); the discovery list (dedupe,
+serial, the 20 s window closing once, a full list refusing the 17th, the state texts); the login state
+machine (deadline = estimate + 2,500 ms, RTT, refused, no answer, a millis() wrap) and both answer
+shapes; the status decode and every text helper; the neighbour and region parsers; the two-step
+confirm; the admin row table for all six views (labels, kinds, ids and the region rows' H/D keys); the
+admin layout (chips inside the width, body above the answer strip, row/part hit test under scroll);
+and the `rptr` USB command.
+
+**Could not check** (no device, no flash, no serial): that a real repeater answers the zero-hop
+DISCOVER request on the SLO mesh and how many answers arrive in 20 s; that the login answer reaches
+`onUnhandledResponse` (the code path is the one the ping already uses, but a login is an ANON_REQ with
+a PATH return, not the same packet shape as the ping's RESPONSE); that the repeater accepts our CLI
+lines (the strings are the mock's and the repeater's own `handleSetCmd`/`handleRegionCmd` were read,
+not run); that the status struct offsets match the SLO repeaters' firmware; the real screen (the admin
+panel shows 3 rows at a time on 320x240, the rest scroll); the region export's exact text on the
+device; and the internal-RAM headroom with Wi-Fi + BLE after this ticket's +7,688 B of statics (the
+new `RptrView` is ~3.3 KB of .bss; if `ble status` shows less than ~60 KB free with both radios up,
+that view is the first thing to move to PSRAM).
+
+**Next step:** flash, then: RPTR > Scan and watch `[rptr] scan: discover request tag ...` and one
+`[rptr] answer <name>` line per repeater; tap one, type Filip's password, and check `[rptr] login ...
+admin (N ms)`; the Overview card against the repeater's own `ver`/`stats`; then Regions > Read,
+Neighbours > Read, and one control per view, each answered in the strip and in `[rptr] cli ->` /
+`[rptr] cli <-`. Then `rptr scan` and `rptr status "<name>"` over USB.
+
+
+## 2026-11-10 18:30 (Claude): EST-358 on the device
+- Built in the sandbox (exit 0, RAM 143,912 B, flash 2,733,297 B), tests exit 0, reviewed binary flashed (2,733,664 B). Internal free 168,656 B (BLE off by Filip).
+- `rptr scan`: discover request, two answers within seconds: `86a8eedb744b` (no name) SNR in 11.0 / out 11.75 dB and `Argus mobile RPTR` SNR 13.25 / 8.25 dB, both direct. The RPTR tab lists them, "saved" on the one in contacts (`docs/shots/2026-11-10-1829-rptr-scan.png`). Login, status and the admin set need Filip's repeater password: Filip.

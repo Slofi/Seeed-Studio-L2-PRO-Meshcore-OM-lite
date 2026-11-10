@@ -51,16 +51,20 @@ RptrLayout rptrLayoutFor(const Layout& L, bool detail) {
   r.empty = r.list;
   r.visibleRows = r.list.h / kRptrRowH;
 
-  // Detail page: the mock nests a back key and a title in the same row, then one status card.
+  // Detail page: the mock nests a back key and a title in the same row, then the facts card, the
+  // password row, the result line, Forget and the hint box. The card is four rows tall at 320 px.
   r.back = Rect{8, (int16_t)(top + 3), kRptrBackW, 20};
   r.title = Rect{(int16_t)(r.back.right() + 8), top, (int16_t)(L.width - r.back.right() - 14),
                  kRptrHeadH};
-  r.infoCard = Rect{8, (int16_t)(top + kRptrHeadH + 4), (int16_t)(L.width - 16), 92};
-  r.loginLabel = Rect{8, (int16_t)(r.infoCard.bottom() + 6), 100, 14};
+  r.sub = Rect{r.title.x, (int16_t)(top + 16), r.title.w, 12};
+  r.infoCard = Rect{8, (int16_t)(top + kRptrHeadH + 4), (int16_t)(L.width - 16), 76};
+  r.loginLabel = Rect{8, (int16_t)(r.infoCard.bottom() + 4), 120, 14};
   r.loginField = Rect{8, (int16_t)(r.loginLabel.bottom() + 1), (int16_t)(L.width - 16 - 76), 22};
   r.loginButton = Rect{(int16_t)(r.loginField.right() + 8), r.loginField.y, 60, 22};
-  r.note = Rect{8, (int16_t)(r.loginField.bottom() + 6), (int16_t)(L.width - 16),
-                (int16_t)(L.tabbar.y - r.loginField.bottom() - 10)};
+  r.result = Rect{8, (int16_t)(r.loginField.bottom() + 2), (int16_t)(L.width - 16 - 64), 14};
+  r.forget = Rect{(int16_t)(L.width - 8 - 56), (int16_t)(r.loginField.bottom() + 1), 56, 18};
+  r.note = Rect{8, (int16_t)(r.result.bottom() + 2), (int16_t)(L.width - 16),
+                (int16_t)(L.tabbar.y - r.result.bottom() - 6)};
   return r;
 }
 
@@ -88,12 +92,94 @@ RptrHitResult rptrHitAt(const RptrLayout& r, bool detail, int count, int scroll,
     if (r.back.contains(x, y)) { out.kind = RptrHit::Back; return out; }
     if (r.loginField.contains(x, y)) { out.kind = RptrHit::LoginField; return out; }
     if (r.loginButton.contains(x, y)) { out.kind = RptrHit::LoginButton; return out; }
+    if (r.forget.contains(x, y)) { out.kind = RptrHit::Forget; return out; }
     return out;
   }
   if (r.scan.contains(x, y)) { out.kind = RptrHit::Scan; return out; }
   const int row = rptrRowAt(r, count, scroll, x, y);
   if (row >= 0) { out.kind = RptrHit::Row; out.row = row; }
   return out;
+}
+
+// ------------------------------------------------------------------------------- the admin panel
+RptrAdminLayout rptrAdminLayoutFor(const Layout& L) {
+  RptrAdminLayout a;
+  const int16_t top = L.status.bottom();
+  a.back = Rect{8, (int16_t)(top + 3), kRptrBackW, 20};
+  a.title = Rect{(int16_t)(a.back.right() + 8), top, (int16_t)(L.width - a.back.right() - 14),
+                 kRptrHeadH};
+  a.sub = Rect{a.title.x, (int16_t)(top + 16), a.title.w, 12};
+
+  // Six mono chips in one row, each as wide as its label plus the mock's 5 px pad either side.
+  int16_t x = 8;
+  const int16_t chipY = (int16_t)(top + kRptrHeadH + 2);
+  for (int i = 0; i < kRptrViewCount; ++i) {
+    const int16_t w = (int16_t)(6 * (int16_t)strlen(kRptrViewLabel[i]) + 10);
+    a.chips[i] = Rect{x, chipY, w, kRptrChipH};
+    x = (int16_t)(x + w + kRptrChipGap);
+  }
+  const int16_t bodyTop = (int16_t)(chipY + kRptrChipH + 4);
+  a.answer = Rect{0, (int16_t)(L.tabbar.y - kRptrAnswerH), L.width, kRptrAnswerH};
+  a.body = Rect{0, bodyTop, L.width, (int16_t)(a.answer.y - bodyTop)};
+  a.visibleRows = a.body.h / kRptrAdminRowH;
+  return a;
+}
+
+RptrRowRects rptrRowRects(const RptrAdminLayout& a, int keys, int index, int scroll) {
+  RptrRowRects out;
+  const int16_t y = (int16_t)(a.body.y + index * kRptrAdminRowH - scroll);
+  out.body = Rect{0, y, a.body.w, kRptrAdminRowH};
+  // The keys sit 4 px in from the right edge, 24 px apart with a 2 px gap.
+  const int16_t pad = 4;
+  if (keys >= 2) {
+    out.keyB = Rect{(int16_t)(a.body.w - pad - kRptrKeyW), (int16_t)(y + 5), kRptrKeyW,
+                    kRptrKeyH};
+    out.keyA = Rect{(int16_t)(out.keyB.x - 2 - kRptrKeyW), (int16_t)(y + 5), kRptrKeyW,
+                    kRptrKeyH};
+  } else if (keys == 1) {
+    out.keyA = Rect{(int16_t)(a.body.w - pad - kRptrKeyW), (int16_t)(y + 5), kRptrKeyW,
+                    kRptrKeyH};
+  }
+  const int16_t keysLeft = keys >= 2 ? out.keyA.x : (keys == 1 ? out.keyA.x : a.body.w - 8);
+  out.label = Rect{10, (int16_t)(y + 1), (int16_t)(keysLeft - 18), 16};
+  out.value = Rect{10, (int16_t)(y + 16), (int16_t)(keysLeft - 18), 16};
+  return out;
+}
+
+int rptrAdminMaxScroll(const RptrAdminLayout& a, int rowCount) {
+  const int total = rowCount * (int)kRptrAdminRowH;
+  return total > a.body.h ? total - (int)a.body.h : 0;
+}
+
+RptrRowHit rptrAdminRowAt(const RptrAdminLayout& a, const uint8_t* keys, int rowCount, int scroll,
+                          int x, int y) {
+  RptrRowHit out;
+  if (!a.body.contains(x, y)) return out;
+  for (int i = 0; i < rowCount; ++i) {
+    const int rowKeys = keys == nullptr ? 0 : (int)keys[i];
+    const RptrRowRects r = rptrRowRects(a, rowKeys, i, scroll);
+    const Rect visible = r.body.intersect(a.body);
+    if (visible.empty() || !visible.contains(x, y)) continue;
+    out.row = i;
+    if (rowKeys >= 2 && r.keyA.contains(x, y)) {
+      out.part = 1;
+    } else if (rowKeys >= 2 && r.keyB.contains(x, y)) {
+      out.part = 2;
+    } else if (rowKeys == 1 && r.keyA.contains(x, y)) {
+      out.part = 1;
+    } else {
+      out.part = 0;
+    }
+    return out;
+  }
+  return out;
+}
+
+int rptrAdminChipAt(const RptrAdminLayout& a, int x, int y) {
+  for (int i = 0; i < kRptrViewCount; ++i) {
+    if (a.chips[i].contains(x, y)) return i;
+  }
+  return -1;
 }
 
 }  // namespace ui

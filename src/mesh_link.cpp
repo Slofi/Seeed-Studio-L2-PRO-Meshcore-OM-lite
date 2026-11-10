@@ -36,6 +36,7 @@
 
 #include "DataStore.h"
 #include "audio.h"
+#include "rptr_link.h"   // EST-358: the repeater session's hooks (see rptr_link.h)
 #include "channels.h"
 #include "crash_report.h"
 #include "history_store.h"
@@ -673,8 +674,16 @@ class OmListener : public MyMesh::Listener {
                      uint32_t, const char* text) override {
     if (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN) {
       storeDm(from, pkt, text);
+    } else if (txt_type == TXT_TYPE_CLI_DATA) {
+      // EST-358: a repeater's CLI answer to our remote admin. Not a chat message: it never enters
+      // the DM ring or the unread count, it goes to the RPTR screen.
+      rptrOnCliReply(from.name, text);
     }
   }
+
+  // EST-358: the discovery answer (a control-data DISCOVER_RESP). MyMesh hands every control-data
+  // packet to the listener after queueing the phone's own frame.
+  void onControlDataRecv(const mesh::Packet* pkt) override { rptrOnControlData(pkt); }
 
   // Every ACK MeshCore receives passes through here (MyMesh::processAck calls it before matching
   // the phone's own table), so a DM's 4-byte hash proves delivery even with no phone attached.
@@ -705,8 +714,6 @@ class OmListener : public MyMesh::Listener {
   // unmatched response arrives here with its tag; the sender's key is what we match on.
   bool onUnhandledResponse(const ContactInfo& from, uint32_t tag_, const uint8_t* data,
                            uint8_t len) override {
-    (void)tag_;
-    (void)data;
     (void)len;
     if (s_pingState == MeshPingState::Sent &&
         memcmp(from.id.pub_key, s_pingKey, PUB_KEY_SIZE) == 0) {
@@ -716,7 +723,11 @@ class OmListener : public MyMesh::Listener {
       Serial.printf("[mc] ping %s: reply in %lu ms\n", s_pingName, (unsigned long)s_pingRttMs);
       return true;   // handled here; no need for a phone frame
     }
-    return false;
+    // EST-358: the repeater session's own answers (the login result and the status card). Only our
+    // own answers are consumed; anything else still reaches the phone as upstream sends it.
+    bool rptrHandled = false;
+    rptrOnResponse(from, tag_, data, len, &rptrHandled);
+    return rptrHandled;
   }
 
   // The trace came back: one SNR per hop, in the order the packet walked them, plus the final SNR
@@ -1204,6 +1215,10 @@ bool meshPubKeyShort(char* out, size_t cap) {
 }
 
 
+// EST-358: rptr_link.cpp needs the one MyMesh (it is file-local to this file on purpose). This is
+// the only door, and it hands back the same object every facade call already drives.
+MyMesh& rptrMesh() { return the_mesh; }
+
 bool meshLinkBegin() {
   if (s_ready) return true;
 
@@ -1404,6 +1419,7 @@ bool meshLinkBegin() {
   if (radioFaultState().onRadioReinit()) Serial.println("[radio] fault cleared");
 
   s_ready = true;
+  rptrLinkBegin();   // EST-358: the remembered repeaters and the auto-login switch (NVS)
 
   // One flood advert at boot (the old firmware did this; upstream's companion UI sends it from
   // its own advert action). The path hash size is whatever the prefs hold, so SLO stays on 2B.
@@ -1480,6 +1496,9 @@ void meshLinkLoop() {
     ++s_traceSerial;
     Serial.printf("[mc] trace %s: no data back\n", s_trace.node);
   }
+
+  // EST-358: the discovery window and the login/status deadlines.
+  rptrLinkLoop();
 }
 
 bool meshLinkReloadChannels() {

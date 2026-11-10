@@ -70,7 +70,8 @@ uint32_t accentCodePoint(char key, bool shift);
 // editors. Each FIELD says which characters it accepts, how many bytes it holds, and whether the
 // accented s/c/z long press and the emoji page belong to it. The key rows are still the same sheet
 // (letters, 123, Del, Send); a field only filters the character keys it cannot accept.
-enum class KeyboardField : uint8_t { Chat = 0, NodeName, Base64Key, WifiPassword };
+enum class KeyboardField : uint8_t { Chat = 0, NodeName, Base64Key, WifiPassword,
+                                     RptrPassword, RptrPosition };   // EST-358
 
 // MeshCore's names: node_name[32] and ChannelDetails::name[32], so 31 bytes. AdvertDataParser::
 // isValidName rejects exactly [ ] \ : , ? * and accepts the rest of printable ASCII.
@@ -80,6 +81,11 @@ constexpr int kKeyboardBase64MaxBytes = 24;
 // A WPA2/WPA3 passphrase is 8..63 printable characters; the sheet accepts printable ASCII and caps
 // the buffer at 63 (the ESP32 driver enforces the minimum, not this keyboard).
 constexpr int kKeyboardWifiPassMaxBytes = 63;
+// EST-358: a repeater's admin password is compared with strcmp and sendLogin() truncates at 15
+// characters, so the sheet holds 15 printable ASCII bytes and never shows them back.
+constexpr int kKeyboardRptrPassMaxBytes = 15;
+// "46.25000, 14.40000" with room to spare while typing.
+constexpr int kKeyboardRptrPosMaxBytes = 24;
 
 bool keyboardAllowsChar(KeyboardField field, char c);
 int keyboardMaxBytes(KeyboardField field);           // 0 for Chat (its own draft budget applies)

@@ -25,6 +25,8 @@
 #include "psram_alloc.h"
 #include "radio.h"
 #include "radio_fault.h"
+#include "rptr_link.h"    // EST-358: the repeater session (scan, login, status, CLI)
+#include "rptr_model.h"   // EST-358: the row table, the CLI line builders, the parsers
 #include "screen_change.h"
 #include "target.h"
 #include "timekeeper.h"
@@ -290,9 +292,6 @@ static bool g_nodeTraceOpen = false;       // the sheet is showing that trace
 static int g_nodeInfo = -1;                // node index whose full Info page is open
 static om::ui::NodeInfoModel g_nodeInfoModel;
 static bool g_newNodeDot = false;          // a contact was added since Nodes was last opened
-// The RPTR tab that "Log in (RPTR)" opens remembers its node; the login exchange itself is not part
-// of this ticket (the tab is still the placeholder, see PROGRESS.md).
-static char g_rptrNode[32] = "";
 
 // EST-357: every UI scratch array above is one PSRAM allocation, made once here. The crash that
 // started this ticket was an internal-RAM allocation inside Bluedroid while Wi-Fi held 37.6 KB; these
@@ -1495,92 +1494,776 @@ static const char* chatOverlayName(om::ui::ChatOverlay which) {
   }
 }
 
-// ----------------------------------------------------------------------------- RPTR (EST-351)
-// The list is the real contact table filtered to MeshCore's ADV_TYPE_REPEATER (2). The repeater
-// page shows what the mesh knows today; login and the remote admin set say "not built yet".
-static bool g_rptrDetail = false;
-static char g_rptrSelName[32] = "";
+// ----------------------------------------------------------------------------- RPTR (EST-358)
+// The tab does real work now: Scan runs MeshCore's own discovery (the companion's control-data
+// DISCOVER request), login is upstream's sendLogin with the answer's admin/guest/refused/no-answer
+// state and its round trip, the status card is upstream's REQ_TYPE_GET_STATUS reply, and every admin
+// control sends exactly the CLI line the mock's tests assert through MeshCore's CLI path. The wording
+// and the arithmetic live in rptr_model.h; the radio lives in rptr_link.h; this is the state and the
+// taps.
+static void showToast(const char* text);
+static void drawRptrTab();
+
+static om::ui::RptrStage g_rptrStage = om::ui::RptrStage::List;
+static char g_rptrNode[32] = "";        // the repeater this tab is about (also the Settings page's)
 static int g_rptrScroll = 0;
 static int g_rptrScroll0 = 0;
-static int g_rptrCount = 0;      // the last build's row count (for the drag clamp)   // finger-down base for the list drag
+static int g_rptrCount = 0;             // the last build's row count (for the drag clamp)
+static int g_rptrView = 0;              // the admin view (0..5)
+static int g_rptrAScroll = 0;
+static int g_rptrAScroll0 = 0;
+static char g_rptrPw[om::rptr::kPasswordMax + 1] = "";   // typed, never drawn as text
+static char g_rptrEdit[64] = "";        // the identity editor's buffer
+static uint8_t g_rptrEditRow = 255;     // which admin row opened the sheet
+static bool g_rptrNums = false;         // the sheet's 123 page
+static bool g_rptrShift = false;
+static om::rptr::AdminValues g_rptrValues;
+static om::rptr::RegionList g_rptrRegions;
+static om::rptr::NeighbourList g_rptrNeighbours;
+static om::rptr::Confirm g_rptrConfirm;
+static char g_rptrLastCmd[48] = "";
+static char g_rptrLastAnswer[120] = "";
+static bool g_rptrAnswerBad = false;
+static bool g_rptrAnswerPending = false;
+static char g_rptrDefaultRegion[24] = "";   // the last `region default` we sent (no get on the repeater)
+static uint32_t g_rptrReplySerial = 0;
+static uint32_t g_rptrStatusSerial = 0;
+static uint32_t g_rptrLoginWait = 0;        // millis() when a login went out
+static bool g_rptrOsk = false;
+static uint8_t g_rptrField = (uint8_t)om::ui::KeyboardField::RptrPassword;
+static char g_rptrEditTitle[32] = "";
+static om::ui::RptrView g_rptrViewStore;    // one instance (the model is ~3 KB, not on the loop stack)
 
-static void hexPrefix(const uint8_t* key, int n, char* out, size_t cap) {
-  static const char* kHex = "0123456789abcdef";
-  size_t o = 0;
-  for (int i = 0; i < n && o + 2 < cap; ++i) {
-    out[o++] = kHex[key[i] >> 4];
-    out[o++] = kHex[key[i] & 0xF];
+static void rptrClearSession() {
+  g_rptrStage = om::ui::RptrStage::List;
+  g_rptrNode[0] = 0;
+  g_rptrPw[0] = 0;
+  g_rptrRegions = om::rptr::RegionList();
+  g_rptrNeighbours = om::rptr::NeighbourList();
+  g_rptrValues.reset();
+  g_rptrLastCmd[0] = 0;
+  g_rptrLastAnswer[0] = 0;
+  g_rptrAnswerPending = false;
+  g_rptrAnswerBad = false;
+  g_rptrOsk = false;
+  g_rptrConfirm.clear();
+  g_rptrView = 0;
+  g_rptrAScroll = 0;
+  g_rptrEditRow = 255;
+}
+
+// Open one repeater: auto-login when the switch is on and its password is remembered, otherwise the
+// login page with an empty field.
+static void rptrOpen(const char* name) {
+  snprintf(g_rptrNode, sizeof(g_rptrNode), "%s", name);
+  g_rptrValues.reset();
+  g_rptrRegions = om::rptr::RegionList();
+  g_rptrNeighbours = om::rptr::NeighbourList();
+  g_rptrLastCmd[0] = 0;
+  g_rptrLastAnswer[0] = 0;
+  g_rptrAnswerPending = false;
+  g_rptrAnswerBad = false;
+  g_rptrPw[0] = 0;
+  g_rptrOsk = false;
+  g_rptrView = 0;
+  g_rptrAScroll = 0;
+  g_rptrStage = om::ui::RptrStage::Login;
+  char pw[om::rptr::kPasswordMax + 1] = "";
+  if (om::rptrAutoLogin() && om::rptrPasswordFor(g_rptrNode, pw, sizeof(pw))) {
+    // Never printed: the remembered password goes straight to upstream's sendLogin.
+    if (om::rptrLoginStart(g_rptrNode, pw)) {
+      g_rptrLoginWait = millis();
+      Serial.printf("[rptr] auto-login %s\n", g_rptrNode);
+    }
+    memset(pw, 0, sizeof(pw));
   }
-  out[o] = 0;
+}
+
+static void rptrLoginNow() {
+  // The mock's own refusal: an empty field never goes on the air.
+  if (g_rptrPw[0] == 0) {
+    showToast("password required");
+    return;
+  }
+  if (!om::rptrLoginStart(g_rptrNode, g_rptrPw)) {
+    showToast("Login not sent: no such contact");
+    return;
+  }
+  g_rptrLoginWait = millis();
+  g_rptrStage = om::ui::RptrStage::Login;
+  g_rptrOsk = false;
+  drawRptrTab();
+}
+
+static void rptrSendLine(const char* line, uint8_t tag) {
+  if (!om::rptrCliSend(line, tag)) {
+    showToast("Login first");
+    return;
+  }
+  snprintf(g_rptrLastCmd, sizeof(g_rptrLastCmd), "%s", line);
+  g_rptrLastAnswer[0] = 0;
+  g_rptrAnswerPending = true;
+  g_rptrAnswerBad = false;
+}
+
+// Where a CLI answer goes: the neighbour list and the region list are the two the screen parses.
+static void rptrTakeReply(const om::RptrReply& rep) {
+  snprintf(g_rptrLastCmd, sizeof(g_rptrLastCmd), "%s", rep.cmd);
+  // A CLI answer can be several lines (the neighbour list); the strip is one line, so a newline
+  // becomes a separator instead of a glyph the mono face cannot draw.
+  size_t w = 0;
+  for (const char* p = rep.text; *p && w + 1 < sizeof(g_rptrLastAnswer); ++p) {
+    g_rptrLastAnswer[w++] = (*p == '\n') ? ' ' : *p;
+  }
+  g_rptrLastAnswer[w] = 0;
+  g_rptrAnswerPending = false;
+  g_rptrAnswerBad = (rep.kind == (uint8_t)om::RptrReplyKind::Error);
+  if (rep.kind != (uint8_t)om::RptrReplyKind::Cli) return;
+  if (strcmp(rep.cmd, om::rptr::kCliNeighboursRead) == 0) {
+    om::rptr::neighboursParse(rep.text, &g_rptrNeighbours);
+    // A neighbour's name comes from our own contact table: the reply carries only the key prefix.
+    static om::MeshContact list[32];
+    const int n = om::meshContactList(list, 32);
+    for (int i = 0; i < g_rptrNeighbours.count; ++i) {
+      om::rptr::Neighbour& nb = g_rptrNeighbours.rows[i];
+      nb.named = false;
+      for (int k = 0; k < n; ++k) {
+        if (memcmp(list[k].pub_key, nb.prefix, 4) == 0) {
+          snprintf(nb.name, sizeof(nb.name), "%s", list[k].name);
+          nb.named = true;
+          break;
+        }
+      }
+      if (!nb.named) {
+        snprintf(nb.name, sizeof(nb.name), "%02x%02x%02x%02x", nb.prefix[0], nb.prefix[1],
+                 nb.prefix[2], nb.prefix[3]);
+      }
+    }
+    g_rptrNeighbours.valid = true;
+    showToast("Neighbours read");
+  } else if (strcmp(rep.cmd, om::rptr::kCliRegionList) == 0) {
+    om::rptr::regionsParse(rep.text, &g_rptrRegions);
+    g_rptrRegions.valid = true;
+    showToast("Regions read");
+  }
+}
+
+// The two asynchronous things the glass must follow: a login answer and the CLI replies.
+static void rptrPump() {
+  const uint32_t serial = om::rptrReplySerial();
+  if (serial != g_rptrReplySerial) {
+    g_rptrReplySerial = serial;
+    om::RptrReply rep;
+    while (om::rptrReplyTake(&rep)) rptrTakeReply(rep);
+  }
+  const om::rptr::LoginMachine& login = om::rptrLogin();
+  if (g_rptrStage == om::ui::RptrStage::Login && login.loggedIn() && g_rptrLoginWait != 0) {
+    // In: the mock's admin views. The status card is read on arrival, one request.
+    g_rptrStage = om::ui::RptrStage::Admin;
+    g_rptrView = 0;
+    g_rptrAScroll = 0;
+    g_rptrOsk = false;
+    g_rptrPw[0] = 0;
+    g_rptrLoginWait = 0;
+    snprintf(g_rptrLastCmd, sizeof(g_rptrLastCmd), "login");
+    om::rptrStatusRequest();
+    redrawCurrentScreen();
+  } else if (g_rptrStage == om::ui::RptrStage::Login &&
+             (login.state == om::rptr::LoginState::Refused ||
+              login.state == om::rptr::LoginState::NoAnswer) &&
+             g_rptrLoginWait != 0) {
+    g_rptrLoginWait = 0;
+    redrawCurrentScreen();
+  }
+  // The status card changed: one redraw, only while the panel is up.
+  const uint32_t st = om::rptrStatusSerial();
+  if (st != g_rptrStatusSerial) {
+    g_rptrStatusSerial = st;
+    g_rptrAnswerPending = false;
+    if (g_rptrStage == om::ui::RptrStage::Admin) redrawCurrentScreen();
+  }
+  if (g_tab == 3 && !g_settings && g_rptrStage == om::ui::RptrStage::List) {
+    static uint32_t lastScanSerial = 0;
+    const uint32_t sc = om::rptrScanSerial();
+    if (sc != lastScanSerial) {
+      lastScanSerial = sc;
+      redrawCurrentScreen();
+    }
+  }
 }
 
 static void buildRptrView(om::ui::RptrView& v) {
   v = om::ui::RptrView();
   buildStatus(v.status);
-  v.detail = g_rptrDetail;
-  v.selected = -1;
+  v.stage = g_rptrStage;
   v.scroll = g_rptrScroll;
-#if defined(OM_ENABLE_MESH)
-  static om::MeshContact list[32];
-  const int n = om::meshContactList(list, 32);
+  v.view = g_rptrView;
+  v.aScroll = g_rptrAScroll;
+  v.osk = g_rptrOsk;
+  v.nums = g_rptrNums;
+  v.shift = g_rptrShift;
+  v.field = g_rptrField;
+  v.okLabel = (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) ? "Login" : "Set";
+  if (g_rptrEditRow != 255) snprintf(v.editTitle, sizeof(v.editTitle), "%s", g_rptrEditTitle);
+  // The sheet's field shows the buffer it is editing: the typed password, or the identity text.
+  {
+    const bool isPw = g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword;
+    if (isPw) {
+      snprintf(v.pwText, sizeof(v.pwText), "%s", g_rptrPw);
+      v.pwLen = (int)strlen(g_rptrPw);
+    } else {
+      snprintf(v.pwText, sizeof(v.pwText), "%s", g_rptrEdit);
+      v.pwLen = (int)strlen(g_rptrEdit);
+    }
+  }
+
   const uint32_t nowWall = om::timeKeeper().now();
   const uint32_t nowUp = millis() / 1000;
   const bool nowReal = om::timeKeeper().realSinceBoot();
-  for (int i = 0; i < n && v.count < om::ui::kRptrMaxItems; ++i) {
-    if (list[i].type != 2) continue;
-    om::ui::RptrItem& it = v.items[v.count++];
-    snprintf(it.name, sizeof(it.name), "%s", list[i].name);
-    char path[28] = "";
-    om::meshContactPathText(list[i].name, path, sizeof(path));
-    char snr[16] = "";
-    if (list[i].adv_snr_known) {
-      snprintf(snr, sizeof(snr), "SNR %d.%d dB", list[i].adv_snr4 / 4,
-               (list[i].adv_snr4 % 4) * 25);
-    }
-    // EST-352: one labelled last-heard TIME (the same formatter as everywhere else). "--" means the
-    // clock was not real at that moment, and rptrRowMeta drops it rather than printing a bare dash.
-    char heard[24] = "";
-    om::ui::stampText(heard, sizeof(heard),
-                      om::ui::Stamp{list[i].lastmod, list[i].lastmodUp, list[i].lastmodReal},
-                      nowWall, nowUp, nowReal, om::ui::StampForm::DayTime);
-    om::ui::RptrRowFacts facts;
-    facts.path = path;
-    facts.heard = heard;
-    facts.snr = snr;
-    om::ui::rptrRowMeta(it.meta, sizeof(it.meta), facts);
-    if (g_rptrSelName[0] && strcmp(g_rptrSelName, list[i].name) == 0) {
-      v.selected = v.count - 1;
-      snprintf(v.name, sizeof(v.name), "%s", list[i].name);
-      // The page's one mono line uses the same labelled facts (no bare "--" here either).
-      char meta[64] = "";
-      om::ui::rptrRowMeta(meta, sizeof(meta), facts);
-      snprintf(v.sub, sizeof(v.sub), "repeater%s%s", meta[0] ? " \xC2\xB7 " : "", meta);
-      appendInfoLine(v, "contact", list[i].name);
-      appendInfoLine(v, "path", path);
-      appendInfoLine(v, "last heard", heard);
+  auto stamp = [&](char* out, size_t cap, uint32_t wall, uint32_t up, bool real) {
+    om::ui::stampText(out, cap, om::ui::Stamp{wall, up, real}, nowWall, nowUp, nowReal,
+                      om::ui::StampForm::DayTime);
+  };
+
+  if (v.stage == om::ui::RptrStage::List) {
+    const om::rptr::FoundList& found = om::rptrScan();
+    v.scanning = found.listening;
+    found.stateText(v.state, sizeof(v.state));
+    for (int i = 0; i < found.count && v.count < om::ui::kRptrMaxItems; ++i) {
+      const om::rptr::Found& f = found.rows[i];
+      om::ui::RptrItem& it = v.items[v.count++];
+      if (f.name[0]) {
+        snprintf(it.name, sizeof(it.name), "%s", f.name);
+      } else {
+        snprintf(it.name, sizeof(it.name), "%02x%02x%02x", f.prefix[0], f.prefix[1], f.prefix[2]);
+      }
+      it.inContacts = f.inContacts;
+      char snr[32] = "";
+      om::rptr::snrBothText(snr, sizeof(snr), f.hasSnrIn, f.snrIn4, f.hasSnrOut, f.snrOut4);
       char hops[16];
-      if (list[i].path_hops < 0) snprintf(hops, sizeof(hops), "unknown");
-      else snprintf(hops, sizeof(hops), "%d", list[i].path_hops);
-      appendInfoLine(v, "hops", hops);
-      char key[20] = "";
-      if (list[i].has_key) hexPrefix(list[i].pub_key, 6, key, sizeof(key));
-      appendInfoLine(v, "public key", key[0] ? key : "unknown");
+      if (f.hops == 0) snprintf(hops, sizeof(hops), "direct");
+      else snprintf(hops, sizeof(hops), "%u hops", (unsigned)f.hops);
+      char heard[24] = "";
+      stamp(heard, sizeof(heard), f.heardWall, f.heardMs / 1000, f.heardReal);
+      om::ui::RptrRowFacts facts;
+      facts.path = hops;
+      facts.heard = heard;
+      facts.snr = snr;
+      om::ui::rptrRowMeta(it.meta, sizeof(it.meta), facts);
+    }
+    g_rptrCount = v.count;
+    return;
+  }
+
+  const om::rptr::LoginMachine& login = om::rptrLogin();
+  const om::rptr::Status& status = om::rptrStatus();
+  snprintf(v.name, sizeof(v.name), "%s", g_rptrNode);
+  if (v.stage == om::ui::RptrStage::Login) {
+    // The facts card: what we know before the password, all of it real.
+    char path[28] = "";
+    om::meshContactPathText(g_rptrNode, path, sizeof(path));
+    om::MeshContact c;
+    if (om::meshContactByName(g_rptrNode, &c)) {
+      appendInfoLine(v, "contact", c.name);
+      appendInfoLine(v, "kind", c.type == 2 ? "repeater" : "other");
+      appendInfoLine(v, "path", path);
+      char heard[24] = "";
+      stamp(heard, sizeof(heard), c.lastmod, c.lastmodUp, c.lastmodReal);
+      appendInfoLine(v, "heard", heard);
+    } else {
+      appendInfoLine(v, "contact", "no longer in the table");
+    }
+    snprintf(v.sub, sizeof(v.sub), "repeater%s%s", path[0] ? " \xC2\xB7 " : "", path);
+    if (login.state != om::rptr::LoginState::Idle) {
+      om::rptrLoginResultText(v.result, sizeof(v.result));
+    }
+    v.loggingIn = login.busy();
+    v.resultOk = login.loggedIn();
+    // Forget is offered when this repeater is remembered (its password is never read here).
+    v.canForget = false;
+    for (int i = 0; i < om::rptrRememberedCount(); ++i) {
+      if (strcmp(om::rptrRememberedName(i), g_rptrNode) == 0) v.canForget = true;
+    }
+    snprintf(v.note, sizeof(v.note),
+             "The password is checked by the repeater. A wrong one gets no answer.");
+    return;
+  }
+
+  // Admin.
+  snprintf(v.sub, sizeof(v.sub), "MC remote admin \xC2\xB7 CLI \xC2\xB7 %s",
+           om::rptr::loginStateText(login.state));
+  const int n = om::rptr::adminRows(g_rptrView, g_rptrValues, status, login.answer.fwLevel,
+                                    g_rptrNode, g_rptrRegions, g_rptrNeighbours, v.rows,
+                                    om::ui::kRptrAdminRows);
+  v.rowCount = n;
+  // The neighbour rows' heard time comes from the reply's seconds and OUR clock (a clock time, not
+  // an age, unless the clock was not real when the reply arrived).
+  if (g_rptrView == 4 && g_rptrNeighbours.valid) {
+    for (int i = 0; i < v.rowCount; ++i) {
+      if (v.rows[i].id != om::rptr::RowId::NeighRow) continue;
+      const om::rptr::Neighbour& nb = g_rptrNeighbours.rows[v.rows[i].index];
+      char snr[12];
+      om::rptr::snrText(snr, sizeof(snr), nb.snr4);
+      char heard[24] = "";
+      const uint32_t ago = (uint32_t)(nb.secsAgo < 0 ? 0 : nb.secsAgo);
+      stamp(heard, sizeof(heard), nowWall > ago ? nowWall - ago : 0,
+            nowUp > ago ? nowUp - ago : 0, nowReal);
+      snprintf(v.rows[i].value, sizeof(v.rows[i].value), "SNR %s \xC2\xB7 %s", snr, heard);
     }
   }
-#endif
-  g_rptrCount = v.count;
-  if (g_rptrSelName[0] && v.selected < 0) {
-    // The contact was removed or is no longer a repeater: leave the page rather than show a ghost.
-    g_rptrSelName[0] = 0;
-    g_rptrDetail = false;
-    v.detail = false;
-  }
+  snprintf(v.lastCmd, sizeof(v.lastCmd), "%s", g_rptrLastCmd);
+  snprintf(v.lastAnswer, sizeof(v.lastAnswer), "%s", g_rptrLastAnswer);
+  v.answerPending = g_rptrAnswerPending;
+  v.answerBad = g_rptrAnswerBad;
 }
 
 static void drawRptrTab() {
-  om::ui::RptrView v;
-  buildRptrView(v);
-  om::ui::rptrScreenDraw(v);
+  buildRptrView(g_rptrViewStore);
+  om::ui::rptrScreenDraw(g_rptrViewStore);
+}
+
+// The identity editor's text goes through the same byte filter as the Settings editors.
+static bool rptrEditAppend(char ch) {
+  const om::ui::KeyboardField field = (om::ui::KeyboardField)g_rptrField;
+  if (!om::ui::keyboardAllowsChar(field, ch)) return false;
+  const int used = (int)strlen(g_rptrEdit);
+  if (!om::ui::keyboardAcceptsBytes(field, used, 1)) return false;
+  if ((size_t)used + 1 >= sizeof(g_rptrEdit)) return false;
+  g_rptrEdit[used] = ch;
+  g_rptrEdit[used + 1] = 0;
+  return true;
+}
+
+// "46.25000, 14.40000" -> micro-degrees. False for anything a coordinate cannot be.
+static bool rptrParsePosition(const char* text, int32_t* latE6, int32_t* lonE6) {
+  if (text == nullptr) return false;
+  const char* comma = strchr(text, ',');
+  if (comma == nullptr) return false;
+  char a[16] = "";
+  char b[16] = "";
+  const char* q = text;
+  while (*q == ' ') ++q;
+  int na = (int)(comma - q);
+  if (na <= 0 || na >= (int)sizeof(a)) return false;
+  memcpy(a, q, (size_t)na);
+  a[na] = 0;
+  q = comma + 1;
+  while (*q == ' ') ++q;
+  snprintf(b, sizeof(b), "%s", q);
+  char* end = nullptr;
+  const double la = strtod(a, &end);
+  if (end == a || *end != 0) return false;
+  const double lo = strtod(b, &end);
+  if (end == b || *end != 0) return false;
+  if (la < -90.0 || la > 90.0 || lo < -180.0 || lo > 180.0) return false;
+  *latE6 = (int32_t)lround(la * 1000000.0);
+  *lonE6 = (int32_t)lround(lo * 1000000.0);
+  return true;
+}
+
+// The sheet's Send key for the identity editors: build the CLI lines and send them.
+static void rptrCommitEdit() {
+  if (g_rptrEditRow == 255) return;
+  char line[64] = "";
+  switch ((om::rptr::RowId)g_rptrEditRow) {
+    case om::rptr::RowId::EditName:
+      if (g_rptrEdit[0] == 0) {
+        showToast("name cannot be empty");
+        return;
+      }
+      if (strlen(g_rptrEdit) > (size_t)om::rptr::kNameMax) {
+        showToast("name is over 31 bytes");
+        return;
+      }
+      om::rptr::cliName(line, sizeof(line), g_rptrEdit);
+      break;
+    case om::rptr::RowId::EditOwner:
+      if (g_rptrEdit[0] == 0) {
+        showToast("owner cannot be empty");
+        return;
+      }
+      om::rptr::cliOwner(line, sizeof(line), g_rptrEdit);
+      break;
+    case om::rptr::RowId::EditPos: {
+      int32_t lat = 0, lon = 0;
+      if (!rptrParsePosition(g_rptrEdit, &lat, &lon)) {
+        showToast("enter lat, lon");
+        return;
+      }
+      char lonLine[40] = "";
+      om::rptr::cliLat(line, sizeof(line), lat);
+      om::rptr::cliLon(lonLine, sizeof(lonLine), lon);
+      rptrSendLine(line, 0);
+      rptrSendLine(lonLine, 0);
+      g_rptrEditRow = 255;
+      g_rptrOsk = false;
+      showToast("set lat and lon sent");
+      drawRptrTab();
+      return;
+    }
+    default:
+      g_rptrEditRow = 255;
+      g_rptrOsk = false;
+      return;
+  }
+  rptrSendLine(line, 0);
+  g_rptrEditRow = 255;
+  g_rptrOsk = false;
+  showToast(line);
+  drawRptrTab();
+}
+
+static void rptrOpenEdit(om::rptr::RowId id) {
+  g_rptrEditRow = (uint8_t)id;
+  g_rptrField = (uint8_t)(id == om::rptr::RowId::EditPos ? om::ui::KeyboardField::RptrPosition
+                                                         : om::ui::KeyboardField::NodeName);
+  g_rptrNums = (id == om::rptr::RowId::EditPos);
+  g_rptrShift = false;
+  g_rptrOsk = true;
+  g_rptrEdit[0] = 0;
+  if (id == om::rptr::RowId::EditName) {
+    snprintf(g_rptrEdit, sizeof(g_rptrEdit), "%s", g_rptrNode);
+    snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "name");
+  } else if (id == om::rptr::RowId::EditOwner) {
+    snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "owner");
+  } else {
+    snprintf(g_rptrEditTitle, sizeof(g_rptrEditTitle), "lat, lon");
+  }
+}
+
+// One admin row, pressed. `part` 0 = the row, 1 = key A, 2 = key B.
+static void rptrAdminPressed(const om::rptr::AdminRow& row, int part) {
+  char line[64] = "";
+  switch (row.id) {
+    case om::rptr::RowId::RadioFreq:
+      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Freq, part == 2 ? 1 : -1);
+      break;
+    case om::rptr::RowId::RadioBw:
+      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Bw, part == 2 ? 1 : -1);
+      break;
+    case om::rptr::RowId::RadioSf:
+      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Sf, part == 2 ? 1 : -1);
+      break;
+    case om::rptr::RowId::RadioCr:
+      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Cr, part == 2 ? 1 : -1);
+      break;
+    case om::rptr::RowId::RadioTx:
+      om::rptr::radioStep(&g_rptrValues.radio, om::rptr::RadioKey::Tx, part == 2 ? 1 : -1);
+      break;
+    case om::rptr::RowId::RadioApply: {
+      // The mock's two lines, exactly; the repeater's own reply says "reboot to apply".
+      char tx[24] = "";
+      om::rptr::cliRadio(line, sizeof(line), g_rptrValues.radio);
+      om::rptr::cliTx(tx, sizeof(tx), g_rptrValues.radio);
+      rptrSendLine(line, 0);
+      rptrSendLine(tx, 0);
+      showToast("radio sent, reboot the repeater to apply");
+      break;
+    }
+    case om::rptr::RowId::StatusRefresh:
+      // The status card's refresh: upstream's REQ_TYPE_GET_STATUS again.
+      if (!om::rptrStatusRequest()) showToast("Status not requested");
+      break;
+    case om::rptr::RowId::RegionRead:
+      rptrSendLine(om::rptr::kCliRegionList, 0);
+      break;
+    case om::rptr::RowId::RegionRow: {
+      if (row.index >= (uint8_t)g_rptrRegions.count) break;
+      const om::rptr::Region& rg = g_rptrRegions.rows[row.index];
+      if (part == 1) {
+        om::rptr::cliRegionHome(line, sizeof(line), rg.name);
+        rptrSendLine(line, 0);
+      } else if (part == 2) {
+        om::rptr::cliRegionDefault(line, sizeof(line), rg.name);
+        rptrSendLine(line, 0);
+        snprintf(g_rptrDefaultRegion, sizeof(g_rptrDefaultRegion), "%s", rg.name);
+      } else {
+        om::rptr::cliRegionFlood(line, sizeof(line), rg.name, !rg.allow);
+        rptrSendLine(line, 0);
+      }
+      break;
+    }
+    case om::rptr::RowId::RegionSave:
+      rptrSendLine(om::rptr::kCliRegionSave, 0);
+      break;
+    case om::rptr::RowId::SiPreset:
+      for (int i = 0; i < om::rptr::kSiPresetCount; ++i) rptrSendLine(om::rptr::kSiPreset[i], 0);
+      showToast("SI preset sent, 7 commands");
+      break;
+    case om::rptr::RowId::PathHash: {
+      int v = (int)g_rptrValues.pathHash + (part == 2 ? 1 : -1);
+      if (v < 0) v = 0;
+      if (v > 2) v = 2;
+      g_rptrValues.pathHash = (uint8_t)v;
+      om::rptr::cliPathHash(line, sizeof(line), g_rptrValues.pathHash);
+      rptrSendLine(line, 0);
+      break;
+    }
+    case om::rptr::RowId::LoopDetect: {
+      int v = (int)g_rptrValues.loop + (part == 2 ? 1 : -1);
+      if (v < 0) v = 0;
+      if (v > 3) v = 3;
+      g_rptrValues.loop = (om::rptr::LoopDetect)v;
+      om::rptr::cliLoopDetect(line, sizeof(line), g_rptrValues.loop);
+      rptrSendLine(line, 0);
+      break;
+    }
+    case om::rptr::RowId::AdvertLocal:
+      om::rptr::advertLocalStep(&g_rptrValues, part == 2 ? 1 : -1);
+      om::rptr::cliAdvertLocal(line, sizeof(line), g_rptrValues.advertLocal);
+      rptrSendLine(line, 0);
+      break;
+    case om::rptr::RowId::AdvertFlood:
+      om::rptr::advertFloodStep(&g_rptrValues, part == 2 ? 1 : -1);
+      om::rptr::cliAdvertFlood(line, sizeof(line), g_rptrValues.advertFlood);
+      rptrSendLine(line, 0);
+      break;
+    case om::rptr::RowId::FloodMax:
+      om::rptr::floodMaxStep(&g_rptrValues, part == 2 ? 1 : -1);
+      om::rptr::cliFloodMax(line, sizeof(line), g_rptrValues.floodMax);
+      rptrSendLine(line, 0);
+      break;
+    case om::rptr::RowId::Repeat:
+      g_rptrValues.repeat = !g_rptrValues.repeat;
+      om::rptr::cliRepeat(line, sizeof(line), g_rptrValues.repeat);
+      rptrSendLine(line, 0);
+      break;
+    case om::rptr::RowId::PowerSave:
+      g_rptrValues.powerSave = !g_rptrValues.powerSave;
+      om::rptr::cliPowerSaving(line, sizeof(line), g_rptrValues.powerSave);
+      rptrSendLine(line, 0);
+      break;
+    case om::rptr::RowId::SharePos:
+      g_rptrValues.sharePosition = !g_rptrValues.sharePosition;
+      om::rptr::cliGpsAdvert(line, sizeof(line), g_rptrValues.sharePosition);
+      rptrSendLine(line, 0);
+      break;
+    case om::rptr::RowId::EditName:
+    case om::rptr::RowId::EditOwner:
+    case om::rptr::RowId::EditPos:
+      rptrOpenEdit(row.id);
+      break;
+    case om::rptr::RowId::UseGpsPos: {
+      if (!g_gps.valid) {
+        showToast("no GPS fix");
+        break;
+      }
+      char lon[40] = "";
+      om::rptr::cliLat(line, sizeof(line), (int32_t)lround(g_gps.lat * 1000000.0));
+      om::rptr::cliLon(lon, sizeof(lon), (int32_t)lround(g_gps.lon * 1000000.0));
+      rptrSendLine(line, 0);
+      rptrSendLine(lon, 0);
+      showToast("position sent");
+      break;
+    }
+    case om::rptr::RowId::NeighDiscover:
+      rptrSendLine(om::rptr::kCliNeighboursDiscover, 0);
+      showToast("discover.neighbors sent, replies take a few seconds");
+      break;
+    case om::rptr::RowId::NeighRead:
+      rptrSendLine(om::rptr::kCliNeighboursRead, 0);
+      break;
+    case om::rptr::RowId::AdvertLocalOnce:
+      rptrSendLine(om::rptr::kCliAdvertLocal, 0);
+      break;
+    case om::rptr::RowId::AdvertFloodOnce:
+      rptrSendLine(om::rptr::kCliAdvertFlood, 0);
+      break;
+    case om::rptr::RowId::ClockSync:
+      rptrSendLine(om::rptr::kCliClockSync, 0);
+      break;
+    case om::rptr::RowId::Silent:
+      // Two steps: four lines do not go out on one stray tap.
+      if (!g_rptrConfirm.take("silent", millis())) {
+        g_rptrConfirm.arm("silent", millis());
+        showToast("Silent mode: tap again to send");
+        break;
+      }
+      for (int i = 0; i < om::rptr::kSilentCount; ++i) rptrSendLine(om::rptr::kSilent[i], 0);
+      g_rptrValues.repeat = false;
+      g_rptrValues.advertLocal = om::rptr::kSilentAdvertLocal;
+      g_rptrValues.advertFlood = om::rptr::kSilentAdvertFlood;
+      g_rptrValues.sharePosition = false;
+      showToast("silent: repeat, adverts and position off");
+      break;
+    case om::rptr::RowId::Resume:
+      for (int i = 0; i < om::rptr::kSilentCount; ++i) rptrSendLine(om::rptr::kResume[i], 0);
+      g_rptrValues.repeat = true;
+      g_rptrValues.advertLocal = om::rptr::kResumeAdvertLocal;
+      g_rptrValues.advertFlood = om::rptr::kResumeAdvertFlood;
+      g_rptrValues.sharePosition = true;
+      showToast("resume: repeat, adverts and position on");
+      break;
+    case om::rptr::RowId::Reboot:
+      if (!g_rptrConfirm.take("reboot", millis())) {
+        g_rptrConfirm.arm("reboot", millis());
+        showToast("Reboot: tap again to send");
+        break;
+      }
+      rptrSendLine(om::rptr::kCliReboot, 0);
+      showToast("reboot sent");
+      break;
+    default:
+      return;
+  }
+  drawRptrTab();
+}
+
+// The sheet's keys, one press, one action (the Settings editor's pattern).
+static bool rptrKeyPressed(const om::ui::RptrKeyHit& key) {
+  switch (key.kind) {
+    case om::ui::KeyKind::Shift:
+      g_rptrShift = !g_rptrShift;
+      break;
+    case om::ui::KeyKind::Mode:
+      g_rptrNums = !g_rptrNums;
+      g_rptrShift = false;
+      break;
+    case om::ui::KeyKind::Del:
+      if (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) {
+        const size_t n = strlen(g_rptrPw);
+        if (n > 0) g_rptrPw[n - 1] = 0;
+      } else {
+        om::ui::composeBackspace(g_rptrEdit);
+      }
+      break;
+    case om::ui::KeyKind::Send:
+      if (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) {
+        rptrLoginNow();
+        return true;
+      }
+      rptrCommitEdit();
+      return true;
+    case om::ui::KeyKind::Space:
+    case om::ui::KeyKind::Char: {
+      const char ch = (key.kind == om::ui::KeyKind::Space) ? ' ' : key.ch;
+      if (g_rptrField == (uint8_t)om::ui::KeyboardField::RptrPassword) {
+        char tmp[om::rptr::kPasswordMax + 2];
+        snprintf(tmp, sizeof(tmp), "%s%c", g_rptrPw, ch);
+        om::rptr::passwordFilter(tmp, g_rptrPw, sizeof(g_rptrPw));
+      } else {
+        rptrEditAppend(ch);
+      }
+      break;
+    }
+    case om::ui::KeyKind::Reveal:
+    case om::ui::KeyKind::Emoji:
+    default:
+      break;
+  }
+  drawRptrTab();
+  return true;
+}
+
+// One tap on the RPTR tab. True when it was consumed.
+static bool handleRptrTap(int x, int y) {
+  const om::ui::Layout& L = om::ui::l2();
+  if (g_rptrOsk) {
+    // The sheet owns the screen while it is up; a tap above it closes it (never acts behind it).
+    buildRptrView(g_rptrViewStore);
+    const om::ui::RptrKeyHit key = om::ui::rptrEditorKeyAt(g_rptrViewStore, x, y);
+    if (key.pressed) return rptrKeyPressed(key);
+    const om::ui::ChatLayout g = om::ui::chatLayoutFor(L, true, false, g_rptrNums, false,
+                                                       om::ui::rptrEditorField(g_rptrViewStore));
+    if (y < g.sheet.y) {
+      g_rptrOsk = false;
+      g_rptrEditRow = 255;
+      drawRptrTab();
+    }
+    return true;
+  }
+  if (g_rptrStage == om::ui::RptrStage::List) {
+    const om::ui::RptrLayout r = om::ui::rptrLayoutFor(L, false);
+    const om::ui::RptrHitResult hit = om::ui::rptrHitAt(r, false, g_rptrCount, g_rptrScroll, x, y);
+    switch (hit.kind) {
+      case om::ui::RptrHit::Scan:
+        if (!om::rptrScanStart()) {
+          showToast("Scan not sent: mesh is not up");
+          return true;
+        }
+        showToast("Scan sent, listening");
+        drawRptrTab();
+        return true;
+      case om::ui::RptrHit::Row:
+        if (hit.row < 0 || hit.row >= g_rptrCount) return true;
+        rptrOpen(g_rptrViewStore.items[hit.row].name);
+        Serial.printf("[rptr] open %s\n", g_rptrNode);
+        drawRptrTab();
+        return true;
+      default:
+        return false;
+    }
+  }
+  if (g_rptrStage == om::ui::RptrStage::Login) {
+    const om::ui::RptrLayout r = om::ui::rptrLayoutFor(L, true);
+    const om::ui::RptrHitResult hit = om::ui::rptrHitAt(r, true, 0, 0, x, y);
+    switch (hit.kind) {
+      case om::ui::RptrHit::Back:
+        om::rptrLogout();
+        rptrClearSession();
+        drawRptrTab();
+        return true;
+      case om::ui::RptrHit::LoginField:
+        g_rptrField = (uint8_t)om::ui::KeyboardField::RptrPassword;
+        g_rptrNums = false;
+        g_rptrShift = false;
+        g_rptrOsk = true;
+        g_rptrEditRow = 255;
+        g_rptrEditTitle[0] = 0;
+        drawRptrTab();
+        return true;
+      case om::ui::RptrHit::LoginButton:
+        rptrLoginNow();
+        return true;
+      case om::ui::RptrHit::Forget:
+        om::rptrForget(g_rptrNode);
+        showToast("Forget: the password is gone");
+        drawRptrTab();
+        return true;
+      default:
+        return false;
+    }
+  }
+  // Admin.
+  const om::ui::RptrAdminLayout a = om::ui::rptrAdminLayoutFor(L);
+  if (a.back.contains(x, y)) {
+    // Back = log out, exactly like the mock's "‹ list": the session ends and the scanned list stays.
+    om::rptrLogout();
+    g_rptrStage = om::ui::RptrStage::List;
+    g_rptrNode[0] = 0;
+    g_rptrPw[0] = 0;
+    g_rptrView = 0;
+    g_rptrAScroll = 0;
+    g_rptrValues.reset();
+    g_rptrRegions = om::rptr::RegionList();
+    g_rptrNeighbours = om::rptr::NeighbourList();
+    g_rptrLastCmd[0] = 0;
+    g_rptrLastAnswer[0] = 0;
+    g_rptrAnswerPending = false;
+    drawRptrTab();
+    return true;
+  }
+  const int chip = om::ui::rptrAdminChipAt(a, x, y);
+  if (chip >= 0) {
+    g_rptrView = chip;
+    g_rptrAScroll = 0;
+    drawRptrTab();
+    return true;
+  }
+  // The row hit test needs each row's key count; build the table once.
+  buildRptrView(g_rptrViewStore);
+  uint8_t keys[om::ui::kRptrAdminRows] = {};
+  for (int i = 0; i < g_rptrViewStore.rowCount && i < om::ui::kRptrAdminRows; ++i) {
+    keys[i] = g_rptrViewStore.rows[i].keys;
+  }
+  const om::ui::RptrRowHit rh = om::ui::rptrAdminRowAt(a, keys, g_rptrViewStore.rowCount,
+                                                       g_rptrAScroll, x, y);
+  if (rh.row < 0) return false;
+  const om::rptr::AdminRow& row = g_rptrViewStore.rows[rh.row];
+  if (row.kind == om::rptr::RowKind::Fact) return true;   // a value, nothing to press
+  if (row.kind == om::rptr::RowKind::Stepper && rh.part == 0) return true;
+  rptrAdminPressed(row, rh.part);
+  return true;
 }
 
 // --------------------------------------------------------------------------------- settings shell
@@ -1593,7 +2276,7 @@ enum SetAct : uint16_t {
   A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_BtToggle, A_BtNewPin, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
   A_Apply, A_Cancel,
-  A_MapRecentre, A_MapClear, A_RptrForget,
+  A_MapRecentre, A_MapClear, A_RptrForget, A_RptrAuto,
   A_ChatPick, A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
   A_ChatMsgSound, A_ChatDmSound, A_ChatMenSound,
   A_SoundMaster, A_SoundVolume, A_SoundMsg, A_SoundDm, A_SoundMen, A_SoundNew,
@@ -1883,11 +2566,23 @@ static void buildSettingsRows() {
 
     case SetPage::RptrRoot: {
       setSection("REPEATER");
-      setAdd(om::ui::SetRowKind::Value, A_None, "Logged-in repeater",
-             g_rptrNode[0] ? g_rptrNode : "none");
-      setAdd(om::ui::SetRowKind::Note, A_None, "Repeater login is not built yet.");
-      setAdd(om::ui::SetRowKind::Note, A_None, "Auto-login is not built yet.");
-      if (g_rptrNode[0]) setAdd(om::ui::SetRowKind::Button, A_RptrForget, "Forget repeater");
+      setAdd(om::ui::SetRowKind::Value, A_None, "Open repeater", g_rptrNode[0] ? g_rptrNode : "none");
+      // EST-358: the switch the ticket asks for, on the Settings RPTR tab.
+      setAdd(om::ui::SetRowKind::Toggle, A_RptrAuto, "Auto-login", "ON", om::rptrAutoLogin());
+      const int remembered = om::rptrRememberedCount();
+      if (remembered > 0) {
+        for (int i = 0; i < remembered && i < 4; ++i) {
+          setAdd(om::ui::SetRowKind::Value, A_None, "Remembered", om::rptrRememberedName(i));
+        }
+        setAdd(om::ui::SetRowKind::Note, A_None,
+               "The password is stored for each repeater and never shown.");
+      } else {
+        setAdd(om::ui::SetRowKind::Note, A_None,
+               "Log in once and the password is remembered for that repeater.");
+      }
+      if (g_rptrNode[0] || remembered > 0) {
+        setAdd(om::ui::SetRowKind::Button, A_RptrForget, "Forget repeater");
+      }
       break;
     }
 
@@ -2458,9 +3153,22 @@ static void handleSettingsRow(uint16_t id) {
       om::mapClearMarker();
       showToast("Marker cleared");
       break;
-    case A_RptrForget:
-      g_rptrNode[0] = 0;
-      showToast("Repeater forgotten");
+    case A_RptrForget: {
+      // Forget the open repeater, or the last remembered one when the tab has none open.
+      const char* name = g_rptrNode[0] ? g_rptrNode : om::rptrLastRemembered();
+      if (name != nullptr && name[0]) {
+        om::rptrForget(name);
+        if (strcmp(name, g_rptrNode) == 0) {
+          om::rptrLogout();
+          rptrClearSession();
+        }
+        showToast("Repeater forgotten");
+      }
+      break;
+    }
+    case A_RptrAuto:
+      om::rptrSetAutoLogin(!om::rptrAutoLogin());
+      showToast(om::rptrAutoLogin() ? "Auto-login on" : "Auto-login off");
       break;
 
     // Chat tab: the same channel, reached from the open chat.
@@ -3237,10 +3945,13 @@ static void showTab(int tab) {
   g_replyName[0] = 0;
   g_selector = false;   // the dropdown belongs to the chat we are leaving
   g_mapSelName[0] = 0;
-  if (tab == 3 && g_rptrNode[0]) {
-    // Coming from the Nodes menu's "Admin": open that repeater's page, not the list.
-    snprintf(g_rptrSelName, sizeof(g_rptrSelName), "%s", g_rptrNode);
-    g_rptrDetail = true;
+  if (tab == 3 && g_rptrNode[0] && g_rptrStage == om::ui::RptrStage::List) {
+    // Coming from the Nodes menu's "Admin" (or a repeater remembered from the last visit): open
+    // that page, not the list. Auto-login happens in rptrOpen() when the Settings switch is on and
+    // the password is remembered. A login page that is already up is left exactly as it was.
+    char name[32];
+    snprintf(name, sizeof(name), "%s", g_rptrNode);
+    rptrOpen(name);
   }
   Serial.printf("[tab] %s\n", om::ui::tabLabel((om::ui::Tab)g_tab));
   beginScreenChange(fromTab, tab);
@@ -3349,14 +4060,12 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
       drawHome();
       showToast("Contact removed");
       return;
-    case om::ui::NodeAction::LoginRptr:
-      snprintf(g_rptrNode, sizeof(g_rptrNode), "%s", name);
-      snprintf(g_rptrSelName, sizeof(g_rptrSelName), "%s", name);
-      g_rptrDetail = true;
-      g_rptrScroll = 0;
+    case om::ui::NodeAction::LoginRptr: {
       closeNodeSheets();
-      showTab(3);   // the RPTR page for that node; login itself is still "not built yet"
+      rptrOpen(name);
+      showTab(3);   // that node's login page (or straight in, when it is remembered and auto-login is on)
       return;
+    }
     case om::ui::NodeAction::None:
     default:
       closeNodeSheets();
@@ -3491,41 +4200,17 @@ static void handleTap(int x, int y, bool longPress) {
 
   if (!g_settings && g_tab == 3) {
     const om::ui::Layout& L = om::ui::l2();
-    const int tab = L.tabAt(x, y);
-    if (tab >= 0) { showTab(tab); return; }
-    if (L.gear().contains(x, y)) { openSettings(3, om::ui::SettingsTab::Rptr); return; }
-    if (L.radioFault().contains(x, y)) { showRadioFaultToast(); return; }
-
-    om::ui::RptrView v;
-    buildRptrView(v);
-    const om::ui::RptrLayout r = om::ui::rptrLayoutFor(L, v.detail);
-    const om::ui::RptrHitResult hit = om::ui::rptrHitAt(r, v.detail, v.count, v.scroll, x, y);
-    switch (hit.kind) {
-      case om::ui::RptrHit::Scan:
-        showToast("Scan: not built yet");
-        return;
-      case om::ui::RptrHit::Row:
-        if (hit.row >= 0 && hit.row < v.count) {
-          snprintf(g_rptrSelName, sizeof(g_rptrSelName), "%s", v.items[hit.row].name);
-          g_rptrDetail = true;
-          g_rptrScroll = 0;
-          Serial.printf("[rptr] open %s\n", g_rptrSelName);
-          drawRptrTab();
-        }
-        return;
-      case om::ui::RptrHit::Back:
-        g_rptrDetail = false;
-        g_rptrSelName[0] = 0;
-        g_rptrScroll = 0;
-        drawRptrTab();
-        return;
-      case om::ui::RptrHit::LoginField:
-      case om::ui::RptrHit::LoginButton:
-        showToast("Login: not built yet");
-        return;
-      default:
-        return;
+    // While the keyboard sheet is up it covers the tab bar and the gear: a tap there must not hit
+    // something the finger cannot see (the chat sheet's rule).
+    if (!g_rptrOsk) {
+      const int tab = L.tabAt(x, y);
+      if (tab >= 0) { showTab(tab); return; }
+      if (L.gear().contains(x, y)) { openSettings(3, om::ui::SettingsTab::Rptr); return; }
+      if (L.radioFault().contains(x, y)) { showRadioFaultToast(); return; }
     }
+
+    if (handleRptrTap(x, y)) return;
+    return;
   }
 
   // Every settings page: tabs, back, rows, steppers and the two text editors, from the view the
@@ -3825,6 +4510,9 @@ void loop() {
   }
 #if defined(OM_ENABLE_MESH)
   om::meshLinkLoop();
+  // EST-358: follow the repeater session's answers (a login result, a CLI reply, the status card)
+  // and the discovery window. It only redraws the screens it owns, and only when they are up.
+  rptrPump();
 
   // EST-356: the phone changed a store through MyMesh (channels, radio, name). One toast says so and
   // the redraw rebuilds the screen from the same stores, so the change is visible at once.
@@ -4084,14 +4772,25 @@ void loop() {
           g_nodeScroll = clamped;
           if (g_drag || changed) drawHome();
         }
-        // The repeater list snaps its give back the same way.
-        if (g_tab == 3 && !g_settings && !g_rptrDetail) {
-          const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
-          const int maxScroll = om::ui::rptrMaxScroll(rr, g_rptrCount);
-          const int clamped = g_rptrScroll < 0 ? 0
-                            : (g_rptrScroll > maxScroll ? maxScroll : g_rptrScroll);
-          const bool changed = clamped != g_rptrScroll;
-          g_rptrScroll = clamped;
+        // The repeater list (and the admin panel's rows) snaps its give back the same way.
+        if (g_tab == 3 && !g_settings && !g_rptrOsk) {
+          bool changed = false;
+          if (g_rptrStage == om::ui::RptrStage::Admin) {
+            const int maxScroll =
+                om::ui::rptrAdminMaxScroll(om::ui::rptrAdminLayoutFor(om::ui::l2()),
+                                           g_rptrViewStore.rowCount);
+            const int clamped =
+                g_rptrAScroll < 0 ? 0 : (g_rptrAScroll > maxScroll ? maxScroll : g_rptrAScroll);
+            changed = clamped != g_rptrAScroll;
+            g_rptrAScroll = clamped;
+          } else if (g_rptrStage == om::ui::RptrStage::List) {
+            const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
+            const int maxScroll = om::ui::rptrMaxScroll(rr, g_rptrCount);
+            const int clamped =
+                g_rptrScroll < 0 ? 0 : (g_rptrScroll > maxScroll ? maxScroll : g_rptrScroll);
+            changed = clamped != g_rptrScroll;
+            g_rptrScroll = clamped;
+          }
           if (g_drag || changed) drawRptrTab();
         }
         // The settings list's give is snapped back the same way; the last 60 ms of a fast drag may
@@ -4123,6 +4822,7 @@ void loop() {
     g_setSelScroll0 = g_setSelScroll;
     g_nodeScroll0 = g_nodeScroll;
     g_rptrScroll0 = g_rptrScroll;
+    g_rptrAScroll0 = g_rptrAScroll;
     g_drag = false;
     g_acted = false;
     g_nodeHoldArmed = false;
@@ -4349,13 +5049,25 @@ void loop() {
           g_lastRender = millis();
           drawMapTab();
         }
-      } else if (g_tab == 3 && !g_rptrDetail) {
-        // The repeater list follows the finger; the release snaps the give back.
-        const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
-        const int next = om::ui::selDragScroll(g_rptrScroll0, dy, om::ui::rptrMaxScroll(rr, g_rptrCount));
-        if (next != g_rptrScroll) {
-          g_rptrScroll = next;
-          if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
+      } else if (g_tab == 3 && !g_rptrOsk) {
+        // The list, or the admin panel's rows, follows the finger; the release snaps the give back.
+        if (g_rptrStage == om::ui::RptrStage::Admin) {
+          const int maxScroll =
+              om::ui::rptrAdminMaxScroll(om::ui::rptrAdminLayoutFor(om::ui::l2()),
+                                         g_rptrViewStore.rowCount);
+          const int next = om::ui::selDragScroll(g_rptrAScroll0, dy, maxScroll);
+          if (next != g_rptrAScroll) {
+            g_rptrAScroll = next;
+            if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
+          }
+        } else if (g_rptrStage == om::ui::RptrStage::List) {
+          const om::ui::RptrLayout rr = om::ui::rptrLayoutFor(om::ui::l2(), false);
+          const int next =
+              om::ui::selDragScroll(g_rptrScroll0, dy, om::ui::rptrMaxScroll(rr, g_rptrCount));
+          if (next != g_rptrScroll) {
+            g_rptrScroll = next;
+            if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
+          }
         }
       } else if (g_tab == 0 && !g_settings) {
         // Nodes scrolls WITH the finger: selDragScroll is the one tested sign (EST-334's bug class,
@@ -4803,6 +5515,74 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
                (unsigned)om::bleFreePsram(),
                om::wifiIsEnabled() ? om::wifi::phaseToken(om::wifiStatus().phase) : "off",
                (unsigned long)om::meshMsgSerial());
+      return;
+    }
+
+    case om::usb::Kind::Rptr: {
+      // EST-358: the repeater tab from the host. Nothing here prints a stored password: `login=` says
+      // only whether a remembered one was used.
+      if (cmd.target == nullptr) {
+        cmdError(reply, cap, "args");
+        return;
+      }
+      if (strcmp(cmd.target, "scan") == 0) {
+        const bool started = om::rptrScanStart();
+        const om::rptr::FoundList& f = om::rptrScan();
+        char state[40];
+        f.stateText(state, sizeof(state));
+        for (int i = 0; i < f.count; ++i) {
+          const om::rptr::Found& r = f.rows[i];
+          char snr[32] = "";
+          om::rptr::snrBothText(snr, sizeof(snr), r.hasSnrIn, r.snrIn4, r.hasSnrOut, r.snrOut4);
+          Serial.printf("[rptr] row %d name=\"%s\" key=%02x%02x%02x snr=\"%s\" hops=%u saved=%d\n", i,
+                        r.name[0] ? r.name : "?", r.prefix[0], r.prefix[1], r.prefix[2], snr,
+                        (unsigned)r.hops, r.inContacts ? 1 : 0);
+        }
+        snprintf(reply, cap, "[cmd] ok rptr scan started=%d state=\"%s\" found=%d", started ? 1 : 0,
+                 state, f.count);
+        return;
+      }
+      // rptr status <name>
+      const char* name = cmd.text;
+      if (!om::rptrLoggedIn() || strcmp(om::rptrCurrentName(), name) != 0) {
+        char pw[om::rptr::kPasswordMax + 1];
+        if (!om::rptrPasswordFor(name, pw, sizeof(pw))) {
+          snprintf(reply, cap,
+                   "[cmd] error rptr no_login: no remembered password for \"%s\", log in on the "
+                   "RPTR tab first",
+                   name);
+          return;
+        }
+        const bool sent = om::rptrLoginStart(name, pw);
+        memset(pw, 0, sizeof(pw));
+        snprintf(reply, cap, "[cmd] ok rptr status name=\"%s\" login=%s", name,
+                 sent ? "sent" : "failed");
+        return;
+      }
+      const om::rptr::Status& st = om::rptrStatus();
+      const uint32_t now = millis();
+      if (!st.valid || (uint32_t)(now - st.atMs) > 20000) {
+        const bool asked = om::rptrStatusRequest();
+        snprintf(reply, cap, "[cmd] ok rptr status name=\"%s\" requested=%d", name, asked ? 1 : 0);
+        return;
+      }
+      char up[20], air[20], snr[12];
+      om::rptr::uptimeText(up, sizeof(up), st.uptimeSec);
+      om::rptr::uptimeText(air, sizeof(air), st.airtimeSec);
+      om::rptr::snrText(snr, sizeof(snr), st.lastSnr4);
+      Serial.printf(
+          "[rptr] status name=\"%s\" uptime=\"%s\" battery=%umV airtime=\"%s\" rx=%lu tx=%lu "
+          "noise=%ddBm snr=\"%s\" firmware=%u clock=%lu rtt=%lums\n",
+          name, up, (unsigned)st.battMv, air, (unsigned long)st.rxPackets,
+          (unsigned long)st.txPackets, (int)st.noiseFloor, snr, (unsigned)st.fwLevel,
+          (unsigned long)st.clock, (unsigned long)st.rttMs);
+      snprintf(reply, cap,
+               "[cmd] ok rptr status name=\"%s\" uptime=%lu battery_mv=%u airtime=%lu rx=%lu "
+               "tx=%lu noise=%d snr4=%d firmware=%u rtt_ms=%lu",
+               name, (unsigned long)st.uptimeSec, (unsigned)st.battMv,
+               (unsigned long)st.airtimeSec, (unsigned long)st.rxPackets,
+               (unsigned long)st.txPackets, (int)st.noiseFloor, (int)st.lastSnr4,
+               (unsigned)st.fwLevel, (unsigned long)st.rttMs);
       return;
     }
 

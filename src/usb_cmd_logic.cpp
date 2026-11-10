@@ -295,6 +295,34 @@ Command parseCommand(char* line) {
     return c;
   }
 
+  // EST-358: the repeater tab from the host. Two forms only, and deliberately no word that could
+  // read a stored repeater password back.
+  if (strcmp(verb, "rptr") == 0) {
+    c.kind = Kind::Rptr;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "scan") == 0) {
+      c.target = sub;
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "status") == 0) {
+      c.target = sub;
+      c.text = cur.next();
+      if (cur.bad() || c.text == nullptr || c.text[0] == 0) {
+        c.error = cur.bad() ? "quote" : "args";
+        return c;
+      }
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
+
   // Everything else, including anything that tries to read a key or a secret, is refused here and
   // never reaches a handler.
   c.error = "unknown";

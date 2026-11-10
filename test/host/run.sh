@@ -41,7 +41,8 @@ BIN20="$(mktemp /tmp/om-lite-est351.XXXXXX)"
 BIN21="$(mktemp /tmp/om-lite-wifi.XXXXXX)"
 BIN22="$(mktemp /tmp/om-lite-est355.XXXXXX)"
 BIN23="$(mktemp /tmp/om-lite-est356.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23"' EXIT
+BIN24="$(mktemp /tmp/om-lite-est358.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -162,3 +163,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est356.cpp \
 "$BIN21"
 "$BIN22"
 "$BIN23"
+
+# EST-358: the RPTR tab's logic. The exact CLI line every admin control sends (the mock's asserted
+# strings), the discovery list, the login state machine and its timeouts, the status decode, the
+# neighbour/region parsers, the two-step confirm, the admin row table, the admin layout's hit test
+# and the `rptr` USB command.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est358.cpp \
+  ../../src/rptr_model.cpp ../../src/ui/rptr_layout.cpp ../../src/usb_cmd_logic.cpp -o "$BIN24"
+"$BIN24"

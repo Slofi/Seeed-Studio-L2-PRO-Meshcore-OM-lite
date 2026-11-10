@@ -65,9 +65,13 @@ bool keyboardAllowsChar(KeyboardField field, char c) {
         default: return true;
       }
     case KeyboardField::WifiPassword:
-      // A passphrase is any printable ASCII, space included; no control character can be typed on
-      // this sheet anyway.
+    case KeyboardField::RptrPassword:
+      // A passphrase (Wi-Fi or a repeater's admin password) is any printable ASCII, space included;
+      // no control character can be typed on this sheet anyway.
       return u >= 0x20 && u < 0x7F;
+    case KeyboardField::RptrPosition:
+      // EST-358: the position editor takes only what a coordinate pair is made of.
+      return (u >= '0' && u <= '9') || u == '.' || u == '-' || u == ',' || u == ' ';
     case KeyboardField::Chat:
     default:
       return true;   // the chat's own key table is already the set it offers
@@ -79,6 +83,8 @@ int keyboardMaxBytes(KeyboardField field) {
     case KeyboardField::NodeName: return kKeyboardNameMaxBytes;
     case KeyboardField::Base64Key: return kKeyboardBase64MaxBytes;
     case KeyboardField::WifiPassword: return kKeyboardWifiPassMaxBytes;
+    case KeyboardField::RptrPassword: return kKeyboardRptrPassMaxBytes;
+    case KeyboardField::RptrPosition: return kKeyboardRptrPosMaxBytes;
     default: return 0;   // chat: the draft budget is composeAllowance()
   }
 }
@@ -93,7 +99,8 @@ bool keyboardAcceptsBytes(KeyboardField field, int usedBytes, int addBytes) {
 bool keyboardAccents(KeyboardField field) {
   // A password is taken literally: the accented s/c/z long press would enter bytes the network's
   // passphrase did not ask for.
-  return field != KeyboardField::Base64Key && field != KeyboardField::WifiPassword;
+  return field != KeyboardField::Base64Key && field != KeyboardField::WifiPassword &&
+         field != KeyboardField::RptrPassword && field != KeyboardField::RptrPosition;
 }
 bool keyboardEmoji(KeyboardField field) { return field == KeyboardField::Chat; }
 

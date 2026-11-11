@@ -51,6 +51,11 @@ constexpr int16_t kRptrKeyW = 26;       // a row's small key
 constexpr int16_t kRptrKeyH = 24;
 constexpr int16_t kRptrModalW = 288;
 constexpr int16_t kRptrModalH = 118;
+// EST-393 (Filip 2026-11-11 16:38): the picker's coordinate banner. It is 42 px and sits FLUSH with
+// the screen floor. Its bottom used to be L.tabbar.y (215), a leftover from when the map canvas
+// stopped above the tab bar; since EST-374 the canvas runs to y 240, so the banner hovered 25 px
+// above the bottom edge with map showing under it.
+constexpr int16_t kRptrPickPanelH = 42;
 
 struct RptrListLayout {
   Rect head;       // "REPEATERS"
@@ -159,7 +164,8 @@ RptrModalHit rptrModalHitAt(const RptrModalLayout& m, int x, int y);
 
 // --------------------------------------------------------------------------------- the map picker
 // EST-366 (rule 6): the Position page's map. It is the Map tab's own renderer (map.cpp, offline
-// tiles) with a crosshair at the view centre; the coordinate under the map is the crosshair's.
+// tiles). EST-393: its mark is the Map's OWN centre cross (ui/map_chrome.h), drawn by the same
+// helper on the same 7x7 box, and the coordinate it saves is still the cross's pixel.
 // `apply` false means the draft still equals the repeater's position, so the Apply key is not drawn
 // (rule 4 applies here too).
 struct RptrMapPickLayout {
@@ -167,11 +173,11 @@ struct RptrMapPickLayout {
   Rect back;       // "< back" over the map, under the status bar
   Rect zoomIn;
   Rect zoomOut;
-  Rect panel;      // the coordinate bar along the bottom of the map
+  Rect panel;      // EST-393: the coordinate banner, 42 px, FLUSH with the screen floor
   Rect coords;     // the two coordinate lines' box
   Rect useGps;     // "Use my GPS position"
   Rect apply;      // empty when there is nothing to apply
-  Rect crosshair;  // the target box around the crosshair; the view centre is its centre
+  Rect cross;      // EST-393: the Map's OWN 7x7 centre cross box (ui/map_chrome.h)
 };
 RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply);
 

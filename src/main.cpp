@@ -2959,7 +2959,7 @@ static void rptrPageRowTapped(const om::rptr::UiRow& row, bool key, int dir) {
       break;
     case om::rptr::Act::MapPick:
       // EST-366 (rule 6): open the map centred on the repeater's draft position (or our GPS, or the
-      // page's last default) with the crosshair at the view centre.
+      // page's last default) with the centre point under the Map's own cross (EST-393).
       {
         g_rptrMapPick = true;
         g_rptrPickZoom = 15;
@@ -3011,8 +3011,8 @@ static bool handleRptrTap(int x, int y) {
   const om::ui::Layout& L = om::ui::l2();
   buildRptrView(g_rptrViewStore);
 
-  // EST-366 (rule 6): the map picker's own keys. A tap on the map itself is a drop of the crosshair
-  // (the pan happens while the finger moves); it changes nothing else.
+  // EST-366 (rule 6): the map picker's own keys. A tap on the map itself re-drops the centre point
+  // under the cross (the pan happens while the finger moves); it changes nothing else.
   if (g_rptrMapPick) {
     const om::ui::RptrMapPickLayout m = om::ui::rptrMapPickLayoutFor(L, rptrMapDirty());
     switch (om::ui::rptrMapPickHitAt(m, x, y)) {
@@ -6642,8 +6642,8 @@ void loop() {
           }
         }
       } else if (g_settings && g_ownPick) {
-        // EST-384: dragging the own-position picker pans the offline map under the fixed crosshair,
-        // with the same first-move base as the RPTR picker so the map never jumps.
+        // EST-384: dragging the own-position picker pans the offline map under the fixed centre
+        // cross, with the same first-move base as the RPTR picker so the map never jumps.
         if (!g_ownPickDragging) {
           g_ownPickDragging = true;
           g_ownPickDragX = (int)x;
@@ -6711,7 +6711,7 @@ void loop() {
           om::map_tab::draw();
         }
       } else if (g_tab == 3 && !g_rptrOsk) {
-        // EST-366 (rule 6): dragging the map picker pans the offline map under the fixed crosshair.
+        // EST-366 (rule 6): dragging the map picker pans the offline map under the fixed centre cross.
         // The first move of a gesture only records the base; later moves apply the delta, so the map
         // never jumps by the distance from an earlier gesture.
         if (g_rptrMapPick) {

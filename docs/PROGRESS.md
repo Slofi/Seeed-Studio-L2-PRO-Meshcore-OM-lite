@@ -6724,3 +6724,105 @@ Fixed (EST-384's picker on the fix or the map centre; Save -> the row reads `Fix
 the pin), tap Position again -> Fixed, pick GPS, tap an empty spot to Cancel (the row must not
 change), and check the Node page has no Position row and no second POSITION section. That is the
 whole ticket.
+
+## 2026-11-11 (DS, EST-393): map picker banner on the screen floor, the Map's cross instead of the dot
+Status: in_review (not committed, not pushed).
+
+### A. What was there before
+- **The banner.** EST-374 made the map canvas the full map area (320 x 214, from y 26 to y 240), and
+  the picker's `map` rectangle followed it. The banner did not: `rptrMapPickLayoutFor()` still placed
+  it at `L.tabbar.y - 42`, a leftover from when the canvas stopped above the 25 px tab bar. On the L2
+  that is y 173..215, so it hovered 25 px above the bottom edge with map showing under it (Filip:
+  "hovering above the bottom edge").
+- **The mark.** `drawMapPick()` drew its own crosshair: a 7 px radius ring, four 5 px ticks 14 px out
+  and a 2 px gold centre dot, all in `kInk` / `kAcc`, around the centre of a 12 x 12 box at 154,127.
+  The Map tab had already moved to EST-373's plain cross (two 1 px dark lines, 7 px, one ink, no
+  outline), so the two screens disagreed.
+- **The centre.** Both pickers already saved `mapScreenToLatLon(kMapCentreX, kMapCentreY)`, i.e. the
+  pixel (160,133), and `kMapCentreY` is the canvas centre under the status bar. The drawing was the
+  only thing off that point.
+
+### B. The change
+1. **Banner flush with the floor.** `rptrMapPickLayoutFor()` now places `m.panel` from `L.height`:
+   `Rect{0, L.height - kRptrPickPanelH, L.width, kRptrPickPanelH}`, with the new
+   `kRptrPickPanelH = 42` in `ui/rptr_layout.h`. On the L2 the banner is 0,198,320,42: full width,
+   **bottom = 240**. `coords`, `useGps` and `apply` were already placed from `m.panel`, so they moved
+   with it (keys now at y 218..238); the hit test and `pressTargetForRptrMapPick()` already read
+   those same rectangles, so drawing and tapping moved together. The `tabbar.y - 42` expression is
+   gone. At 800x480 the same rule puts the banner's bottom at 480.
+2. **The Map's own cross.** The EST-373 drawing is now ONE helper, `drawMapCentreCross(Device*,
+   Rect)` in `ui/map_chrome.h` (a template, so the header stays LovyanGFX-free; the screens pass
+   their `lgfx::LovyanGFX*`, the host test passes a recorder). It paints exactly two `fillRect`
+   strokes: `(cx - 3, cy, 7, 1)` and `(cx, cy - 3, 1, 7)` in `kMapCrossInk`, with no outline, plate
+   or dot. `screen_map.cpp`'s `drawCentreCross()` now calls it with `mapCentreCrossRect(c)`, and
+   `map_pick.cpp` calls it with `m.cross`; the ring/ticks/dot block is deleted. `mapCentreCrossAt()`
+   is the one 7x7 box builder, used by `mapCentreCrossRect()` and by the picker's
+   `m.cross = mapCentreCrossAt(kMapCentreX, kMapCentreY)`. On the L2 that is 157,130,7,7, centre
+   **(160,133)**, the same rectangle the Map screen draws.
+3. **The saved point is still under the cross.** No coordinate maths changed: the RPTR picker and
+   the own-position picker both still call `om::mapScreenToLatLon(om::ui::kMapCentreX,
+   om::ui::kMapCentreY, ...)`; `test_est393.py` checks both functions. The Q&A path that opens the
+   picker also seeds the draft from the view's centre, so an untouched picker saves the point the
+   cross marks.
+- Both users of the picker (the RPTR Position page and Settings' Fixed position) share
+  `rptrMapPickLayoutFor()` and `drawMapPick()`, so this one change fixes both doors, as the ticket
+  asked.
+
+### C. Files
+- `src/ui/map_chrome.h`: `mapCentreCrossAt()`, `mapCentreCrossRect()` built from it, and the one
+  `drawMapCentreCross()` template; the stale "the picker keeps its own crosshair" comment is fixed.
+- `src/ui/screen_map.cpp`: `drawCentreCross()` is now one call to the shared helper.
+- `src/ui/map_pick.cpp` + `src/ui/map_pick.h`: the picker calls `drawMapCentreCross(d, m.cross)`.
+- `src/ui/rptr_layout.h` + `.cpp`: `kRptrPickPanelH`, the floor-placed panel, `Rect cross`, and the
+  one `mapCentreCrossAt(kMapCentreX, kMapCentreY)`.
+- Comments in `src/main.cpp`, `src/ui/press_targets.h` and `src/ui/screen_rptr.h` now say "centre
+  point / cross" instead of "crosshair"; no code changed there.
+
+### D. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` (the REBUILD.md command): **exit 0**, SUCCESS, RAM **160,168 B** of 327,680
+  (48.9 %, unchanged), flash **2,986,657 B** of 6,553,600 (45.6 %; EST-392 was 2,986,733, so
+  **-76 B**), `firmware.bin` **2,987,024 B** (was 2,987,104, **-80 B**). The build id is
+  `3c21d6f-dirty`.
+- `test/host/run.sh`: **exit 0**, **51 C++ binaries + 17 Python checks** (one new of each).
+- New `test/host/test_est393.cpp`: the banner is 42 px, full width, bottom == 240 (and at 800x480
+  bottom == 480); the coordinate line and keys are inside it; both keys are 20 px above the floor,
+  never overlap, and their drawn rects are the same rects `rptrMapPickHitAt()` and
+  `pressTargetForRptrMapPick()` return (a tap at the old key centre is plain map now); the picker's
+  cross rectangle is exactly `mapCentreCrossRect(mapChromeFor(...))` (157,130,7,7, centre 160,133);
+  the shared helper is called with a recorder and writes exactly two 1 px lines in `kMapCrossInk`
+  (7 px across and 7 px down) with no dot/ring/outline, and the Map's own box produces identical
+  operations; the cross is above the banner and that pixel hits `Map`.
+- New `test/host/test_est393.py`: the picker draws the shared helper once and has no `crosshair`,
+  `drawCircle`/`fillCircle` or raw `kMapCrossInk` stroke left; `screen_map.cpp` calls the same helper;
+  only `map_chrome.h` contains a `fillRect(... kMapCrossInk)` stroke; `rptr_layout.cpp` places the
+  banner from `L.height` (no `tabbar.y - 42`) and builds `m.cross` from `mapCentreCrossAt()`; and both
+  shell centre functions still call `mapScreenToLatLon(kMapCentreX, kMapCentreY)`.
+- One older test changed on purpose: `test_est366.cpp` asserted the picker's banner bottom was `<=
+  L.tabbar.y` and its mark was a 12 x 12 crosshair box. EST-393 supersedes both (the ticket moves the
+  banner to the floor and replaces the crosshair), so it now asserts bottom == `L.height` and the
+  7 x 7 `cross`. `test_est374.cpp` and `test_est370.cpp` got the same field/box update (the centre
+  checks themselves are unchanged).
+
+### E. Preview
+- `docs/shots/2026-11-11-est393-picker.png` (2x), generated by the new `tools/mkpick.py`: the
+  Settings picker with a real rectangle dump from `ui/rptr_layout.h` and real colours from
+  `ui/theme.h`. The banner is full width and ends on the screen floor, `Cancel` / `+` / `-` / `z15`
+  are where the layout puts them, and the mark is the Map's 7 x 7 cross at (160,133). The banner's
+  digits are the placeholder `00.00000, 00.00000`, never a coordinate. The photo-like backdrop is the
+  existing z13 reference image's centre cropped to the 320 x 214 canvas (the picker's label still
+  says z15); it is a backdrop for the layout, not a new device capture.
+
+### F. Could not check (no device, no serial)
+- The taps on the glass: Cancel, +, -, Use my GPS and Save, and a drag/tap on the map with the banner
+  now over its old hovered strip.
+- Whether the cross reads as well on the real z15 tiles as it does on the preview's z13 backdrop; the
+  host proves the pixels and the EST-373 contrast measurement still applies to the same ink.
+- That the point under the cross survives a real pan/zoom/Save round trip on the device (the host
+  proves the rectangle and the shell's one centre call, not the map projection on glass).
+
+### G. Next step
+Claude reviews the diff and the preview and flashes. On the glass: Settings > General > POSITION,
+choose Fixed (the banner must sit flush with the bottom edge, its Save hit rect where it is drawn),
+check the cross at the map centre, drag the map, tap, Save, reopen the picker (the saved point must
+be under the cross), then open the RPTR Position page's picker and check the same banner and cross.
+That is the whole ticket.

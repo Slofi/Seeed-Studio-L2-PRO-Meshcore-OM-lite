@@ -3,8 +3,8 @@
 
 #include <string.h>
 
-// EST-374: the map picker's canvas origin and crosshair are the Map chrome's own numbers, so the
-// picker cannot point anywhere the Map tab's cross does not.
+// EST-374: the map picker's canvas origin and centre are the Map chrome's own numbers, so the
+// picker cannot point anywhere the Map tab's cross does not. EST-393: it draws that same cross.
 #include "ui/map_chrome.h"
 
 namespace om {
@@ -235,19 +235,22 @@ RptrHitResult rptrPageHitAt(const RptrPageLayout& a, const rptr::ScreenOut& scre
 RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply) {
   RptrMapPickLayout m;
   // EST-374: exactly map.cpp's canvas, which now runs from the status bar's bottom row to the screen
-  // floor, and the crosshair sits on the chrome's own centre point (ui/map_chrome.h) so the picker,
-  // the Map tab's cross and the projection can never disagree. It used to be the 320x214 canvas at
-  // y 0 with its crosshair at 101 + 6; both follow the canvas down by the 26 px it gained on top.
+  // floor, and the cross sits on the chrome's own centre point (ui/map_chrome.h) so the picker,
+  // the Map tab's cross and the projection can never disagree.
+  // EST-393 (Filip 2026-11-11 16:38): the banner is placed from the SCREEN FLOOR, not from the tab
+  // bar: since EST-374 the canvas runs to y 240, so its old bottom (L.tabbar.y) hovered 25 px above
+  // the bottom edge. Coordinates and both keys hang off m.panel, so their drawing and their hit
+  // rectangles move with it. The cross is the Map's own 7x7 box, not a second mark.
   m.map = Rect{0, kMapCanvasTop, kMapCanvasW, kMapCanvasH};
   const int16_t top = L.status.bottom();
   m.back = Rect{8, (int16_t)(top + 3), kRptrBackW, 20};
   m.zoomIn = Rect{(int16_t)(L.width - 8 - 24), (int16_t)(top + 30), 24, 24};
   m.zoomOut = Rect{(int16_t)(L.width - 8 - 24), (int16_t)(top + 58), 24, 24};
-  m.panel = Rect{0, (int16_t)(L.tabbar.y - 42), L.width, 42};
+  m.panel = Rect{0, (int16_t)(L.height - kRptrPickPanelH), L.width, kRptrPickPanelH};
   m.coords = Rect{8, (int16_t)(m.panel.y + 3), (int16_t)(L.width - 16), 18};
   m.useGps = Rect{8, (int16_t)(m.panel.y + 20), 154, 20};
   if (apply) m.apply = Rect{(int16_t)(L.width - 8 - 150), (int16_t)(m.panel.y + 20), 150, 20};
-  m.crosshair = Rect{(int16_t)(kMapCentreX - 6), (int16_t)(kMapCentreY - 6), 12, 12};
+  m.cross = mapCentreCrossAt(kMapCentreX, kMapCentreY);
   return m;
 }
 

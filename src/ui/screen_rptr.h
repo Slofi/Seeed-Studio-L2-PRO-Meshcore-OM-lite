@@ -56,7 +56,7 @@ struct RptrView {
   char mapCoords[40] = "";          // "46.04263, 14.50145"
   char mapHint[40] = "";            // "z15 · drag the map"
   bool mapGps = false;              // a fix exists: "Use my GPS position" works
-  bool mapApply = false;            // the crosshair differs from the repeater's position
+  bool mapApply = false;            // the point under the cross differs from the repeater's position
 
   // --- the confirmation pop-up
   bool modal = false;

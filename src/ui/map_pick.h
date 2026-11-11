@@ -2,6 +2,7 @@
 // EST-366 / EST-384: ONE map picker, used by the RPTR Position page and by the node's own Fixed
 // position. The geometry is ui/rptr_layout.h's rptrMapPickLayoutFor()/rptrMapPickHitAt(); this file
 // owns only the pixels, so the two screens cannot drift into two pickers.
+// EST-393: the picker's mark is the Map's own centre cross, drawn by ui/map_chrome.h's one helper.
 #pragma once
 
 #include <LovyanGFX.hpp>

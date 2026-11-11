@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // EST-374 host test: the rest of Filip's "hide" idea (2026-11-11).
 //   A. the map canvas is the FULL map area (status bar's bottom row .. the screen floor) in both
-//      states, so the centre (cross, follow, GPS, the picker's crosshair) never moves on a toggle;
+//      states, so the centre (cross, follow, GPS, the picker's mark) never moves on a toggle;
 //   B. the chip hides the bottom page bar too: a 3 px strip on the floor that takes no taps, and
 //      every other screen keeps its own full bar (mapBarsTucked);
 //   C. the hide/show key is a 22 x 22 chip (kPanel/kLine) with a 2 px chevron in kInk, its label in
@@ -70,13 +70,16 @@ static void testFullCanvas() {
   CHECK(cs.x == ch.x && cs.y == ch.y && cs.w == ch.w && cs.h == ch.h);
   CHECK(cs.x + cs.w / 2 == 160 && cs.y + cs.h / 2 == 133);
 
-  // The Position picker's crosshair is the same point (map.cpp subtracts the same origin when it
-  // turns the centre back into lat/lon, so the picker's value is the view centre).
+  // The Position picker's mark is the Map's own 7x7 cross box at the same point (map.cpp subtracts
+  // the same origin when it turns the centre back into lat/lon, so the picker's value is the view
+  // centre). EST-393: it is the same rectangle, not a second crosshair.
   const RptrMapPickLayout pick = rptrMapPickLayoutFor(L, false);
   CHECK(pick.map.y == kMapCanvasTop && pick.map.h == kMapCanvasH);
-  CHECK(pick.crosshair.w == 12 && pick.crosshair.h == 12);
-  CHECK(pick.crosshair.x + pick.crosshair.w / 2 == kMapCentreX);
-  CHECK(pick.crosshair.y + pick.crosshair.h / 2 == kMapCentreY);
+  CHECK(pick.cross.x == cs.x && pick.cross.y == cs.y);
+  CHECK(pick.cross.w == cs.w && pick.cross.h == cs.h);
+  CHECK(pick.cross.w == 7 && pick.cross.h == 7);
+  CHECK(pick.cross.x + pick.cross.w / 2 == kMapCentreX);
+  CHECK(pick.cross.y + pick.cross.h / 2 == kMapCentreY);
 }
 
 // --- C. the chip ---------------------------------------------------------------------------------

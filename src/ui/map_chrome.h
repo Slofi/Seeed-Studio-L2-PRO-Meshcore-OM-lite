@@ -81,8 +81,8 @@ constexpr int16_t kMapUnreadDotD = 6;
 
 // EST-373: the centre cross. TWO 1 px lines, 7 px long each (arm 3), in ONE dark ink (kMapCrossInk)
 // and no outline under them: on a light topo tile the dark line reads on its own, and the old white
-// kInk without its 1 px kMapBg plate would be invisible. It is still a cross, never a crosshair: the
-// Position picker keeps its own crosshair and does not draw this.
+// kInk without its 1 px kMapBg plate would be invisible. EST-393: the Position picker now draws this
+// same cross from the helper below instead of its old ring-and-ticks crosshair.
 constexpr int16_t kMapCentreCrossArm = 3;   // 2 * 3 + 1 = 7 px
 
 // EST-370: the tile canvas map.cpp renders into, and the point at its centre. mapRender() puts the
@@ -174,11 +174,32 @@ constexpr MapPoint mapCentreOf(const MapChrome& c) {
   return MapPoint{(int16_t)(c.view.x + c.view.w / 2), (int16_t)(c.view.y + c.view.h / 2)};
 }
 
-// The cross's 7x7 box (the screen draws the two 1 px dark lines inside it, nothing else).
+// The cross's 7x7 box around one centre (the screen draws the two 1 px dark lines inside it, nothing
+// else). EST-393: the Map's cross and the Position picker both ask this, so neither can grow a box
+// of its own.
+constexpr Rect mapCentreCrossAt(int16_t cx, int16_t cy) {
+  return Rect{(int16_t)(cx - kMapCentreCrossArm), (int16_t)(cy - kMapCentreCrossArm),
+              (int16_t)(2 * kMapCentreCrossArm + 1), (int16_t)(2 * kMapCentreCrossArm + 1)};
+}
+
 constexpr Rect mapCentreCrossRect(const MapChrome& c) {
   const MapPoint p = mapCentreOf(c);
-  return Rect{(int16_t)(p.x - kMapCentreCrossArm), (int16_t)(p.y - kMapCentreCrossArm),
-              (int16_t)(2 * kMapCentreCrossArm + 1), (int16_t)(2 * kMapCentreCrossArm + 1)};
+  return mapCentreCrossAt(p.x, p.y);
+}
+
+// EST-393 (Filip 2026-11-11 16:38): the ONE centre cross. The Map screen and the Position picker
+// both call this with the cross's own 7x7 box, so the picker cannot drift into a second mark.
+// Two 1 px lines in one dark ink, no outline, no plate, no dot: the EST-373 drawing exactly.
+// A template keeps this header free of LovyanGFX and Arduino: the screens pass their LovyanGFX*,
+// the host test passes a recorder. `fillRect` is the only call it makes.
+template <typename Device>
+inline void drawMapCentreCross(Device* d, const Rect& box) {
+  const int16_t cx = (int16_t)(box.x + box.w / 2);
+  const int16_t cy = (int16_t)(box.y + box.h / 2);
+  const int16_t arm = kMapCentreCrossArm;
+  const int16_t span = (int16_t)(2 * arm + 1);
+  d->fillRect((int16_t)(cx - arm), cy, span, 1, kMapCrossInk);
+  d->fillRect(cx, (int16_t)(cy - arm), 1, span, kMapCrossInk);
 }
 
 // EST-374: the unread dot's box on the chip's top-left corner, and the one rule that decides it: only

@@ -8,6 +8,7 @@
 #include "../fonts.h"   // useAppFont, the same face the RPTR frame restores
 #include "board.h"
 #include "map.h"
+#include "ui/map_chrome.h"   // EST-393: the Map's own centre cross, reused here
 #include "ui/rptr_layout.h"
 
 namespace om {
@@ -57,15 +58,9 @@ void drawMapPick(lgfx::LovyanGFX* d, const MapPickView& v) {
                      (int16_t)(m.back.y + m.back.h / 2),
                      (int16_t)(m.zoomIn.x - m.back.right() - 16), v.hint);
   }
-  // The crosshair: a ring and four ticks, the gold centre dot marks the exact pixel picked.
-  const int cx = m.crosshair.x + m.crosshair.w / 2;
-  const int cy = m.crosshair.y + m.crosshair.h / 2;
-  d->drawCircle(cx, cy, 7, kInk);
-  d->drawFastHLine(cx - 14, cy, 5, kInk);
-  d->drawFastHLine(cx + 10, cy, 5, kInk);
-  d->drawFastVLine(cx, cy - 14, 5, kInk);
-  d->drawFastVLine(cx, cy + 10, 5, kInk);
-  d->fillCircle(cx, cy, 2, kAcc);
+  // EST-393: the Map's own centre cross, at the same 7x7 box and centre (160,133). The helper and
+  // the constants are the Map screen's (ui/map_chrome.h), so there is no second cross to drift.
+  drawMapCentreCross(d, m.cross);
 
   d->fillRect(m.panel.x, m.panel.y, m.panel.w, m.panel.h, kPanel);
   d->drawFastHLine(m.panel.x, m.panel.y, m.panel.w, kLine);

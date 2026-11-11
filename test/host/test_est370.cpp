@@ -115,10 +115,10 @@ static void testCentre() {
   CHECK(ps.x == p.x && ps.y == p.y);
   CHECK(mapCentreCrossRect(sel).x == d.x && mapCentreCrossRect(sel).y == d.y);
 
-  // The Position picker's crosshair (rptr_layout.cpp, a 12x12 box at 154,127 since EST-374) is
-  // centred on the same pixel, which is why the picker does not draw this cross: it has its own.
-  CHECK(154 + 12 / 2 == p.x);
-  CHECK(127 + 12 / 2 == p.y);
+  // EST-393: the Position picker now draws THIS cross from mapCentreCrossAt(), on the same pixel
+  // and the same 7x7 box (test_est393 owns the picker's rectangle and the shared drawing).
+  CHECK(mapCentreCrossAt(p.x, p.y).x == d.x && mapCentreCrossAt(p.x, p.y).y == d.y);
+  CHECK(mapCentreCrossAt(p.x, p.y).w == d.w && mapCentreCrossAt(p.x, p.y).h == d.h);
 }
 
 // --- the trace colours and widths ----------------------------------------------------------------

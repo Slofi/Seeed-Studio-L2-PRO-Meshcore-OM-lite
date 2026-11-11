@@ -101,17 +101,10 @@ void drawPlainTextOnMap(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, const R
 }
 
 // EST-373 (Filip: "just a cross, small, thin, no outlines"): the centre cross, above the tiles (and
-// the route) but below the markers and the tabs. TWO 1 px dark lines, 7 px long (arm 3), one ink
-// (kMapCrossInk) and nothing behind them. It is not a crosshair: the Position picker keeps its own
-// crosshair and never calls this screen.
+// the route) but below the markers and the tabs. EST-393: the pixels come from the one shared
+// helper in ui/map_chrome.h, which the Position picker also calls, so there is one drawing of it.
 void drawCentreCross(lgfx::LovyanGFX* d, const MapChrome& c) {
-  const Rect r = mapCentreCrossRect(c);
-  const int cx = r.x + r.w / 2;
-  const int cy = r.y + r.h / 2;
-  const int arm = kMapCentreCrossArm;
-  const int span = 2 * arm + 1;
-  d->fillRect((int16_t)(cx - arm), (int16_t)cy, (int16_t)span, 1, kMapCrossInk);
-  d->fillRect((int16_t)cx, (int16_t)(cy - arm), 1, (int16_t)span, kMapCrossInk);
+  drawMapCentreCross(d, mapCentreCrossRect(c));
 }
 
 // EST-374: the chevron inside the hide/show chip. ">" while the bars are out, "<" while they are

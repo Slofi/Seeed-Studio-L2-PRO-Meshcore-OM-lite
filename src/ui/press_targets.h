@@ -292,7 +292,7 @@ inline PressTarget pressTargetForRptrPage(const RptrPageLayout& a, const rptr::S
   return t;
 }
 
-// The RPTR map picker's keys (the map itself drops the crosshair and is not a target).
+// The RPTR map picker's keys (the map itself moves the centre point and is not a target).
 inline PressTarget pressTargetForRptrMapPick(const RptrMapPickLayout& m, int x, int y) {
   PressTarget t;
   switch (rptrMapPickHitAt(m, x, y)) {

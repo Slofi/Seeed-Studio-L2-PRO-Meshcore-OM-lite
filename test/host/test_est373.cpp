@@ -67,13 +67,18 @@ static void testRectsAreTaps() {
 
     for (int i = 0; i < kMapTabCount; ++i) {
       const Rect r = tabs[i].rect;
-      // Shown, the drawn rectangle answers its own switch; hidden, the 4 px sliver it still draws
+      // Shown, the drawn rectangle answers its own switch; hidden, the 6 px sliver it still draws
       // answers the hide/show key (nothing invisible fires).
       const MapHitKind want = hidden ? MapHitKind::TabsToggle : tabs[i].kind;
       // Flush with the screen edge: x + w == 320, always.
       CHECK(r.right() == 320);
       CHECK(r.x + r.w == 320);
       CHECK(r.w == (hidden ? kMapTabSliverW : kMapTabW));
+      // EST-375: the hidden tab is the 6 px left-rounded end at 314..320 (kRadius + 2), not a strip.
+      if (hidden) {
+        CHECK(kMapTabSliverW == 6);
+        CHECK(r.x == 314 && r.w == 6);
+      }
       CHECK(!r.empty());
       // Every pixel of the drawn rectangle answers that tab: the four corners and the centre.
       const int mx = r.x + r.w / 2;
@@ -103,10 +108,11 @@ static void testRectsAreTaps() {
 }
 
 // --- 3. the hide/show key and the slivers ----------------------------------------------------------
-// EST-374 moved the hide/show key from the label line into a 22 px chip and narrowed the slivers to
-// 3 px, and it gives the hidden state its own tap semantics (the ghost + / -). Those checks live in
-// test_est374.cpp; this file keeps EST-373's own truths (a 25 px tab whose drawn rect IS its tap
-// rect, and the one dark cross).
+// EST-374 moved the hide/show key from the label line into a 22 px chip and narrowed the slivers;
+// EST-375 makes them the 6 px rounded left end at 314..320, and gives the hidden state its own tap
+// semantics (the ghost + / -). Those checks live in test_est374.cpp; this file keeps EST-373's own
+// truths (a 25 px tab whose drawn rect IS its tap rect, and the one dark cross), plus the sliver's
+// 314..320 rectangle above.
 
 // --- 4. the centre cross in one dark ink ----------------------------------------------------------
 static double chan5(uint16_t v) { return ((v >> 11) & 0x1F) * 255.0 / 31.0; }

@@ -4804,3 +4804,72 @@ sandbox, and the device is off: this entry is the sandbox's evidence only.
 - DS's run ended on the 30-minute cap (exit 124) after the work and this log were written, so Paperclip marked it blocked; nothing was missing except item F's rounded slivers, which were added to the description after DS had started (still square, 3 px).
 - Review: projection and its inverse both shift by the same 26 px (`mapProject` +kViewTop, `mapScreenToLatLon` -kViewTop); every outside caller (traces, markers, cull band, the RPTR picker at kMapCentreX/Y) uses the screen form. Preview checked (three frames, no positions or names).
 - Sandbox build exit 0 (RAM 156,800 B, flash 2,805,873 B, firmware.bin 2,806,240 B), tests exit 0. Committed locally, **not pushed and not flashed**: the device is off for the night. First flash tomorrow, then push.
+
+## 2026-11-11 01:37 (DeepSeek): EST-375 rounded hidden map tabs, built and tested, NOT on the device
+
+**Ticket (Filip 2026-11-11 00:57):** when the button-tabs are hidden, the remaining edge is sharp;
+it should have rounded corners, like when extended. One shape, not a new redraw path.
+
+**What changed**
+- `ui/map_chrome.h`: `kMapTabSliverW = kRadius + 2` = **6 px**, so the hidden tab is the left-rounded
+  end (both 4 px corners) plus 2 px of straight edge, at **x 314..320**. It has the same rows and
+  heights as the shown tabs (56..87, 88..119, 120..151, 152..183, 184..215) and the same fill/edge
+  colours (gold `kSelBg2`/`kAcc` when the switch is on, `kPanel`/`kLine` otherwise).
+- New `mapEdgeTabDrawRect()` in the same header is the one rectangle the rounded draw paints: the
+  visible rect extended right by `kRadius`, so the hidden sliver's box is x 314..324 and the glass
+  clips it at 320. `screen_map.cpp`'s `edgeTabBox()` uses it for BOTH the shown tab and the hidden
+  sliver; `edgeTabSliver` is deleted and `drawTabsHidden()` calls `edgeTabBox()` on the same
+  `mapTabRects()` rectangle, so there is no second sliver drawing.
+- Slide: the tab now travels `kMapTabSlideDx = 25 - 6 = 19 px` while the bar still drops
+  `kMapBarSlideDy = 22 px`. `slideBars()` carries a `tabOff` and a `barOff` (4, 9, 14 for the tabs;
+  5, 11, 16 for the bar). The last tab frame is the shown tab at x 314 and the steady hidden frame is
+  the same 6 px tab at x 314; the header's `static_assert`s now check that equality instead of the
+  old "both move 22" one.
+- Tap rules unchanged: the sliver's 6 px still answers `TabsToggle` and wins over the ghost zoom
+  zones; the ghost `+` / `-` centres stay at **(307,167)** and **(307,199)**, 7 px left of every
+  sliver, so neither glyph is covered.
+
+**Build** (the `docs/REBUILD.md` command, real exit code)
+- `pio run -e om_lite_l2` **exit 0**, SUCCESS in 54.5 s. RAM **156,800 B** of 327,680 (47.9 %,
+  unchanged); flash **2,805,865 B** of 6,553,600 (42.8 %, previous 2,805,873, **-8 B**);
+  `firmware.bin` **2,806,224 B** (previous 2,806,240, **-16 B**). The shape change is a wash.
+
+**Tests** — `sh test/host/run.sh` **exit 0**.
+- `test_est373.cpp`: the hidden rectangle is checked explicitly at **314..320, w 6** (and
+  `kMapTabSliverW == 6`) in addition to the existing four-corner draw/tap checks.
+- `test_est374.cpp`: `kMapTabSliverW == kRadius + 2 == 6`; all five slivers at x 314..320, same rows
+  and heights; `mapEdgeTabDrawRect()` goes to **324 = 320 + kRadius** (the ticket's "otherwise" branch:
+  the harness has no canvas, so it asserts the rectangle handed to the rounded draw); the ghost
+  centres are 307 and are not inside any sliver; a tap on the sliver's first column and on x 319 is
+  `TabsToggle`; the tab slide is **19 px**, the last frame and the steady sliver are the same tab at
+  x 314, and the bar still goes 5, 11, 16 of 22 px. Added a check that the two offsets are no longer
+  equal, so a future edit cannot quietly make the tab over/undershoot.
+
+**Preview** — `docs/shots/2026-11-11-rounded-slivers-preview.png` (780x430): one 1:1 hidden frame
+(Traces on, so its sliver is gold; ghost `+` / `-` visible at 307) plus a **4x** crop of the Traces
+sliver with the glass edge marked. Every rectangle and colour is printed by a small host program
+linked against the real `ui/map_chrome.cpp` + `theme.h`; the renderer is scratch outside the repo
+(like EST-372/373/374), so the rounded pixels are Pillow's stand-in, not the device's.
+
+**Could not check (no device, no serial, no glass)**
+- The actual rounded pixels on the L2: the host harness has no canvas, so it proves the rectangle
+  handed to `fillRoundRect`/`drawRoundRect` (x 314, w 10 = 6 + kRadius), not the framebuffer. The
+  first flash is the real check.
+- Whether 6 px reads as a rounded tab end under a fingertip and whether the gold sliver still reads
+  as "tucked under"; and the measured slide time (the estimate is still 4 x 31 ms).
+- Touch-on-the-corner feel: the tap zone is the full 6 x 31 rectangle, so the visually unset corner
+  pixels still bring the bars back, by design (the drawn rect is the tap rect, EST-373's rule).
+
+**Next step for Claude**
+1. Review the diff and the preview, then flash `firmware.bin` (2,806,224 B); the boot line is still
+   `[map] layers traces=.. names=.. hidden=..`.
+2. Open the Map, tap the chip, and look at the right edge: five rounded stubs at 314..320, the Traces
+   one gold if traces are on, no square strip. Tap one: the bars come back and the log still says
+   `[map] bars hidden` / `[map] bars shown` + `tuck/restore: 3 slide frame(s) + 1 in N ms`.
+3. While hidden, tap the ghost `+` / `-` at (307,167)/(307,199): they must still zoom and must not be
+   covered by the sliver; a tap at x 314..320 on those rows must still bring the bars back.
+4. Quick regression: the bottom bar is still the 3 px strip, the chip/chevron/unread dot unchanged,
+   and the Position picker's crosshair still at (160,133).
+
+## 2026-11-11 01:43 (Claude): EST-375 reviewed and built, NOT on the device
+- One shape: the hidden tab is the same edgeTabBox through mapEdgeTabDrawRect (6 px on the glass, both 4 px corners), edgeTabSliver removed; the tab slide is 19 px, the bar 22 px. Preview checked. Sandbox build exit 0 (flash 2,805,865 B, firmware.bin 2,806,224 B), tests exit 0. Committed locally, not pushed, not flashed.

@@ -8,9 +8,12 @@
 //      the dark map ink immediately to its left, and a 30 x 26 target that never reaches the top tab;
 //   D. an unread dot on the chip's corner, only while the bars are hidden;
 //   E. the zoom + / - stay behind as grey ghosts at the SHOWN tab rectangles, which are also their
-//      tap zones while hidden (2 px left of one is a map tap);
-//   F. the slivers are 3 px and a tap on one still brings the bars back;
-//   G. the slide is 4 frames of chrome over the cached canvas, ~31 ms each (under the 35 ms limit).
+//      tap zones while hidden (2 px left of one is a map tap); the 6 px sliver starts 7 px right of
+//      each glyph centre and never covers it;
+//   F. the slivers are 6 px (kRadius + 2) left-rounded tabs at x 314..320, and a tap on one still
+//      brings the bars back;
+//   G. the slide is 4 frames of chrome over the cached canvas, ~31 ms each (under the 35 ms limit);
+//      the tab travels 19 px and lands exactly on the steady hidden tab at x 314.
 // Plain g++, no Arduino (ui/map_chrome.cpp + ui/rptr_layout.cpp).
 #include <math.h>
 #include <stdio.h>
@@ -213,20 +216,35 @@ static void testGhostZooms() {
   const MapChrome shown = mapChromeFor(L, false, false);
   const MapChrome hidden = mapChromeFor(L, false, true);
 
-  // The SLIVER is the only tab pixel left: 3 px at the screen edge, at the shown rows and height.
-  CHECK(kMapTabSliverW == 3);
+  // EST-375: the SLIVER is the same left-rounded tab as the shown state: kRadius (4) + 2 px of
+  // straight edge = 6 px at x 314..320, at the shown rows and height. It is no longer a square strip.
+  CHECK(kRadius == 4);
+  CHECK(kMapTabSliverW == kRadius + 2);
+  CHECK(kMapTabSliverW == 6);
   MapTab hs[kMapTabCount];
   MapTab ss[kMapTabCount];
   mapTabRects(hidden, hs);
   mapTabRects(shown, ss);
   for (int i = 0; i < kMapTabCount; ++i) {
-    CHECK(hs[i].rect.w == 3);
-    CHECK(hs[i].rect.x == 317);
+    CHECK(hs[i].rect.w == 6);
+    CHECK(hs[i].rect.x == 314);
     CHECK(hs[i].rect.right() == 320);
     CHECK(hs[i].rect.y == ss[i].rect.y);
     CHECK(hs[i].rect.h == shown.names.h);
+    // The rounded box the screen draws extends kRadius past x 320, so the right corners are clipped
+    // and only the rounded LEFT end is on the glass. The host harness has no canvas (map_chrome.cpp
+    // has no LovyanGFX), so this is the ticket's "otherwise" branch: assert the rectangle handed to
+    // the rounded draw, not the pixels. 320 + 4 = 324, with the visible part still 314..320.
+    const Rect box = mapEdgeTabDrawRect(hs[i].rect);
+    CHECK(box.x == 314);
+    CHECK(box.w == 6 + kRadius);
+    CHECK(box.right() == 320 + kRadius);
+    CHECK(box.y == hs[i].rect.y && box.h == hs[i].rect.h);
     // A tap on a sliver brings the bars back (never a hidden switch).
     CHECK(mapHitAt(hidden, nullptr, 0, hs[i].rect.x + 1, hs[i].rect.y + 2).kind ==
+          MapHitKind::TabsToggle);
+    // ...and a tap on its rounded-left pixel column still wins over the ghost zone.
+    CHECK(mapHitAt(hidden, nullptr, 0, hs[i].rect.x, hs[i].rect.y + 2).kind ==
           MapHitKind::TabsToggle);
   }
 
@@ -254,8 +272,23 @@ static void testGhostZooms() {
                  shown.zoomInShown.y + 15).kind == MapHitKind::ZoomIn);
   CHECK(mapHitAt(shown, nullptr, 0, shown.zoomInShown.x - 2,
                  shown.zoomInShown.y + 15).kind == MapHitKind::Map);
-  // The 3 px sliver wins over the ghost zone: the hide/show key is the visible thing.
+  // EST-375: the rounded-left 6 px sliver starts 7 px to the right of the ghost glyph centres, so
+  // neither ghost + nor - is covered by a sliver, and a tap on the centre still zooms.
+  const int ghostInX = hidden.zoomInShown.x + hidden.zoomInShown.w / 2;    // 307
+  const int ghostOutX = hidden.zoomOutShown.x + hidden.zoomOutShown.w / 2;  // 307
+  CHECK(ghostInX == 307 && ghostOutX == 307);
+  CHECK(hs[1].rect.x - ghostInX == 7);
+  CHECK(hs[0].rect.x - ghostOutX == 7);
+  CHECK(!hs[1].rect.contains(ghostInX, hidden.zoomInShown.y + hidden.zoomInShown.h / 2));
+  CHECK(!hs[0].rect.contains(ghostOutX, hidden.zoomOutShown.y + hidden.zoomOutShown.h / 2));
+  CHECK(mapHitAt(hidden, nullptr, 0, ghostInX, hidden.zoomInShown.y + 15).kind ==
+        MapHitKind::ZoomIn);
+  CHECK(mapHitAt(hidden, nullptr, 0, ghostOutX, hidden.zoomOutShown.y + 15).kind ==
+        MapHitKind::ZoomOut);
+  // The 6 px sliver still wins over the ghost zone: the hide/show key is the visible thing.
   CHECK(mapHitAt(hidden, nullptr, 0, 319, hidden.zoomInShown.y + 15).kind ==
+        MapHitKind::TabsToggle);
+  CHECK(mapHitAt(hidden, nullptr, 0, 314, hidden.zoomInShown.y + 15).kind ==
         MapHitKind::TabsToggle);
   // A marker still wins over both (the map's one rule).
   MapMarker m;
@@ -274,25 +307,54 @@ static void testGhostZooms() {
 
 // --- G. the slide ---------------------------------------------------------------------------------
 static void testSlide() {
-  // Both groups move 22 px (a 25 px tab -> 3 px sliver; a 25 px bar -> 3 px strip), which is why one
-  // number drives both. The header's static_assert enforces the equality.
+  // EST-375: the tab rides 19 px (25 -> 6) and the bar drops 22 px (25 -> 3), so the slide now carries
+  // two offsets. The tab's travel must land on the steady hidden rectangle exactly.
   CHECK(kMapTabSlideDx == kMapTabW - kMapTabSliverW);
-  CHECK(kMapTabSlideDx == 22);
+  CHECK(kMapTabSlideDx == 19);
   CHECK(kMapBarSlideDy == kTabH - kMapBarStripH);
   CHECK(kMapBarSlideDy == 22);
-  CHECK(kMapTabSlideDx == kMapBarSlideDy);
-
-  // 4 frames: 3 interpolated steps plus the steady one, 22 px over 4 steps = 5, 11 and 16 px.
-  CHECK(kMapSlideSteps >= 4 && kMapSlideSteps <= 5);
-  int prev = 0;
-  for (int i = 1; i < kMapSlideSteps; ++i) {
-    const int off = kMapTabSlideDx * i / kMapSlideSteps;
-    CHECK(off > prev);
-    CHECK(off < kMapTabSlideDx);
-    prev = off;
+  CHECK(kMapTabSlideDx != kMapBarSlideDy);   // no longer one number (EST-375)
+  // The last slide frame (shown tab shifted by the whole travel) and the steady hidden frame are the
+  // same tab at x 314: same x, same width, same rows.
+  MapTab shownTabs[kMapTabCount];
+  MapTab hiddenTabs[kMapTabCount];
+  mapTabRects(mapChromeFor(l2(), false, false), shownTabs);
+  mapTabRects(mapChromeFor(l2(), false, true), hiddenTabs);
+  for (int i = 0; i < kMapTabCount; ++i) {
+    CHECK(shownTabs[i].rect.x + kMapTabSlideDx == hiddenTabs[i].rect.x);
+    CHECK(hiddenTabs[i].rect.x == 314);
+    CHECK(hiddenTabs[i].rect.w == kMapTabSliverW);
+    CHECK(shownTabs[i].rect.y == hiddenTabs[i].rect.y);
+    CHECK(shownTabs[i].rect.h == hiddenTabs[i].rect.h);
+    // The two frames clip to the same visible left-rounded shape: both draw rectangles start at 314
+    // and extend past 320, so the pixels on the glass are the same tab.
+    const Rect last = mapEdgeTabDrawRect(Rect{(int16_t)(shownTabs[i].rect.x + kMapTabSlideDx),
+                                              shownTabs[i].rect.y, shownTabs[i].rect.w,
+                                              shownTabs[i].rect.h});
+    const Rect steady = mapEdgeTabDrawRect(hiddenTabs[i].rect);
+    CHECK(last.x == steady.x && last.y == steady.y && last.h == steady.h);
+    CHECK(last.x == 314 && last.right() >= 320 && steady.right() == 320 + kRadius);
   }
-  CHECK(kMapTabSlideDx * 1 / 4 == 5 && kMapTabSlideDx * 2 / 4 == 11 &&
-        kMapTabSlideDx * 3 / 4 == 16);
+
+  // 4 frames: 3 interpolated steps plus the steady one. The tab's 19 px goes 4, 9 and 14; the bar's
+  // 22 px goes 5, 11 and 16.
+  CHECK(kMapSlideSteps >= 4 && kMapSlideSteps <= 5);
+  int prevTab = 0;
+  int prevBar = 0;
+  for (int i = 1; i < kMapSlideSteps; ++i) {
+    const int tabOff = kMapTabSlideDx * i / kMapSlideSteps;
+    const int barOff = kMapBarSlideDy * i / kMapSlideSteps;
+    CHECK(tabOff > prevTab);
+    CHECK(tabOff < kMapTabSlideDx);
+    CHECK(barOff > prevBar);
+    CHECK(barOff < kMapBarSlideDy);
+    prevTab = tabOff;
+    prevBar = barOff;
+  }
+  CHECK(kMapTabSlideDx * 1 / 4 == 4 && kMapTabSlideDx * 2 / 4 == 9 &&
+        kMapTabSlideDx * 3 / 4 == 14);
+  CHECK(kMapBarSlideDy * 1 / 4 == 5 && kMapBarSlideDy * 2 / 4 == 11 &&
+        kMapBarSlideDy * 3 / 4 == 16);
 
   // The cost estimate from EST-371's measured numbers: a cached-canvas repush (19.8 ms) plus one
   // panel push (11.5 ms) is 31.3 ms per frame, under the ticket's ~35 ms limit for an animated
@@ -318,7 +380,7 @@ int main() {
     return 1;
   }
   printf("est374: full canvas centre (160,133) in both states, 22 px chip + 30x26 target, "
-         "3 px tucked strip with no taps, ghost zooms on the shown rects, unread dot, 4-frame slide "
-         "ok\n");
+         "3 px tucked strip with no taps, ghost zooms on the shown rects, unread dot, 6 px rounded "
+         "slivers at 314, 19 px tab slide ending on them, ok\n");
   return 0;
 }

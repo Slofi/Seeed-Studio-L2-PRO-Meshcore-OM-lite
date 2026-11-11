@@ -13,8 +13,9 @@
 // down to a sliver and brings it back.
 // EST-374 (Filip 2026-11-11, the rest of the "hide" idea): the canvas is the full map area in both
 // states (the bars are drawn OVER it, so hiding them costs a repaint of the chrome and no tile), the
-// hide key is a 22 px chip with a chevron, the BOTTOM bar tucks with the tabs (both down to a 3 px
-// strip), the zoom + / - stay behind as grey ghosts while hidden, an unread dot rides on the chip,
+// hide key is a 22 px chip with a chevron, the BOTTOM bar tucks with the tabs (the tabs to 6 px
+// rounded slivers, the bar to a 3 px strip), the zoom + / - stay behind as grey ghosts while hidden,
+// an unread dot rides on the chip,
 // and the two groups slide together in a few frames of chrome-only repaint.
 #include "ui/screen_map.h"
 
@@ -32,17 +33,13 @@ namespace {
 // EST-372: a tab coming out of the right edge. The rounded left corners are the visible ones; the
 // rectangle is extended past the screen by the radius, so the right corners are clipped away and
 // the visible right side is square with no border and no gap. One call for the fill and the edge.
+// EST-375: the extent comes from mapEdgeTabDrawRect() in map_chrome.h, so the host test can prove the
+// hidden sliver is drawn as a real rounded tab, not a square strip. The steady hidden sliver and the
+// last slide frame go through this same function.
 void edgeTabBox(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line) {
-  d->fillRoundRect(r.x, r.y, (int16_t)(r.w + kRadius), r.h, kRadius, fill);
-  d->drawRoundRect(r.x, r.y, (int16_t)(r.w + kRadius), r.h, kRadius, line);
-}
-
-// EST-373: hidden, the same tab is only the 3 px (kMapTabSliverW) that still fits at the screen
-// edge. It is drawn square: it is the middle of a tab, not a rounded left end, so a 3 px sliver does
-// not turn into a 3 px smear of the corner radius. One line on its left edge says "a tab is here".
-void edgeTabSliver(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line) {
-  d->fillRect(r.x, r.y, r.w, r.h, fill);
-  d->drawFastVLine(r.x, r.y, r.h, line);
+  const Rect box = mapEdgeTabDrawRect(r);
+  d->fillRoundRect(box.x, box.y, box.w, box.h, kRadius, fill);
+  d->drawRoundRect(box.x, box.y, box.w, box.h, kRadius, line);
 }
 
 void drawLockIcon(lgfx::LovyanGFX* d, const Rect& r, bool on) {
@@ -310,8 +307,11 @@ void drawTabFace(lgfx::LovyanGFX* d, const MapChrome& shown, const MapView& v, i
   }
 }
 
-// The steady hidden column: five 3 px slivers (a tap on one brings both groups back), and the two
+// The steady hidden column: five 6 px slivers (a tap on one brings both groups back), and the two
 // zoom glyphs left behind at the SHOWN tab centres, in the grey ghost ink, with no tab body.
+// EST-375: a sliver is not a separate shape. It is the SAME edgeTabBox the shown tab uses, on the
+// 6 px rectangle mapTabRects() returns (x 314), so its left corners are round and its right side is
+// clipped by the screen exactly like the last frame of the slide.
 void drawTabsHidden(lgfx::LovyanGFX* d, const MapChrome& c, const MapView& v) {
   MapTab tabs[kMapTabCount];
   mapTabRects(c, tabs);
@@ -323,7 +323,7 @@ void drawTabsHidden(lgfx::LovyanGFX* d, const MapChrome& c, const MapView& v) {
       case MapHitKind::Names: on = v.namesOn; break;
       default: break;
     }
-    edgeTabSliver(d, tabs[i].rect, on ? kSelBg2 : kPanel, on ? kAcc : kLine);
+    edgeTabBox(d, tabs[i].rect, on ? kSelBg2 : kPanel, on ? kAcc : kLine);
   }
   drawZoomGlyph(d, c.zoomInShown, '+', kMapGhostInk, false);
   drawZoomGlyph(d, c.zoomOutShown, '-', kMapGhostInk, false);
@@ -331,7 +331,7 @@ void drawTabsHidden(lgfx::LovyanGFX* d, const MapChrome& c, const MapView& v) {
 
 // One frame. `freshTiles` picks mapRender() (decode + composite) or mapRepush() (the canvas that is
 // already in PSRAM). `slide` is null for the steady states; otherwise the tabs ride out by tabDx and
-// the whole bottom bar sits barDy rows lower (both from kMapSlideSteps, chrome only).
+// the whole bottom bar sits barDy rows lower (two offsets, chrome only).
 struct MapSlideFrame {
   int16_t tabDx = 0;
   int16_t barDy = 0;
@@ -431,8 +431,8 @@ void drawMapFrame(const MapView& v, bool freshTiles, const MapSlideFrame* slide)
 
   // EST-373/374: drawn from the SAME list the hit test reads (mapTabRects), so a tab's tap zone and
   // its rectangle cannot drift apart. Shown: flush with the screen edge, rounded on the left only.
-  // Hidden: the 3 px sliver and, at the shown centres, the grey ghost + / -. Sliding: the shown
-  // tabs shifted right by tabDx.
+  // Hidden: the 6 px rounded sliver and, at the shown centres, the grey ghost + / -. Sliding: the
+  // shown tabs shifted right by tabDx (the last frame lands on the sliver's x 314).
   if (slide != nullptr) {
     const MapChrome shown = mapChromeFor(l2(), v.callout, false);
     drawTabFace(d, shown, v, slide->tabDx);

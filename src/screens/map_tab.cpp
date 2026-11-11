@@ -307,8 +307,10 @@ void drawAnimFrame() {
 }
 
 // EST-374: the hide/show slide. The map never moves (the canvas is full height in both states), so
-// every frame is a cached-canvas repaint with only the chrome moved: the five tabs ride right and
-// the bottom page bar drops, each by the same fraction of their 22 px. kMapSlideSteps - 1
+// every frame is a cached-canvas repaint with only the chrome moved: the five tabs ride right by
+// 19 px and the bottom page bar drops by 22 px, each by the same fraction of its own travel. The
+// tab offset is the one that must land on the hidden sliver (x 314); the bar keeps its 3 px strip.
+// kMapSlideSteps - 1
 // interpolated frames plus the steady frame; from the EST-371 numbers a frame is a 19.8 ms canvas
 // repush plus an 11.5 ms panel push (31 ms, under the ticket's 35 ms limit), so 4 frames is about
 // 125 ms inside the 120-150 ms window. With no canvas to repush (a first entry after boot) the loop
@@ -320,10 +322,14 @@ void slideBars(bool hidden) {
   int frames = 0;
   if (ui::kMapSlideSteps > 1 && om::mapCanvasReady()) {
     for (int i = 1; i < ui::kMapSlideSteps; ++i) {
-      int off = (int)ui::kMapTabSlideDx * i / ui::kMapSlideSteps;
+      int tabOff = (int)ui::kMapTabSlideDx * i / ui::kMapSlideSteps;
+      int barOff = (int)ui::kMapBarSlideDy * i / ui::kMapSlideSteps;
       // Tucking moves the groups AWAY from home (off grows); restoring walks them back.
-      if (!hidden) off = (int)ui::kMapTabSlideDx - off;
-      ui::mapScreenSlide(v, (int16_t)off, (int16_t)off);
+      if (!hidden) {
+        tabOff = (int)ui::kMapTabSlideDx - tabOff;
+        barOff = (int)ui::kMapBarSlideDy - barOff;
+      }
+      ui::mapScreenSlide(v, (int16_t)tabOff, (int16_t)barOff);
       ++frames;
     }
   }
@@ -556,7 +562,7 @@ bool tap(int x, int y) {
     }
     case ui::MapHitKind::TabsToggle: {
       // EST-373/374: the chip (or a tap on a hidden sliver) hides BOTH groups at once, the five tabs
-      // to 3 px slivers and the whole bottom page bar to a 3 px strip, and brings them back. One
+      // to 6 px rounded slivers and the whole bottom page bar to a 3 px strip, and brings them back. One
       // saved key ("tabsHidden") drives both. Saved with the other two switches, so reopening the
       // map keeps them as they were left. The slide is chrome over the cached canvas (slideBars).
       s_layers.toggleTabsHidden();     // the return is the write's, so read the state back below

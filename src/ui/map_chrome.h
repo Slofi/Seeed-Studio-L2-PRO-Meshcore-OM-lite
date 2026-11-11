@@ -47,8 +47,11 @@ constexpr int16_t kMapTabIconW = kMapLockW;              // the widest icon draw
 constexpr int16_t kMapTabW = kMapTabIconW + 2 * kMapTabIconPad;   // 25
 
 // EST-373: hidden, each tab keeps this much of itself at the right edge, and nothing else.
-// EST-374 (Filip): 3 px, one less than before; the tab and the bottom bar tuck together.
-constexpr int16_t kMapTabSliverW = 3;
+// EST-374 (Filip): the tab and the bottom bar tuck together.
+// EST-375 (Filip 2026-11-11 00:57): the hidden tab is not a square strip any more. It is the SAME
+// left-rounded tab the shown state draws, just placed so only its left end is on the glass: the
+// radius's 4 px plus 2 px of straight edge = 6 px, at x 314..320. kRadius lives in theme.h.
+constexpr int16_t kMapTabSliverW = (int16_t)(kRadius + 2);   // 6
 
 constexpr int16_t kMapZoomLabelH = 11;   // "z13" in mono 10 px
 constexpr int16_t kMapZoomLabelW = 21;   // three 6 px glyphs plus 3 px of air
@@ -101,19 +104,24 @@ constexpr int16_t kMapCentreY = (int16_t)(kMapCanvasTop + kMapCanvasH / 2);   //
 // slides down by kBarSlideDy and only its top 3 px are still on the screen, in kPanel, with the Map
 // tab's gold segment showing: it reads as "tucked under". The strip takes no taps (the map does).
 constexpr int16_t kMapBarStripH = 3;
-constexpr int16_t kMapTabSlideDx = (int16_t)(kMapTabW - kMapTabSliverW);   // 22: how far a tab rides
+constexpr int16_t kMapTabSlideDx = (int16_t)(kMapTabW - kMapTabSliverW);   // EST-375: 19 (25 -> 6)
 constexpr int16_t kMapBarSlideDy = (int16_t)(kTabH - kMapBarStripH);       // 22: how far the bar drops
 
 // EST-374: the motion. The two groups slide together (the tabs right, the bar down) in this many
-// FRAMES: 3 interpolated steps plus the steady frame. 22 px over 4 steps is 5, 11 and 16 px.
+// FRAMES: 3 interpolated steps plus the steady frame. EST-375: the tab rides 19 px (25 -> 6) and
+// the bar drops 22 px (25 -> 3), so over 4 steps the tabs go 4, 9 and 14 and the bar 5, 11 and 16.
 // The estimate from the EST-371 numbers is a 19.8 ms canvas repush + an 11.5 ms panel push per frame
 // (31 ms, under the ticket's 35 ms limit), so 4 frames is about 125 ms inside the 120-150 ms window.
 // Set it to 1 for the instant switch; the log line says which one ran.
 constexpr int kMapSlideSteps = 4;
-// Both groups move by the same 22 px (25 -> 3 for a tab, 25 -> 3 for the bar), which is what lets
-// one number drive the slide. The test asserts this too; the assert makes a later change to either
-// width stop the build instead of making the two groups drift apart on the glass.
-static_assert(kMapTabSlideDx == kMapBarSlideDy, "both groups must slide by the same 22 px");
+// EST-375: the two distances are no longer equal (a tab keeps 6 px, the bar keeps 3), so the slide
+// carries a tab offset and a bar offset separately. What must hold is that the tab's travel lands
+// exactly on the steady hidden rectangle: the last frame is the same tab at x 314, not a second
+// shape near it. The bar's own assert keeps its strip at 3 px.
+static_assert(kScreenW - kMapTabW + kMapTabSlideDx == kScreenW - kMapTabSliverW,
+              "the last slide frame and the steady hidden tab are the same x (314)");
+static_assert(kMapTabSliverW == kRadius + 2, "6 px: both left corners plus 2 px of straight edge");
+static_assert(kTabH - kMapBarSlideDy == kMapBarStripH, "the bar slide must leave its 3 px strip");
 
 struct MapPoint {
   int16_t x = 0;
@@ -137,7 +145,7 @@ struct MapChrome {
   Rect chipTap;     // EST-374: its 30x26 target (above the top tab, never on it)
   Rect chevron;     // EST-374: the chevron's box inside the chip
   Rect zoomLabel;   // EST-372: plain "z13", immediately left of the chip
-  Rect zoomIn;      // the tab rectangles THIS state draws: 25 px shown, 3 px (a sliver) hidden
+  Rect zoomIn;      // the tab rectangles THIS state draws: 25 px shown, 6 px (a sliver) hidden
   Rect zoomOut;
   Rect lock;
   Rect traces;      // EST-368: the Traces toggle, above the locate tab
@@ -153,7 +161,7 @@ struct MapChrome {
 // All rectangles from the screen size. `selected` adds the callout; it sits over the bottom of the
 // map like the mock's .callout. The tabs stack upward from the shown bar's top edge: zoom out, zoom
 // in, follow, Traces, Names; every tab's right edge IS the screen edge. `tabsHidden` gives each tab
-// its 3 px sliver at that same edge: the tab rectangle and the tap zone move together, never one
+// its 6 px sliver at that same edge: the tab rectangle and the tap zone move together, never one
 // alone, and the ghost zoom zones keep the shown rectangles.
 MapChrome mapChromeFor(const Layout& L, bool selected, bool tabsHidden = false);
 
@@ -202,7 +210,7 @@ enum class MapHitKind : uint8_t {
   Lock,
   Traces,      // EST-368: the Traces toggle
   Names,       // EST-370: the Names toggle
-  TabsToggle,  // EST-373/374: the chip, and a hidden tab's 3 px sliver (brings them back)
+  TabsToggle,  // EST-373/374: the chip, and a hidden tab's 6 px sliver (brings them back)
   Marker,
   Map,
   Callout
@@ -217,8 +225,17 @@ struct MapTab {
 
 constexpr int kMapTabCount = 5;
 
+// EST-375: the rectangle the rounded edge-tab box actually paints. A tab is rounded on the left and
+// runs off the right edge, so the draw rectangle is the visible one extended to the right by kRadius;
+// the frame clips whatever is past x 320. The shown tab and the hidden 6 px sliver use the SAME
+// helper, so the last slide frame (shown geometry at x = 314) and the steady hidden frame are one
+// shape. The host test asserts the hidden case extends to 320 + kRadius.
+constexpr Rect mapEdgeTabDrawRect(const Rect& r) {
+  return Rect{r.x, r.y, (int16_t)(r.w + kRadius), r.h};
+}
+
 // The five tabs, bottom up: zoom out, zoom in, follow, Traces, Names. Every one is out of the same
-// MapChrome the screen draws, including the 3 px slivers while the tabs are hidden.
+// MapChrome the screen draws, including the 6 px slivers while the tabs are hidden.
 void mapTabRects(const MapChrome& c, MapTab out[kMapTabCount]);
 
 struct MapHit {
@@ -228,7 +245,7 @@ struct MapHit {
 
 // The tab or marker under a point. A marker wins over the map; the callout's own box is not a map
 // tap; the chip is the hide/show key; every toggle is a tab like the zoom ones. `count` markers in
-// `markers`. While the bars are hidden: their 3 px slivers are the only tab pixels and a tap on one
+// `markers`. While the bars are hidden: their 6 px slivers are the only tab pixels and a tap on one
 // brings both groups back, and the zoom tabs leave their ghost + / - behind at the SHOWN rectangles
 // (minus those sliver pixels, which belong to the hide/show key) so zooming still works hidden.
 MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, int y);

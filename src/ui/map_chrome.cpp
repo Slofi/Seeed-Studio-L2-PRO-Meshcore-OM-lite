@@ -39,8 +39,9 @@ MapChrome mapChromeFor(const Layout& L, bool selected, bool tabsHidden) {
   // Five tabs, bottom up: zoom out, zoom in, follow, Traces, Names. The right edge is the screen
   // edge (drawing rounds the left corners only and leaves the right square). The height is what is
   // left after the chip's target and the four 1 px gaps; every tab is the same height. EST-374:
-  // hidden, each tab is only its 3 px sliver at the same edge, at the same height, so the rectangle
-  // and the tap zone move together. The chip target's 26 px is what makes the tabs 31 px.
+  // hidden, each tab is only its sliver at the same edge, at the same height, so the rectangle and
+  // the tap zone move together. EST-375: that sliver is 6 px (the rounded left end) at x 314.
+  // The chip target's 26 px is what makes the tabs 31 px.
   const int16_t top = (int16_t)(c.chipTap.bottom() + kMapChipGap);
   const int16_t available = (int16_t)(barTop - top - 4 * kMapTabGap);
   int16_t tabH = (int16_t)(available / 5);
@@ -124,7 +125,7 @@ MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, 
   // so the two targets can never fight over a pixel (the 26 px target is why the tabs are 31 px).
   if (c.chipTap.contains(x, y)) { hit.kind = MapHitKind::TabsToggle; return hit; }
   // EST-373/374: the tabs and their tap zones are ONE list, built from the rectangles the screen
-  // draws. Hidden, the only tab pixels are the 3 px slivers, and a tap on one brings both groups
+  // draws. Hidden, the only tab pixels are the 6 px slivers, and a tap on one brings both groups
   // back instead of firing a switch the finger cannot see.
   MapTab tabs[kMapTabCount];
   mapTabRects(c, tabs);
@@ -134,7 +135,7 @@ MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, 
     return hit;
   }
   // EST-374: hidden, the zoom tabs leave their + and - behind at the SHOWN rectangles, and those
-  // are the tap zones while hidden. The sliver check above wins on its 3 px, so the visible remnant
+  // are the tap zones while hidden. The sliver check above wins on its 6 px, so the visible remnant
   // is still the hide/show key; everything else in the shown rectangle zooms.
   if (c.tabsHidden) {
     if (c.zoomInShown.contains(x, y)) { hit.kind = MapHitKind::ZoomIn; return hit; }

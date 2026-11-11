@@ -37,8 +37,8 @@ struct MapView {
   bool tracesOn = false;
   // EST-370: the Names toggle. Off hides every marker label and leaves the markers themselves.
   bool namesOn = false;
-  // EST-373/374: the hide/show chip. On, the five tabs are 3 px slivers at the screen edge, the
-  // bottom page bar is a 3 px strip on the floor, and the map gets the freed area (the canvas was
+  // EST-373/374: the hide/show chip. On, the five tabs are 6 px rounded slivers at the screen edge,
+  // the bottom page bar is a 3 px strip on the floor, and the map gets the freed area (the canvas was
   // full-height all along); the state comes from the saved layer store and drives both groups.
   bool tabsHidden = false;
   TraceFrame trace;

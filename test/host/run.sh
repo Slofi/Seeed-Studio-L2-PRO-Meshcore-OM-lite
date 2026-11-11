@@ -305,7 +305,8 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est373.cpp \
 # both states and the centre (160,133) never moves; the 22 px chip with its 2 px chevron and 30 x 26
 # target; the tucked bottom bar (a 3 px strip with no tap zone, every other screen keeps its bar);
 # the unread dot; the grey ghost + / - on the shown zoom rectangles (and 2 px left of one is a map
-# tap); the 3 px slivers; and the 4-frame slide's 31 ms per-frame estimate.
+# tap); EST-375's 6 px rounded slivers at 314..320 (the drawn box extends to 324, the ghost centres
+# stay 7 px left); and the 4-frame slide (19 px tabs, 22 px bar) and its 31 ms per-frame estimate.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est374.cpp \
   ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp -o "$BIN36"
 "$BIN36"

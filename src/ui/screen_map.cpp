@@ -463,10 +463,12 @@ void drawMapFrame(const MapView& v, bool freshTiles, const MapSlideFrame* slide)
   if (v.callout && !c.callout.empty()) {
     d->fillRoundRect(c.callout.x, c.callout.y, c.callout.w, c.callout.h, kRadius, kSelBg);
     d->drawRoundRect(c.callout.x, c.callout.y, c.callout.w, c.callout.h, kRadius, kAcc);
-    drawTextEllipsis(d, FontRole::SansBody, kAccInk, kSelBg, c.callout.x + 7,
-                     c.callout.y + 12, c.callout.w - 14, v.calloutTitle);
-    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kSelBg, c.callout.x + 7,
-                     c.callout.y + 28, c.callout.w - 14, v.calloutLine);
+    drawTextEllipsis(d, FontRole::SansBody, kAccInk, kSelBg, c.callout.x + kMapCalloutPadX,
+                     c.callout.y + kMapCalloutLine1Cy, c.callout.w - 2 * kMapCalloutPadX,
+                     v.calloutTitle);
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kSelBg, c.callout.x + kMapCalloutPadX,
+                     c.callout.y + kMapCalloutLine2Cy, c.callout.w - 2 * kMapCalloutPadX,
+                     v.calloutLine);
   }
 
   drawStatusBar(d, l2(), v.status);

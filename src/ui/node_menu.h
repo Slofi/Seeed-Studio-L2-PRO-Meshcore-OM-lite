@@ -55,6 +55,9 @@ struct NodeMenuRow {
   NodeAction action = NodeAction::None;
   const char* label = "";
   const char* value = "";   // right-hand mono text (favourite state), "" = none
+  // EST-400: the value is gold (a state that is ON). An explicit flag, because the drawing used to
+  // test `value[0] == 'o' && value[1] == 'n'`, so any value beginning "on" was drawn as a state.
+  bool valueAccent = false;
 };
 
 // One node's facts, filled by the shell from the contact table.

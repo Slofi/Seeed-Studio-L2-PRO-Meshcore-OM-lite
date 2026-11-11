@@ -88,5 +88,11 @@ int wrapText(const char* text, MeasureFn measure, void* ctx, int firstW, int nex
 // Byte offset just past the last byte that was wrapped. Less than strlen(text) when maxLines cut it.
 int wrapConsumed(const char* text, const WrapLine* lines, int count);
 
+// EST-400: how much of `text` can be drawn in `maxW` WITH a trailing "..." (one dot per ellipsis
+// row), cut on a drawable-unit boundary, never inside a UTF-8 sequence. Returns the byte count to
+// draw before the "...", or -1 when the whole string already fits (draw it unchanged). The text
+// helper drawTextEllipsis() and the host test both ask this, so the cut is one arithmetic.
+int ellipsisFit(const char* text, MeasureFn measure, void* ctx, int maxW);
+
 }  // namespace ui
 }  // namespace om

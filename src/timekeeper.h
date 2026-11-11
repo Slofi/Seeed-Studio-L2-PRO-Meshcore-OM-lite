@@ -58,6 +58,26 @@ constexpr int64_t daysFromCivil(int year, unsigned month, unsigned day) {
 
 constexpr bool isLeapYear(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
 
+// EST-400: the UTC civil year an epoch falls in. A constexpr walk over whole years (the epoch is a
+// uint32, so it ends at 2106 at worst), used only to derive the UI's limits from the clock's one
+// sanity window. No second copy of "2038" or "2025" exists anywhere.
+constexpr int civilYearOfEpoch(uint32_t epoch) {
+  int64_t days = (int64_t)(epoch / 86400UL);
+  int year = 1970;
+  while (true) {
+    const int64_t yearDays = isLeapYear(year) ? 366 : 365;
+    if (days < yearDays) return year;
+    days -= yearDays;
+    ++year;
+  }
+}
+
+// The manual-time steppers' real range: the civil years kMinSaneEpoch..kMaxSaneEpoch can name
+// (2025..2038). The clock refuses anything outside that window, so offering 2000..2099 was a range
+// the Set key could never honour.
+constexpr int kMinSaneYear = civilYearOfEpoch(kMinSaneEpoch);   // 2025
+constexpr int kMaxSaneYear = civilYearOfEpoch(kMaxSaneEpoch);   // 2038
+
 constexpr int daysInMonth(int y, int m) {
   return m == 2 ? (isLeapYear(y) ? 29 : 28)
                 : ((m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31);

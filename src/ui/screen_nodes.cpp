@@ -33,12 +33,16 @@ void drawSheetHead(lgfx::LovyanGFX* d, const NodesView& v, const NodeSheetLayout
   d->drawFastHLine(g.head.x, g.head.bottom() - 1, g.head.w, kLine);
 }
 
-void drawActionRow(lgfx::LovyanGFX* d, const Rect& r, const char* label, const char* value) {
+// EST-400: the value column is a theme constant, not a pixel typed into the drawing, the value is
+// right-aligned a sheet pad in from the row's edge like every other sheet row, and the gold ink is
+// an explicit flag instead of sniffing the first two characters of the string.
+void drawActionRow(lgfx::LovyanGFX* d, const Rect& r, const char* label, const char* value,
+                   bool valueAccent = false) {
   const int cy = r.y + r.h / 2;
-  drawTextEllipsis(d, FontRole::SansBody, kInk, kSheet, r.x, cy, r.w - 70, label);
+  drawTextEllipsis(d, FontRole::SansBody, kInk, kSheet, r.x, cy, r.w - kNodeSheetValueW, label);
   if (value != nullptr && value[0] != 0) {
-    drawTextRight(d, FontRole::MonoMeta, value[0] == 'o' && value[1] == 'n' ? kAcc : kDim, kSheet,
-                  r.right(), cy, value);
+    drawTextRight(d, FontRole::MonoMeta, valueAccent ? kAcc : kDim, kSheet, r.right() - kSheetPadX,
+                  cy, value);
   }
   d->drawFastHLine(r.x, r.bottom() - 1, r.w, kRowLine);
 }
@@ -47,8 +51,8 @@ void drawNodeSheet(lgfx::LovyanGFX* d, const NodesView& v) {
   const int rows = sheetRowCount(v);
   if (rows <= 0) return;
   const NodeSheetLayout g = nodeSheetLayout(l2(), rows);
-  d->fillRoundRect(g.panel.x, g.panel.y, g.panel.w, (int16_t)(g.panel.h + kOskRadius), kOskRadius,
-                   kSheet);
+  d->fillRoundRect(g.panel.x, g.panel.y, g.panel.w, (int16_t)(g.panel.h + kSheetRadius),
+                   kSheetRadius, kSheet);
   d->drawFastHLine(g.panel.x, g.panel.y, g.panel.w, kLine);
   drawSheetHead(d, v, g);
 
@@ -72,7 +76,7 @@ void drawNodeSheet(lgfx::LovyanGFX* d, const NodesView& v) {
   }
 
   for (int i = 0; i < v.menuCount && i < g.rowCount; ++i) {
-    drawActionRow(d, g.rows[i], v.menu[i].label, v.menu[i].value);
+    drawActionRow(d, g.rows[i], v.menu[i].label, v.menu[i].value, v.menu[i].valueAccent);
   }
 }
 

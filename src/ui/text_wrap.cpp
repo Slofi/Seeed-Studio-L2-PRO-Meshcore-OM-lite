@@ -218,5 +218,29 @@ int wrapConsumed(const char* text, const WrapLine* lines, int count) {
   return end;
 }
 
+int ellipsisFit(const char* text, MeasureFn measure, void* ctx, int maxW) {
+  if (text == nullptr || measure == nullptr || maxW <= 0) return 0;
+  const int len = (int)strlen(text);
+  if (measure(ctx, text, len) <= maxW) return -1;   // the whole string fits: no cut, no dots
+  const int ellW = measure(ctx, "...", 3);
+  int cut = 0;
+  int w = 0;
+  for (int i = 0; i < len;) {
+    TextUnit u;
+    const int next = textUnitAt(text, len, i, &u);
+    if (next <= i) break;                           // never loop on a refused unit
+    if (!u.zero) {
+      const int cw = measure(ctx, text + u.start, u.end - u.start);
+      if (w + cw + ellW > maxW) break;
+      w += cw;
+      cut = u.end;
+    } else {
+      cut = u.end;                                  // a stray selector takes no room
+    }
+    i = next;
+  }
+  return cut;
+}
+
 }  // namespace ui
 }  // namespace om

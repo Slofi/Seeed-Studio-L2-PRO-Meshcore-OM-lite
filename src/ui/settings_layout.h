@@ -344,6 +344,21 @@ constexpr Rect settingsStepValueRect(const Rect& row) {
   return Rect{(int16_t)(minus.right() + kSetStepGap), minus.y, kSetStepValueW, kSetStepW};
 }
 
+// EST-400: the room a Stepper's label has before its minus key (the label used to be drawn with no
+// clip and could run under the key), and the room a Toggle's label has before its right-aligned
+// value, given that value's measured width. Both include the row's own inset, so the same numbers
+// draw and are host-tested.
+constexpr int16_t settingsStepperLabelW(const Rect& row) {
+  const int16_t room = (int16_t)(settingsStepMinusRect(row).x - (row.x + kSetPadX) - kSelGap);
+  return room > 0 ? room : 0;
+}
+
+constexpr int16_t settingsToggleLabelW(const Rect& row, int valueW) {
+  const int16_t room =
+      (int16_t)(row.right() - kSetPadX - valueW - kSelGap - (row.x + kSetPadX));
+  return room > 0 ? room : 0;
+}
+
 constexpr int settingsStepperPart(const Rect& row, int x, int y) {
   if (settingsStepMinusRect(row).contains(x, y)) return -1;
   if (settingsStepPlusRect(row).contains(x, y)) return 1;
@@ -451,7 +466,10 @@ constexpr int settingsChoiceScrollFor(const SettingsLayout& L, const SettingRow*
 
 // ---------------------------------------------------------------------------------- manual time
 // The manual-time page steps one civil field at a time. Everything wraps (the mock's +/- steppers):
-// minute 59 -> 0, hour 23 -> 0, day past the month's last -> 1, month 12 -> 1, year 2099 -> 2000.
+// minute 59 -> 0, hour 23 -> 0, day past the month's last -> 1, month 12 -> 1. The YEAR does not wrap
+// over 2000..2099 any more (EST-400): the clock's one gate is kMaxSaneEpoch (2038-01-19) and its
+// floor is kMinSaneEpoch (2025-01-01), so the stepper walks exactly the years those constants can
+// name and wraps year 2038 -> 2025. Offering 2050 could only answer "Time not set".
 // A day is clamped to the month it lands in, so 31 Jan + 1 month is 28/29 Feb, never 31 Feb.
 enum class TimeField : uint8_t { Year = 0, Month, Day, Hour, Minute, Count };
 
@@ -469,9 +487,11 @@ constexpr CivilTime stepCivilTime(CivilTime t, TimeField f, int dir) {
   if (dir == 0) return t;
   switch (f) {
     case TimeField::Year:
+      // EST-400: the clock's own window (kMinSaneYear..kMaxSaneYear, both derived from
+      // kMinSaneEpoch/kMaxSaneEpoch in timekeeper.h), never a second 2000..2099 guess.
       t.year += dir;
-      if (t.year > 2099) t.year = 2000;
-      if (t.year < 2000) t.year = 2099;
+      if (t.year > om::kMaxSaneYear) t.year = om::kMinSaneYear;
+      if (t.year < om::kMinSaneYear) t.year = om::kMaxSaneYear;
       break;
     case TimeField::Month:
       t.month += dir;

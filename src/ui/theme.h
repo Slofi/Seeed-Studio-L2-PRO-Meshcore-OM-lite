@@ -302,6 +302,10 @@ constexpr int16_t kMissingBoxH  = 6;
 // (the ticket). 4 + 18 + 3 + 4*22 + 3*2 + 4 = 123 px, so the sheet covers the tab bar completely.
 constexpr int16_t kOskPad      = 4;
 constexpr int16_t kOskRadius   = 6;
+// EST-400: the message / action sheets round their TOP corners with this and overflow the bottom
+// edge by the same amount. They used the keyboard sheet's radius, so retuning the keyboard would
+// silently change the chat's and the Nodes sheets too. Own constant, same 6 px value.
+constexpr int16_t kSheetRadius = kRadiusLg;
 constexpr int16_t kOskKeyH     = 22;
 constexpr int16_t kOskKeyGap   = 2;
 constexpr int16_t kOskDraftH   = 18;
@@ -342,6 +346,9 @@ constexpr int16_t kSheetRowH    = 22;
 // The Nodes long-press sheet has at most eight rows (a client and a repeater both top out there);
 // 20 px keeps the whole panel above the status bar: 12 + 34 + 8 * 20 = 206 px, top edge at 34.
 constexpr int16_t kNodeSheetRowH = 20;
+// EST-400: the value column of a Nodes sheet row ("SNR 3.2", "on"). The label ellipsises before
+// this much room, and the value is right-aligned a sheet pad in from the row's own edge.
+constexpr int16_t kNodeSheetValueW = 70;
 constexpr int16_t kSheetLine1Cy = 11;   // from the header's top: the sender
 constexpr int16_t kSheetLine2Cy = 25;   // from the header's top: channel, hops, SNR
 constexpr int16_t kSheetGap     = 6;    // a row's label -> its value

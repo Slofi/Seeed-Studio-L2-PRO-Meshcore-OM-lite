@@ -67,7 +67,10 @@ MapChrome mapChromeFor(const Layout& L, bool selected, bool tabsHidden) {
   c.creditBottom = tabsHidden ? c.barStrip.y : barTop;
 
   if (selected) {
-    c.callout = Rect{8, (int16_t)(barTop - 8 - kMapCalloutH), (int16_t)(w - 16), kMapCalloutH};
+    // EST-400: the box's inset and its height are theme constants; its two text rows come from the
+    // same ones in map_chrome.h, so retuning the callout's height moves its lines with it.
+    c.callout = Rect{kMapMargin, (int16_t)(barTop - kMapCalloutPadY - kMapCalloutH),
+                     (int16_t)(w - 2 * kMapMargin), kMapCalloutH};
   }
   return c;
 }

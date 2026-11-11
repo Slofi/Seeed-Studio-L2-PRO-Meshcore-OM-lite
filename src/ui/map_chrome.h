@@ -22,6 +22,16 @@ namespace ui {
 constexpr int kMapMaxMarkers = 32;
 constexpr int16_t kMapMargin = 6;
 constexpr int16_t kMapCalloutH = 40;
+// EST-400: the callout's two text rows and their padding. Its height is kMapCalloutH, so these must
+// add up inside it: 12 and 28 put the two 11/10 px lines on their own bands, 7 px in from the sides.
+constexpr int16_t kMapCalloutPadX = 7;
+constexpr int16_t kMapCalloutPadY = 8;    // the box sits this much above the bar
+constexpr int16_t kMapCalloutLine1Cy = 12;
+constexpr int16_t kMapCalloutLine2Cy = 28;
+static_assert(kMapCalloutLine2Cy + 6 <= kMapCalloutH,
+              "the callout's second line must stay inside its box");
+static_assert(kMapCalloutLine1Cy + 8 <= kMapCalloutLine2Cy,
+              "the two callout lines must not overlap");
 constexpr int16_t kMapMarkerR = 4;
 constexpr int16_t kMapMarkerHitR = 11;
 

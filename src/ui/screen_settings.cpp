@@ -122,10 +122,15 @@ int measureBody(void* ctx, const char* text, int len) {
 }
 
 void drawWarn(lgfx::LovyanGFX* d, const Rect& r, const char* text) {
-  d->fillRoundRect(r.x, r.y + 3, r.w - 2 * kSetPadX, r.h - 6, kRadius, kWarnBg);
-  d->drawRoundRect(r.x, r.y + 3, r.w - 2 * kSetPadX, r.h - 6, kRadius, kWarnLine);
-  const int x = r.x + kSetPadX + 6;
-  const int w = r.w - 2 * (kSetPadX + 6);
+  // EST-400: the plate was left-flush (r.x) with a width already inset on both sides, so it was
+  // inset on the right only and the text's right edge fell one pixel past its background. Every other
+  // row insets from r.x + kSetPadX; so does this one now, and the text keeps its 6 px inner pad.
+  const Rect plate{(int16_t)(r.x + kSetPadX), (int16_t)(r.y + 3),
+                   (int16_t)(r.w - 2 * kSetPadX), (int16_t)(r.h - 6)};
+  d->fillRoundRect(plate.x, plate.y, plate.w, plate.h, kRadius, kWarnBg);
+  d->drawRoundRect(plate.x, plate.y, plate.w, plate.h, kRadius, kWarnLine);
+  const int x = plate.x + 6;
+  const int w = plate.w - 12;
   WrapLine lines[3];
   const int n = wrapText(text ? text : "", measureBody, d, w, w, lines, 3);
   char buf[96];
@@ -211,18 +216,22 @@ void drawRow(lgfx::LovyanGFX* d, const SettingRow& row, const Rect& r) {
       setRole(d, FontRole::SansBody);
       d->setTextDatum(lgfx::textdatum_t::middle_left);
       d->setTextColor(kInk, kScreen);
-      d->drawString(row.label, labelX, cy);
+      // EST-400: the label stops before the minus key (it used to run under it).
+      drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, labelX, cy,
+                       settingsStepperLabelW(r), row.label);
       const Rect val = settingsStepValueRect(r);
       drawTextRight(d, FontRole::MonoMeta, kInk, kScreen, val.right(), cy, row.value);
       break;
     }
     case SetRowKind::Toggle: {
-      setRole(d, FontRole::SansBody);
-      d->setTextDatum(lgfx::textdatum_t::middle_left);
-      d->setTextColor(kInk, kScreen);
-      d->drawString(row.label, labelX, cy);
+      // EST-400: the label stops before the right-aligned value (it used to run under it), measured
+      // from the value's own width, not from a guess.
+      const char* value = row.on ? (row.value[0] ? row.value : "ON") : "OFF";
+      const int valueW = measureText(d, FontRole::MonoMeta, value, (int)strlen(value));
+      drawTextEllipsis(d, FontRole::SansBody, kInk, kScreen, labelX, cy,
+                       settingsToggleLabelW(r, valueW), row.label);
       drawTextRight(d, FontRole::MonoMeta, row.on ? kGreen : kDimmer, kScreen, r.right() - kSetPadX,
-                    cy, row.on ? (row.value[0] ? row.value : "ON") : "OFF");
+                    cy, value);
       break;
     }
     case SetRowKind::Check: {
@@ -477,20 +486,8 @@ SettingsKeyHit settingsEditorKeyAt(const SettingsView& v, int x, int y) {
   if (v.editor == SettingsEditor::None) return out;
   const KeyboardField field = settingsEditorField(v.editor);
   const ChatLayout g = chatLayoutFor(l2(), true, false, v.editNums, false, field);
-  const KeyHit key = keyAt(g, v.editNums, x, y, field);
-  if (key.row < 0) return out;
-  KeyDef defs[10];
-  const int n = keyRow(v.editNums, key.row, defs, field);
-  if (key.col < 0 || key.col >= n) return out;
-  out.pressed = true;
-  out.kind = defs[key.col].kind;
-  out.row = key.row;
-  out.col = key.col;
-  out.ch = defs[key.col].label[0];
-  if (v.editShift && !v.editNums && out.ch >= 'a' && out.ch <= 'z') {
-    out.ch = (char)(out.ch - 32);
-  }
-  return out;
+  // EST-400: the one key hit test (ui/keys.cpp), the same one the RPTR sheet asks.
+  return editorKeyAt(g, field, v.editNums, v.editShift, x, y);
 }
 
 SettingsModalHit settingsClearAskHit(const SettingsView& v, int x, int y) {

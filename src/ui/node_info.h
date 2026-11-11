@@ -55,6 +55,19 @@ inline int pubKeyHex(char* out, size_t cap, const uint8_t* key, int bytes) {
   return (int)n;
 }
 
+// EST-400: how many rows nodeInfoLines() will produce, without building their text. The page's
+// scroll limit is this count times kNodeInfoRowH; test/host asserts the two agree for every model
+// shape, so the cheap counter cannot drift from the builder that decides what is drawn.
+inline int nodeInfoLineCount(const NodeInfoModel& m) {
+  int n = 2;                                   // Name, Type
+  if (m.hasKey) n += 3;                        // Key (short), Key (1/2), Key (2/2)
+  if (m.lastSeen[0]) ++n;
+  if (m.hasPosition) ++n;
+  if (m.path[0]) ++n;
+  if (m.hasSnr) ++n;
+  return n;
+}
+
 // Rows: name, type, public key (short, then the whole key split over two mono lines), last advert,
 // position and path when known, SNR only when known. Returns 0..kMaxNodeInfoLines.
 inline int nodeInfoLines(const NodeInfoModel& m, NodeInfoLine* out, int max) {

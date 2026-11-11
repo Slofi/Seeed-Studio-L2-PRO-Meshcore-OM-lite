@@ -254,6 +254,12 @@ RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply) {
   m.useGps = Rect{8, (int16_t)(m.panel.y + 20), 154, 20};
   if (apply) m.apply = Rect{(int16_t)(L.width - 8 - 150), (int16_t)(m.panel.y + 20), 150, 20};
   m.cross = mapCentreCrossAt(kMapCentreX, kMapCentreY);
+  // EST-400: the empty state's own band. It used to be a literal {8, 60, 304, 100} in map_pick.cpp,
+  // i.e. the L2's width and centre baked into a file both devices' pickers draw. Now it is inside the
+  // picker's map area with the Map chrome's own margin, so the screen size stays a parameter.
+  m.empty = Rect{(int16_t)(m.map.x + kMapMargin),
+                 (int16_t)(m.map.y + (m.map.h - kMapPickEmptyH) / 2),
+                 (int16_t)(m.map.w - 2 * kMapMargin), kMapPickEmptyH};
   return m;
 }
 

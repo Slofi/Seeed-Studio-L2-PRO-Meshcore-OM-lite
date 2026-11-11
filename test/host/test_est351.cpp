@@ -73,8 +73,10 @@ static void testMapChrome() {
 
   const MapChrome s = mapChromeFor(L, true);
   CHECK(!s.callout.empty());
-  CHECK(s.callout.bottom() == L.tabbar.y - 8);   // EST-374: the shown bar's top, not the view's
-  CHECK(s.callout.x == 8 && s.callout.right() == 312);
+  CHECK(s.callout.bottom() == L.tabbar.y - kMapCalloutPadY);   // EST-374: the shown bar's top
+  // EST-400: the box insets by the Map's own margin on both sides (it was the literals 8 / 16).
+  CHECK(s.callout.x == kMapMargin && s.callout.right() == L.width - kMapMargin);
+  CHECK(s.callout.w == L.width - 2 * kMapMargin);
 }
 
 static void testMapHit() {

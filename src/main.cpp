@@ -343,6 +343,8 @@ static char g_nodeTraceTitle[32] = "";     // whose result it is (TraceView has 
 static bool g_nodeTraceOpen = false;       // the sheet is showing that trace
 static int g_nodeInfo = -1;                // node index whose full Info page is open
 static om::ui::NodeInfoModel g_nodeInfoModel;
+static int g_nodeInfoScroll = 0;           // EST-400: the Info page's body offset (0 when opened)
+static int g_nodeInfoScroll0 = 0;          // the finger-down base for that drag
 static bool g_newNodeDot = false;          // a contact was added since Nodes was last opened
 
 // EST-357: every UI scratch array above is one PSRAM allocation, made once here. The crash that
@@ -633,6 +635,7 @@ static bool buildNodeInfoModel(int node, om::ui::NodeInfoModel* m) {
 static void openNodeInfo(int node) {
   if (!buildNodeInfoModel(node, &g_nodeInfoModel)) return;
   g_nodeInfo = node;
+  g_nodeInfoScroll = 0;   // EST-400: the page opens at its first row, never where the last one was
   closeNodeSheets();
   // EST-399: the row, not the name the sheet is showing (rule 9).
   Serial.printf("[nodes] info %d\n", node);
@@ -702,7 +705,7 @@ static void drawHome() {
     if (!buildNodeInfoModel(g_nodeInfo, &g_nodeInfoModel)) {
       g_nodeInfo = -1;   // the contact went away (removed, or the table changed under us)
     } else {
-      om::ui::nodeInfoDraw(status, g_nodeInfoModel);
+      om::ui::nodeInfoDraw(status, g_nodeInfoModel, g_nodeInfoScroll);
       return;
     }
   }
@@ -3417,6 +3420,24 @@ static void timeFieldText(om::ui::TimeField f, char* out, size_t cap) {
   }
 }
 
+// EST-400: ONE manual-time apply. The title row's Set key and the editor's OK carried the same
+// twenty lines (the civil build, the sanity gate, the source set, the floor save and the two toasts),
+// and a third copy is how the EST-391 32-bit bug would come back. Shows the one toast and returns
+// whether the clock was set; the caller then leaves the page.
+static bool applyManualTime() {
+  uint32_t epoch = 0;
+  const bool made = om::localEpochFromCivil(g_setTime.year, g_setTime.month, g_setTime.day,
+                                            g_setTime.hour, g_setTime.minute, 0, epoch);
+  if (!made || !om::saneEpoch(epoch) ||
+      !om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
+    showToast("Time not set");
+    return false;
+  }
+  saveTimeFloor();
+  showToast("Time set");
+  return true;
+}
+
 static void buildSettingsRows() {
   setResetRows();
   // EST-392: the Position row is only on General; every other page leaves the index unset.
@@ -3952,7 +3973,11 @@ static void buildSettingsRows() {
         timeFieldText((om::ui::TimeField)i, v, sizeof(v));
         setAdd(om::ui::SetRowKind::Stepper, (uint16_t)(A_TimeFieldBase + i), labels[i], v);
       }
-      setAdd(om::ui::SetRowKind::Note, A_None, "The next GPS fix takes over.");
+      // EST-400: the stepper now walks exactly the clock's real years (kMinSaneYear..kMaxSaneYear,
+      // derived from kMinSaneEpoch/kMaxSaneEpoch), so the Note says the same bound instead of a
+      // second, unrelated sentence.
+      setAdd(om::ui::SetRowKind::Note, A_None,
+             "2025 to 2038. The next GPS fix takes over.");
       // EST-363: same rule as the sound picker: the commit action lives in the title row, because with
       // five steppers above it the old bottom row needed a scroll on the 188 px body.
       g_setActionLabel = "Set";
@@ -4516,20 +4541,10 @@ static void handleSettingsRow(uint16_t id) {
       g_setPresetPending = om::ui::kRadioCustomPreset;
       setGo(SetPage::ConfirmPreset);
       break;
-    case A_TimeApply: {
-      uint32_t epoch = 0;
-      const bool made = om::localEpochFromCivil(g_setTime.year, g_setTime.month, g_setTime.day,
-                                                g_setTime.hour, g_setTime.minute, 0, epoch);
-      if (made && om::saneEpoch(epoch) &&
-          om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
-        saveTimeFloor();
-        showToast("Time set");
-        setBack();
-      } else {
-        showToast("Time not set");
-      }
+    case A_TimeApply:
+      // EST-400: the one apply (it shows the one toast too); on success leave the page.
+      if (applyManualTime()) setBack();
       break;
-    }
     case A_Apply:
       if (g_setPage == SetPage::ConfirmHash) {
         if (om::meshPathHashSet((uint8_t)g_setHashPending)) showToast("Path hash saved");
@@ -4706,17 +4721,8 @@ static void settingsEditorOk() {
   }
 
   if (g_setPage == SetPage::TimeEdit) {
-    uint32_t epoch = 0;
-    const bool made = om::localEpochFromCivil(g_setTime.year, g_setTime.month, g_setTime.day,
-                                              g_setTime.hour, g_setTime.minute, 0, epoch);
-    if (made && om::saneEpoch(epoch) &&
-        om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
-      saveTimeFloor();
-      showToast("Time set");
-      setBack();                    // the page that opened the editor: Time
-    } else {
-      showToast("Time not set");
-    }
+    // EST-400: the same one apply as the title row's Set key.
+    if (applyManualTime()) setBack();   // the page that opened the editor: Time
     drawSettings();
     return;
   }
@@ -5609,7 +5615,6 @@ static void pressArmAt(int x, int y) {
 static void handleTap(int x, int y, bool longPress) {
   Serial.printf("[tap] %d,%d\n", x, y);
   om::sounds::playClick();
-  const bool topRight = (y < 40 && x >= 260);
 
   // New Nodes tab: the tab bar, the gear and the row bands all come from the same Layout rects
   // that drew them. Nothing here repeats a coordinate.
@@ -6474,9 +6479,19 @@ void loop() {
           }
           if (redraw) drawChat();
         }
-        // The Nodes scroll is clamped and snapped back when the finger lifts; the last 60 ms of a
-        // drag may not have been drawn, so the final position is always drawn here.
-        if (g_tab == 0 && !g_settings && screenOn) {
+        // The Info page's scroll snaps its give back the same way, and its last drawn position is
+        // always painted here too (the drag may not have drawn in the last 60 ms).
+        if (g_tab == 0 && !g_settings && screenOn && g_nodeInfo >= 0) {
+          const om::ui::NodeInfoLayout nl = om::ui::nodeInfoLayoutFor(om::ui::l2());
+          const int maxScroll =
+              om::ui::nodeInfoMaxScroll(om::ui::nodeInfoLineCount(g_nodeInfoModel), nl);
+          const int clamped = om::ui::nodeInfoSnapScroll(g_nodeInfoScroll, maxScroll);
+          const bool changed = clamped != g_nodeInfoScroll;
+          g_nodeInfoScroll = clamped;
+          if (g_drag || changed) drawHome();
+        } else if (g_tab == 0 && !g_settings && screenOn) {
+          // The Nodes scroll is clamped and snapped back when the finger lifts; the last 60 ms of a
+          // drag may not have been drawn, so the final position is always drawn here.
           const int maxScroll = om::ui::l2().maxScroll(g_nodeCount);
           const int clamped = g_nodeScroll < 0 ? 0
                             : (g_nodeScroll > maxScroll ? maxScroll : g_nodeScroll);
@@ -6543,6 +6558,7 @@ void loop() {
     g_setScroll0 = g_setScroll;
     g_setSelScroll0 = g_setSelScroll;
     g_nodeScroll0 = g_nodeScroll;
+    g_nodeInfoScroll0 = g_nodeInfoScroll;   // EST-400: the Info page's own drag base
     g_rptrScroll0 = g_rptrScroll;
     g_rptrPageScroll0 = g_rptrPageScroll;
     g_drag = false;
@@ -6842,6 +6858,20 @@ void loop() {
           if (next != g_rptrPageScroll) {
             g_rptrPageScroll = next;
             if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawRptrTab(); }
+          }
+        }
+      } else if (g_tab == 0 && !g_settings && g_nodeInfo >= 0) {
+        // EST-400: the Info page's rows scroll with the finger once they do not fit the body (a
+        // ninth row is one field away), through the same give rule as every other list.
+        const om::ui::NodeInfoLayout nl = om::ui::nodeInfoLayoutFor(om::ui::l2());
+        const int maxScroll =
+            om::ui::nodeInfoMaxScroll(om::ui::nodeInfoLineCount(g_nodeInfoModel), nl);
+        const int next = om::ui::nodeInfoDragScroll(g_nodeInfoScroll0, dy, maxScroll);
+        if (next != g_nodeInfoScroll) {
+          g_nodeInfoScroll = next;
+          if (millis() - g_lastRender > 60) {
+            g_lastRender = millis();
+            drawHome();
           }
         }
       } else if (g_tab == 0 && !g_settings) {

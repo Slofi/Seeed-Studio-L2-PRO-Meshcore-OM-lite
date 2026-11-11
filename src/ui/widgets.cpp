@@ -164,6 +164,12 @@ int glyphWidthCb(void* ctx, uint32_t cp) {
   return c->d->textWidth(b);
 }
 
+int measureCb(void* ctx, const char* text, int len) {
+  Utf8Ctx* c = (Utf8Ctx*)ctx;
+  if (c == nullptr) return 0;
+  return measureText(c->d, c->role, text, len);
+}
+
 int spaceWidth(lgfx::LovyanGFX* d, FontRole role) {
   setRole(d, role);
   return d->textWidth(" ");
@@ -276,34 +282,24 @@ int drawTextRight(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, i
   return w;
 }
 
-// Never draws outside maxW; the cut is on a drawable-unit boundary and ends with "...".
+// Never draws outside maxW; the cut is on a drawable-unit boundary and ends with "...". EST-400: the
+// cut itself is ui/text_wrap.h's ellipsisFit(), the same arithmetic the host test proves.
 void drawTextEllipsis(lgfx::LovyanGFX* d, FontRole role, uint16_t fg, uint16_t bg, int x, int y,
                       int maxW, const char* s) {
   if (d == nullptr || s == nullptr || maxW <= 0) return;
-  const int len = (int)strlen(s);
-  if (measureText(d, role, s, len) <= maxW) {
+  Utf8Ctx ctx{d, role};
+  int cut = ellipsisFit(s, measureCb, &ctx, maxW);
+  if (cut < 0) {   // the whole string fits: draw it unchanged
     drawTextLeft(d, role, fg, bg, x, y, s);
     return;
   }
-  const int ellW = measureText(d, role, "...", 3);
-  char buf[80];
-  int cut = 0;
-  int w = 0;
-  for (int i = 0; i < len && cut < (int)sizeof(buf) - 4;) {
-    TextUnit u;
-    const int next = textUnitAt(s, len, i, &u);
-    if (next <= i) break;
-    if (!u.zero) {
-      const int cw = measureText(d, role, s + u.start, u.end - u.start);
-      if (w + cw + ellW > maxW) break;
-      w += cw;
-      cut = u.end;
-    } else {
-      cut = u.end;
-    }
-    i = next;
-  }
   if (cut == 0) return;
+  char buf[80];
+  if (cut > (int)sizeof(buf) - 4) {
+    cut = (int)sizeof(buf) - 4;
+    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) --cut;   // never mid-sequence
+    if (cut == 0) return;
+  }
   memcpy(buf, s, (size_t)cut);
   buf[cut] = 0;
   strncat(buf, "...", sizeof(buf) - strlen(buf) - 1);
@@ -384,16 +380,21 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   if (flags.bt) drawIcon(d, kIconBluetooth, rects.bt.x, rects.bt.y, m.btConnected ? kInk : kDim, kBar);
 }
 
+// One line on a 304 px plate. EST-400: it used to be the only text path in the UI that neither
+// ellipsised nor clipped: a long line ran past both rounded ends. The text stays centred while it
+// fits the plate (the old middle_center datum's result) and is cut with "..." to the plate's inner
+// width when it does not.
 void drawToast(lgfx::LovyanGFX* d, const Layout& L, const char* text) {
   if (d == nullptr || text == nullptr || text[0] == 0) return;
   const Rect box{(int16_t)kToastMargin, (int16_t)(L.tabbar.y - kToastMargin - kToastH),
                  (int16_t)(L.width - 2 * kToastMargin), kToastH};
   d->fillRoundRect(box.x, box.y, box.w, box.h, kRadius, kPanel2);
   d->drawRoundRect(box.x, box.y, box.w, box.h, kRadius, kLine);
-  setRole(d, FontRole::SansBody);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kInk, kPanel2);
-  d->drawString(text, box.x + box.w / 2, box.y + box.h / 2);
+  const int room = box.w - 2 * kToastMargin;
+  const int tw = measureText(d, FontRole::SansBody, text, (int)strlen(text));
+  const int drawn = tw > room ? room : tw;
+  drawTextEllipsis(d, FontRole::SansBody, kInk, kPanel2, box.x + (box.w - drawn) / 2,
+                   box.y + box.h / 2, room, text);
 }
 
 // The frame overlay (EST-344): the toast state lives in ui/toast.h; this only decides whether the

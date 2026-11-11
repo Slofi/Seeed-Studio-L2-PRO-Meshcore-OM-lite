@@ -56,6 +56,9 @@ constexpr int16_t kRptrModalH = 118;
 // stopped above the tab bar; since EST-374 the canvas runs to y 240, so the banner hovered 25 px
 // above the bottom edge with map showing under it.
 constexpr int16_t kRptrPickPanelH = 42;
+// EST-400: the "Map pack not open." band's height, centred in the picker's map area. Its width and x
+// come from the layout (m.empty), never from a screen-sized literal in the drawing.
+constexpr int16_t kMapPickEmptyH = 100;
 
 struct RptrListLayout {
   Rect head;       // "REPEATERS"
@@ -190,6 +193,7 @@ struct RptrMapPickLayout {
   Rect useGps;     // "Use my GPS position"
   Rect apply;      // empty when there is nothing to apply
   Rect cross;      // EST-393: the Map's OWN 7x7 centre cross box (ui/map_chrome.h)
+  Rect empty;      // EST-400: the "Map pack not open." band inside `map`, kMapMargin in from its sides
 };
 RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply);
 

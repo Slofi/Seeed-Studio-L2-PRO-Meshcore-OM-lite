@@ -11,7 +11,9 @@
 #include "board.h"
 #include "map.h"   // EST-366: the Position page's picker is the Map tab's own offline renderer
 #include "ui/keyboard_draw.h"
+#include "ui/keys.h"        // EST-400: the shared small keys (also the map picker's) and editorKeyAt
 #include "ui/map_pick.h"   // EST-384: the one picker, shared with the node's Fixed position
+#include "ui/text_wrap.h"  // EST-400: the shared wrapper for the confirmation pop-up
 
 namespace om {
 namespace ui {
@@ -26,20 +28,8 @@ void chip(lgfx::LovyanGFX* d, const Rect& r, const char* text, bool on) {
   d->drawString(text, r.x + r.w / 2, r.y + r.h / 2);
 }
 
-void smallKey(lgfx::LovyanGFX* d, const Rect& r, const char* text, bool strong) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, strong ? kSelBg2 : kPanel2);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, strong ? kAcc : kLine);
-  setRole(d, FontRole::MonoMeta);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(strong ? kAccInk : kInk, strong ? kSelBg2 : kPanel2);
-  d->drawString(text, r.x + r.w / 2, r.y + r.h / 2);
-}
-
-void drawBack(lgfx::LovyanGFX* d, const Rect& r, const char* label) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kPanel2);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kLine);
-  drawTextLeft(d, FontRole::MonoMeta, kInk, kPanel2, r.x + 8, r.y + r.h / 2, label);
-}
+// EST-400: smallKey / drawBack / drawButton are ui/keys.cpp now (they were byte-identical copies in
+// map_pick.cpp; one shared file means the picker and this page can never drift).
 
 // A small gold key: the remembered password. A ring and a stem, no font glyph involved.
 void drawKeyIcon(lgfx::LovyanGFX* d, int cx, int cy, uint16_t ink, uint16_t bg) {
@@ -113,12 +103,12 @@ void drawPageRow(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::UiRow&
     }
   }
   if (row.stepKeys) {
-    smallKey(d, r.keyA, "-", false);
-    smallKey(d, r.keyB, "+", false);
+    drawSmallKey(d, r.keyA, "-", false);
+    drawSmallKey(d, r.keyB, "+", false);
   } else if (row.key[0]) {
-    smallKey(d, r.keyA, row.key, false);
+    drawSmallKey(d, r.keyA, row.key, false);
   } else if (row.arrow) {
-    smallKey(d, r.keyA, ">", false);
+    drawSmallKey(d, r.keyA, ">", false);
   }
   d->drawFastHLine(r.body.x, r.body.bottom() - 1, r.body.w, kRowLine);
 }
@@ -184,42 +174,54 @@ void drawBanner(lgfx::LovyanGFX* d, const RptrPageLayout& a, const rptr::ScreenO
   }
 }
 
+// EST-400: the shared wrapper (ui/text_wrap.h) instead of a private one. The old loop broke only at
+// a space and stopped silently at a 47-byte line cap, so one long unbroken token was cut mid-word
+// and a box that ran out of rows said nothing. Now every line is a byte range of the source cut on a
+// drawable-unit boundary, and a box that cannot show all of the text ends its last line with "...".
+namespace {
+
+struct WrapCtx {
+  lgfx::LovyanGFX* d;
+  FontRole role;
+};
+
+int measureWrapped(void* ctx, const char* text, int len) {
+  WrapCtx* c = (WrapCtx*)ctx;
+  if (c == nullptr) return 0;
+  return measureText(c->d, c->role, text, len);
+}
+
+}  // namespace
+
 void drawWrapped(lgfx::LovyanGFX* d, FontRole role, uint16_t ink, uint16_t bg, const Rect& box,
                  const char* text) {
+  if (d == nullptr || text == nullptr) return;
   setRole(d, role);
-  int y = box.y + 2;
   const int lineH = 15;
-  char line[48];
-  const char* p = text;
-  while (*p && y + lineH <= box.bottom()) {
-    // Take as many words as fit the box, then draw that line.
-    size_t n = 0;
-    size_t lastSpace = 0;
-    line[0] = 0;
-    while (p[n] && n + 1 < sizeof(line)) {
-      line[n] = p[n];
-      line[n + 1] = 0;
-      if (p[n] == ' ') lastSpace = n;
-      if (measureText(d, role, line, (int)n + 1) > box.w) break;
-      ++n;
-    }
-    if (p[n] && lastSpace > 0) n = lastSpace;
-    line[n < sizeof(line) ? n : sizeof(line) - 1] = 0;
-    drawTextLeft(d, role, ink, bg, box.x, y, line);
-    p += n;
-    while (*p == ' ') ++p;
-    y += lineH;
+  const int top = box.y + 2;
+  int maxLines = (box.bottom() - top) / lineH;
+  if (maxLines < 1) maxLines = 1;
+  if (maxLines > kMaxWrapLines) maxLines = kMaxWrapLines;
+  WrapCtx ctx{d, role};
+  WrapLine lines[kMaxWrapLines];
+  const int n = wrapText(text, measureWrapped, &ctx, box.w, box.w, lines, maxLines);
+  const bool truncated = wrapConsumed(text, lines, n) < (int)strlen(text);
+  char buf[128];
+  for (int i = 0; i < n; ++i) {
+    int len = lines[i].len;
+    if (len < 0) len = 0;
+    if (len > (int)sizeof(buf) - 5) len = (int)sizeof(buf) - 5;
+    memcpy(buf, text + lines[i].start, (size_t)len);
+    buf[len] = 0;
+    if (i == n - 1 && truncated) strncat(buf, "...", sizeof(buf) - strlen(buf) - 1);
+    // The last line may also be cut by the buffer above: drawTextEllipsis is the one that guards the
+    // box width (and adds its own dots when the text it is handed still does not fit).
+    drawTextEllipsis(d, role, ink, bg, box.x, top + i * lineH, box.w, buf);
   }
 }
 
-void drawButton(lgfx::LovyanGFX* d, const Rect& r, const char* label, bool danger) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, danger ? kDangerBg : kSelBg2);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, danger ? kBad : kAcc);
-  setRole(d, FontRole::SansBody);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(danger ? kDangerInk : kAccInk, danger ? kDangerBg : kSelBg2);
-  d->drawString(label, r.x + r.w / 2, r.y + r.h / 2);
-}
+// EST-400: drawButton is ui/keys.cpp's drawActionKey (the map picker's Apply was the same key with
+// the danger branch removed).
 
 // The sheet over the tab bar: the same shared keyboard the Settings editors and the composer use.
 void drawSheet(lgfx::LovyanGFX* d, const RptrView& v) {
@@ -306,7 +308,7 @@ void drawPageStage(lgfx::LovyanGFX* d, const RptrView& v) {
   const bool banner = s.banner[0] != 0;
   const RptrPageLayout a =
       rptrPageLayoutFor(l2(), card, banner, s.hasApply, s.bigButton, console);
-  drawBack(d, a.back, v.page == rptr::Page::Repeater ? "< list" : "< back");
+  drawSheetBackKey(d, a.back, v.page == rptr::Page::Repeater ? "< list" : "< back");
   // EST-363: the title sits in its own band, above the subtitle band. drawTextLeft uses a middle-left
   // datum, so the y is the band's centre, not its top.
   drawTextEllipsis(d, FontRole::SansTitle, kInk, kScreen, a.title.x,
@@ -353,15 +355,15 @@ void drawPageStage(lgfx::LovyanGFX* d, const RptrView& v) {
     const char* typed = s.consoleInput[0] ? s.consoleInput : "command";
     drawTextEllipsis(d, FontRole::MonoMeta, s.consoleInput[0] ? kInk : kDimmer, kFieldBg,
                      a.input.x + 6, a.input.y + a.input.h / 2, a.input.w - 12, typed);
-    drawButton(d, a.send, "Send", false);
+    drawActionKey(d, a.send, "Send", false);
   } else {
     d->setClipRect(a.body.x, a.body.y, a.body.w, a.body.h);
     for (int i = 0; i < s.count; ++i) drawPageRow(d, a, s.rows[i], i, v.pageScroll);
     d->clearClipRect();
   }
 
-  if (!a.apply.empty()) drawButton(d, a.apply, "Apply", s.applyDanger);
-  if (!a.big.empty()) drawButton(d, a.big, s.bigLabel, false);
+  if (!a.apply.empty()) drawActionKey(d, a.apply, "Apply", s.applyDanger);
+  if (!a.big.empty()) drawActionKey(d, a.big, s.bigLabel, false);
 }
 
 void drawModal(lgfx::LovyanGFX* d, const RptrView& v) {
@@ -371,8 +373,8 @@ void drawModal(lgfx::LovyanGFX* d, const RptrView& v) {
   d->fillRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kPanel);
   d->drawRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kAcc);
   drawWrapped(d, FontRole::SansBody, kInk, kPanel, m.text, v.modalText);
-  drawButton(d, m.cancel, "Cancel", false);
-  drawButton(d, m.confirm, v.modalVerb, true);
+  drawActionKey(d, m.cancel, "Cancel", false);
+  drawActionKey(d, m.confirm, v.modalVerb, true);
 }
 
 // EST-366 (rule 6): the Position page's map. EST-384 moved the pixels into ui/map_pick.cpp so the
@@ -456,18 +458,9 @@ RptrKeyHit rptrEditorKeyAt(const RptrView& v, int x, int y) {
   if (!v.osk) return out;
   const KeyboardField field = rptrEditorField(v);
   const ChatLayout g = chatLayoutFor(l2(), true, false, v.nums, false, field);
-  const KeyHit key = keyAt(g, v.nums, x, y, field);
-  if (key.row < 0) return out;
-  KeyDef defs[10];
-  const int n = keyRow(v.nums, key.row, defs, field);
-  if (key.col < 0 || key.col >= n) return out;
-  out.pressed = true;
-  out.kind = defs[key.col].kind;
-  out.row = key.row;
-  out.col = key.col;
-  out.ch = defs[key.col].label[0];
-  if (v.shift && !v.nums && out.ch >= 'a' && out.ch <= 'z') out.ch = (char)(out.ch - 32);
-  return out;
+  // EST-400: the one key hit test (ui/keys.cpp). It was fifteen lines duplicated in
+  // screen_settings.cpp; the shell still asks this wrapper, so nothing above it moved.
+  return editorKeyAt(g, field, v.nums, v.shift, x, y);
 }
 
 }  // namespace ui

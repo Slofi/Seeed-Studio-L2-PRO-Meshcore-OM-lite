@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "ui/chat_selector.h"   // EST-350: the selector inside Settings is the Chat tab's own
+#include "ui/keys.h"            // EST-400: EditorKeyHit + editorKeyAt, the RPTR sheet's own test
 #include "ui/settings_layout.h"
 #include "ui/widgets.h"
 
@@ -72,13 +73,8 @@ void settingsScreenDraw(const SettingsView& v);
 
 // One key of the editor's sheet, resolved to what the shell does with it. `ch` is the character for
 // KeyKind::Char with shift already applied; `row`/`col` locate the drawn key for the accent bubble.
-struct SettingsKeyHit {
-  bool pressed = false;
-  KeyKind kind = KeyKind::Char;
-  char ch = 0;
-  int row = -1;
-  int col = -1;
-};
+// EST-400: the RPTR sheet's RptrKeyHit was the same struct; both are ui/keys.h's EditorKeyHit now.
+using SettingsKeyHit = EditorKeyHit;
 
 // All hit tests are pure reads of the same layout the drawing used.
 int settingsTabHit(const SettingsView& v, int x, int y);          // 0..4 or -1

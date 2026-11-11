@@ -10,6 +10,7 @@
 #include "rptr_model.h"
 #include "rptr_page.h"
 #include "ui/chat_layout.h"
+#include "ui/keys.h"          // EST-400: EditorKeyHit + editorKeyAt (the Settings sheet's own test)
 #include "ui/layout.h"
 #include "ui/rptr_layout.h"
 #include "ui/widgets.h"
@@ -89,14 +90,9 @@ void rptrScreenDraw(const RptrView& v);
 // The floor the screen must not put a tap on: true while the sheet covers the tab bar.
 bool rptrSheetOpen(const RptrView& v);
 
-// One key of the open sheet, resolved for the shell (the Settings editor's pattern).
-struct RptrKeyHit {
-  bool pressed = false;
-  KeyKind kind = KeyKind::Char;
-  int row = -1;
-  int col = -1;
-  char ch = 0;
-};
+// One key of the open sheet, resolved for the shell (the Settings editor's pattern). EST-400: the
+// two structs were the same five fields; both are ui/keys.h's EditorKeyHit now.
+using RptrKeyHit = EditorKeyHit;
 RptrKeyHit rptrEditorKeyAt(const RptrView& v, int x, int y);
 KeyboardField rptrEditorField(const RptrView& v);
 

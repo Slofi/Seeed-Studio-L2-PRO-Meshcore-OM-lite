@@ -9,11 +9,12 @@ namespace ui {
 namespace {
 
 void add(NodeMenuRow* out, int& n, int max, NodeAction action, const char* label,
-         const char* value = "") {
+         const char* value = "", bool valueAccent = false) {
   if (n >= max) return;
   out[n].action = action;
   out[n].label = label;
   out[n].value = value ? value : "";
+  out[n].valueAccent = valueAccent;
   ++n;
 }
 
@@ -37,7 +38,8 @@ int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
   if (c.hasKey && c.pathKnown) add(out, n, max, NodeAction::Trace, "Trace");
   if (c.hasKey && c.pathKnown) add(out, n, max, NodeAction::ResetPath, "Reset path");
   if (c.hasKey) {
-    add(out, n, max, NodeAction::Favourite, "Favourite", c.favourite ? "on" : "off");
+    add(out, n, max, NodeAction::Favourite, "Favourite", c.favourite ? "on" : "off",
+        c.favourite);
   }
   if (c.hasKey) {
     // Two taps: the first only renames the row, so a long press followed by a stray tap cannot

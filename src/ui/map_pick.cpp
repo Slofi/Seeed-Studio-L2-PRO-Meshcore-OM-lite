@@ -8,6 +8,7 @@
 #include "../fonts.h"   // useAppFont, the same face the RPTR frame restores
 #include "board.h"
 #include "map.h"
+#include "ui/keys.h"        // EST-400: the shared small keys (also the RPTR page's)
 #include "ui/map_chrome.h"   // EST-393: the Map's own centre cross, reused here
 #include "ui/rptr_layout.h"
 
@@ -15,31 +16,9 @@ namespace om {
 namespace ui {
 namespace {
 
-// The picker's one strong key (Apply / Save). Same shape as the RPTR page's action keys; kept local
-// so this file does not need the RPTR screen's private drawing helpers.
-void drawPickAction(lgfx::LovyanGFX* d, const Rect& r, const char* label) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kSelBg2);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kAcc);
-  setRole(d, FontRole::SansBody);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kAccInk, kSelBg2);
-  d->drawString(label, r.x + r.w / 2, r.y + r.h / 2);
-}
-
-void smallKey(lgfx::LovyanGFX* d, const Rect& r, const char* text, bool strong) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, strong ? kSelBg2 : kPanel2);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, strong ? kAcc : kLine);
-  setRole(d, FontRole::MonoMeta);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(strong ? kAccInk : kInk, strong ? kSelBg2 : kPanel2);
-  d->drawString(text, r.x + r.w / 2, r.y + r.h / 2);
-}
-
-void drawBack(lgfx::LovyanGFX* d, const Rect& r, const char* label) {
-  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kPanel2);
-  d->drawRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, kLine);
-  drawTextLeft(d, FontRole::MonoMeta, kInk, kPanel2, r.x + 8, r.y + r.h / 2, label);
-}
+// EST-400: nothing here any more. drawSmallKey / drawSheetBackKey / drawActionKey are ui/keys.cpp,
+// the one copy the RPTR page draws too; this file used to carry byte-identical versions of all three
+// (and a comment explaining that the copy was deliberate, which is what EST-384 was avoiding).
 
 }  // namespace
 
@@ -47,12 +26,14 @@ void drawMapPick(lgfx::LovyanGFX* d, const MapPickView& v) {
   om::mapRender();
   const RptrMapPickLayout m = rptrMapPickLayoutFor(l2(), v.action);
   if (!om::mapReady()) {
-    drawEmptyState(d, Rect{8, 60, 304, 100}, "Map pack not open.",
+    // EST-400: the empty state's band comes from the layout (inside the picker's own map area with
+    // kMapMargin on each side), not from the L2's 320 px and a literal {8, 60, 304, 100}.
+    drawEmptyState(d, m.empty, "Map pack not open.",
                    "The card needs /maps/slo/tiles.pack.");
   }
-  drawBack(d, m.back, v.backLabel);
-  smallKey(d, m.zoomIn, "+", false);
-  smallKey(d, m.zoomOut, "-", false);
+  drawSheetBackKey(d, m.back, v.backLabel);
+  drawSmallKey(d, m.zoomIn, "+", false);
+  drawSmallKey(d, m.zoomOut, "-", false);
   // EST-394: the zoom label owns its own rectangle now, UNDER the back key (rptr_layout.cpp), so the
   // wide "Cancel" of the Settings picker can never crowd it. Same MonoMeta face and kDim ink as before.
   if (v.hint[0]) {
@@ -73,7 +54,7 @@ void drawMapPick(lgfx::LovyanGFX* d, const MapPickView& v) {
   d->setTextDatum(lgfx::textdatum_t::middle_center);
   d->setTextColor(v.gps ? kInk : kDimmer, kPanel2);
   d->drawString("Use my GPS position", m.useGps.x + m.useGps.w / 2, m.useGps.y + m.useGps.h / 2);
-  if (!m.apply.empty()) drawPickAction(d, m.apply, v.actionLabel);
+  if (!m.apply.empty()) drawActionKey(d, m.apply, v.actionLabel, false);
 }
 
 void drawMapPickScreen(const MapPickView& v, const StatusModel& status) {

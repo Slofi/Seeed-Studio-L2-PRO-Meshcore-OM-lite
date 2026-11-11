@@ -82,7 +82,8 @@ BIN51="$(mktemp /tmp/om-lite-est393.XXXXXX)"
 BIN52="$(mktemp /tmp/om-lite-est394.XXXXXX)"
 BIN53="$(mktemp /tmp/om-lite-est397.XXXXXX)"
 BIN54="$(mktemp /tmp/om-lite-est399.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54"' EXIT
+BIN55="$(mktemp /tmp/om-lite-est400.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -531,3 +532,15 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est399.cpp \
   ../../src/ui/rptr_layout.cpp ../../src/ui/chat_layout.cpp -o "$BIN54"
 "$BIN54"
 python3 -B test_est399.py
+
+# EST-400: the S5 polish fixes. The manual-time stepper's range derived from the clock's own
+# kMinSaneEpoch/kMaxSaneEpoch, the Stepper/Toggle label rooms, the one ellipsis cut (text fit, UTF-8
+# never split) shared by drawTextEllipsis and the toast, the Info page's clipped/scrolled body and
+# its line counter, the map callout's own text rows, and the picker's empty band from the layout.
+# test_est400.py is the source half: one manual-time helper, the year wrap, the shared ui/keys.cpp,
+# the RPTR wrapper, the toast, the notice log after the show, the Warn plate and the node-info clip.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est400.cpp \
+  ../../src/ui/text_wrap.cpp ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp \
+  ../../src/ui/node_menu.cpp -o "$BIN55"
+"$BIN55"
+python3 -B test_est400.py

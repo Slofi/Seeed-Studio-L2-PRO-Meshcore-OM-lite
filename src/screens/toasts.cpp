@@ -66,7 +66,12 @@ void markShown() {
   s_paintReported = false;
 }
 
-// The shared body of every door: decide, log, then act. `body` may be nullptr (a one-line notice).
+// The shared body of every door: decide, act, then log what really happened. `body` may be nullptr
+// (a one-line notice).
+//
+// EST-400: the log line used to be printed BEFORE the act, so a show the toast then refused still
+// said `[notice] show` and the instrument EST-381 added could lie. Every path now updates `out` to
+// the delivery that REALLY happened and the one logDecision() call is after the switch.
 //
 // `queueWhenBusy` is the one difference between the two doors, and it is deliberate: a NOTIFICATION
 // waits for the toast that is up (the newest pending wins, EST-366's rule 9), while the shell's own
@@ -76,30 +81,38 @@ ui::NoticeDelivery deliver(const char* kindToken, ui::NoticeKind kind, const cha
                            const char* body, bool chatOpen, bool dnd, const char** reason,
                            bool queueWhenBusy) {
   const bool busy = queueWhenBusy && ui::toastState().visible(millis());
-  const ui::NoticeDecision dec = ui::noticeDecide(kind, title, s_screenOn, dnd, chatOpen, busy);
-  logDecision(kindToken, dec);
-  if (reason != nullptr) *reason = dec.reason;
+  ui::NoticeDecision dec = ui::noticeDecide(kind, title, s_screenOn, dnd, chatOpen, busy);
   switch (dec.delivery) {
     case ui::NoticeDelivery::Skipped:
-      return dec.delivery;
+      break;
     case ui::NoticeDelivery::Queued: {
       ui::Notice n;
       ui::noticeCopy(n.title, sizeof(n.title), title);
       ui::noticeCopy(n.body, sizeof(n.body), body);
-      if (!s_queue.pushNotice(kind, n)) return ui::NoticeDelivery::Skipped;
+      if (!s_queue.pushNotice(kind, n)) {
+        dec.delivery = ui::NoticeDelivery::Skipped;
+        dec.reason = "queue-full";
+        break;
+      }
       // The queued notice is not drawn yet (the current toast owns the glass); pump() shows it the
       // moment the current one ends. No frame is needed for this one now.
-      return dec.delivery;
+      break;
     }
     case ui::NoticeDelivery::Shown:
     default:
       if (!ui::toastState().showNotice(title, body, millis(), ui::kToastMs)) {
-        return ui::NoticeDelivery::Skipped;
+        // The toast refused it (an empty title or a zero duration). The line must not say "show".
+        dec.delivery = ui::NoticeDelivery::Skipped;
+        dec.reason = "refused";
+        break;
       }
       markShown();
       requestFrame();
-      return ui::NoticeDelivery::Shown;
+      break;
   }
+  logDecision(kindToken, dec);   // one line, after the act: it can never claim a show that failed
+  if (reason != nullptr) *reason = dec.reason;
+  return dec.delivery;
 }
 
 }  // namespace

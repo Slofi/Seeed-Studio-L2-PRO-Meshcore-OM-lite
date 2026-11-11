@@ -230,11 +230,18 @@ static void testManualTime() {
   CivilTime janLeap{2024, 1, 31, 0, 0};
   check(stepCivilTime(janLeap, TimeField::Month, 1).day == 29, "31 Jan 2024 + 1 month = 29 Feb");
 
-  CivilTime y{2099, 12, 31, 0, 0};
-  check(stepCivilTime(y, TimeField::Year, 1).year == 2000, "year 2099 wraps to 2000");
-  check(stepCivilTime(y, TimeField::Year, -1).year == 2098, "year 2099 backwards is 2098");
-  CivilTime low{2000, 1, 1, 0, 0};
-  check(stepCivilTime(low, TimeField::Year, -1).year == 2099, "year 2000 backwards wraps to 2099");
+  // EST-400: the year walks the clock's real window, kMinSaneYear..kMaxSaneYear (derived from
+  // kMinSaneEpoch/kMaxSaneEpoch in timekeeper.h), not the old 2000..2099 assumption.
+  CivilTime y{om::kMaxSaneYear, 12, 31, 0, 0};
+  check(stepCivilTime(y, TimeField::Year, 1).year == om::kMinSaneYear,
+        "the last clock year wraps to the first");
+  check(stepCivilTime(y, TimeField::Year, -1).year == om::kMaxSaneYear - 1,
+        "the last clock year backwards is the one before");
+  CivilTime low{om::kMinSaneYear, 1, 1, 0, 0};
+  check(stepCivilTime(low, TimeField::Year, -1).year == om::kMaxSaneYear,
+        "the first clock year backwards wraps to the last");
+  check(om::kMinSaneYear == 2025 && om::kMaxSaneYear == 2038,
+        "the clock window is 2025..2038");
 
   CivilTime leap{2024, 2, 29, 0, 0};
   check(stepCivilTime(leap, TimeField::Year, 1).day == 28, "29 Feb + 1 year = 28 Feb");

@@ -7662,3 +7662,68 @@ constants, and the third sweep of `map_trace.cpp` and `screens/map_tab.cpp`.
 
 ## 2026-11-11 18:34 (Claude): EST-399 reviewed
 - Guard proof re-run by Claude: the NEW test_est397.py against the OLD source exits 1 with 65 failures; against the fixed source exits 0. (A first check with git stash was invalid: it restored the old test too.) The tightened guard found 36 more log lines no sweep reported; all fixed.
+
+## 2026-11-11 19:00 (DS, EST-400): L2 Pro firmware, the S5 polish from the sweeps
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). Fixes the 14 S5 polish findings EST-399 left in place: six constants/dead lines
+from EST-396 (#3-#8) and eight from EST-398 (#5-#12). No behaviour change beyond what each finding names; two
+existing tests carried the OLD expectation of a changed rule and were updated (named below).
+
+### Finding -> fix -> test
+
+| Finding | Fix | Test |
+|---|---|---|
+| EST-396 #3 S5: `screen_nodes.cpp` reserved a hard-coded 70 px value column, put the value on the panel edge and chose gold ink by testing `value[0]=='o' && value[1]=='n'` | `theme.h` `kNodeSheetValueW = 70`; the label ellipsises before it and the value is right-aligned at `r.right() - kSheetPadX` (every other sheet row's inset). `NodeMenuRow` gained `valueAccent`, set from `c.favourite`, so the drawing never sniffs a string | `test_est400.cpp` `testMapConstants`: the sheet's row is wider than the constant leaves; `test_est400.py`: no `r.w - 70`, no `'o'/'n'` test, the flag is passed and set |
+| EST-396 #4 S5: the map callout's two text rows (7/12/28/14) and its 8/16 inset were literals beside `kMapCalloutH` | `map_chrome.h`: `kMapCalloutPadX/PadY/Line1Cy/Line2Cy` with two `static_assert`s that the lines stay inside the box and off each other; the box insets by `kMapMargin` | `test_est400.cpp` `testMapConstants`: x/w/pad, both line centres inside, no overlap with the tab bar; `test_est400.py`: the constants are used and the literals are gone |
+| EST-396 #5 S5: `main.cpp` `handleTap` kept `const bool topRight = (y < 40 && x >= 260);`, the old coordinate rule that decided nothing | deleted (with a comment in the test, not in the shell: the tap log stays) | `test_est400.py`: `topRight` appears nowhere |
+| EST-396 #6 S5: the one-line toast drew a centred `drawString` with no ellipsis and no clip, so a long line ran off both rounded ends | `drawToast` measures the text, keeps it centred while it fits the plate's inner width (304 - 2*8 = 288 px) and draws through `drawTextEllipsis` when it does not | `test_est400.py`: the `drawToast` body uses `drawTextEllipsis`/`measureText`, no `drawString`, no `middle_center`; the cut arithmetic is `testEllipsisFit` (shared with `drawTextEllipsis`) |
+| EST-396 #7 S5: the chat and Nodes message/action sheets rounded with `kOskRadius`, the KEYBOARD sheet's constant | `theme.h` `kSheetRadius = kRadiusLg` (6, the same value today) and `screen_chat.cpp`/`screen_nodes.cpp` use it; the keyboard sheet keeps `kOskRadius` | `test_est400.py`: both sheets use `kSheetRadius`, neither draws `g.panel.h + kOskRadius`; `test_est400.cpp` asserts the two constants are independent names with the same 6 px value |
+| EST-396 #8 S5: `toasts.cpp deliver()` logged `[notice] show` BEFORE `showNotice()` could still refuse it | the decision is mutable, every path updates it to the delivery that really happened (`"refused"` / `"queue-full"` on a refusal) and the ONE `logDecision()` call is after the switch | `test_est400.py`: one log call in `deliver()`, after `showNotice`, a refused show sets its own reason |
+| EST-398 #5 S5: the "apply manual time" block was duplicated in the title row's Set key and the editor's OK (localEpochFromCivil, saneEpoch, setFromSource, saveTimeFloor, both toasts) | one `applyManualTime()` in `main.cpp`: builds the epoch, gates it, sets the source, saves the floor, shows the one toast and returns whether the clock was set; both doors call it | `test_est400.py`: exactly ONE `localEpochFromCivil(` in `main.cpp`, one definition + two call sites, the old Note row string gone |
+| EST-398 #6 S5: the year steppers offered 2000..2099 while the clock's gate is `kMaxSaneEpoch` (INT32_MAX = 2038-01-19), so 2050 answered only "Time not set" | `timekeeper.h` derives `kMinSaneYear`/`kMaxSaneYear` from `kMinSaneEpoch`/`kMaxSaneEpoch` with a constexpr `civilYearOfEpoch()`; `stepCivilTime` wraps in that window; the Note row now says "2025 to 2038. The next GPS fix takes over." | `test_est400.cpp` `testYearStepper`: 2038+1 -> 2025, 2025-1 -> 2038, every year in the window is `saneEpoch` on Jan 1, the leap-day clamp, the month wrap; `test_settings.cpp` updated (it asserted 2099->2000) |
+| EST-398 #7 S5: the Settings Warn plate started at the row's own left edge with a width already inset on both sides, so it was inset on the right only and the text ended 1 px past its background | `drawWarn` builds the plate at `r.x + kSetPadX`, `r.w - 2 * kSetPadX` and keeps its 6 px inner text pad, so the text ends 6 px inside the plate | `test_est400.py`: the plate uses `r.x + kSetPadX`, the left-flush fills are gone; `docs/shots/2026-11-11-est400-polish.png` panel 2 |
+| EST-398 #8 S5: the Stepper and Toggle row kinds drew their label with no width check, so it could run under the minus key / the right-aligned value | `settings_layout.h` hands out `settingsStepperLabelW(row)` (up to the minus key minus `kSelGap`) and `settingsToggleLabelW(row, valueW)`; both kinds draw through `drawTextEllipsis` with that room, the Toggle measuring its value first | `test_est400.cpp` `testLabelRooms`: exact room arithmetic at 320, no overlap, zero (never negative) on a narrow row; `test_est400.py`: both row kinds use the helpers and only the Selector's own section label is still an unclipped `drawString` |
+| EST-398 #9 S5: `screen_rptr.cpp` had a private word-wrapper with a 48-byte line buffer, a space-only break and a silent stop at the box's floor | it now uses `ui/text_wrap.h` `wrapText()` + `wrapConsumed()` on the real measure callback; the box's line count comes from its height; a tail that did not fit ends with "..." (and `drawTextEllipsis` still guards the width) | `test_est400.py`: no `char line[48]`, no `lastSpace`, the shared wrapper and `wrapConsumed` are used and the cut appends dots; the wrapper itself is the EST-368-tested one |
+| EST-398 #10 S5: `map_pick.cpp` and `screen_rptr.cpp` had byte-identical `smallKey`/`drawBack` (and `drawPickAction` was `drawButton` without the danger branch); `settingsEditorKeyAt` and `rptrEditorKeyAt` were the same 15 lines | new `ui/keys.h`/`keys.cpp`: `drawSmallKey`, `drawSheetBackKey`, `drawActionKey(danger)` and ONE `editorKeyAt()`; `EditorKeyHit` is the one struct (`SettingsKeyHit`/`RptrKeyHit` are aliases). Both screens and the picker call it | `test_est400.py`: each helper and the hit test are defined exactly once, no private copy in either screen, both wrappers return `editorKeyAt(...)`; `test/host/test_est351.cpp` etc. still link and pass |
+| EST-398 #11 S5: `map_pick.cpp` drew the empty state in a screen-sized literal `Rect{8, 60, 304, 100}` | `RptrMapPickLayout` gained `empty`, built in `rptrMapPickLayoutFor()` inside `m.map` with `kMapMargin` on each side and `kMapPickEmptyH` high; `drawMapPick` passes `m.empty` | `test_est400.cpp` `testMapConstants`: the band is one margin inside the map, centred, clear of the back key, the zoom label and the coordinate panel; `test_est400.py`: the literal is gone, `m.empty` is used |
+| EST-398 #12 S5: the Info page's rows had no clip and no scroll, and the hint was a literal baseline: a ninth row (one field away) ended on top of it | new pure `ui/node_info_layout.h`: one header, a clipped `body` (54..220 at 320x240), a `hint` rect on the same line the old baseline drew (centre 230), `nodeInfoMaxScroll`/`nodeInfoDragScroll`/`nodeInfoSnapScroll`; `screen_node_info.cpp` clips the rows and draws the hint from its rect; `nodeInfoLineCount()` is the cheap count the scroll limit uses; the shell keeps `g_nodeInfoScroll` and drags/snaps it like every other list | `test_est400.cpp` `testNodeInfoLayout`: body never reaches the hint, 8 rows fit and 9 need exactly 14 px, the scrolled last row lands on the body's floor, the give/snap, and `nodeInfoLineCount == nodeInfoLines` over all 32 model shapes; `test_est400.py`: the clip, the hint rect, no `rowH = 20`/`L.height - 10`, the shell passes the scroll |
+
+### Previews
+
+`tools/mkest400.py` -> `docs/shots/2026-11-11-est400-polish.png` (2x, four panels). It compiles a dumper over the
+firmware's own headers and draws ONLY the rectangles and RGB565 colours those print: the toast plate and its 288 px
+room, the Settings Warn row/plate, and the Info page's header/body/hint with the nine real row labels. The text is the
+real UI copy or invented placeholders ("Alice", `<position>`, an invented key and an invented log line); no real name,
+coordinate or message. Panels: the toast ellipsised inside its plate, the Warn box inset and its text inside it, the
+Info page at the top (the ninth row cut by the clip, clear of the hint) and at its maximum scroll (the ninth row on the
+body's floor).
+
+### Build and tests (real exit codes, this tree)
+
+- `PLATFORMIO_CORE_DIR=/home/slofi/.cache/pio-om-lite/core pio run -e om_lite_l2`: **SUCCESS**, exit 0.
+  **RAM 160,400 / 327,680 B (49.0 %; before 160,360, +40 B)**, **Flash 2,988,985 / 6,553,600 B (45.6 %; before
+  2,988,245, +740 B)**, `firmware.bin` 2,989,344 B. No compiler warning.
+- `test/host/run.sh`: **exit 0**, every suite green, including the two new halves: `test_est400.cpp` (year range,
+  label rooms, ellipsis, node-info layout/scroll/line count, callout, picker band) and `test_est400.py` (the source
+  wiring for all 14 findings). `test_est397.py` now reads 183 files / 439 statements (three new UI files, no new
+  Serial), 16 whitelisted, 15 negative controls.
+- **Two existing tests changed their expectation, both because a finding names the change:**
+  `test_settings.cpp` asserted `stepCivilTime` wrapping 2099->2000 (the old range; now `om::kMaxSaneYear` ->
+  `om::kMinSaneYear`), and `test_est351.cpp` asserted the callout at x 8..312 (now `kMapMargin` -> 306..314 at 320).
+
+### What I could not check, and what is left
+
+- **No device.** Nothing here was seen on the glass; the PNG is a host render of the real rectangles, not a
+  screenshot. On the panel, please check: (a) a long toast (the History-not-saved line with a big count) ends with
+  "..." inside its plate; (b) the Preset confirmation's Warn text starts and ends inside its plate; (c) the Info page
+  of a contact with a key, position, path and SNR: the ninth row is cut at the bottom and a drag brings it up.
+- **The 2038 bound is a YEAR.** kMaxSaneEpoch is 2038-01-19, so the stepper can still name 2038-02..12 and the Set
+  key then answers "Time not set": a year stepper cannot express the 19 January cut-off. The window is now 11 months
+  of one year, not 22 years, and the Note says the range out loud.
+- The Info page has no visible scrollbar: the ninth row is simply clipped until the finger drags it, like the Nodes
+  list. Its body is 166 px, so 8 rows fit and the ninth needs 14 px of scroll.
+- `kSheetRadius` and `kOskRadius` are both 6 today, so the sheet-radius fix changes no pixel; it changes WHO owns the
+  number.
+- The third sweep (`ui/map_trace.cpp`, `screens/map_tab.cpp`) is still not done; it was the EST-398 report's "next
+  step" and is outside this ticket.

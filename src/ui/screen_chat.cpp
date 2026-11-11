@@ -517,8 +517,9 @@ void drawMessageSheet(lgfx::LovyanGFX* d, const ChatView& v) {
 
   // Rounded at the top only, like the keyboard sheet: the body is drawn past the bottom edge so the
   // lower corners fall off the screen, and it covers the tab bar because it is drawn after it.
-  d->fillRoundRect(g.panel.x, g.panel.y, g.panel.w, (int16_t)(g.panel.h + kOskRadius), kOskRadius,
-                   kSheet);
+  // EST-400: its own radius (kSheetRadius), not the keyboard sheet's.
+  d->fillRoundRect(g.panel.x, g.panel.y, g.panel.w, (int16_t)(g.panel.h + kSheetRadius),
+                   kSheetRadius, kSheet);
   d->drawFastHLine(g.panel.x, g.panel.y, g.panel.w, kLine);
   drawSheetHead(d, v, v.msgs[v.menuMsg], g);
   for (int i = 0; i < n; ++i) drawSheetRow(d, g.rows[i], rows[i], v.menuHeard);

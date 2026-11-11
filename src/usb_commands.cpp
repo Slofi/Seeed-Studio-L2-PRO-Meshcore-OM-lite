@@ -1148,10 +1148,10 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
         return;
       }
       snprintf(reply, cap,
-               "[https] probe start host=%s path=%s port=%u timeout_ms=%lu ca=isrg-root-x1 "
+               "[https] probe start host=%s path=%s port=%u timeout_ms=%lu ca=%s "
                "(the report follows, one line)",
                om::httpsprobe::kHost, om::httpsprobe::kPath, (unsigned)om::httpsprobe::kPort,
-               (unsigned long)om::httpsprobe::kTimeoutMs);
+               (unsigned long)om::httpsprobe::kTimeoutMs, om::httpsprobe::kCaLabel);
       return;
     }
 

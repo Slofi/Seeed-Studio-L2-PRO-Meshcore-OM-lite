@@ -23,6 +23,12 @@ constexpr const char* kHost = "game.cl0.eu";
 constexpr const char* kPath = "/api/v1/health";
 constexpr uint16_t kPort = 443;
 
+// Which trust anchors the probe validated against, as one word on the report line (EST-389). It is a
+// firmware fact, not a measurement: https_probe_ca.h pins both roots in one buffer, and test_est389
+// ties this word to the two certificates that buffer must hold. Printed so five runs can be compared
+// without wondering whether the build under test had the newer chain.
+constexpr const char* kCaLabel = "isrg-x1+x2";
+
 // The whole probe (lookup + connect + request + read) has this budget; the lookup alone gets the
 // smaller one so a dead DNS cannot eat the connect time.
 constexpr uint32_t kTimeoutMs = 10000;
@@ -120,7 +126,8 @@ inline void formatLine(char* out, size_t cap, const Report& r) {
            "[https] probe %lu result=%s stage=%s status=%d bytes=%lu body=%lu dns_ms=%lu "
            "conn_ms=%lu tls_ms=%lu hs_ms=%ld total_ms=%lu err=%ld internal_before=%lu "
            "internal_min=%lu internal_after=%lu largest_before=%lu largest_min=%lu "
-           "largest_after=%lu psram_before=%lu psram_after=%lu idf_min=%lu ble=%s ntp_active=%d",
+           "largest_after=%lu psram_before=%lu psram_after=%lu idf_min=%lu ble=%s ntp_active=%d "
+           "ca=%s",
            (unsigned long)r.attempt, r.result, r.stage, r.status, (unsigned long)r.bytes,
            (unsigned long)r.bodyBytes, (unsigned long)r.dnsMs, (unsigned long)r.connMs,
            (unsigned long)r.tlsMs, hs, (unsigned long)r.totalMs, r.err,
@@ -128,7 +135,8 @@ inline void formatLine(char* out, size_t cap, const Report& r) {
            (unsigned long)r.internalAfter, (unsigned long)r.largestBefore,
            (unsigned long)r.largestMin, (unsigned long)r.largestAfter,
            (unsigned long)r.psramBefore, (unsigned long)r.psramAfter,
-           (unsigned long)r.idfMinInternal, r.ble ? "on" : "off", r.ntpActive ? 1 : 0);
+           (unsigned long)r.idfMinInternal, r.ble ? "on" : "off", r.ntpActive ? 1 : 0,
+           kCaLabel);
 }
 
 }  // namespace httpsprobe

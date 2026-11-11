@@ -426,8 +426,14 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est387.cpp \
 # EST-388: the HTTPS probe's pure parts. The one target (game.cl0.eu, /api/v1/health, 443, 10 s), the
 # three refusal words (wifi off / wifi not connected / https busy), the HTTP status line as it arrives
 # in pieces, the header terminator (CRLF and bare LF), the mbedTLS out-of-memory codes, and the one
-# report line the five device runs are compared by (every field, a negative hs_ms, truncation safe).
-# The python part decodes the embedded PEM and checks it is ISRG Root X1 by its SHA-256.
+# report line the five device runs are compared by (every field, a negative hs_ms, truncation safe,
+# the ca= word last). The python part keeps the probe on the validating path (no setInsecure, no
+# bundle switch).
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est388.cpp -o "$BIN47"
 "$BIN47"
 python3 -B test_est388.py
+# EST-389: the probe's trust anchors. Exactly TWO roots in ONE CA buffer, each PEM decoded by the
+# test: its SHA-256 must match the fingerprint in the file's comment and the published value (the
+# game server's chain now ends at ISRG Root X2, not X1). Two separate constants, a third PEM, a
+# stale comment or an altered base64 line fails the run.
+python3 -B test_est389.py

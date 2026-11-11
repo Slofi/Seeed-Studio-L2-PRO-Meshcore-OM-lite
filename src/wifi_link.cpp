@@ -620,8 +620,10 @@ void httpsExchange() {
   client->setHandshakeTimeout(secs);
   client->setTimeout(secs);
   t0 = millis();
+  // One buffer, two pinned roots (EST-389): mbedTLS parses the concatenated PEMs into one CA chain,
+  // so the chain may end at ISRG Root X1 or ISRG Root X2. Validation stays REQUIRED.
   const bool tlsOk = client->connect(ip, httpsprobe::kPort, httpsprobe::kHost,
-                                     httpsprobe::kIsrgRootX1Pem, nullptr, nullptr) == 1;
+                                     httpsprobe::kCaPem, nullptr, nullptr) == 1;
   r.tlsMs = millis() - t0;
   if (!tlsOk) {
     char text[96] = "";

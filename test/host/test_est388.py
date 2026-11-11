@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Host test for EST-388: the parts of `https probe` that a C++ test cannot see.
 
-1. The embedded trust anchor is really ISRG Root X1: the PEM is decoded and its SHA-256 must be the
-   published fingerprint. A different root, a stray ----PRIVATE KEY---- or an edited base64 line
-   fails the run, and so does the ticket's "certificate validation ON" (the device build passes this
-   PEM to WiFiClientSecure::connect(), which parses it as the only trusted CA).
+1. Certificate validation stays ON in the probe path: the device hands the pinned CA buffer to
+   WiFiClientSecure::connect(), which sets MBEDTLS_SSL_VERIFY_REQUIRED, and nothing in wifi_link.cpp
+   calls setInsecure() or switches to the built-in bundle. WHICH roots that buffer holds, and that
+   they are exactly ISRG Root X1 and X2, is EST-389's test (test_est389.py) since the buffer now
+   carries two PEMs.
 2. The report line still carries every number the ticket names (status, bytes, connect / handshake /
    total, internal before / lowest / after, largest before / lowest / after, PSRAM before / after,
    BLE on), so a later refactor cannot quietly drop one of them from the five device runs.
 3. The command surface stays closed: `https` has one sub-word (`probe`) and no word can name a host,
    a path or a query, and the start line is not an answer line for tools/cmd.py.
 """
-import base64
-import hashlib
 import os
 import re
 
@@ -23,9 +22,6 @@ MODEL = os.path.join(SRC, "https_probe.h")
 LINK = os.path.join(SRC, "wifi_link.cpp")
 PARSER = os.path.join(SRC, "usb_cmd_logic.cpp")
 COMMANDS = os.path.join(SRC, "usb_commands.cpp")
-
-# The published SHA-256 of ISRG Root X1's DER (Let's Encrypt's RSA root).
-ISRG_ROOT_X1_SHA256 = "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
 
 
 def read(path):
@@ -38,23 +34,10 @@ def check(cond, message):
         raise SystemExit("FAIL test_est388: " + message)
 
 
-def test_ca():
-    text = read(CA)
-    begin = text.find("-----BEGIN CERTIFICATE-----")
-    end = text.find("-----END CERTIFICATE-----")
-    check(begin >= 0 and end > begin, "the CA header has no PEM certificate block")
-    check(text.count("-----BEGIN CERTIFICATE-----") == 1, "exactly one CA may be embedded")
-    check("PRIVATE KEY" not in text, "a private key must never sit in the tree")
-    pem = text[begin:end + len("-----END CERTIFICATE-----")]
-    body = "".join(pem.splitlines()[1:-1])
-    der = base64.b64decode(body)
-    fingerprint = hashlib.sha256(der).hexdigest().upper()
-    check(fingerprint == ISRG_ROOT_X1_SHA256,
-          "the embedded CA is not ISRG Root X1 (sha256 %s)" % fingerprint)
-    check("ISRG Root X1" in text, "the header must say which root it pins")
-    # The parse call the device makes: PEM -> CA chain, and validation stays REQUIRED.
+def test_validation_stays_on():
+    # The buffer's CONTENT is EST-389's test; this only keeps the probe on the validating path.
     link = read(LINK)
-    check("kIsrgRootX1Pem" in link, "wifi_link.cpp must pass the pinned CA to the client")
+    check("kCaPem" in link, "wifi_link.cpp must pass the pinned CA buffer to the client")
     check("setInsecure" not in link,
           "certificate validation must stay ON: no setInsecure() in the probe path")
     check("setCACertBundle" not in link,
@@ -109,7 +92,7 @@ def test_rule9():
 
 
 def main():
-    test_ca()
+    test_validation_stays_on()
     test_report_fields()
     test_command_surface()
     test_rule9()

@@ -6347,3 +6347,67 @@ TLS client adds about 141 KB of flash to this build.
 ## 2026-11-11 11:44 (Claude): EST-388 built; its pinned CA does not match the server
 - Build + tests green (RAM 160,120 B, flash 2,977,089 B: +~147 KB for TLS). The pinned ISRG Root X1 is correct (SHA-256 96:BC:EC:06:...), but game.cl0.eu serves the newer Let's Encrypt chain leaf -> YE1 -> Root YE -> ISRG Root X2 (openssl s_client from TestBox, verify 0). With only X1 pinned the probe would fail on the certificate and look like a memory failure -> EST-389 pins X1 + X2. Not on the device.
 - ISRG Root X2 on TestBox: 69:72:9B:8E:15:A8:6E:FC:17:7A:57:AF:B7:17:1D:FC:64:AD:D2:8C:2F:CA:8C:F1:50:7E:34:45:3C:CB:14:70
+
+## 2026-11-11 (DS, EST-389): the HTTPS probe also trusts ISRG Root X2 (game.cl0.eu's chain)
+Status: in_review (not committed, not pushed). Certificate validation stays ON; the only behaviour that
+changes is which root the probe accepts.
+
+### A. What changed, and why
+- Claude's s_client check (2026-11-11 11:43) found leaf CN=game.cl0.eu -> CN=YE1 -> CN=Root YE ->
+  issued by ISRG Root X2. EST-388 pinned X1 only, so the probe would have failed certificate
+  validation, and that failure would have looked like the out-of-memory answer the ticket hunts for.
+- `src/https_probe_ca.h` now holds ONE buffer, `kCaPem`, built from two adjacent raw string literals:
+  X1 then X2. Two literals, one buffer: the compiler joins them, nothing is duplicated in flash, and
+  the parse call still takes one string. That is the documented mbedTLS behaviour (vendored header,
+  `mbedtls_x509_crt_parse`: "one or more concatenated PEM-encoded certificates"; 0 when all parse, a
+  positive count when some fail, negative when none).
+- Fingerprints in the header, in buffer order: X1 `96:BC:...:08:C6` (unchanged), X2
+  `69:72:9B:8E:...:CB:14:70`. The X2 value was re-read here from `/etc/ssl/certs/ISRG_Root_X2.pem`
+  (`openssl x509 -sha256`) and matches Claude's note exactly.
+- `src/wifi_link.cpp` passes `kCaPem` to the same `WiFiClientSecure::connect()`. Arduino's
+  `start_ssl_client()` sets `MBEDTLS_SSL_VERIFY_REQUIRED` whenever a root buffer is passed (checked in
+  the framework), so validation is on before and after this ticket.
+- The report line gains `ca=isrg-x1+x2` as its LAST field (`kCaLabel` in `https_probe.h`); being last,
+  its presence also proves no earlier field was truncated. The command's start line printed
+  `ca=isrg-root-x1` as a second, hand-written literal; it now prints the same constant, so the two
+  lines cannot drift apart. (The EST-388 entry above still shows the old word; this supersedes it.)
+
+### B. Build and host tests
+- Build (`pio run -e om_lite_l2`), real exit code 0. RAM **160,120 B** of 327,680 (48.9 %), unchanged
+  (the PEM lives in .rodata in flash, not in RAM); flash **2,977,921 B** of 6,553,600 (45.4 %);
+  EST-388 was 2,977,089, so **+832 B**, about the size of the added PEM text (~790 B). The 22 warnings
+  in the log are the pre-existing RadioLib `#warning` lines; none come from the changed files.
+- In the linked image: exactly two real PEM headers, at 0xc2998 and 0xc312c, and the bytes between them
+  are `-----END CERTIFICATE-----` then a blank line then `-----BEGIN CERTIFICATE-----`, so the two
+  literals really did become one contiguous NUL-terminated buffer. A third "BEGIN CERTIFICATE" string
+  exists at 0x1002ad and it belongs to mbedTLS's own error-message table ("The certificate validity has
+  expired" follows it), not to a third certificate.
+- `test/host/run.sh`: exit 0, every suite green.
+- New `test_est389.py` decodes every PEM in the header and proves: one buffer symbol only, two
+  adjacent literals, exactly two certificates in X1-then-X2 order, each SHA-256 equal to BOTH the
+  fingerprint in the comment and the published value, no private key, no `setInsecure()` or bundle
+  switch in the probe path, and the `ca=` word agreeing with the two roots. The fingerprints are
+  parsed out of the comments, so a stale comment fails the run.
+- That test was checked against four mutations of a copy in /tmp (it is not a test that cannot fail):
+  X2's block removed, one hex digit of the X2 comment changed, one base64 character of X2 changed, and
+  `wifi_link.cpp` pointed back at a single-root symbol. Each failed with its own message; the
+  unmutated copy passed.
+- `test_est388.py` loses its single-root assertions (now false by design) and keeps the validation-ON
+  guard; the CONTENT of the anchors is EST-389's test. `test_est388.cpp` asserts the `ca=` word is the
+  last field of the line.
+
+### C. Could not check (no device, no network here)
+- That the handshake now succeeds against the live server. The expected line is `result=ok` with
+  `ca=isrg-x1+x2`; a `result=tls` with an X509 error now points at the chain or the name, not at RAM.
+- The parse count on the device: Arduino checks the parse result only for `< 0`, so one malformed PEM
+  inside a two-certificate buffer would be accepted silently (mbedTLS returns a positive count). Both
+  PEMs decode cleanly here, so this is not expected, but the device build cannot assert it.
+- The extra internal-RAM cost of parsing one more certificate inside the measured window: X2's DER is
+  543 B, so `internal_min` in the five runs will include a one-time parse that EST-388's build did not
+  have. The linker's static numbers do not show it.
+- Whether the server ever serves the older X1 chain again: both roots are pinned, so either chain
+  validates.
+
+### D. Next step
+Claude reviews the diff, flashes, and runs the ticket's five `https probe` runs (BLE off, then on).
+The two headlines: does it say `result=ok` now, and what `internal_min` reaches with both roots pinned.

@@ -145,6 +145,10 @@ static void testReportLine() {
   CHECK(has(line, "idf_min=110000"));
   CHECK(has(line, "ble=off"));
   CHECK(has(line, "ntp_active=1"));
+  // EST-389: the report line names the pinned anchors, as its LAST field, so its presence here also
+  // proves none of the fields before it was cut off by the buffer.
+  CHECK(strcmp(om::httpsprobe::kCaLabel, "isrg-x1+x2") == 0);
+  CHECK(has(line, "ca=isrg-x1+x2"));
 
   // A negative handshake estimate is printed signed, never hidden or wrapped.
   r.connMs = 120;

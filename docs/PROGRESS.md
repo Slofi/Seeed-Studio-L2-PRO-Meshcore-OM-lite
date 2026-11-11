@@ -7391,3 +7391,204 @@ whitelist question above.
 
 ## 2026-11-11 18:01 (Claude): EST-397 reviewed
 - All 13 verified findings fixed with tests. Whitelist decision: the USB `msgs` command may keep printing message text (an on-demand debug command; Claude strips texts before quoting). NOT covered yet and the guard does not catch them: main.cpp:1279/1361 (node names), 1374/1377 (message text on resend), from the EST-396 UI sweep -> fixed in the UI fix ticket, where the guard must be tightened to catch `m.text` and `%s` names.
+
+## EST-398 sweep: UI part 2
+
+Read-only sweep of the files EST-396 did not read in full, DeepSeek (Paperclip worker, 2026-11-11). **No code was
+changed and nothing was committed.** Scope: the four Settings/RPTR screens and their layouts, the chat layout and
+selector, the message sheet, the emoji picker, the map picker, the text wrapper, the press targets and the compose/send
+paths in `main.cpp`.
+
+**Counts: 12 findings: S1 0, S2 2, S3 1, S4 1, S5 8.** Ranked most severe first. Every finding quotes the real line;
+"not verified" marks what I inferred. No crash and no proven data loss: the two S2s are a confirmation that can be
+armed for the wrong row and a pressed look that lands off its key. **The Settings tap order is clean**: the pop-up, the
+Position choice, the selector, Back, the title action, the keyboard sheet, the tabs and the rows are consumed in the
+drawing order (`main.cpp:4752, 4763, 4786, 4810, 4818, 4823, 4860, 4872`), so nothing reaches a row under an overlay.
+
+### 1. S2 · main.cpp:4515-4524 · one armed flag is shared by every "Forget" row, so a second row is forgotten without its own confirmation
+```c
+if (!g_deleteArmed) {
+  g_deleteArmed = true;
+  showToast("Tap Forget again");
+} else {
+  g_deleteArmed = false;
+  om::wifiForget(at);
+```
+`g_deleteArmed` is one global (`main.cpp:143`) and the Saved-networks page builds one Forget button per saved network
+(`main.cpp:3834`, `A_WifiForgetBase + i`). The handler checks only that SOME row was armed, never that it was THIS row.
+Trigger: tap Forget on network A (armed, toast), then tap Forget on network B: B's password is deleted on the FIRST tap
+of B, with no second tap and no chance to cancel. Two more oddities in the same block: the button's label never changes
+(the channel page's does: `main.cpp:3674` "Tap again to delete"), and a tap anywhere else on the page does not disarm.
+Fix: store the armed index (`static int g_deleteArmAt = -1;` and compare), reset it on every other row and on `setGo`.
+Effort S.
+
+### 2. S2 · ui/press_targets.h:262-263 · the RPTR card's refresh and banner keys light up at their SCROLL-0 place
+```c
+case RptrHit::Refresh: t.kind = PressKind::Button; t.rect = a.refreshTap; break;   // inside body
+case RptrHit::BannerButton: t.kind = PressKind::Button; t.rect = a.bannerButton; break;
+```
+The page's hit test moves both rectangles with the scroll before testing them
+(`ui/rptr_layout.cpp:180-181` `Rect rt = a.refreshTap; rt.y = (int16_t)(rt.y - scroll);` and the same two lines for
+`a.bannerButton`), and the drawing moves too (`ui/screen_rptr.cpp:156` `const int cy = (int16_t)(a.refresh.y - scroll)`,
+`:169` `button.y = (int16_t)(button.y - scroll);`). The pressed look does not: `omFrameBlendRect(t.rect...)` paints the
+unscrolled rectangle. Trigger: scroll a repeater page at all, then hold the refresh ring: the gold press tint appears
+lower down, over a settings row, while the ring that was tapped stays unlit. The tap itself is correct, so this is the
+pressed look only. Fix: build both rects with `-scroll` and `intersect(a.body)`, exactly as the hit test does. Effort S.
+
+### 3. S3 · main.cpp:1279, 1313, 1334 · three more log lines print another node's name
+```c
+Serial.printf("[chat] no contact named %s, no DM\n", name ? name : "?");
+Serial.printf("[chat] reply to %s\n", g_replyName);
+Serial.printf("[chat] mention %s\n", tag);
+```
+Rule 9 (the repo is public) allows no other people's names in logs. These three are on the message sheet's paths (reply,
+mention, a DM that could not be opened) and print a contact's name on every tap. They are NOT EST-396 #1/#2 (those were
+the position at `1359` and the message text at `1172/1372/1375`); `1361` (name only, after EST-397) is already on
+Claude's list for the UI fix ticket, so I am not re-reporting it or the text lines. The EST-397 guard only knows
+`from.name`/`ci->name`, so none of the four is caught. Fix: `[chat] reply opened`, `[chat] mention prepended`,
+`[chat] DM refused: unknown contact`, and add `m.name`/`g_replyName`/`name` to the guard's `%s` list. Effort S.
+
+### 4. S4 · main.cpp:1213 with 396-407 · every emoji tap writes NVS, and the write's result is dropped
+```c
+g_emojiRecent.use(cp);
+saveEmojiRecent();                       // main.cpp:1213
+...
+g_prefs.putBytes("erec", buf, sizeof(buf));   // main.cpp:406, return value ignored
+```
+A pick is a per-event flash write (69 bytes into the `omlite` NVS partition) for a 16-entry convenience list, and the
+caller cannot tell whether it landed: exactly EST-380's "hist_dropped = 0 while losing data" shape. Trigger: typing a
+message with six emoji = six NVS commits; nothing on the glass or in the log if one fails. Fix: mark the list dirty and
+flush it when the sheet closes (or in `chatSendDraft`), and count a failed `putBytes`. Effort S.
+
+### 5. S5 · main.cpp:4457-4469 and main.cpp:4645-4658 · the whole "apply the manual time" block exists twice
+```c
+const bool made = om::localEpochFromCivil(g_setTime.year, g_setTime.month, g_setTime.day,
+                                          g_setTime.hour, g_setTime.minute, 0, epoch);
+if (made && om::saneEpoch(epoch) &&
+    om::timeKeeper().setFromSource(epoch, om::TimeSource::Manual, millis() / 1000)) {
+  saveTimeFloor();
+```
+Identical in both places (the title row's Set key and `settingsEditorOk()`), including `saveTimeFloor()` and the two
+toasts. A third copy of the same rule would be the easiest way to re-introduce the EST-391 32-bit bug. Fix: one
+`applyManualTime()` returning the toast text. Effort S.
+
+### 6. S5 · ui/settings_layout.h:473-474 · the year steppers offer 2000..2099, the clock accepts up to 2038
+```c
+t.year += dir;
+if (t.year > 2099) t.year = 2000;
+```
+The one gate is `src/timekeeper.h:45` `constexpr uint32_t kMaxSaneEpoch = 2147483647UL;  // INT32_MAX = 2038-01-19`.
+So the page lets the user step to 2050 and then answers the generic `"Time not set"` (`main.cpp:4467`), with no hint
+that the bound is 2038 or why. This is the UI half of EST-391 that the fix left in place: the layout's range still
+assumes a 64-bit `time_t`. Fix: clamp the year to the civil year of `kMaxSaneEpoch` (2038) and say so on the Note row.
+Effort S.
+
+### 7. S5 · ui/screen_settings.cpp:124-128 · the Warn box is left-flush, and its text ends 1 px outside the plate
+```c
+d->fillRoundRect(r.x, r.y + 3, r.w - 2 * kSetPadX, r.h - 6, kRadius, kWarnBg);
+...
+const int x = r.x + kSetPadX + 6;
+const int w = r.w - 2 * (kSetPadX + 6);
+```
+With `kSetPadX` 7 the plate is 14 px narrower than the row but starts at the row's own left edge, so it is inset on the
+right only; the text's right edge is `r.x + r.w - 13` against the plate's `r.x + r.w - 14`, i.e. one pixel of ink past
+the background it was drawn on. Every other row insets from `r.x + kSetPadX`. Fix: `r.x + kSetPadX` for the plate and
+`r.w - 2 * kSetPadX` for the text. Effort S.
+
+### 8. S5 · ui/screen_settings.cpp:214 and :223 · the two row kinds that never check their label's width
+```c
+d->drawString(row.label, labelX, cy);                          // Stepper, line 214
+d->drawString(row.label, labelX, cy);                          // Toggle, line 223
+```
+Every other kind ellipsises (`:159`, `:236`, `:254`, `:263`). A Stepper's label can therefore run under its minus key
+(which starts at `row.right() - 119`) and a Toggle's under its right-aligned value. Today's labels are short
+("Frequency", "Share position"), so this is a latent overflow, not a visible one. Fix: `drawTextEllipsis` with the room
+the keys leave. Effort S.
+
+### 9. S5 · ui/screen_rptr.cpp:187-213 · a private word-wrapper, with a 48-byte line cap and a silent tail
+```c
+const int lineH = 15;
+char line[48];
+...
+while (p[n] && n + 1 < sizeof(line)) { ... }
+```
+This is a second wrapper beside `ui/text_wrap.cpp` `wrapText()`, which the Settings screens use for the same job. It
+breaks only at a space (`if (p[n] && lastSpace > 0) n = lastSpace;`), so one long unbroken token is cut at 47 bytes
+mid-word, and the loop stops at the box's floor with no ellipsis, unlike `drawTextEllipsis`. **Not verified** that a
+current `modalText` reaches the cap (the strings I saw are short); the risk is that nothing would tell us. Fix: the
+shared `wrapText()` + `wrapConsumed()` + an ellipsis on the last line. Effort S.
+
+### 10. S5 · ui/map_pick.cpp:29-42 vs ui/screen_rptr.cpp:29-42 · the same three drawing helpers in two files
+```c
+// screen_rptr.cpp:29  and  map_pick.cpp:29, byte for byte
+void smallKey(lgfx::LovyanGFX* d, const Rect& r, const char* text, bool strong) {
+  d->fillRoundRect(r.x, r.y, r.w, r.h, kRadiusSm, strong ? kSelBg2 : kPanel2);
+```
+`smallKey` and `drawBack` are identical copies (map_pick's comment explains why it "does not need the RPTR screen's
+private drawing helpers", which is the drift EST-384 moved the picker to avoid), and `drawPickAction` is `drawButton`
+without the `danger` branch. `ui/screen_settings.cpp:475-494` and `ui/screen_rptr.cpp:454-471` are a second pair:
+`settingsEditorKeyAt` and `rptrEditorKeyAt` are the same 15 lines. Fix: one `ui/keys.cpp` for the small controls and
+one `editorKeyAt()`; Effort S.
+
+### 11. S5 · ui/map_pick.cpp:50 · a screen-sized hard-coded rectangle inside the shared picker
+```c
+drawEmptyState(d, Rect{8, 60, 304, 100}, "Map pack not open.",
+               "The card needs /maps/slo/tiles.pack.");
+```
+`304` is `kMapCanvasW` and `8/60/100` are the L2's numbers; this file is drawn on both devices' pickers, and rule 3
+says the screen size is a parameter. Fix: `Rect{(int16_t)kMapMargin, ..., (int16_t)(L.width - 2 * kMapMargin), ...}`
+from the layout. Effort S.
+
+### 12. S5 · ui/screen_node_info.cpp:47-63 · the row list has no clip and no scroll, and meets the floor hint
+```c
+NodeInfoLine lines[kMaxNodeInfoLines];
+const int n = nodeInfoLines(m, lines, kMaxNodeInfoLines);
+const int16_t rowH = 20;
+...
+drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, kScreen, kRowPadX, L.height - 10,
+                 L.width - 2 * kRowPadX, "tap the header to go back");
+```
+Nine rows from `back.bottom() + 5` would end at y 234 while the hint is drawn at `L.height - 10` (230), on top of the
+last row. **Not reachable today** (`hasSnr` is never true, so the page has at most eight rows and ends at 214), which is
+why this is S5 and not S2: the ninth row is one field away. Fix: clip to a body rect and put the hint in the layout.
+Effort S.
+
+### Clean (read, nothing found)
+- **The Settings tap order** (`main.cpp:4741-4880`): the pop-up, the Position choice, the selector, Back, the disabled
+  title action, the keyboard sheet and the tab row are all consumed in the order they are drawn, and the Position
+  choice's own scroll is lifted by `settingsChoiceScrollFor()` before it opens. This is the class that bit us three
+  times in S492 and it is right here.
+- **One rectangle drives draw and tap** in `settings_layout.h`, `rptr_layout.h` and `chat_layout.h`: the rows, the
+  stepper keys, the sheet's keys (`g.keyHit` built beside `g.keys` at `chat_layout.cpp:316`), the selector rows
+  (`selRowLayoutFor` asked by both the drawing and `selRowAt`) and the emoji pad all come from one function. Apart from
+  finding 2's pressed look I found no second set of numbers on a tap path.
+- **Allocating the row list in PSRAM** (`main.cpp:352`, `psramArray<SettingRow>(64)`, ~15 KB away from internal RAM):
+  the Settings model is not part of the internal-RAM pressure, and the boot line prints which heap answered.
+- **No SD, NVS or radio call from a draw**: the two `putBytes` writes are in the tap handlers (finding 4 is one of
+  them), and the map's `om::mapRender()` in `map_pick.cpp:47` is reached from the loop's draw, not from the USB
+  command handler. Nothing in this scope touches the radio.
+- **`ui/chat_selector.cpp` and `ui/message_sheet.cpp`**: the row count is capped at `kMaxSheetRows` in both the builder
+  and the layout, and every string is measured or ellipsised. Clean.
+- **`ui/press_feedback.cpp`** and **`ui/emoji_picker.cpp`**: clean (the latter is data only; the strip's arithmetic
+  fits: 16 recents plus the Send key end at x 314 inside the 316 px area).
+- **`ui/text_wrap.cpp`**: the UTF-8 walk does not split a code point, does not run past a NUL, and refuses to loop on a
+  refused unit. Clean.
+
+### Coverage
+**Read in full:** `ui/settings_layout.h`, `ui/screen_settings.cpp`, `ui/screen_rptr.cpp`, `ui/rptr_layout.cpp`,
+`ui/chat_layout.cpp`, `ui/chat_selector.cpp`, `ui/text_wrap.cpp`, `ui/map_pick.cpp`, `ui/press_feedback.cpp`,
+`ui/screen_node_info.cpp`, `ui/message_sheet.cpp`, `ui/emoji_picker.cpp`, `ui/press_targets.h:118-310`, parts of
+`main.cpp` (95-205, 320-390, 1100-1420, 3186-4663, 4700-4979), `ui/node_info.h`, `docs/REBUILD.md`.
+**Read in part or only through targeted grep (so absences there are NOT evidence):** `ui/chat_layout.h`,
+`ui/chat_selector.h`, `ui/message_sheet.h`, `ui/theme.h` (the constants the layouts use).
+**In scope but NOT reached** (the 30-minute cap; I worked severity first and stopped): `ui/map_trace.cpp`,
+`screens/map_tab.cpp`, `ui/rptr_layout.h` (only its constants), `ui/settings_prefs.h`, `ui/emoji_picker.h`, and
+`main.cpp`'s remaining settings-adjacent handlers outside 3186-4979 (the RPTR pumps 1700-3100 and the USB handlers).
+No build and no host test was run: this ticket changes no code.
+
+### Next step
+Findings 1 and 2 are the two that change what the user sees and should be the next fix ticket (both one-line
+comparisons); finding 3 belongs with the EST-396 #1/#2 UI log fix and needs the guard extended to `m.name`,
+`g_replyName` and a bare `name`. #4 (NVS per emoji), #5 (the duplicated time apply) and #6 (the 2038 bound in the
+year steppers) are small and independent. A third sweep should read `map_trace.cpp` and `screens/map_tab.cpp`, which
+are the two files in this scope nobody has read yet.

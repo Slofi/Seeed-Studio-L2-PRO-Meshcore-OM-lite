@@ -6059,3 +6059,136 @@ still gets an answer with BLE on.
 ## 2026-11-11 10:57 (Claude): EST-386 built (guard), GPS no-fix time PROVEN on the device
 - EST-386: modem sleep is switched off for an NTP attempt only while Bluetooth is off; DS read the framework: esp_wifi_set_ps(PS_NONE) with BT up makes the Wi-Fi task abort, so the guard prevents a crash. Build + tests green.
 - Device, build 5cf263f, 10:52 power-off/on by Filip, L2 near the window: at ~10:55 `clock=gps-nofix`, `gps raw` ZDA 09:55:05 UTC 11.11.2026 matching TestBox to the second, 2 heard / 0 used / best 29 dB-Hz. The EST-383 no-fix path works.
+
+## 2026-11-11 (DS, EST-387): warm boots keep the GPS (no reset on every boot) + AID-INI built, switched off
+Status: in_review (not committed, not pushed).
+
+### A. What the ticket found, and what this run confirms in the code
+`expanderBegin()` staged expander bit 9 (GNSS reset) HIGH before the first latch and released it LOW
+on every boot. The polarity, from the code and the device: the line has been left LOW since the boot
+sequence and the module talks, so LOW is "running" and HIGH is "held in reset". The pulse was therefore
+the whole span from the latch to the release, on every flash and every crash restart, with the power
+rail (bit 13) never dropping: exactly the cold start the ticket describes, next to a receiver that
+could have stayed warm.
+
+### B. 1. Warm boots keep the receiver
+- New `src/gps_boot.h` (plain C++, host-tested): the reason table, by number, in ESP-IDF's
+  `esp_reset_reason_t` values. RESET for PowerOn, Brownout, DeepSleep, Unknown; KEEP for Software
+  (ESP.restart(), an OTA reboot), External, Panic, IntWdt, TaskWdt, Wdt, Sdio.
+  Two rows are this run's reading of the ticket, and both are argued in the header: **DeepSleep**
+  resets because the rails were down (nothing in this firmware deep-sleeps today, but a future duty
+  cycle must never assume a running receiver after a wake) and **Unknown** resets because the RTC
+  domain that carries the reason was lost, i.e. it looks like a cold start; a needless reset costs one
+  start, a wrongly kept receiver after a real power cut costs the whole boot.
+- `board.cpp`: `espBootReason()` maps the SDK enum onto that table with `static_assert`s on every
+  number, so an SDK that renumbers them fails the DEVICE build instead of silently changing the rule.
+  `stageOutput(kBitGnssReset, resetReceiver)`: on a warm boot that stages the level the line already
+  has (low), which is not an edge, so the receiver does not notice the restart. The release and its
+  40 ms stay for the reset path, so a cold boot runs the same sequence as before.
+- One extra input, because the decision cannot be the reason alone: the latched level is read back
+  before staging. If the previous boot died between the latch and the release it left the line
+  ASSERTED, and the module would sit in reset for ever; that case resets and logs
+  `[gps] boot: reset (left asserted by the last boot)`.
+- Log lines (the ticket's wording): `[gps] boot: kept running (reset reason N)` or
+  `[gps] boot: reset (power-on|brownout|deep-sleep|unknown|left asserted by the last boot)`.
+- Init commands: `$PCAS04,7` is the ONLY one this firmware has (`$PCAS03` went with EST-339), and
+  nothing in the repo proves whether the L76K restarts its engine on a mode change (the module never
+  acknowledges the command either). So on a warm boot nothing is sent and the command is marked as
+  already applied (`GpsModeCommand::onModuleWarmStart()`), with `[gps] init: mode 7 kept (receiver kept
+  running)`; after a reset it is armed as before (`... armed (receiver was reset)`) and goes out once,
+  on the first checksum-valid sentence, as today. Without the new `onModuleWarmStart()` the fresh
+  object's `sent_ = false` would have sent the command anyway: that was the trap in "just stop pulsing".
+- `$PCAS10,0` (hot start) is NOT used, and this is why: it is only worth sending when the receiver
+  needs a known state. On a warm boot it needs nothing (we do not touch it at all, which is strictly
+  less than a hot start), and after a reset the pin already gives a clean start that a hot-start
+  command could not improve.
+- Known limitation, written down rather than hidden: if the module restarts on its own while we run
+  (its own watchdog, a GNSS-rail glitch), we cannot see it, so mode 7 is not re-sent until the next
+  boot. A detector would be "no bytes for N s, then bytes again", which is a separate ticket.
+
+### C. 2. Aiding: the whole path is built and host-tested, the switch is OFF
+- `src/gps_aid.h` (plain C++, host-tested) has four parts: the CASIC frame (`BA CE | len | class | id
+  | payload | sum`), the AID-INI payload builder (56 bytes, field by field), a byte-stream reader that
+  pulls ACK/NAK frames out of the NMEA stream (a bad checksum or a silly length is dropped and the
+  reader resynchronises), and the ticket's once-per-boot rule as one object (`AidGate`: only a real
+  clock from Wi-Fi/phone/manual with no fix, once, and again only when a BETTER source arrives).
+- `board.cpp` wires it: one frame in flight at most, a 2 s answer window, and one line
+  `[gps] aid time=ok|nak|no-answer pos=sent|none src=<source>` (tokens only, never a value; rule 9).
+  The own position is `posOwn()`, i.e. the same point the node advertises (Fixed or the last fix).
+- **`constexpr bool kEnabled = false;` and this is the honest part of the run**: this sandbox has no
+  network (DNS fails), so the CASIC AID-INI field table could not be read; the offsets in
+  `aidIniPayload()` are written from memory of the specification and every field that matters is
+  marked `[unverified offset]` in the header. A wrong-but-accepted frame would seed the receiver with
+  a wrong time, and indoors the receiver's time is what sets our clock (EST-383), so a wrong aid is
+  worse than no aid. The ticket's own rule is "keep only if the module ACKs"; there is no ACK to read
+  in here, so the switch stays off and the device boots with `[gps] aid: off (kEnabled=false)`.
+- Turning it on is one line (`kEnabled = true`): then the boot says `[gps] aid: armed`, and the first
+  moment a real non-GPS clock exists with no fix it prints the `time=... pos=... src=...` line. If
+  that line says `nak` or `no-answer`, it goes back to false and the field table is checked against
+  the spec. A host test (`testSwitchIsOff`) fails the run the moment the constant is flipped, so the
+  plan above cannot be forgotten.
+
+### D. Tests
+- `test/host/run.sh`: exit 0, all suites green.
+- New `test_est387.cpp` (g++, over the same headers the firmware compiles): the reset table reason by
+  reason (including the SDK numbers and an unknown number mapping to Unknown), the two boot-line words,
+  the AID-INI frame BYTE BY BYTE against a hand-computed example (66 bytes: sync, length 62,
+  class/id, payload offsets 4/6/8/16/24/28..34, sum 0x0302), the same with a position (lat 46.0 /
+  lon 14.5 as IEEE-754 doubles), the refusals (2026-02-30, hour 24, lat 91, lon -181, a short buffer),
+  the ACK and NAK frames (hand-computed sums 474/475) through the reader, NMEA passing through
+  untouched, a bad checksum, a nonsense length followed by a good frame, a frame split one byte at a
+  time, the aid gate (no fix, no real clock, GPS sources excluded, once, better source only, a worse
+  source with a very different time still silent) and the UTC civil round trip (1970, the ticket's
+  timestamp, a leap day, the last second of a year).
+- New `test_est387.py`: every `[gps`/`[gpsraw` log line in `board.cpp` and every log line in
+  `gps_aid.h`/`gps_boot.h`/`gps_raw.cpp` carries no float conversion and no lat/lon name; the aid line
+  has the ticket's shape and all five tokens; both boot lines exist; `kEnabled` is one false constant.
+- `test_gps_mode.cpp` grew the warm-start case: after `onModuleWarmStart()` twenty sentences send
+  nothing, and a later real restart arms it exactly once.
+
+### E. Build (sandbox, real exit code)
+`pio run -e om_lite_l2`: **exit 0**. RAM **159,024 B** of 327,680 (48.5 %; 159,016 before, **+8 B**);
+flash **2,835,921 B** of 6,553,600 (43.3 %; 2,835,217 before, **+704 B**). The aiding code is compiled
+but its switch is a constant, so the optimizer keeps almost none of it: the +704 B is the boot
+decision, the three new log lines and the warm-start method.
+
+### F. Device test for Claude (indoors, this is the ticket's own plan)
+1. Flash this build. The first boot after the flash is an OTA reboot, i.e. a SOFTWARE reset: the log
+   must say `[gps] boot: kept running (reset reason 3)` and `[gps] init: mode 7 kept (receiver kept
+   running)`, and `$PCAS04,7` must NOT appear (`[gps] mode 7 sent` absent). `[gps] aid: off
+   (kEnabled=false)` appears once.
+2. Immediately `tools/cmd.py gps raw 30` and keep the `[gpsraw]` lines and the `[gps] ... used=
+   expected= heard= best= maxheard=` lines.
+3. Flash the SAME build again (a second OTA, another software reset) and, as soon as the second boot
+   is up, `gps raw 30` again. Compare: after the second boot the ZDA/RMC time should be there at once
+   (`[gpsraw] t=0s type=GNZDA time=... date=...`) and `maxheard` must not start over: the receiver was never restarted, so its RTC is still right and
+   its almanac is not being downloaded again. The two `gps raw 30` summaries (`types=`, `zda=`, `bad=`)
+   and the two `[gps] no-fix` lines are the numbers to compare.
+4. Power OFF (the switch) and ON: now the log must say `[gps] boot: reset (power-on)` and
+   `[gps] init: mode 7 armed (receiver was reset)`, followed later by `[gps] mode 7 sent`; that is the
+   control case proving the table has both branches on the device.
+5. Phone time: set the clock from the phone (or Wi-Fi NTP) with no fix, watch for the aid line. With
+   this build it is `[gps] aid: off (kEnabled=false)` at boot and nothing else, by design (see C). To
+   read `[gps] aid time=... pos=... src=phone`, one line changes (`kEnabled = true` in `gps_aid.h`)
+   and the same test prints it; then either the ACK confirms the frame or the line says `nak` /
+   `no-answer` and the switch goes back to false.
+
+### G. Could not check (no device, no serial)
+- That a warm boot really leaves the L76K's RTC and ephemeris intact on THIS module: the code no
+  longer pulses the line, but only the device can show the clock still being right after a reflash.
+- Whether `$PCAS04,7` restarts the receiver's engine: no source in the repo proves it either way, which
+  is why the command is not sent to a warm receiver at all rather than "probably harmless".
+- The AID-INI field table and the frame length convention, and therefore whether the module ACKs:
+  no network in the sandbox (see C).
+- That the expander's output register survives a warm boot with bit 9 low on this board: it is what the
+  existing comment and `gpsRailOn()` already assume for bit 13, and the new read-back makes a wrong
+  assumption visible in the log rather than silent.
+
+### H. Next step
+Claude reviews the diff and runs F1-F4 (two flashes and one power cycle, indoors). The one open
+decision is C's switch: if Filip wants the aiding tried, it is `kEnabled = true` and one flash; the
+`[gps] aid` line then says whether the L76K speaks AID-INI. The reset-reason work needs nothing
+further: `[gps] boot:` plus the two `gps raw 30` summaries settle it.
+
+## 2026-11-11 11:18 (Claude): EST-387 reviewed
+- Reset table (reset only on power-on, brown-out, deep-sleep, unknown, or a line left asserted), the warm-boot path stages the level the line already has (no edge), PCAS04 not re-sent on a warm boot via onModuleWarmStart(). AID-INI built but kEnabled=false: field offsets written from memory, unverified; keep off until checked against the CASIC spec. Not on the device yet.

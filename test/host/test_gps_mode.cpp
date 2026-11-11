@@ -72,6 +72,19 @@ int main() {
   testNothingBeforeTheModuleTalks();
   testSentExactlyOnce();
   testRearmAfterModuleReboot();
+  // EST-387: a warm boot (the ESP32 restarted, the receiver did not) marks the command as already
+  // applied, so no sentence can trigger it: nothing is sent to a receiver that is still warm. A later
+  // real module restart arms it again, exactly once.
+  {
+    GpsModeCommand warm;
+    warm.onModuleWarmStart();
+    CHECK(warm.sent());
+    for (int i = 0; i < 20; ++i) CHECK(!warm.onValidSentence(kGga));
+    warm.onModuleReboot();
+    CHECK(!warm.sent());
+    CHECK(warm.onValidSentence(kGga));
+    CHECK(!warm.onValidSentence(kGga));
+  }
   if (g_fail) {
     printf("%d gps mode check(s) FAILED\n", g_fail);
     return 1;

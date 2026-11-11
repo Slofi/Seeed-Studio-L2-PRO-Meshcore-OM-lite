@@ -22,6 +22,9 @@ python3 -B test_est379.py
 python3 -B test_est384.py
 # EST-385: no NTP log or answer format prints a LAN address, an SSID or a password (rule 9).
 python3 -B test_est385.py
+# EST-387: no GPS log or aid format prints a coordinate, and the boot/aid lines are the ones the
+# ticket names (rule 9).
+python3 -B test_est387.py
 
 # Layout / hit testing, the migration bytes and the other pure-C++ logic (no Arduino): build them
 # with the system g++.
@@ -70,7 +73,8 @@ BIN42="$(mktemp /tmp/om-lite-gpsraw.XXXXXX)"
 BIN43="$(mktemp /tmp/om-lite-est384.XXXXXX)"
 BIN44="$(mktemp /tmp/om-lite-ntp.XXXXXX)"
 BIN45="$(mktemp /tmp/om-lite-est386.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45"' EXIT
+BIN46="$(mktemp /tmp/om-lite-est387.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -408,3 +412,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_ntp.cpp ../../src/tim
 # end never turns sleep on behind the caller's back; and the four actions composed with a fake radio.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est386.cpp -o "$BIN45"
 "$BIN45"
+
+# EST-387: the GNSS warm-boot decision (power-on / brown-out / deep-sleep / unknown reset the receiver,
+# software / OTA / panic / watchdog / external leave it running), the AID-INI frame against a
+# hand-computed example (sync, length, class/id, the 56-byte payload layout and the 32-bit sum), the
+# ACK/NAK reader out of the NMEA stream (bad checksum, silly length, split frames), the once-per-boot
+# aid gate and the UTC civil time the payload carries.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est387.cpp \
+  ../../src/timekeeper.cpp -o "$BIN46"
+"$BIN46"

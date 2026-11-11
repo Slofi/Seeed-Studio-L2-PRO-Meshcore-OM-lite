@@ -9,13 +9,17 @@
 #include <LovyanGFX.hpp>
 #include <SD_MMC.h>
 #include <Wire.h>
+#include <esp_system.h>   // EST-387: esp_reset_reason(), the one input of the GNSS reset decision
 #include <lgfx/v1/panel/Panel_NV3031B.hpp>
 
 #include "diag_logic.h"   // EST-376: the FUSB302 register map `pmu probe` reads
 #include "fonts.h"
 #include "frame_metrics.h"   // the one luma rule (EST-355): the change dip's brightness numbers
+#include "gps_aid.h"         // EST-387: CASIC AID-INI, the ACK/NAK reader and the once-per-boot rule
+#include "gps_boot.h"        // EST-387: may this boot touch the GNSS reset line?
 #include "gps_mode.h"
 #include "gps_raw.h"     // EST-383: the `gps raw` diagnostic window
+#include "position.h"    // EST-387: the own position an aid frame may carry
 #include "sd_budget.h"   // EST-380: the SD open-file budget the mount limit is checked against
 #include "timekeeper.h"
 #include "ui/layout.h"   // clampTouchToScreen: the same edge rule the hit tests use
@@ -71,6 +75,32 @@ bool setOutput(uint8_t bit, bool high) {
   return false;
 }
 
+// EST-387: the SDK's reset reason in gps_boot.h's terms. The static_asserts are the contract: the
+// header is plain C++ (so test/host can prove the table) and carries ESP-IDF's numbers, so a future
+// SDK that renumbered them fails the DEVICE build instead of silently changing the rule.
+GpsBootReason espBootReason() {
+  static_assert((int)ESP_RST_UNKNOWN == (int)GpsBootReason::Unknown, "ESP_RST_UNKNOWN number");
+  static_assert((int)ESP_RST_POWERON == (int)GpsBootReason::PowerOn, "ESP_RST_POWERON number");
+  static_assert((int)ESP_RST_EXT == (int)GpsBootReason::External, "ESP_RST_EXT number");
+  static_assert((int)ESP_RST_SW == (int)GpsBootReason::Software, "ESP_RST_SW number");
+  static_assert((int)ESP_RST_PANIC == (int)GpsBootReason::Panic, "ESP_RST_PANIC number");
+  static_assert((int)ESP_RST_INT_WDT == (int)GpsBootReason::IntWdt, "ESP_RST_INT_WDT number");
+  static_assert((int)ESP_RST_TASK_WDT == (int)GpsBootReason::TaskWdt, "ESP_RST_TASK_WDT number");
+  static_assert((int)ESP_RST_WDT == (int)GpsBootReason::Wdt, "ESP_RST_WDT number");
+  static_assert((int)ESP_RST_DEEPSLEEP == (int)GpsBootReason::DeepSleep, "ESP_RST_DEEPSLEEP number");
+  static_assert((int)ESP_RST_BROWNOUT == (int)GpsBootReason::Brownout, "ESP_RST_BROWNOUT number");
+  return gpsBootReasonOf((int)esp_reset_reason());
+}
+
+// True when expanderBegin() asserted the GNSS reset line this boot. gpsBegin() reads it: a receiver
+// that was restarted needs its one-time init command again, a receiver that kept running does not.
+bool s_gnssResetThisBoot = false;
+
+// The latched level of the GNSS reset line (bit 9): true = asserted = the module is held in reset.
+bool gnssResetAsserted() {
+  return (s_output[kBitGnssReset >> 3] & (uint8_t)(1U << (kBitGnssReset & 7))) != 0;
+}
+
 bool expanderBegin() {
   s_expanderReady = false;
   Wire.setClock(100000);
@@ -81,6 +111,18 @@ bool expanderBegin() {
       !readRegisters(0x06, s_config, sizeof(s_config))) {
     return false;
   }
+
+  // EST-387: the two inputs of the reset decision, read where both are available.
+  //   the SDK's reset reason (gps_boot.h's table decides; the numbers are static_asserted below), and
+  //   the level the expander was left holding. If the PREVIOUS boot died between the latch and the
+  //   release, it left the line asserted: the receiver is sitting in reset and would never talk, so
+  //   that is worth a reset whatever this boot's reason says. On a power-on the expander's output
+  //   register reads back its power-up default (all ones), which lands in the same branch, which is
+  //   right for a cold boot anyway.
+  const GpsBootReason bootReason = espBootReason();
+  const bool reasonResets = gpsBootResetsReceiver(bootReason);
+  const bool heldFromLastBoot = gnssResetAsserted();
+  const bool resetReceiver = reasonResets || heldFromLastBoot;
 
   // Inputs: wake button, I2C interrupt, SD detect, LCD control line.
   stageInput(kBitWakeButton);
@@ -93,7 +135,18 @@ bool expanderBegin() {
   stageOutput(kBitLcdReset, true);
   stageOutput(kBitGrovePower, false);
   stageOutput(kBitTouchReset, false);
-  stageOutput(kBitGnssReset, true);
+  // The GNSS reset line. Polarity, measured on this board: bit 9 HIGH holds the L76K in reset, LOW
+  // lets it run (the line has stayed low since the boot sequence and the module talks, so low cannot
+  // be "reset"). The power rail (bit 13) is set high above and never brought low anywhere in this
+  // file, so a soft restart leaves the module powered: the PCA9554 keeps its latched outputs while
+  // the SoC restarts.
+  // EST-387: until now the line was asserted (high) on EVERY boot and released below, so every flash
+  // and every crash restart restarted the receiver and threw away its RTC, almanac and ephemeris: a
+  // cold start each time, indoors with one satellite. Now it is asserted only when the SoC really
+  // lost power (gps_boot.h holds the table). Staging the level the line already has is not an edge,
+  // so on a warm boot the receiver does not notice the restart at all. Do not "fix" this by dropping
+  // bit 13 and raising it again: a cold module starts slower and may need a full almanac download.
+  stageOutput(kBitGnssReset, resetReceiver);
   stageOutput(kBitUserLed, false);
   stageOutput(kBitUsbOtg, false);
   stageOutput(kBitAudioPa, false);
@@ -108,14 +161,17 @@ bool expanderBegin() {
   s_expanderReady = true;
 
   // GNSS and panel reset pulses, then the panel's control line, then touch release.
-  //
-  // The GNSS power rail (bit 13) is set high above and never brought low anywhere in this file, so
-  // a soft reboot leaves the module powered: the PCA9554 keeps its latched outputs while the SoC
-  // restarts. What a reboot does do is this reset pulse, which restarts the module (its almanac is
-  // in its own flash and survives; a kept RTC keeps the start warm). Do not "fix" that by dropping
-  // bit 13 and raising it again: a cold module starts slower and may need a full almanac download.
-  if (!setOutput(kBitGnssReset, false)) return false;
+  if (resetReceiver && !setOutput(kBitGnssReset, false)) return false;
   delay(40);
+  // EST-387: the two boot lines the ticket names, printed where the decision was made. A kept
+  // receiver is the fix; a reset one names why, so the log says why the clock may start cold.
+  if (resetReceiver) {
+    Serial.printf("[gps] boot: reset (%s)\n",
+                  reasonResets ? gpsBootReasonToken(bootReason) : "left asserted by the last boot");
+  } else {
+    Serial.printf("[gps] boot: kept running (reset reason %d)\n", (int)esp_reset_reason());
+  }
+  s_gnssResetThisBoot = resetReceiver;
   if (!setOutput(kBitLcdReset, false)) return false;
   delay(10);
   if (!setOutput(kBitLcdReset, true)) return false;
@@ -723,6 +779,11 @@ static GpsModeCommand s_gpsMode;
 static GpsRawWindow s_gpsRaw;
 static NoFixTimeGate s_noFixTime;
 
+// EST-387: one line each, printed once per boot, so the log says what the boot line could not: whether
+// the receiver's one init command was re-armed, and what the aid switch is doing.
+static bool s_gpsInitLogged = false;
+static bool s_aidLogged = false;
+
 // One complete $... command with the L76K's XOR checksum.
 static void sendL76KCommand(const char* body) {
   uint8_t sum = 0;
@@ -756,11 +817,33 @@ void gpsBegin(bool swapPins) {
   // The sky counts (expected/heard, the 60 s window, max heard) live in the caller's GpsState now,
   // which starts zeroed. The only re-begin is the 10 s pin retry, and that runs only while no byte
   // has ever arrived (bytes == 0), so there is no sky state to clear here.
-  // A re-begin means the module may have restarted too, so the command is armed again and goes out
-  // once more as soon as the module talks, and the no-fix chain starts over (a time before a
-  // restart is not a consecutive sentence).
-  s_gpsMode.onModuleReboot();
+  // The no-fix chain starts over (a time before a restart is not a consecutive sentence).
   s_noFixTime.reset();
+  // EST-387: the one init command is re-armed only when the receiver was really restarted. A warm
+  // boot left the L76K running with its constellation mode in force, so re-sending `$PCAS04,7` would
+  // be a command to a receiver that is already warm, for no gain: we do not know whether the L76K
+  // restarts its engine on a mode change (nothing in this repo proves it either way, and the module
+  // never acknowledges the command), so the one state we can keep for free is "send nothing at all".
+  // `$PCAS04,7` itself is the only init command this firmware has: EST-338's `$PCAS03` GSV probe is
+  // long gone, so there is no harmless-list to resend.
+  if (s_gnssResetThisBoot) {
+    s_gpsMode.onModuleReboot();
+    if (!s_gpsInitLogged) Serial.println("[gps] init: mode 7 armed (receiver was reset)");
+  } else {
+    // The receiver never stopped: mark its one init command as already applied, so the first NMEA
+    // sentence does NOT trigger it (a fresh GpsModeCommand would otherwise send it at boot anyway).
+    s_gpsMode.onModuleWarmStart();
+    if (!s_gpsInitLogged) Serial.println("[gps] init: mode 7 kept (receiver kept running)");
+  }
+  s_gpsInitLogged = true;
+  // One line so a log reader knows what the aid switch is doing. It is a compile-time constant; see
+  // gps_aid.h for why it is off (the AID-INI field table is unverified, and the module's ACK is what
+  // settles it: the device line reads `[gps] aid time=ok|nak|no-answer ...` once it is on).
+  if (!s_aidLogged) {
+    Serial.println(om::aid::kEnabled ? "[gps] aid: armed (kEnabled=true)"
+                                     : "[gps] aid: off (kEnabled=false)");
+  }
+  s_aidLogged = true;
 }
 
 // EST-383: the `gps raw` window. It is started by the USB command and runs from gpsPoll(), so no
@@ -774,10 +857,78 @@ bool gpsRawActive() { return s_gpsRaw.active(); }
 
 int gpsRawSecondsLeft(uint32_t nowMs) { return s_gpsRaw.secondsLeft(nowMs); }
 
+// ---------------------------------------------------------------------------- EST-387: aiding
+// The state the ticket's log line needs and nothing else: at most one frame in flight, its answer (or
+// the timeout) printed once, and `pos=sent|none` naming whether the own position was in it.
+static om::aid::CasicReader s_casic;
+static om::aid::AidGate s_aidGate;
+static bool s_aidPending = false;
+static bool s_aidPosSent = false;
+static TimeSource s_aidSource = TimeSource::None;
+static uint32_t s_aidSentMs = 0;
+
+static void aidLog(const char* answer) {
+  // Rule 9: tokens only. `src=` names the clock source that triggered the frame, never a value.
+  Serial.printf("[gps] aid time=%s pos=%s src=%s\n", answer, s_aidPosSent ? "sent" : "none",
+                timeSourceName(s_aidSource));
+  s_aidPending = false;
+}
+
+// One CASIC frame finished on the UART. Only the answer to our AID-INI matters; anything else the
+// receiver sends in binary is ignored, and none of it reaches the NMEA parser (that is the point of
+// consuming the frame here).
+static void aidOnFrame() {
+  if (!s_casic.answersFor(om::aid::kAidClass, om::aid::kAidIniId)) return;
+  if (!s_aidPending) return;   // a late answer for a frame already reported: never a second line
+  aidLog(s_casic.isNak() ? "nak" : "ok");
+}
+
+// Once per gpsPoll(): the answer timeout first, then the send decision.
+static void aidPoll(const GpsState& gps) {
+  const uint32_t now = millis();
+  if (s_aidPending) {
+    if (now - s_aidSentMs >= om::aid::kAnswerTimeoutMs) aidLog("no-answer");
+    return;
+  }
+  if (gps.bytes == 0) return;   // a receiver we have never heard from cannot be aided
+  const TimeKeeper& tk = timeKeeper();
+  if (!s_aidGate.shouldSend(tk.realSinceBoot(), tk.source(), tk.now(), gps.valid)) return;
+  om::aid::AidTime t;
+  if (!om::aid::aidTimeFromEpoch(tk.now(), t)) return;
+  // The own position, when there is one (Fixed or the last fix): the same point the node advertises.
+  const PositionFix& own = posOwn();
+  const bool withPos = own.valid;
+  uint8_t payload[om::aid::kAidIniBytes];
+  const int payloadLen = om::aid::aidIniPayload(t, /*timeValid=*/true, withPos, own.lat, own.lon,
+                                                /*altMeters=*/0.0f, payload, (int)sizeof(payload));
+  if (payloadLen != om::aid::kAidIniBytes) return;
+  uint8_t frame[om::aid::kMaxFrame];
+  const int len = om::aid::casicFrame(om::aid::kAidClass, om::aid::kAidIniId, payload, payloadLen,
+                                      frame, (int)sizeof(frame));
+  if (len <= 0) return;
+  s_aidGate.onSent(tk.source());
+  s_aidSource = tk.source();
+  s_aidPosSent = withPos;
+  s_aidSentMs = millis();
+  s_aidPending = true;
+  Serial1.write(frame, (size_t)len);
+}
+
 void gpsPoll(GpsState& out) {
   while (Serial1.available()) {
-    const char c = (char)Serial1.read();
+    const uint8_t byte = (uint8_t)Serial1.read();
     ++out.bytes;
+    // EST-387: the receiver's binary answers (a CASIC ACK/NAK to an aid frame) share this UART with
+    // NMEA. With aiding switched off nothing is read here, so the byte stream is exactly what it was.
+    if (om::aid::kEnabled) {
+      const om::aid::CasicReader::Step step = s_casic.feed(byte);
+      if (step == om::aid::CasicReader::Step::Complete) {
+        aidOnFrame();
+        continue;
+      }
+      if (step == om::aid::CasicReader::Step::Taken) continue;
+    }
+    const char c = (char)byte;
     if (c == '\r') continue;
     if (c == '\n') {
       ++out.sentences;
@@ -851,6 +1002,9 @@ void gpsPoll(GpsState& out) {
   // Once per poll, with no data needed: the 60 s best-C/N0 window has to expire even when the module
   // has gone quiet (a stale "best" from the last satellite heard would otherwise stay for ever).
   gpsSkyRefresh(out, millis());
+
+  // EST-387: the aid frame's one send and its answer. With aiding switched off this is a no-op.
+  if (om::aid::kEnabled) aidPoll(out);
 
   // EST-383: one summary when the `gps raw` window is over, even if the module sent nothing.
   if (s_gpsRaw.finished(millis())) {

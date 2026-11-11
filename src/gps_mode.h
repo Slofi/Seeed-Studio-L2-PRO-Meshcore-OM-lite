@@ -34,6 +34,11 @@ class GpsModeCommand {
   // the command again and wait for the module to talk.
   void onModuleReboot() { sent_ = false; }
 
+  // EST-387: this boot did NOT restart the receiver (a software/OTA/panic/watchdog restart of the
+  // ESP32 alone), so its constellation mode is still in force. Mark the command as done for this
+  // boot: nothing is sent and nothing is armed, which is the point of keeping the receiver running.
+  void onModuleWarmStart() { sent_ = true; }
+
   bool sent() const { return sent_; }
 
  private:

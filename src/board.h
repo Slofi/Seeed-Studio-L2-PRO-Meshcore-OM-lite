@@ -129,10 +129,19 @@ void adcProbe(AdcProbe& out);
 // `[gps] mode 7 sent`. Nothing watches for it to be taken: a heard GLONASS satellite in the
 // heartbeat's `heard=..(g.. l.. b..)` count is the only proof.
 //
+// EST-387: the reset line (expander bit 9, high = held in reset) is asserted only when this boot is a
+// real power-on, a brown-out, a deep-sleep wake or an unreadable reason (gps_boot.h holds the table);
+// a software, OTA, panic or watchdog restart leaves the receiver running, so `$PCAS04,7` is re-armed
+// only after a reset. The boot log says which happened: `[gps] boot: kept running (reset reason N)` or
+// `[gps] boot: reset (<reason>)`, then `[gps] init: mode 7 kept|armed`.
+//
 // GpsState and the GSV half of the parser live in gps_sky.h (plain C++): GSV's "in view" number is
 // what the module's almanac EXPECTS, and only a satellite with a C/N0 value above zero is HEARD, so
 // the two counts are kept apart. That header also holds the 60 s best-C/N0 window and the most
 // satellites heard at once since boot.
+//
+// EST-387 aiding lives in gps_aid.h (CASIC AID-INI, the ACK/NAK reader, the once-per-boot rule) and is
+// wired here; its switch is OFF until the device proves the module acknowledges the frame.
 void gpsBegin(bool swapPins = false);
 void gpsPoll(GpsState& out);
 

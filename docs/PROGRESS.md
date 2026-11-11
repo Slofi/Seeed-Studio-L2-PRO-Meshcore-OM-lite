@@ -5699,3 +5699,124 @@ Claude's to check.
 ## 2026-11-11 09:45 (Claude): EST-383 reviewed
 - ZDA already arrives on this unit (DS cites the 2026-11-10 logs), so no PCAS03 was sent; RMC V and ZDA now pass one gate (plausible year, 1..2 s steps, a satellite tracked) as GpsNoFix, priority below Wi-Fi/phone/manual; a fix replaces it at once. gps raw strips lat/lon by construction.
 - Note: the year gate is build year .. +1, so a 2026 build refuses no-fix time from 2028 on until rebuilt (fix time unaffected). Acceptable.
+
+## 2026-11-11 11:25 (DeepSeek): EST-384 own position, Fixed on the map beats GPS (GPS then only for the clock)
+
+### A. One position source, two ways to set it
+- New `src/position_source.h` (plain C++, host-tested) owns the node's own point and the ONE rule:
+  Fixed beats GPS; with GPS selected the latest fix is used; with neither there is no point. While
+  Fixed is on the GPS still runs and still feeds the clock (EST-383), but a fresh fix is kept only
+  for the clock path and never becomes the node's position.
+- New `src/position.cpp` is the only NVS and MeshCore glue. NVS (`omlite`): `psrc` (0 GPS, 1 Fixed),
+  `plat` and `plon`, written together on every change; a Fixed record with a missing or out-of-range
+  point falls back to GPS at boot. `sensors.node_lat/lon` is now written by exactly ONE function,
+  `posApplyToNode()`: the Fixed point when Fixed is selected, the GPS fix when GPS is selected, else
+  0/0 (MeshCore's "no position").
+- Every writer found and routed: `OmSensors::setGpsFix()` (the GPS poll's `targetSetGpsFix`) goes to
+  `posSetGpsFix()`; `MyMesh::begin()` loads its old NodePrefs lat/lon into `sensors` and the shell
+  re-applies the source right after `meshLinkBegin()`; the phone command is covered in C below.
+  Adverts, telemetry, the phone's self-info and the map all read that one applied point.
+
+### B. Settings > General > Node > Position, and the SAME picker
+- The Node page has a `Position` row whose value is the source token (`gps` / `fixed` / `none`), never
+  a coordinate. It opens a `Position` page with two Check rows, `GPS` (default) and `Fixed`, and,
+  while Fixed is on, a `Change fixed position` button.
+- Choosing Fixed opens the SAME map picker the RPTR Position page uses. The picker's pixels were moved
+  out of `ui/screen_rptr.cpp` into `ui/map_pick.{h,cpp}`; RPTR and Settings both call it, and both use
+  the same `rptrMapPickLayoutFor()` geometry and hit test. Nothing was copied into a second picker.
+  Its back key is `Cancel` and its action key is `Save`; RPTR keeps `< back` / `Apply`.
+- Start point: current GPS fix when there is one, else the map pack's centre. `Change fixed position`
+  (and tapping Fixed when it is already on) reopens it on the saved point. Pan and zoom are the
+  picker's own; the crosshair's point is the candidate.
+- Save stores the point and switches to Fixed. Cancel changes no source and no saved point, so a node
+  that was on GPS stays on GPS. The two choices live in the existing settings history, so Back is one
+  level as everywhere else.
+- The General tab's GPS `Position` value row used to print the raw fix as text; it now prints the same
+  source token, because that row is about the position the node uses.
+
+### C. The phone's set-location command (which one it is)
+- The companion command is `CMD_SET_ADVERT_LATLON` (id **14**) in
+  `lib/meshcore_companion/MyMesh.cpp` (the `else if (cmd_frame[0] == CMD_SET_ADVERT_LATLON ...)`
+  branch, around line 1266). Upstream decodes two int32 micro-degrees and writes
+  `sensors.node_lat/lon`, then `savePrefs()`.
+- We do not edit that vendored file. `bleTransportFrame()` in `src/ble_link.cpp` already sees every
+  frame the phone sends BEFORE MyMesh parses it; it now recognises id 14, decodes the same two int32
+  values and calls `posPhoneSet()`. That point becomes Fixed, is saved to NVS and is applied at once.
+  MyMesh then writes the same values, so there is no fight; a later GPS fix cannot move the node.
+- A per-pass `posPollNode()` is the safety net for anything that writes `sensors.node_lat/lon` outside
+  those paths: a different value is taken as the phone's set-location and becomes Fixed. It never
+  fires for our own GPS writes because `posApplyToNode()` records them.
+
+### D. The map
+- The Map tab, locate/follow, the traces' "us" endpoint and the RPTR picker's fallback start point now
+  read `posOwn()` (the effective point), not the raw GPS parser. The GPS parser still drives the clock,
+  the satellite counters and the diagnostics.
+- Our own marker uses the same rect and the same projection as before; when the point is Fixed it is
+  drawn as a small gold pin (head plus a 5 px tip, white centre, 1 px screen outline) instead of the
+  white GPS dot with the gold halo. `MapMarker` gained the one `fixed` flag.
+
+### E. Status and USB
+- `status` gained `pos=gps|fixed|none` (the source token; never coordinates).
+- USB: `pos fixed-here` takes the current GPS fix as the Fixed point (device test shortcut; answers
+  `[cmd] error no gps fix` when there is none) and `pos gps` switches back. Both answer
+  `[cmd] ok pos source=gps|fixed`. Parser: exactly one word, one of the two.
+- Log lines are source-only: `[pos] source=gps|fixed`, `[pos] phone set-location -> fixed`. No format
+  string in the new code carries a coordinate, and `test_est384.py` greps for that.
+
+### F. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` (the REBUILD.md command): **exit 0**, SUCCESS, `OM_BUILD_ID = 769be92-dirty`;
+  only RadioLib's two known `#warning`s, no warning from a changed file.
+- RAM **158,952 B** of 327,680 (48.5 %; 158,824 before, **+128 B**); flash **2,829,753 B** of 6,553,600
+  (43.2 %; 2,825,533 before, **+4,220 B**); `firmware.bin` **2,830,112 B** (was 2,825,904, **+4,208 B**).
+- `test/host/run.sh` **exit 0**: **43 C++ binaries + 10 Python checks**. New `test_est384.cpp` proves:
+  the default (GPS, no fix -> none); a GPS fix is used when GPS is selected; Fixed beats a fresh fix
+  and the point does not move when a later fix arrives; switching back to GPS uses the latest fix at
+  once; the phone set-location switches to Fixed, survives a later fix, a second set replaces the
+  point and an invalid pair is refused; the NVS record round-trips (source + point, GPS clears the
+  point) and a missing/out-of-range Fixed record falls back to GPS; the token is exactly gps/fixed/none
+  with no digits or dot. `test_usb_cmd.cpp` adds the `pos gps` / `pos fixed-here` parser cases (one
+  word only; `pos`, `pos somewhere`, `pos gps extra` and `position gps` refused).
+  `test_est384.py` greps every log/answer format string in the new position code and in the `status`
+  and `pos` handlers for a float specifier or a coordinate name.
+- `strings firmware.elf` carries `[pos] source=%s`, `[pos] phone set-location -> fixed`,
+  `[cmd] ok pos source=%s`, `[cmd] ok status ... clock=%s pos=%s ...`, `fixed-here`,
+  `Change fixed position` and `Fixed position saved`.
+
+### G. Preview
+- `docs/shots/2026-11-11-est384-node-position.png` (2x): the Node page with the POSITION section,
+  `Position  fixed` and `Share position ON`.
+- `docs/shots/2026-11-11-est384-map-fixed-pin.png` (2x): the Map with the Fixed pin at the canvas
+  centre on the default map centre. The pin is the same marker rect as the GPS dot.
+
+### H. Device test steps (after the flash)
+1. `tools/cmd.py status` -> `pos=gps` with a fix, `pos=none` indoors with no saved point. The GNSS
+   count and `clock=` lines must be unchanged, so the GPS still runs.
+2. Settings > General > Node: the Position row reads `gps`; open it, the GPS row has the filled dot.
+   Tap Fixed -> the map picker opens at the current fix (or the map centre indoors). Tap the map away
+   from the centre, Save -> the Position page shows Fixed, the Change button appears, the Node row
+   reads `fixed`.
+3. Walk until the GPS has a fix: `status` must stay `pos=fixed`; the Map marker is the pin and stays
+   on the saved point; locate/follow recentres on the pin; adverts (with Share position on) carry the
+   fixed point. The clock and `[gps] fix` lines keep running.
+4. Open the picker again with Change fixed position: it starts on the saved point. Cancel -> the point
+   and the source are unchanged. Saving a new point moves the pin.
+5. Tap GPS -> `pos=gps` and the marker is the white dot again (or none indoors).
+6. Reboot: the source and point survive (`status`, the Node row and the pin are unchanged).
+7. With Bluetooth on, use the phone app's "set location" on a point: `status` becomes `pos=fixed` and
+   the `[pos] phone set-location -> fixed` line appears; walking with a fresh fix must not move it.
+8. `tools/cmd.py pos fixed-here` with a fix -> `[cmd] ok pos source=fixed`; without a fix ->
+   `[cmd] error no gps fix`. `tools/cmd.py pos gps` -> `source=gps`.
+
+### I. Could not check (no device, no sky, no phone)
+- The real picker pan/zoom and the Cancel/Save taps on the glass; the preview is a layout drawing.
+- The phone app's own set-location screen and the BLE frame ordering with the real app (the host
+  proves the decode and the rule, not the phone).
+- Whether the pin reads clearly on the z13 tiles at 320x240 (the preview is 2x).
+- The boot-time NVS read on a real power cycle (the host proves the record round trip).
+
+### J. Next step
+- Claude reviews the diff and the two previews, flashes, and runs H1-H8. Comment the `pos=` values,
+  the `[pos]` lines and what the pin looks like on the glass.
+
+## 2026-11-11 10:22 (Claude): EST-384 built, NOT reviewed in detail, NOT on the device
+- Sandbox build + tests green. Committed so the NTP ticket starts from a clean tree; review + device test owed.

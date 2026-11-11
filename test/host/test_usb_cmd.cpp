@@ -384,6 +384,24 @@ static void testParseOthers() {
   CHECK(parse(p9).error != nullptr);
   char p10[] = "gps status 30";
   CHECK(parse(p10).error != nullptr);
+
+  // EST-384: `pos gps` and `pos fixed-here`, exactly one word and one of those two.
+  char q1[] = "pos gps";
+  c = parse(q1);
+  CHECK(c.error == nullptr && c.kind == om::usb::Kind::Pos && strcmp(c.target, "gps") == 0);
+  char q2[] = "pos fixed-here";
+  c = parse(q2);
+  CHECK(c.error == nullptr && c.kind == om::usb::Kind::Pos &&
+        strcmp(c.target, "fixed-here") == 0);
+  char q3[] = "pos";
+  CHECK(parse(q3).error != nullptr);
+  char q4[] = "pos somewhere";
+  c = parse(q4);
+  CHECK(c.error != nullptr && strcmp(c.error, "value") == 0);
+  char q5[] = "pos gps extra";
+  CHECK(parse(q5).error != nullptr);
+  char q6[] = "position gps";
+  CHECK(parse(q6).error != nullptr);
 }
 
 static void testRefusals() {

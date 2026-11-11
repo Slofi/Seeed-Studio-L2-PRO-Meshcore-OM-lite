@@ -10,6 +10,7 @@
 #include "target.h"
 
 #include "board.h"
+#include "position.h"
 #include "radio_stats.h"
 #include "radio_fault.h"
 #include "radio_diag.h"
@@ -137,17 +138,16 @@ void OmRTCClock::setCurrentTime(uint32_t time) {
 
 // --- sensors with GPS ----------------------------------------------------------------------------
 void OmSensors::setGpsFix(double lat, double lon, bool valid) {
-  fix_valid_ = valid;
-  if (valid) {
-    node_lat = lat;
-    node_lon = lon;
-  }
+  // EST-384: the raw fix goes to the one source, which decides whether it becomes the node's
+  // position (GPS selected) or only feeds the clock (Fixed selected).
+  om::posSetGpsFix(lat, lon, valid);
 }
 
 bool OmSensors::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
   bool added = false;
-  if ((requester_permissions & TELEM_PERM_LOCATION) && fix_valid_) {
-    telemetry.addGPS(TELEM_CHANNEL_SELF, (float)node_lat, (float)node_lon, 0.0f);
+  const om::PositionFix& own = om::posOwn();
+  if ((requester_permissions & TELEM_PERM_LOCATION) && own.valid) {
+    telemetry.addGPS(TELEM_CHANNEL_SELF, (float)own.lat, (float)own.lon, 0.0f);
     added = true;
   }
   return added;

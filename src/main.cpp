@@ -24,6 +24,7 @@
 #include "history_store.h"
 #include "mem_stats.h"
 #include "ota.h"
+#include "position.h"
 #include "power_log.h"
 #include "psram_alloc.h"
 #include "radio.h"
@@ -57,6 +58,7 @@
 #include "ui/node_info.h"
 #include "ui/map_chrome.h"
 #include "ui/map_layers.h"
+#include "ui/map_pick.h"   // EST-384: the one picker, shared with the RPTR Position page
 #include "ui/rptr_layout.h"
 #include "ui/screen_chat.h"
 #include "ui/screen_node_info.h"
@@ -104,6 +106,15 @@ static om::ui::SettingsNav g_setNav;   // where Back goes, with the scroll each 
 static int g_setScroll = 0;          // px scrolled in the body
 static int g_setScroll0 = 0;         // its value when the finger went down
 static int g_setMaxScroll = 0;       // the last build's clamp
+// EST-384: Settings' own-position map picker, the SAME picker (ui/map_pick.cpp) the RPTR Position
+// page draws. The candidate lives here; nothing is committed until Save.
+static bool g_ownPick = false;
+static int32_t g_ownPickLatE6 = 0;
+static int32_t g_ownPickLonE6 = 0;
+static int g_ownPickZoom = 15;
+static int g_ownPickDragX = 0;
+static int g_ownPickDragY = 0;
+static bool g_ownPickDragging = false;
 static char g_setTitle[40] = "Settings";
 static bool g_setSubPage = false;
 // EST-363: a page's one commit action in the title row (the sound picker's Use, the time page's Set,
@@ -416,7 +427,9 @@ static om::ui::TabBarModel currentTabBar(om::ui::Tab active) {
   return om::ui::tabBarModel(active, unreadTotal(), g_newNodeDot);
 }
 static om::ui::TabBarModel appTabBar(om::ui::Tab active) { return currentTabBar(active); }
-static const om::GpsState* appGps() { return &g_gps; }
+// EST-384: the Map, locate/follow and the traces read the ONE own-position source, not the raw GPS
+// parser. The parser still owns the clock and the satellite diagnostics.
+static const om::PositionFix* appGps() { return &om::posOwn(); }
 
 static void drawHome();
 // Defined far below; the toast paths need it now that showing a toast means "redraw the current
@@ -2937,9 +2950,11 @@ static void rptrPageRowTapped(const om::rptr::UiRow& row, bool key, int dir) {
         if (g_rptrDraft.latE6 != 0 || g_rptrDraft.lonE6 != 0) {
           lat = (double)g_rptrDraft.latE6 / 1e6;   // the repeater's own (or the typed) position
           lon = (double)g_rptrDraft.lonE6 / 1e6;
-        } else if (g_gps.valid) {
-          lat = g_gps.lat;                          // no position on the repeater: our own fix
-          lon = g_gps.lon;
+        } else if (om::posOwn().valid) {
+          // EST-384: no position on the repeater: start on OUR effective position (the Fixed point
+          // when Fixed is on, else the GPS fix), not on the raw parser.
+          lat = om::posOwn().lat;
+          lon = om::posOwn().lon;
         } else {
           lat = 46.0569;                            // Ljubljana: the map pack's centre
           lon = 14.5058;
@@ -3157,6 +3172,7 @@ enum SetAct : uint16_t {
   A_None = 0,
   A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_BtToggle, A_BtNewPin, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
+  A_PosPage, A_PosGps, A_PosFixed, A_PosChange,
   A_Apply, A_Cancel,
   A_MapRecentre, A_MapClear, A_RptrForget, A_RptrAuto,
   A_ChatPick, A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
@@ -3184,6 +3200,7 @@ static bool s_setNameNode = false;   // the name editor is renaming the node, no
 
 static void drawSettings();   // the gear and every settings page reach this
 static void showToast(const char* text);
+static void drawOwnPick();    // EST-384: the Settings own-position map picker's frame
 
 static void setResetRows() { g_setRowCount = 0; }
 
@@ -3375,9 +3392,9 @@ static void buildSettingsRows() {
                (unsigned)g_gps.heardTotal);
       setAdd(om::ui::SetRowKind::Value, A_None, "Satellites", v);
       setAdd(om::ui::SetRowKind::Value, A_None, "Fix", g_gps.valid ? "3D" : "no fix");
-      if (g_gps.valid) snprintf(v, sizeof(v), "%.4f, %.4f", g_gps.lat, g_gps.lon);
-      else snprintf(v, sizeof(v), "--");
-      setAdd(om::ui::SetRowKind::Value, A_None, "Position", v);
+      // EST-384: the effective source, never a coordinate (rule 9). The raw fix is still visible in
+      // the Fix row and the satellite counters; what the node actually uses is the source token.
+      setAdd(om::ui::SetRowKind::Value, A_None, "Position", om::posStatusToken());
       setAdd(om::ui::SetRowKind::Toggle, A_AdvertPos, "Share position", "ON",
              om::meshAdvertPosPolicyGet());
 
@@ -3564,8 +3581,30 @@ static void buildSettingsRows() {
       key[0] = 0;
       om::meshPubKeyShort(key, sizeof(key));
       setAdd(om::ui::SetRowKind::Value, A_None, "Public key", key);
+      // EST-384: the node's own position source. The value is the source token (gps / fixed / none),
+      // never a coordinate; the page behind it has the two choices and the map picker.
+      setSection("POSITION");
+      setAdd(om::ui::SetRowKind::Chevron, A_PosPage, "Position", om::posStatusToken());
       setAdd(om::ui::SetRowKind::Toggle, A_AdvertPos, "Share position", "ON",
              om::meshAdvertPosPolicyGet());
+      break;
+    }
+
+    case SetPage::Position: {
+      // EST-384: two choices. GPS is today's behaviour and the default; Fixed opens the SAME map
+      // picker the RPTR Position page uses. "Change fixed position" reopens it on the saved point.
+      snprintf(g_setTitle, sizeof(g_setTitle), "Position");
+      setSection("SOURCE");
+      setAdd(om::ui::SetRowKind::Check, A_PosGps, "GPS", "live fix",
+             om::posSource().source() == om::kPosSourceGps);
+      setAdd(om::ui::SetRowKind::Check, A_PosFixed, "Fixed", "picked on the map",
+             om::posSource().source() == om::kPosSourceFixed);
+      if (om::posSource().sourceFixed()) {
+        setSection("FIXED POINT");
+        setAdd(om::ui::SetRowKind::Button, A_PosChange, "Change fixed position");
+      }
+      setAdd(om::ui::SetRowKind::Warn, A_None,
+             "Fixed keeps the GPS running for the clock only. A new fix never moves the node.");
       break;
     }
 
@@ -3958,6 +3997,12 @@ static void redrawMainTab() {
 }
 
 static void drawSettings() {
+  // EST-384: the own-position map picker is its own full frame (the RPTR picker is drawn the same
+  // way), so no row build happens while it is up.
+  if (g_ownPick) {
+    drawOwnPick();
+    return;
+  }
   buildSettingsRows();
   const om::ui::SettingsLayout L =
       om::ui::settingsLayoutFor(om::ui::kScreenW, om::ui::kScreenH, g_setSubPage, g_setSelOpen);
@@ -3986,6 +4031,7 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
   g_clearAsk = false;
   g_setSelOpen = false;
   g_setSelScroll = 0;
+  g_ownPick = false;      // EST-384: a fresh door into Settings never opens on the picker
   g_advertMenu = false;   // EST-382: leaving the Chat page closes its advert dropdown
   // EST-350: the settings page starts on the chat that was open when the gear was pressed.
   g_setChat = g_chatSel;
@@ -4027,6 +4073,103 @@ static void openChannelPage(int idx) {
 
 static void settingsEditorOk();
 
+// --- EST-384: Settings' own-position picker (the SAME picker as the RPTR Position page) ----------
+// The candidate is a draft: Save commits it as the Fixed position, Cancel changes nothing, so a
+// program that was on GPS stays on GPS.
+static void ownPickCentreToDraft() {
+  double lat = 0.0;
+  double lon = 0.0;
+  om::mapScreenToLatLon(om::ui::kMapCentreX, om::ui::kMapCentreY, lat, lon);
+  g_ownPickLatE6 = (int32_t)lround(lat * 1e6);
+  g_ownPickLonE6 = (int32_t)lround(lon * 1e6);
+}
+
+static void ownPickOpen(bool onSavedPoint) {
+  double lat = 46.0569;   // the map pack's own centre: no saved point and no fix
+  double lon = 14.5058;
+  if (onSavedPoint && om::posSource().fixedSet()) {
+    lat = om::posSource().fixedLat();
+    lon = om::posSource().fixedLon();
+  } else if (g_gps.valid) {
+    lat = g_gps.lat;      // the ticket: start at the current GPS fix when there is one
+    lon = g_gps.lon;
+  }
+  g_ownPickLatE6 = (int32_t)lround(lat * 1e6);
+  g_ownPickLonE6 = (int32_t)lround(lon * 1e6);
+  g_ownPickZoom = 15;
+  om::mapSetView(lat, lon, g_ownPickZoom);
+  g_ownPickDragging = false;
+  g_ownPick = true;
+  drawSettings();
+}
+
+static void ownPickCancel() {
+  g_ownPick = false;
+  drawSettings();
+}
+
+static void ownPickSave() {
+  const bool ok = om::posSelectFixed((double)g_ownPickLatE6 / 1e6, (double)g_ownPickLonE6 / 1e6);
+  g_ownPick = false;
+  showToast(ok ? "Fixed position saved" : "Position not saved");
+  drawSettings();
+}
+
+static void ownPickTap(int x, int y) {
+  const om::ui::RptrMapPickLayout m = om::ui::rptrMapPickLayoutFor(om::ui::l2(), true);
+  switch (om::ui::rptrMapPickHitAt(m, x, y)) {
+    case om::ui::RptrMapPickHit::Back:
+      ownPickCancel();
+      return;
+    case om::ui::RptrMapPickHit::ZoomIn:
+      om::mapZoomBy(1);
+      g_ownPickZoom = om::mapZoom();
+      drawSettings();
+      return;
+    case om::ui::RptrMapPickHit::ZoomOut:
+      om::mapZoomBy(-1);
+      g_ownPickZoom = om::mapZoom();
+      drawSettings();
+      return;
+    case om::ui::RptrMapPickHit::UseGps:
+      if (!g_gps.valid) {
+        showToast("No GPS fix yet");
+        return;
+      }
+      om::mapSetView(g_gps.lat, g_gps.lon, g_ownPickZoom);
+      g_ownPickLatE6 = (int32_t)lround(g_gps.lat * 1e6);
+      g_ownPickLonE6 = (int32_t)lround(g_gps.lon * 1e6);
+      drawSettings();
+      return;
+    case om::ui::RptrMapPickHit::Apply:
+      ownPickSave();
+      return;
+    case om::ui::RptrMapPickHit::Map:
+      ownPickCentreToDraft();
+      drawSettings();
+      return;
+    default:
+      return;   // the panel/back are over the map; nothing else is a map tap
+  }
+}
+
+static void drawOwnPick() {
+  char lat[20];
+  char lon[20];
+  rptrCoordText(lat, sizeof(lat), g_ownPickLatE6);
+  rptrCoordText(lon, sizeof(lon), g_ownPickLonE6);
+  om::ui::MapPickView v;
+  snprintf(v.coords, sizeof(v.coords), "%s, %s", lat, lon);
+  snprintf(v.hint, sizeof(v.hint), "z%d", g_ownPickZoom);
+  v.gps = g_gps.valid;
+  v.action = true;
+  v.actionLabel = "Save";
+  v.backLabel = "Cancel";
+  om::ui::StatusModel st;
+  buildStatus(st);
+  om::ui::drawMapPickScreen(v, st);
+}
+
 static void openSoundPicker(SoundEvent ev) {
   g_setSoundEvent = (int)ev;
   g_setSoundPending = (int)om::sounds::choice(ev);
@@ -4044,6 +4187,20 @@ static void handleSettingsRow(uint16_t id) {
     // EST-350: the General row named "Node" opens the Node page (Name, Public key, Share position);
     // the rename is the Node page's own "Name" row (A_NodeName), which is what used to be here.
     case A_Node:     setGo(SetPage::Node); break;
+    // EST-384: the Node page's Position row, its two choices and the map picker.
+    case A_PosPage:  setGo(SetPage::Position); break;
+    case A_PosGps:
+      om::posSelectGps();
+      showToast("Position: GPS");
+      break;
+    case A_PosFixed:
+      // Choosing Fixed opens the SAME picker. Already fixed? Then this reopens on the saved point,
+      // exactly like the Change row.
+      ownPickOpen(om::posSource().sourceFixed());
+      return;   // ownPickOpen drew the picker
+    case A_PosChange:
+      ownPickOpen(true);
+      return;
     case A_NodeName:
       snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::meshNodeName());
       s_setNameNode = true;
@@ -4566,6 +4723,11 @@ static void settingsClearChannelMessages() {
 
 // A tap on a settings page. All rectangles come from the view the drawing used.
 static void handleSettingsTap(int x, int y) {
+  // EST-384: the own-position picker owns every tap while it is up (Cancel, zoom, GPS, Save, map).
+  if (g_ownPick) {
+    ownPickTap(x, y);
+    return;
+  }
   buildSettingsRows();
   const om::ui::SettingsView v = settingsView();
 
@@ -4747,6 +4909,10 @@ void setup() {
 
   om::crashCheckpoint("[om] prefs + clock");
   g_prefs.begin("omlite", false);
+  // EST-384: the node's own position source (GPS or a point fixed on the map). Loaded before
+  // MeshCore exists so its own saved lat/lon can never win the boot race; the effective point is
+  // re-applied right after meshLinkBegin() below.
+  om::posBegin(&g_prefs);
   // One clock, seeded before MeshCore exists: max(saved floor, build time). It is not real time yet;
   // buildStatus() keeps showing "--:--" until GPS (or a later Wi-Fi/phone/manual source) sets it.
   {
@@ -4804,6 +4970,11 @@ void setup() {
   om::crashCheckpoint("[om] mesh begin");
   const bool meshOk = om::meshLinkBegin();
   Serial.printf("[mc] mesh: %s\n", meshOk ? "up" : "FAILED");
+  // EST-384: MeshCore's begin() loads its own NodePrefs lat/lon into sensors. That is GPS-era saved
+  // state; the ONE position source is the truth, so put the effective point back right after it.
+  // Done even when begin() failed part-way: otherwise posPollNode() could mistake those half-loaded
+  // prefs for a phone set-location on the first pass.
+  om::posApplyToNode();
   // The status bar's red mark, second of its three reasons: MeshCore did not start (its radio,
   // identity, settings or contact store). A radio fault already showing outranks this one.
   if (!meshOk && om::radioFaultState().set(om::RadioFault::Mesh)) {
@@ -5258,6 +5429,10 @@ void loop() {
   const uint32_t passStartUs = micros();
   om::radio::beginPass(passStartUs);
   const uint16_t passPush0 = om::omFramePushCount();
+  // EST-384: catch a phone set-location that slipped past the BLE frame hook BEFORE this pass's GPS
+  // write, so a GPS fix can never overwrite the point the phone just sent. The source itself decides;
+  // this only reports an outside write.
+  om::posPollNode();
   // EST-349: the ONE history flush point, on the loop task and outside every other path. A send, a
   // MeshCore callback or a USB command only enqueues a record; the card is touched here and nowhere
   // else. One (two under pressure) record per pass: a card write never sits in the packet path.
@@ -5888,6 +6063,7 @@ void loop() {
       g_upY = g_sy;
       g_upMs = millis();
       g_rptrPickDragging = false;   // EST-366: the next map gesture starts a fresh pan base
+      g_ownPickDragging = false;    // EST-384: same for the Settings own-position picker
       // A spent gesture was the press that closed an overlay: its release does nothing at all (no
       // tap, no rubber band, no redraw). Only the NEXT new press acts on what was behind (EST-339).
       const bool spent = g_spent;
@@ -5994,7 +6170,7 @@ void loop() {
         }
         // The settings list's give is snapped back the same way; the last 60 ms of a fast drag may
         // not have been drawn, so the final position is always drawn here.
-        if (g_settings) {
+        if (g_settings && !g_ownPick) {
           const int clamped = om::ui::settingsSnapScroll(g_setScroll, g_setMaxScroll);
           const bool changed = clamped != g_setScroll;
           g_setScroll = clamped;
@@ -6199,6 +6375,26 @@ void loop() {
             drawSettings();
           }
         }
+      } else if (g_settings && g_ownPick) {
+        // EST-384: dragging the own-position picker pans the offline map under the fixed crosshair,
+        // with the same first-move base as the RPTR picker so the map never jumps.
+        if (!g_ownPickDragging) {
+          g_ownPickDragging = true;
+          g_ownPickDragX = (int)x;
+          g_ownPickDragY = (int)y;
+        } else {
+          om::mapPan(g_ownPickDragX - (int)x, g_ownPickDragY - (int)y);
+          g_ownPickDragX = (int)x;
+          g_ownPickDragY = (int)y;
+          ownPickCentreToDraft();
+        }
+        g_drag = true;
+        if (millis() - g_lastRender > 60) {
+          g_lastRender = millis();
+          drawSettings();
+        }
+        g_lastX = x;
+        g_lastY = y;
       } else if (g_settings) {
         // Every settings page scrolls with the finger, through the one shared drag rule
         // (settings_layout.h: the chat list's sign and give), and snaps back on release.

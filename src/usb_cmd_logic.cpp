@@ -322,6 +322,23 @@ Command parseCommand(char* line) {
     if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
     return c;
   }
+  // EST-384: `pos gps` and `pos fixed-here`, the node's own position source. One word, exactly one
+  // of the two; nothing here carries a coordinate.
+  if (strcmp(verb, "pos") == 0) {
+    c.kind = Kind::Pos;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "gps") != 0 && strcmp(sub, "fixed-here") != 0) {
+      c.error = "value";
+      return c;
+    }
+    c.target = sub;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
   // EST-376: the read-only charge probe. One form only: `pmu probe`.
   if (strcmp(verb, "pmu") == 0) {
     c.kind = Kind::Pmu;

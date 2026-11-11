@@ -47,8 +47,8 @@ constexpr uint32_t kTraceFrameMs = 33;   // ~30 fps while a trace runs; nothing 
 bool s_openFast = false;
 bool s_refreshPending = false;
 
-const GpsState& fix() {
-  static const GpsState none{};
+const PositionFix& fix() {
+  static const PositionFix none{};
   return (s_host.gps != nullptr) ? *s_host.gps() : none;
 }
 
@@ -66,7 +66,7 @@ void toast(const char* text) {
 }
 
 void traceRememberSelf() {
-  const GpsState& g = fix();
+  const PositionFix& g = fix();
   if (!g.valid) return;
   s_traceSelfLatE6 = (int32_t)lround(g.lat * 1e6);
   s_traceSelfLonE6 = (int32_t)lround(g.lon * 1e6);
@@ -242,8 +242,8 @@ void build(ui::MapView& v) {
   v.tabsHidden = s_layers.tabsHidden();
   v.trace = s_traceFrame;
 
-  // Our own position: the white dot with the gold halo.
-  const GpsState& g = fix();
+  // Our own position: the white GPS dot, or the small gold pin when the point is Fixed (EST-384).
+  const PositionFix& g = fix();
   if (g.valid) {
     int x = 0, y = 0;
     // EST-374: mapProject() answers in screen coordinates (the canvas starts under the status bar),
@@ -257,6 +257,7 @@ void build(ui::MapView& v) {
       m.type = 1;
       m.name = om::meshNodeName();
       m.self = true;
+      m.fixed = g.fixed;   // EST-384: the same rect, a pin instead of the GPS dot
     }
   }
 
@@ -299,7 +300,7 @@ void build(ui::MapView& v) {
 }
 
 void drawAnimFrame() {
-  const GpsState& g = fix();
+  const PositionFix& g = fix();
   if (s_lock && g.valid) om::mapSetView(g.lat, g.lon, om::mapZoom());
   ui::MapView v;
   build(v);
@@ -441,7 +442,7 @@ void leave() {
 }
 
 void draw() {
-  const GpsState& g = fix();
+  const PositionFix& g = fix();
   // Follow mode: a locked map recentres on our fix before the tiles are composed.
   if (s_lock && g.valid) om::mapSetView(g.lat, g.lon, om::mapZoom());
   traceRememberSelf();
@@ -537,7 +538,7 @@ bool tap(int x, int y) {
     }
     case ui::MapHitKind::Lock: {
       s_lock = !s_lock;
-      const GpsState& g = fix();
+      const PositionFix& g = fix();
       if (s_lock && g.valid) om::mapSetView(g.lat, g.lon, om::mapZoom());
       Serial.printf("[map] follow %s\n", s_lock ? "on" : "off");
       draw();

@@ -39,6 +39,7 @@ enum class Kind : uint8_t {
   Notify,   // notify test "<title>" "<body>"   (EST-381: the message pop-up without radio traffic)
   Advert,   // advert local|flood   (EST-382: the one manual advert, same function as the Chat key)
   Gps,      // gps raw <5..120>   (EST-383: the safe NMEA fields of RMC/ZDA/GGA/GSA + a type tally)
+  Pos,      // pos gps | pos fixed-here   (EST-384: the node's own position source)
 };
 
 // A parsed command. `target` and `text` point into the line given to parseCommand(), which is

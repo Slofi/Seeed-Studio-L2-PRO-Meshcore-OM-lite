@@ -88,6 +88,9 @@ class OmRTCClock : public mesh::RTCClock {
 
 // Sensors with GPS. MeshCore uses node_lat/node_lon for adverts and querySensors() for
 // telemetry; the GPS fix itself is parsed by board.cpp and pushed in with targetSetGpsFix().
+// EST-384: both fields are the EFFECTIVE own position now, written only by om::posApplyToNode():
+// the Fixed point when Fixed is selected, the GPS fix when GPS is selected. A raw GPS fix never
+// writes them directly, so it cannot move a fixed node.
 class OmSensors : public SensorManager {
  public:
   bool begin() override { return true; }
@@ -98,12 +101,12 @@ class OmSensors : public SensorManager {
   const char* getSettingValue(int i) const override;
   bool setSettingValue(const char* name, const char* value) override;
 
+  // EST-384: feeds the one position source; the effective position decides what MeshCore sees.
   void setGpsFix(double lat, double lon, bool valid);
 
  private:
   bool gps_enabled_ = false;
   uint32_t gps_interval_ = 0;
-  bool fix_valid_ = false;
 };
 
 // A no-op transport, kept for builds without the phone link. Since EST-356 MyMesh gets the real BLE

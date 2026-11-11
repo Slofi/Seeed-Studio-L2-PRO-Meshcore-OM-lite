@@ -18,6 +18,8 @@ python3 -B test_fonts.py
 # EST-379: the build id's one command, the dirty suffix and the "unknown" fallback with a warning,
 # against a fake git (success, dirty, failure, git missing).
 python3 -B test_est379.py
+# EST-384: the new position code's log and answer format strings carry no coordinate (rule 9).
+python3 -B test_est384.py
 
 # Layout / hit testing, the migration bytes and the other pure-C++ logic (no Arduino): build them
 # with the system g++.
@@ -63,7 +65,8 @@ BIN39="$(mktemp /tmp/om-lite-est380.XXXXXX)"
 BIN40="$(mktemp /tmp/om-lite-est381.XXXXXX)"
 BIN41="$(mktemp /tmp/om-lite-est382.XXXXXX)"
 BIN42="$(mktemp /tmp/om-lite-gpsraw.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42"' EXIT
+BIN43="$(mktemp /tmp/om-lite-est384.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -381,3 +384,10 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est382.cpp \
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps_raw.cpp \
   ../../src/gps_raw.cpp ../../src/timekeeper.cpp -o "$BIN42"
 "$BIN42"
+
+# EST-384: the one own-position source. Fixed beats a fresh GPS fix and a later fix never moves the
+# node; GPS is used when GPS is selected and none when there is no fix; the phone's set-location
+# becomes Fixed; the NVS record round-trips and an invalid Fixed record falls back to GPS; the status
+# token is gps/fixed/none and carries no coordinate. The log-format grep is test_est384.py above.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est384.cpp -o "$BIN43"
+"$BIN43"

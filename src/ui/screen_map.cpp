@@ -56,7 +56,21 @@ void drawLockIcon(lgfx::LovyanGFX* d, const Rect& r, bool on) {
 
 void drawMarker(lgfx::LovyanGFX* d, const MapMarker& m) {
   const int r = m.self ? 5 : kMapMarkerR;
-  if (m.self) {
+  if (m.self && m.fixed) {
+    // EST-384: the Fixed point is a small pin, not the GPS dot. It occupies the SAME marker rect
+    // (a 10 px box around the point): a gold head at y-2 and a tip 5 px down, with the same 1 px
+    // screen outline and a white centre so it reads on a light tile.
+    const int headY = m.y - 2;
+    d->fillTriangle((int16_t)(m.x - r + 1), (int16_t)headY, (int16_t)(m.x + r - 1),
+                    (int16_t)headY, (int16_t)m.x, (int16_t)(headY + 7), kAcc);
+    d->fillCircle(m.x, headY, r, kAcc);
+    d->drawCircle(m.x, headY, r, kScreen);
+    d->drawLine((int16_t)(m.x - r + 2), (int16_t)(headY + 4), (int16_t)m.x, (int16_t)(headY + 7),
+                kScreen);
+    d->drawLine((int16_t)m.x, (int16_t)(headY + 7), (int16_t)(m.x + r - 2),
+                (int16_t)(headY + 4), kScreen);
+    d->fillCircle(m.x, headY, 2, kWhite);
+  } else if (m.self) {
     d->fillCircle(m.x, m.y, r + 4, kSelBg2);   // the gold halo the mock gives .mk.self
     d->fillCircle(m.x, m.y, r + 2, kAcc);
     d->fillCircle(m.x, m.y, r, kWhite);

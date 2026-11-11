@@ -70,7 +70,7 @@ constexpr bool settingsTabFits(SettingsTab t, int16_t width) {
 // rest are pages reached from a row.
 enum class SetPage : uint8_t {
   GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
-  Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
+  Preset, PresetCustom, Hash, Node, NameEdit, Position, Channels, Channel, ChanAdd, ChanKey,
   Sound, SoundPicker, Wifi, WifiSaved, WifiPass, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash,
   Count,
 };

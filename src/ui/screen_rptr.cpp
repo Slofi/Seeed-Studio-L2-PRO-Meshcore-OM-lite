@@ -11,6 +11,7 @@
 #include "board.h"
 #include "map.h"   // EST-366: the Position page's picker is the Map tab's own offline renderer
 #include "ui/keyboard_draw.h"
+#include "ui/map_pick.h"   // EST-384: the one picker, shared with the node's Fixed position
 
 namespace om {
 namespace ui {
@@ -374,46 +375,17 @@ void drawModal(lgfx::LovyanGFX* d, const RptrView& v) {
   drawButton(d, m.confirm, v.modalVerb, true);
 }
 
-// EST-366 (rule 6): the Position page's map. Same renderer as the Map tab (offline tiles), a
-// crosshair at the view centre, pan by dragging, zoom with the two keys, and the coordinate under the
-// map. The panel is drawn over the map's bottom so the tile area stays map.cpp's own 320x214.
+// EST-366 (rule 6): the Position page's map. EST-384 moved the pixels into ui/map_pick.cpp so the
+// node's own Fixed position draws the SAME picker; this wrapper only maps the RPTR view onto it.
 void drawMapPick(lgfx::LovyanGFX* d, const RptrView& v) {
-  om::mapRender();
-  const RptrMapPickLayout m = rptrMapPickLayoutFor(l2(), v.mapApply);
-  if (!om::mapReady()) {
-    drawEmptyState(d, Rect{8, 60, 304, 100}, "Map pack not open.",
-                   "The card needs /maps/slo/tiles.pack.");
-  }
-  drawBack(d, m.back, "< back");
-  smallKey(d, m.zoomIn, "+", false);
-  smallKey(d, m.zoomOut, "-", false);
-  if (v.mapHint[0]) {
-    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kMapBg, (int16_t)(m.back.right() + 8),
-                     (int16_t)(m.back.y + m.back.h / 2),
-                     (int16_t)(m.zoomIn.x - m.back.right() - 16), v.mapHint);
-  }
-  // The crosshair: a ring and four ticks, the gold centre dot marks the exact pixel picked.
-  const int cx = m.crosshair.x + m.crosshair.w / 2;
-  const int cy = m.crosshair.y + m.crosshair.h / 2;
-  d->drawCircle(cx, cy, 7, kInk);
-  d->drawFastHLine(cx - 14, cy, 5, kInk);
-  d->drawFastHLine(cx + 10, cy, 5, kInk);
-  d->drawFastVLine(cx, cy - 14, 5, kInk);
-  d->drawFastVLine(cx, cy + 10, 5, kInk);
-  d->fillCircle(cx, cy, 2, kAcc);
-
-  d->fillRect(m.panel.x, m.panel.y, m.panel.w, m.panel.h, kPanel);
-  d->drawFastHLine(m.panel.x, m.panel.y, m.panel.w, kLine);
-  drawTextEllipsis(d, FontRole::MonoMeta, kInk, kPanel, m.coords.x,
-                   (int16_t)(m.coords.y + m.coords.h / 2), m.coords.w, v.mapCoords);
-  d->fillRoundRect(m.useGps.x, m.useGps.y, m.useGps.w, m.useGps.h, kRadiusSm, kPanel2);
-  d->drawRoundRect(m.useGps.x, m.useGps.y, m.useGps.w, m.useGps.h, kRadiusSm, kLine);
-  setRole(d, FontRole::MonoMeta);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(v.mapGps ? kInk : kDimmer, kPanel2);
-  d->drawString("Use my GPS position", m.useGps.x + m.useGps.w / 2,
-                m.useGps.y + m.useGps.h / 2);
-  if (!m.apply.empty()) drawButton(d, m.apply, "Apply", false);
+  MapPickView pick;
+  snprintf(pick.coords, sizeof(pick.coords), "%s", v.mapCoords);
+  snprintf(pick.hint, sizeof(pick.hint), "%s", v.mapHint);
+  pick.gps = v.mapGps;
+  pick.action = v.mapApply;
+  pick.actionLabel = "Apply";
+  pick.backLabel = "< back";
+  om::ui::drawMapPick(d, pick);
 }
 
 }  // namespace

@@ -24,6 +24,7 @@
 #include "mesh_link.h"
 #include "om_build.h"
 #include "ota.h"
+#include "position.h"
 #include "power_log.h"
 #include "radio.h"
 #include "radio_diag.h"
@@ -432,12 +433,12 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       const om::history::HistoryStatus& hs = om::history::status();
       snprintf(reply, cap,
                "[cmd] ok status mesh=%s name=\"%s\" build=%s path=%s channels=%d contacts=%d dm=%d "
-               "unread=%d clock=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
+               "unread=%d clock=%s pos=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
                "hist_worst_us=%lu hist_dropped=%lu hist_write_fail=%lu loop_stack_free=%u "
                "loop_stack_size=%u internal=%u internal_max=%u heap=%u psram=%u",
                om::meshLinkReady() ? "up" : "down", name, OM_BUILD_ID, path, om::mcChannelCount(), om::app::nodeCount(),
                om::meshDmCount(), om::app::unreadTotal(),
-               om::timeSourceName(om::timeKeeper().source()),
+               om::timeSourceName(om::timeKeeper().source()), om::posStatusToken(),
                !hs.ready ? "off" : (hs.sd ? "sd" : "spiffs"), (unsigned long)hs.bytes, hs.slots,
                (unsigned long)hs.records, (unsigned long)hs.worstFlushUs,
                (unsigned long)hs.dropped, (unsigned long)hs.writeFail,
@@ -888,6 +889,23 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       // and gpsPoll() prints the one `[cmd] ok gps raw ...` answer at the end, so tools/cmd.py
       // prints every sentence instead of returning before the first one arrives.
       snprintf(reply, cap, "[gpsraw] start secs=%d", cmd.count);
+      return;
+    }
+
+    // EST-384: `pos gps` and `pos fixed-here`. The second takes the CURRENT GPS fix as the Fixed
+    // point (a device-side test shortcut; it refuses when there is no fix). The answer names the
+    // source only, never a coordinate.
+    case om::usb::Kind::Pos: {
+      if (cmd.target != nullptr && strcmp(cmd.target, "fixed-here") == 0) {
+        if (!om::posFixHere()) {
+          cmdError(reply, cap, "no gps fix");
+          return;
+        }
+        snprintf(reply, cap, "[cmd] ok pos source=%s", om::posStatusToken());
+        return;
+      }
+      om::posSelectGps();
+      snprintf(reply, cap, "[cmd] ok pos source=%s", om::posStatusToken());
       return;
     }
 

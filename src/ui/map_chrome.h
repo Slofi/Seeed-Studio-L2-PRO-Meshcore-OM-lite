@@ -136,6 +136,9 @@ struct MapMarker {
   const char* name = "";
   bool selected = false;
   bool self = false;   // our own position: the white dot with the gold halo
+  // EST-384: our own position is the Fixed point: the same marker rect, drawn as a small gold pin
+  // instead of the GPS dot. Ignored on a contact marker.
+  bool fixed = false;
 };
 
 struct MapChrome {

@@ -14,6 +14,7 @@
 #include "mem_stats.h"
 #include "mesh_link.h"
 #include "mesh_text.h"
+#include "position.h"
 #include "wifi_link.h"
 
 namespace om {
@@ -39,6 +40,10 @@ constexpr uint32_t kStartNeedBlock = 8u * 1024u;    // largest single internal b
 // uses to SEND are needed here: the listener already sees everything that arrives.
 constexpr uint8_t kCmdSendTxtMsg = 2;          // [2][type][attempt][ts:4][pubkey:6][text]
 constexpr uint8_t kCmdSendChannelTxtMsg = 3;   // [3][type][channel][ts:4][text]
+// EST-384: the companion's set-location command (CMD_SET_ADVERT_LATLON = 14 in
+// lib/meshcore_companion/MyMesh.cpp). Upstream validates the two int32 micro-degrees itself; we take
+// the same point into the Fixed source through the transport hook, before MyMesh writes sensors.
+constexpr uint8_t kCmdSetAdvertLatLon = 14;    // [14][lat:int32][lon:int32][alt:int32 optional]
 constexpr uint8_t kTxtTypePlain = 0;
 
 // EST-357: the shell's toast hook and the one text queued during setup (a toast cannot be drawn
@@ -326,8 +331,9 @@ void bleSetNotice(void (*fn)(const char*)) { s_notice = fn; }
 uint32_t bleStartNeedFree() { return kStartNeedFree; }
 uint32_t bleStartNeedBlock() { return kStartNeedBlock; }
 
-// Called by the transport with each frame the phone sent, before MyMesh handles it. Copies only the
-// two send commands; everything else is upstream's business.
+// Called by the transport with each frame the phone sent, before MyMesh handles it. Copies the two
+// send commands and, since EST-384, takes the set-location command into the Fixed position;
+// everything else is upstream's business.
 void bleTransportFrame(const uint8_t* data, size_t len) {
   if (data == nullptr || len == 0) return;
   if (data[0] == kCmdSendChannelTxtMsg && len >= 7 && data[1] == kTxtTypePlain) {
@@ -345,6 +351,15 @@ void bleTransportFrame(const uint8_t* data, size_t len) {
     memcpy(text, &data[13], n);
     text[n] = 0;
     if (text[0] != 0) meshPhoneDmSent(&data[7], 6, text);
+  } else if (data[0] == kCmdSetAdvertLatLon && len >= 9) {
+    // EST-384: the phone set the node's location. That point becomes the Fixed position and the
+    // source switches, so a later GPS fix cannot move the node away from what the phone sent. The
+    // same int32/1e6 decode upstream uses; an out-of-range pair is refused by posPhoneSet().
+    int32_t lat = 0;
+    int32_t lon = 0;
+    memcpy(&lat, &data[1], 4);
+    memcpy(&lon, &data[5], 4);
+    posPhoneSet((double)lat / 1000000.0, (double)lon / 1000000.0);
   }
 }
 

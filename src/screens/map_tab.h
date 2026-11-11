@@ -7,6 +7,7 @@
 #pragma once
 
 #include "board.h"
+#include "position_source.h"
 #include "ui/map_layers.h"
 #include "ui/screen_map.h"
 
@@ -17,7 +18,9 @@ namespace map_tab {
 struct Host {
   void (*buildStatus)(ui::StatusModel&) = nullptr;
   ui::TabBarModel (*tabBar)(ui::Tab) = nullptr;
-  const GpsState* (*gps)() = nullptr;
+  // EST-384: the effective own position (GPS or Fixed), not the raw GPS parser state. The Map's
+  // own marker, locate/follow and the trace endpoint all read this one point.
+  const PositionFix* (*gps)() = nullptr;
   void (*toast)(const char*) = nullptr;
 };
 

@@ -80,6 +80,7 @@ BIN49="$(mktemp /tmp/om-lite-est391.XXXXXX)"
 BIN50="$(mktemp /tmp/om-lite-est392.XXXXXX)"
 BIN51="$(mktemp /tmp/om-lite-est393.XXXXXX)"
 BIN52="$(mktemp /tmp/om-lite-est394.XXXXXX)"
+BIN53="$(mktemp /tmp/om-lite-est397.XXXXXX)"
 trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
@@ -505,3 +506,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est394.cpp \
   ../../src/ui/map_trace.cpp ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp -o "$BIN52"
 "$BIN52"
 python3 -B test_est394.py
+
+# EST-397: the core sweep fixes. The clock bound at INT32_MAX (the first epoch a 32-bit time_t turns
+# negative is refused) and the 5 s fix expiry, both against the device headers; then the source half:
+# every Serial statement in src/ is grepped for a position, an SSID, a LAN address, a message text or a
+# name, with the 12 look-alikes whitelisted and each reason stated.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est397.cpp ../../src/timekeeper.cpp -o "$BIN53"
+"$BIN53"
+python3 -B test_est397.py

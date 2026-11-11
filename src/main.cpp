@@ -1356,7 +1356,9 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
         const double lon = (double)c.lon_e6 / 1e6;
         g_bubMenuSeq = 0;
         om::map_tab::showPoint(lat, lon, m.name);
-        Serial.printf("[chat] map %s %.6f,%.6f\n", m.name, lat, lon);
+        // EST-397: the name only. The contact's exact point is rule 9's first "no", and this line put
+        // it in the log on every map open from a chat.
+        Serial.printf("[chat] map %s\n", m.name);
         showTab(2);
         return;
       }
@@ -5243,7 +5245,8 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
         const double lon = (double)contact.lon_e6 / 1e6;
         closeNodeSheets();
         om::map_tab::showPoint(lat, lon, name);
-        Serial.printf("[nodes] map %s %.6f,%.6f\n", name, lat, lon);
+        // EST-397: the node's name only, never its exact point (rule 9).
+        Serial.printf("[nodes] map %s\n", name);
         showTab(2);
       }
       return;
@@ -5975,10 +5978,13 @@ void loop() {
     // what the module actually received (a C/N0 above zero; GN's own count when it only speaks
     // GNGSV). best is the best C/N0 of the last 60 s in dB-Hz, maxheard the most heard at once since
     // boot, both kept even when nothing is plugged in during the test.
-    Serial.printf("[hb] gps bytes=%lu nmea=%lu bad=%lu expected=%u(g%u l%u b%u a%u) "
+    // EST-397: over= is the NMEA buffer overflow count (#13), so a truncated line can be told from a
+    // bad checksum.
+    Serial.printf("[hb] gps bytes=%lu nmea=%lu bad=%lu over=%lu expected=%u(g%u l%u b%u a%u) "
                   "heard=%u(g%u l%u b%u a%u) used=%u best=%u maxheard=%u fix=%d\n",
                   (unsigned long)g_gps.bytes, (unsigned long)g_gps.sentences,
-                  (unsigned long)g_gps.checksumBad, g_gps.expectedTotal,
+                  (unsigned long)g_gps.checksumBad, (unsigned long)g_gps.lineOverflow,
+                  g_gps.expectedTotal,
                   g_gps.expected[om::kGpsUs], g_gps.expected[om::kGpsGlonass],
                   g_gps.expected[om::kGpsBeiDou], g_gps.expected[om::kGpsGalileo],
                   g_gps.heardTotal, g_gps.heard[om::kGpsUs], g_gps.heard[om::kGpsGlonass],

@@ -7308,3 +7308,86 @@ The two S3s are one small commit and would make the tap-path log safe to paste (
 which is the same fix in the same style). #5 is a one-line deletion that removes the last coordinate rule from
 `handleTap`; #3, #4 and #7 are constants moving into theme.h and can be one commit. #6 and #8 are one line each and
 Claude can decide whether they are worth a ticket at all. Then the second UI run for the four screens not reached.
+
+## EST-397 fix: the verified EST-395 core findings
+
+DeepSeek (Paperclip worker, 2026-11-11). **Changed, not committed** (`.git` is read-only in the sandbox). This
+ticket fixes the EST-395 findings Claude verified, and skips #5 (it is not a bug: `history_log.h:1669-1670`
+refuses a NULL append handle in the counted EST-380 path) and #9 (boot time, a later ticket). #5's S2 and #12's
+duplicate-scale risk are therefore not touched.
+
+| Finding | Fix | Test |
+|---|---|---|
+| #1 S2 clock gate admitted epochs a 32-bit `time_t` cannot hold | `timekeeper.h`: `kMaxSaneEpoch = 2147483647UL` (`INT32_MAX`, 2038-01-19 03:14:07 UTC) replaces the 2100 bound, so the ONE gate feeds every source, `ntp_plan.h` and the shell. `timekeeper.cpp` `systemSet()` refuses an out-of-window epoch before the `(time_t)` cast, i.e. before `settimeofday()` | `test_est397.cpp`: the first value a 32-bit `time_t` turns negative (2147483648) is refused, the bound is exclusive, the last value that fits is accepted, a 2039 Wi-Fi time never reaches the setter (fake setter sees no write), `setHardware()` refuses it too, and a sane time still goes through (positive control) |
+| #2 S2 `(Wire.read()<<8) \| Wire.read()` — unsequenced ADC bytes | `board.cpp` `adsReadChannel()`: two locals `hi`, `lo`, then combine | build only: the ADC path needs the I2C device. The fix removes the unsequenced pair, which is provable by reading the line |
+| #3 S2 half-failed latch rolled the shadow back | `board.cpp`: `latch(bool* outputLatched)` reports which write landed; `setOutput()` rolls back ONLY when the first (0x02) write failed, otherwise re-reads 0x02/0x06 from the chip into the shadow and logs one line | build only (I2C device); the two branches are the ticket's rule, one per branch |
+| #4 S2 the fix never expired | `GpsState.lastFixMs`; a GGA with quality > 0 restamps it; `gpsExpireFix(out, now)` in `gps_sky.h` clears `valid` after `kGpsFixExpiryMs` = 5 s, called once at the end of `gpsPoll()` after the parser ran. `main.cpp` hands `g_gps.valid` to `targetSetGpsFix()` and to the status bar AFTER that, so the node's position, the position source and the status bar all follow it | `test_est397.cpp`: fresh stays valid, 4999 ms valid, 5000 ms expired, restamp revives, expiry idempotent, and the `millis()` wrap case |
+| #6 S3 `map.cpp` printed the centre to 5 decimals | the line now prints the tile ranges (`tx a..b ty c..d`) and the count, no degrees | `test_est397.py`: the new shape is present, `%.5f` is gone from `map.cpp`, and the source-wide float-beside-a-coordinate rule |
+| #7 S3 four `mesh_link.cpp` lines logged message texts and a sender name | `[mc] DM seq %lu: %u B (hops, snr)`, `[mc] channel %d: %u B (...)`, `[ble] phone sent ch%d: %u B`, `[ble] phone sent DM seq %lu: %u B`. Lengths and our own ids only | `test_est397.py`: the four exact new format strings must be present |
+| #8 S3 five `wifi_link.cpp` lines logged the SSID and the IP | `saved index %d`, `not saved: the list already holds %d networks`, `connected idx=%d rssi=%d internal=%u largest=%u (name and address not printed)`, `connecting idx=%d%s`, `forgot index %d`, following the `[ntp]` house style. The address is still handed to the WiFi model, just not printed | `test_est397.py` (the four exact formats) + `test_est385.py` still passes (its address-formatter owner list is unchanged) |
+| #10 S4 the PSRAM fallback took 48 KB of internal RAM | `audio.cpp`: when `ps_malloc` fails the internal buffer is a QUARTER (12 KB, 375 ms) and one line says so. `sound_synth`: `renderPass()` takes the caller's `cap` and CUTS a longer phrase with the normal tail fade instead of returning 0, so a short buffer still plays the attack | `test_est369.cpp`: a 10-sample buffer now returns 10 with the last sample faded to 0 (the old expectation `== 0` was this ticket's behaviour change) |
+| #11 S5 dead `stageInput(kBitLcdControl)` + duplicate `s_expanderReady` | both removed (the LCD control line is an output; the assignment after the rails are latched is the one the pulses use) | build |
+| #12 S5 the battery scale existed twice | `batteryMilliVolts()` is `adsPinMilliVolts(raw) * 2u`, one ADC constant | build. Note: one mV of rounding can differ from the old expression (`pin_mv` truncates before the doubling); a battery percentage cannot see it |
+| #13 S5 a too-long NMEA line was dropped silently | `GpsState.lineOverflow`, counted in the `else` (and the parser resets, so the rest of the line cannot be parsed as a sentence); printed as `over=` in the `[hb] gps` line | `test_est397.cpp`: the counter exists and is not `checksumBad`; `test_est397.py`: the field is in the heartbeat line |
+| #14 S5 `codecMute()` wrote 0 into 0x31 when its read failed | a failed read uses the last value read from 0x31 (cached) and writes only the two mute bits; with no cached value the write is skipped and counted, one log line either way | build (I2C) |
+| #9 guard: a future log line could reintroduce the four patterns | new source-wide test, see below | `test_est397.py` |
+
+### The one new guard test
+
+`test/host/test_est397.py` reads **every** `Serial.printf/println` statement in `src/` recursively (437 statements
+in 178 files), whole statements rather than lines, and fails on: a float conversion in a statement that also names a
+coordinate; an `ip=` field; an `ssid=` field; a `%s` fed by `m.text`/`s_lastText`/a bare `text`/`body`; a `%s` fed by
+`from.name`/`ci->name`; a `%s` fed by an `ssid`. A `strlen(...)`/`sizeof(...)` argument is stripped first, because a
+LENGTH is the fix, not the leak. It also asserts the four rewritten mesh lines, the four wifi lines and the map line
+are the NEW shapes, and that `gpsExpireFix(out,` is called exactly once.
+
+**12 whitelisted statements, each with its reason in the file** (look-alikes, all read in context): app-composed UI
+notice strings, our OWN outgoing resends, the `msg`/`history`/`wifi scan` USB answers an operator asks for by hand, a
+repeater's own CLI answer, and the PUBLIC NTP server's address (allowed by `test_est385.py`).
+**Claude: this whitelist is the known remainder of the rule.** `usb_commands.cpp:331` (`[msg] ... text=`),
+`mesh_link.cpp`'s `[hist]` dump, `rptr_link.cpp:887` and `ble_link.cpp:60` do print a stored message body or a notice
+string, on explicit request and never on a receive or send path. I did not change them (a USB answer's fields are what
+`tools/cmd.py` reads, and it is outside this ticket's list); say if you want them reduced to lengths as well.
+
+### Two extra lines the new test found (fixed here)
+
+`main.cpp:1359` (`[chat] map`) and `main.cpp:5248` (`[nodes] map`) printed a contact's EXACT position to five
+decimals on every map open from a chat or the node sheet. Both are the same rule-9 family as #6 and would have made
+the guard test red, so they now print the name only. They are the two lines EST-396 reported as UI tap-path leaks.
+
+### Build and tests (real exit codes, this tree)
+
+- `pio run -e om_lite_l2`: **SUCCESS**, exit 0. **RAM 160,328 / 327,680 B (48.9 %)**, **Flash 2,987,489 / 6,553,600 B
+  (45.6 %)**. RAM and flash are unchanged from before the ticket to the byte at this resolution (the fixes are a few
+  bytes of code; the sound buffer only shrinks on a board whose PSRAM refused).
+- `test/host/run.sh`: **exit 0**, all suites green, including the two new halves (`est397` C++ and `est397.py`) and
+  the updated `est369`/`est391` expectations.
+- Existing tests had to move with the fixes and were updated, not deleted: `test_est369.cpp` (a short buffer now
+  truncates, `== 10` rather than `== 0`) and `test_est391.cpp` (its "the bound as a 32-bit time_t is negative" proof
+  now uses a local `kOld2100Bound` 2100 constant as history, plus a new check that the real bound is `INT32_MAX` and
+  positive). `test_est385.py` needed no change.
+
+### What I could not check
+
+- **No device**: none of the I2C/latch/ADC/audio paths (#2, #3, #10, #14) or the GPS expiry (#4) can be exercised on
+  this host, so "tested" there means the logic compiles and the branch/format is as the ticket states. The fix that
+  matters for the glass is #4: the map and the status bar go to "no fix" 5 s after the last GGA, which nobody has
+  watched on the panel yet.
+- **`#3`'s re-read path** assumes a PCA9554 read of 0x02/0x06 answers right after a failed config write; the board
+  has never been in that state on purpose.
+- **`#10`'s truncation** is a real behaviour change: on a board without PSRAM a phrase longer than 375 ms is now cut
+  (attack kept, tail faded) instead of the buffer being 48 KB. No PSRAM-less board was available to hear it.
+- The `[hb] gps over=` field: the heartbeat line length grows by ~13 characters; the USB tool's parser reads named
+  fields, so nothing should care, but nobody ran `tools/cmd.py` against a device with it.
+
+### Next step
+
+Claude reviews the diff and commits as Slofi; then flash and check four things on the glass: the status bar drops to
+"no fix" ~5 s after the GPS antenna is pulled, the battery percentage is stable (the ADC byte order), the boot log's
+`[wifi] connected idx=` line has no name or address, and a long sound (the low-battery warning) still plays on the
+board whose PSRAM is fine. #9 (the ~700 ms boot delay) stays for a later ticket, and so does the `[msg]`/`[hist]`
+whitelist question above.
+
+
+## 2026-11-11 18:01 (Claude): EST-397 reviewed
+- All 13 verified findings fixed with tests. Whitelist decision: the USB `msgs` command may keep printing message text (an on-demand debug command; Claude strips texts before quoting). NOT covered yet and the guard does not catch them: main.cpp:1279/1361 (node names), 1374/1377 (message text on resend), from the EST-396 UI sweep -> fixed in the UI fix ticket, where the guard must be tightened to catch `m.text` and `%s` names.

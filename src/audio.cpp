@@ -43,6 +43,10 @@ struct PlayRequest {
 QueueHandle_t s_queue = nullptr;
 int16_t* s_buf = nullptr;   // PSRAM, one phrase at a time (the task renders it before streaming)
 bool s_bufPsram = false;
+// EST-397: the buffer's length in samples. Full length in PSRAM; a quarter when the fallback lands in
+// internal RAM (12 KB instead of 48 KB), where a long phrase is cut short rather than take the heap
+// the Wi-Fi + BLE + TLS peak needs.
+int s_bufSamples = 0;
 uint32_t s_played = 0;
 uint32_t s_dropped = 0;
 
@@ -152,7 +156,7 @@ void audioTask(void*) {
     if (!sound::validSound(req.sound)) continue;
     sound::RenderInfo info{};
     const uint32_t renderStart = micros();
-    const int n = sound::renderSound(req.sound, s_buf, sound::kMaxSamples, &info);
+    const int n = sound::renderSound(req.sound, s_buf, s_bufSamples, &info);
     const uint32_t renderUs = micros() - renderStart;
     if (n <= 0) {
       Serial.printf("[sound] render failed event=%s sound=%u\n", sound::eventKey(ev),
@@ -184,11 +188,18 @@ void audioTask(void*) {
 bool soundTaskBegin() {
   s_buf = (int16_t*)ps_malloc((size_t)sound::kMaxSamples * sizeof(int16_t));
   s_bufPsram = s_buf != nullptr;
+  s_bufSamples = sound::kMaxSamples;
   if (s_buf == nullptr) {
-    // Internal RAM fallback keeps a board whose PSRAM did not come up audible; the log says which
-    // one answered. The buffer is 48 KB (1.5 s at 16 kHz), small enough for the EST-357 internal-heap
-    // work to still hold on a board with PSRAM.
-    s_buf = (int16_t*)malloc((size_t)sound::kMaxSamples * sizeof(int16_t));
+    // EST-397: internal RAM fallback, a QUARTER of the phrase (12 KB, 375 ms at 16 kHz) instead of
+    // 48 KB. 48 KB in internal RAM is the single largest user in the measured boot/BLE/Wi-Fi/TLS
+    // budget, and sound that nobody needs at full length must not push a Wi-Fi + BLE + TLS peak over
+    // the edge. The renderer cuts a longer phrase with its normal tail fade.
+    s_bufSamples = sound::kMaxSamples / 4;
+    s_buf = (int16_t*)malloc((size_t)s_bufSamples * sizeof(int16_t));
+    if (s_buf != nullptr) {
+      Serial.printf("[sound] PSRAM refused: buffer cut to a quarter, %d samples (%u B) in internal RAM\n",
+                    s_bufSamples, (unsigned)((size_t)s_bufSamples * sizeof(int16_t)));
+    }
   }
   s_queue = xQueueCreate(kQueueLen, sizeof(PlayRequest));
   if (s_buf == nullptr || s_queue == nullptr) {
@@ -200,17 +211,39 @@ bool soundTaskBegin() {
     Serial.println("[sound] player not started (task)");
     return false;
   }
-  Serial.printf("[sound] player up: %d samples (%u B) in %s, queue %d\n", sound::kMaxSamples,
-                (unsigned)((size_t)sound::kMaxSamples * sizeof(int16_t)),
+  Serial.printf("[sound] player up: %d samples (%u B) in %s, queue %d\n", s_bufSamples,
+                (unsigned)((size_t)s_bufSamples * sizeof(int16_t)),
                 s_bufPsram ? "PSRAM" : "INTERNAL (PSRAM refused)", kQueueLen);
   return true;
 }
 
 void codecMute(bool mute) {
+  // EST-397: a failed read used to leave v = 0, and the write then cleared every other bit of 0x31
+  // (only the two mute bits are ours to touch). Now a failed read uses the last value we saw; with no
+  // cached value the write is skipped and counted instead of guessing.
+  static uint8_t s_cached31 = 0;
+  static bool s_haveCache31 = false;
+  static uint32_t s_muteReadFails = 0;
   uint8_t v = 0;
   Wire.beginTransmission(kAddr);
   Wire.write(0x31);
-  if (Wire.endTransmission(false) == 0 && Wire.requestFrom((int)kAddr, 1) == 1) v = (uint8_t)Wire.read();
+  const bool readOk =
+      Wire.endTransmission(false) == 0 && Wire.requestFrom((int)kAddr, 1) == 1;
+  if (readOk) {
+    v = (uint8_t)Wire.read();
+    s_cached31 = v;
+    s_haveCache31 = true;
+  } else {
+    ++s_muteReadFails;
+    if (!s_haveCache31) {
+      Serial.printf("[audio] mute: 0x31 unreadable, write skipped (%lu skipped since boot)\n",
+                    (unsigned long)s_muteReadFails);
+      return;
+    }
+    v = s_cached31;
+    Serial.printf("[audio] mute: 0x31 unreadable, using cached %02X, mute bits only (%lu)\n", v,
+                  (unsigned long)s_muteReadFails);
+  }
   v = (uint8_t)(v & 0x9F);
   w(0x31, mute ? (uint8_t)(v | 0x60) : v);
 }

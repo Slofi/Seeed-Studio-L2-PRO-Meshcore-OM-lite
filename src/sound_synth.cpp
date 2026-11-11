@@ -302,14 +302,19 @@ float envelopeAt(const VoiceDef& v, float tSec, float durSec, float releaseSec) 
 // One pass over the phrase. With out == nullptr it only measures the peak; with a scale it writes
 // the scaled samples. The low-pass state and the tail fade run identically in both passes, so the
 // measured peak is the peak of the written buffer.
-int renderPass(const Recipe& r, int16_t* out, float scale, RenderInfo* info) {
+// EST-397: `cap` is the caller's buffer length. A phrase longer than it is CUT at `cap` samples and
+// faded out over the normal tail fade, so a short internal-RAM buffer still plays the attack of a
+// long sound instead of returning silence.
+int renderPass(const Recipe& r, int16_t* out, int cap, float scale, RenderInfo* info) {
   const int total = samplesForMs((int)r.ms);
   if (total <= 0) return 0;
+  const int n = (cap > 0 && cap < total) ? cap : total;
   const float lpA = 1.0f - expf(-2.0f * kPi * kLowpassHz / (float)kRate);
-  const int fadeN = samplesForMs(kTailFadeMs);
+  const int fadeSamples = samplesForMs(kTailFadeMs);
+  const int fadeN = fadeSamples < n ? fadeSamples : n;
   float lp = 0.0f;
   int peak = 0;
-  for (int i = 0; i < total; ++i) {
+  for (int i = 0; i < n; ++i) {
     const float tSec = (float)i / (float)kRate;
     float sum = 0.0f;
     for (int k = 0; k < (int)r.count; ++k) {
@@ -333,7 +338,7 @@ int renderPass(const Recipe& r, int16_t* out, float scale, RenderInfo* info) {
     }
     lp += lpA * (sum - lp);
     float value = lp;
-    if (i >= total - fadeN) value *= (float)(total - 1 - i) / (float)fadeN;
+    if (fadeN > 0 && i >= n - fadeN) value *= (float)(n - 1 - i) / (float)fadeN;
     int s = (int)lroundf(value * scale * 32767.0f);
     if (s > 32767) s = 32767;
     if (s < -32768) s = -32768;
@@ -342,10 +347,10 @@ int renderPass(const Recipe& r, int16_t* out, float scale, RenderInfo* info) {
     if (out != nullptr) out[i] = (int16_t)s;
   }
   if (info != nullptr) {
-    info->samples = total;
+    info->samples = n;
     info->peak = peak;
   }
-  return total;
+  return n;
 }
 
 // The loudest the waveform can be at any moment: the sum of the notes that are sounding then, each
@@ -444,7 +449,7 @@ int renderSound(uint8_t id, int16_t* out, int cap, RenderInfo* info) {
   if (out == nullptr || cap <= 0 || !validSound(id)) return 0;
   const Recipe& r = soundFor(id).recipe;
   const int total = samplesForMs((int)r.ms);
-  if (total <= 0 || total > kMaxSamples || total > cap) return 0;
+  if (total <= 0 || total > kMaxSamples) return 0;
 
   // An upper bound on the phrase's peak, per instant (see levelBound). Scaling by it means one pass
   // can never overflow 16 bits, whatever a future recipe adds.
@@ -453,7 +458,9 @@ int renderSound(uint8_t id, int16_t* out, int cap, RenderInfo* info) {
 
   RenderInfo local{};
   RenderInfo* measured = info != nullptr ? info : &local;
-  const int n = renderPass(r, out, scale, measured);
+  // EST-397: a cap shorter than the phrase truncates it (with the usual tail fade) instead of
+  // returning 0, so the quarter-length internal-RAM buffer still plays something.
+  const int n = renderPass(r, out, cap, scale, measured);
   if (n <= 0) return 0;
 
   // A sound with its own target (the battery warning) is brought exactly to that peak. Everything

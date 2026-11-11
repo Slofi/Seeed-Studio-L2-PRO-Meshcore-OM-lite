@@ -38,7 +38,11 @@ int timeSourcePriority(TimeSource s);
 constexpr uint32_t kTimeSourceHoldSec = 6UL * 60UL * 60UL;   // 6 hours
 constexpr uint32_t kFloorSaveIntervalSec = 10UL * 60UL;      // 10 minutes
 constexpr uint32_t kMinSaneEpoch = 1735689600UL;             // 2025-01-01 00:00:00 UTC
-constexpr uint32_t kMaxSaneEpoch = 4102444800UL;             // 2100-01-01 00:00:00 UTC
+// EST-397: the top of the window is INT32_MAX (2038-01-19 03:14:07 UTC), NOT 2100. On this
+// toolchain time_t is 32 bits and signed, so every epoch above INT32_MAX turns negative in the
+// (time_t) cast and settimeofday() would put the clock into 1901. One bound for every source: this
+// constant feeds saneEpoch(), TimeKeeper::systemSet(), the NTP capture (ntp_plan.h) and the shell.
+constexpr uint32_t kMaxSaneEpoch = 2147483647UL;             // INT32_MAX = 2038-01-19 03:14:07 UTC
 
 // --- calendar and NMEA ---------------------------------------------------------------------------
 // Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's civil_from_days inverse).

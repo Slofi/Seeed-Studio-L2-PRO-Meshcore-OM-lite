@@ -517,7 +517,11 @@ void mapRender() {
     Serial.printf("[map] BLANK z%d (render z%d) tx %d..%d ty %d..%d\n", s_z, rz, tx0, tx1,
                   ty0, ty1);
   }
-  Serial.printf("[map] z%d%s %.5f,%.5f -> %d tiles\n", s_z, mag ? " (2x)" : "", s_cLat, s_cLon, drawn);
+  // EST-397 (rule 9): no lat/lon here, not even rounded. The tile ranges are what a blank or frozen
+  // map is debugged with and they do not say where the user is (they are only meaningful next to the
+  // zoom, and rule 9 forbids exact positions in a public repo's logs).
+  Serial.printf("[map] z%d%s tx %d..%d ty %d..%d -> %d tiles\n", s_z, mag ? " (2x)" : "", tx0,
+                tx1, ty0, ty1, drawn);
   s_renderedEpoch = s_viewEpoch;   // EST-371: this canvas now matches the current view
   om::radio::addPart(om::radio::Part::MapDecode, micros() - renderStartUs);
 }

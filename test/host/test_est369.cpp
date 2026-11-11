@@ -324,7 +324,13 @@ static void testRender() {
 
   // A bad id, a tiny buffer and a null buffer all refuse cleanly.
   CHECK(renderSound((uint8_t)soundCount(), buf, kMaxSamples, nullptr) == 0);
-  CHECK(renderSound(94, buf, 10, nullptr) == 0);
+  // EST-397: a buffer SHORTER than the phrase now truncates it (with the tail fade) instead of
+  // returning 0, so the quarter-length internal-RAM buffer still plays the attack of a long sound.
+  {
+    int16_t small[10] = {0};
+    CHECK(renderSound(94, small, 10, nullptr) == 10);
+    CHECK(small[9] == 0);   // the last sample is faded to nothing, no click at the cut
+  }
   CHECK(renderSound(94, nullptr, kMaxSamples, nullptr) == 0);
   CHECK(renderSound(94, buf, 0, nullptr) == 0);
 }

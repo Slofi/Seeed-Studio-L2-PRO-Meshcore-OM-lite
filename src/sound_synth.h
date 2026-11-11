@@ -89,9 +89,11 @@ int soundNoteCount(uint8_t id);
 bool soundNote(uint8_t id, int index, NoteInfo* out);
 
 // Renders one library sound into out[cap] at 16 kHz, 16-bit mono. Returns the number of samples
-// written, or 0 for a bad id, a buffer that is too small, or a recipe over kMaxSamples. A loud sound
-// (the battery warning) is normalized to its own target peak; every sound is kept at or below
-// kPeakTarget, so a full-volume play cannot clip in the digital domain.
+// written, or 0 for a bad id or a recipe over kMaxSamples. EST-397: a `cap` shorter than the phrase
+// writes `cap` samples, cut with the usual tail fade, instead of returning 0 (the quarter-length
+// internal-RAM buffer depends on that). A loud sound (the battery warning) is normalized to its own
+// target peak; every sound is kept at or below kPeakTarget, so a full-volume play cannot clip in the
+// digital domain.
 int renderSound(uint8_t id, int16_t* out, int cap, RenderInfo* info);
 
 // --- the event table ----------------------------------------------------------------------------

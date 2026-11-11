@@ -62,17 +62,37 @@ void stageOutput(uint8_t bit, bool high) {
   s_config[bit >> 3] &= (uint8_t)~mask;
 }
 
-bool latch() {
-  return writeRegisters(0x02, s_output, sizeof(s_output)) &&
-         writeRegisters(0x06, s_config, sizeof(s_config));
+// EST-397: writes the shadow to the chip and reports WHICH write landed. The output register (0x02)
+// is the one the rollback decision turns on: once it is written the chip holds the new levels, so
+// restoring the old shadow would make it disagree with the hardware. A failed config write (0x06)
+// therefore re-reads both registers instead of guessing.
+bool latch(bool* outputLatched = nullptr) {
+  if (outputLatched != nullptr) *outputLatched = false;
+  if (!writeRegisters(0x02, s_output, sizeof(s_output))) return false;
+  if (outputLatched != nullptr) *outputLatched = true;
+  return writeRegisters(0x06, s_config, sizeof(s_config));
 }
 
 bool setOutput(uint8_t bit, bool high) {
   if (!s_expanderReady) return false;
   const uint8_t o0 = s_output[0], o1 = s_output[1], c0 = s_config[0], c1 = s_config[1];
   stageOutput(bit, high);
-  if (latch()) return true;
-  s_output[0] = o0; s_output[1] = o1; s_config[0] = c0; s_config[1] = c1;
+  bool outputsWritten = false;
+  if (latch(&outputsWritten)) return true;
+  if (!outputsWritten) {
+    // The FIRST write failed: the chip still holds the old levels, so the shadow is right again.
+    s_output[0] = o0; s_output[1] = o1; s_config[0] = c0; s_config[1] = c1;
+    return false;
+  }
+  // The output register took the new levels and the config write failed: do NOT roll back. Read the
+  // chip back so the shadow says what the hardware really holds, and say so on one line.
+  if (!readRegisters(0x02, s_output, sizeof(s_output)) ||
+      !readRegisters(0x06, s_config, sizeof(s_config))) {
+    Serial.println("[om] expander: config write failed, chip read back failed too");
+    return false;
+  }
+  Serial.printf("[om] expander: config write failed, chip re-read out=%02X/%02X cfg=%02X/%02X\n",
+                s_output[0], s_output[1], s_config[0], s_config[1]);
   return false;
 }
 
@@ -125,11 +145,12 @@ bool expanderBegin() {
   const bool heldFromLastBoot = gnssResetAsserted();
   const bool resetReceiver = reasonResets || heldFromLastBoot;
 
-  // Inputs: wake button, I2C interrupt, SD detect, LCD control line.
+  // Inputs: wake button, I2C interrupt, SD detect. (The LCD control line is an OUTPUT: line 200's
+  // setOutput(kBitLcdControl, true) sets its config bit, and this function's own stageOutput() would
+  // clear it anyway, so a stageInput() here was a no-op that read as intent. EST-397, #11.)
   stageInput(kBitWakeButton);
   stageInput(kBitI2cInterrupt);
   stageInput(kBitSdDetect);
-  stageInput(kBitLcdControl);
   // Outputs and their power-up levels.
   stageOutput(kBitTouchInterrupt, false);
   stageOutput(kBitLcdPower, true);
@@ -182,7 +203,8 @@ bool expanderBegin() {
   if (!setOutput(kBitTouchReset, true)) return false;
   delay(60);
 
-  s_expanderReady = true;
+  // EST-397: the one s_expanderReady = true (the earlier one, after the rails are latched). A second
+  // assignment here was a harmless duplicate that hid which one the reset pulses depend on.
   Serial.printf("[om] expander ready out=%02X/%02X cfg=%02X/%02X\n",
                 s_output[0], s_output[1], s_config[0], s_config[1]);
   return true;
@@ -726,7 +748,13 @@ static bool adsReadChannel(uint8_t channel, uint16_t* raw) {
     Wire.beginTransmission(0x48);
     Wire.write(0x00);   // conversion
     if (Wire.endTransmission(false) == 0 && Wire.requestFrom(0x48, 2) == 2) {
-      value = (uint16_t)((Wire.read() << 8) | Wire.read());
+      // EST-397: two locals, then combine. In `(Wire.read() << 8) | Wire.read()` the two calls are
+      // unsequenced (the operands of | are), so a compiler that evaluates the right one first swaps
+      // the ADS1115's high and low byte and the battery reads a garbled milli-voltage. GCC orders
+      // them left to right today; nothing in the code or a test pinned that.
+      const uint8_t hi = (uint8_t)Wire.read();
+      const uint8_t lo = (uint8_t)Wire.read();
+      value = (uint16_t)(((uint16_t)hi << 8) | lo);
     } else {
       ok = false;
     }
@@ -750,8 +778,9 @@ uint16_t batteryMilliVolts() {
   uint16_t raw = 0;
   if (!adsReadChannel(0, &raw)) return 0;
   if (!raw) return 0;
-  const float volts = (float)(int16_t)raw * 4.096f / 32767.0f;
-  return (uint16_t)(volts * 2.0f * 1000.0f);
+  // EST-397: ONE scale. The board divides the cell voltage by 2, so the cell is twice the pin; the
+  // ADC constant lives in adsPinMilliVolts() only, so a future calibration cannot be made twice.
+  return (uint16_t)(adsPinMilliVolts(raw) * 2u);
 }
 
 // EST-376: the four single-ended inputs once each, AIN1, AIN2, AIN3 and AIN0 LAST, so the chip is
@@ -999,6 +1028,10 @@ void gpsPoll(GpsState& out) {
           out.sats = (uint8_t)atoi(fields[7]);
           out.lat = nmeaToDegrees(fields[2], fields[3]);
           out.lon = nmeaToDegrees(fields[4], fields[5]);
+          // EST-397: the fix's freshness stamp. Only a GGA with quality > 0 refreshes it, so a module
+          // that stops talking lets gpsExpireFix() drop the fix 5 s later instead of advertising the
+          // last point for ever.
+          if (out.valid) out.lastFixMs = millis();
         }
       } else if (strlen(s_nmea) >= 6 && strncmp(s_nmea + 3, "GSV", 3) == 0) {
         // Satellites EXPECTED (almanac "in view") and HEARD (a C/N0 above zero), per constellation:
@@ -1024,8 +1057,18 @@ void gpsPoll(GpsState& out) {
       }
       continue;
     }
-    if (s_nmeaLen < sizeof(s_nmea) - 1) s_nmea[s_nmeaLen++] = c;
+    if (s_nmeaLen < sizeof(s_nmea) - 1) {
+      s_nmea[s_nmeaLen++] = c;
+    } else {
+      // EST-397: a line longer than the buffer is dropped whole (the newline that follows resets the
+      // parser). Counted, so a module in the wrong mode or a run of binary bytes can be told apart
+      // from radio noise, which lands in checksumBad.
+      ++out.lineOverflow;
+      s_nmeaLen = 0;   // the rest of this line is not a sentence we can parse
+    }
   }
+  // EST-397: the fix expires AFTER the parser ran, so a fresh GGA in this poll always wins.
+  gpsExpireFix(out, millis());
   // Once per poll, with no data needed: the 60 s best-C/N0 window has to expire even when the module
   // has gone quiet (a stale "best" from the last satellite heard would otherwise stay for ever).
   gpsSkyRefresh(out, millis());

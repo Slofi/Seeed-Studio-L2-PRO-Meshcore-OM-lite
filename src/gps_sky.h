@@ -96,6 +96,13 @@ struct GpsState {
   uint32_t timeEpoch = 0;  // latest UTC time from RMC/ZDA, 0 = none yet
   bool timeEpochFix = false;  // EST-383: true when timeEpoch came from a position fix (RMC A),
                               // false for the accepted no-fix path (RMC V / ZDA)
+  // EST-397: millis() of the last GGA that carried a fix. `valid` is only ever written by a GGA, so
+  // without this stamp a receiver that goes quiet (unplugged antenna, a wedged UART) kept advertising
+  // its last point for ever. gpsExpireFix() below is the one reader.
+  uint32_t lastFixMs = 0;
+  // EST-397: NMEA lines longer than the parser's buffer, dropped. Counted so a burst of binary bytes
+  // (or a sentence from a module in the wrong mode) can be told from radio noise.
+  uint32_t lineOverflow = 0;
 
   // GSV, per constellation: satellites the module EXPECTS from its almanac, and satellites it HEARS
   // (a C/N0 field with a value above zero in the current cycle).
@@ -116,6 +123,21 @@ struct GpsState {
 };
 
 inline uint8_t gpsCountU8(int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
+
+// EST-397: how long a fix may sit without a fresh GGA before it stops counting. A receiver that is
+// talking repeats GGA about once a second and reports quality 0 within a second of losing the fix, so
+// 5 s is long enough to ride out one or two dropped sentences and short enough that the map, the
+// status bar and the node's own adverts stop claiming a point the module no longer has.
+constexpr uint32_t kGpsFixExpiryMs = 5000;
+
+// The ONE place a fix expires, called at the end of every gpsPoll(). Nothing else writes `valid` for
+// the stale case, so a source cannot bypass it: main.cpp hands g_gps.valid to the node's position
+// (targetSetGpsFix) and to the status bar, both after this ran.
+inline void gpsExpireFix(GpsState& out, uint32_t nowMs) {
+  if (!out.valid) return;
+  if ((uint32_t)(nowMs - out.lastFixMs) < kGpsFixExpiryMs) return;
+  out.valid = false;   // lat/lon stay as the last known point but nothing may use them while !valid
+}
 
 // GSV talker -> constellation. GN (combined) and GQ (QZSS) and anything unknown land in kGpsOther.
 inline int gpsConstellationOf(const char* line) {

@@ -796,17 +796,21 @@ void onConnected(uint32_t nowMs) {
     const int at = s_saved.add(ssid, s_pendingPass);
     if (at >= 0) {
       saveStore();
-      Serial.printf("[wifi] saved \"%s\" (%d of %d)\n", ssid, s_saved.count(), wifi::kMaxSaved);
+      // EST-397 (rule 9): the index in the saved list, never the SSID itself.
+      Serial.printf("[wifi] saved index %d (%d of %d)\n", at, s_saved.count(), wifi::kMaxSaved);
     } else {
-      Serial.printf("[wifi] \"%s\" not saved: the list already holds %d networks\n", ssid,
-                    wifi::kMaxSaved);
+      Serial.printf("[wifi] not saved: the list already holds %d networks\n", wifi::kMaxSaved);
     }
   }
   clearPendingPass();
   s_autoActive = false;
   bump();
-  Serial.printf("[wifi] connected to \"%s\" ip=%s rssi=%d internal=%u largest=%u\n", ssid, ipText,
-                rssi, (unsigned)internalFreeBytes(), (unsigned)internalLargestBlock());
+  // EST-397 (rule 9): the saved-list index and the readings, never the SSID or the LAN address. The
+  // address is still handed to the model (it is what the machine needs); it is not printed. House
+  // style of the [ntp] lines: "addresses not printed".
+  const int savedIndex = s_saved.find(ssid);
+  Serial.printf("[wifi] connected idx=%d rssi=%d internal=%u largest=%u (name and address not printed)\n",
+                savedIndex, rssi, (unsigned)internalFreeBytes(), (unsigned)internalLargestBlock());
   printMemLine("wifi connected");
   // EST-385: the schedule starts with an attempt at 0 s; pollNtp() keeps it going.
   s_ntp.connected(nowMs);
@@ -835,7 +839,9 @@ void startConnect(const char* ssid, const char* password, bool autoAttempt, uint
   const wl_status_t st = WiFi.begin(ssid, pass);
   s_machine.connectStarted(ssid, nowMs);
   bump();
-  Serial.printf("[wifi] connecting to \"%s\"%s\n", ssid, autoAttempt ? " (saved)" : "");
+  // EST-397 (rule 9): the saved-list index (-1 = a network the list does not hold), not the SSID.
+  Serial.printf("[wifi] connecting idx=%d%s\n", s_saved.find(ssid),
+                autoAttempt ? " (saved pass)" : " (user)");
   if (st == WL_CONNECT_FAILED) {
     s_machine.failed("driver refused", nowMs);
     onAttemptFailed("driver refused");
@@ -985,13 +991,11 @@ const wifi::SavedNetwork* wifiSavedAt(int index) { return s_saved.at(index); }
 int wifiSavedIndexFor(const char* ssid) { return s_saved.find(ssid); }
 
 void wifiForget(int index) {
-  const wifi::SavedNetwork* n = s_saved.at(index);
-  char ssid[wifi::kSsidBytes + 1] = "";
-  if (n != nullptr) snprintf(ssid, sizeof(ssid), "%s", n->ssid);
   if (!s_saved.forgetAt(index)) return;
   saveStore();
   bump();
-  Serial.printf("[wifi] forgot \"%s\" (%d left)\n", ssid, s_saved.count());
+  // EST-397 (rule 9): the index that was forgotten, never the network's name.
+  Serial.printf("[wifi] forgot index %d (%d left)\n", index, s_saved.count());
 }
 
 bool wifiConnect(const char* ssid, const char* password) {

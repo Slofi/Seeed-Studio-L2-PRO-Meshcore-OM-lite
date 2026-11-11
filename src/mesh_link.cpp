@@ -558,8 +558,10 @@ void storeDm(const ContactInfo& from, mesh::Packet* pkt, const char* text) {
                                        thread >= 0 ? histNextUnreadDm(thread) : 0);
   s_dmRing->bumpRecvSerial();
   if (thread >= 0) s_dmRing->noteReceived(thread, from.name, m.wall);
-  Serial.printf("[mc] DM from %s: %s (hops %d snr %.2f)\n", from.name, text ? text : "",
-                (int)m.hops, (double)m.snr4 / 4.0);
+  // EST-397 (rule 9): no text and no sender name in the log. The DM's seq, its length, hops and SNR
+  // are what debugging needs; the body and the name stay in RAM and on the card.
+  Serial.printf("[mc] DM seq %lu: %u B (hops %d snr %.2f)\n", (unsigned long)m.seq,
+                (unsigned)strlen(m.text), (int)m.hops, (double)m.snr4 / 4.0);
 }
 
 // Resend one DM with the next attempt (the companion app's retry): the same text and the same wire
@@ -881,8 +883,11 @@ class OmListener : public MyMesh::Listener {
     const int unreadAt = unreadEntryFor(msgHash, true);
     if (unreadAt >= 0 && s_unread[unreadAt].count < 255) ++s_unread[unreadAt].count;
     const bool muted = mcChannelMuted(channelIdx);
-    Serial.printf("[mc] channel %d: %s (hops %d snr %.2f)%s\n", channelIdx, s_lastText,
-                  (int)m.hops, (double)m.snr4 / 4.0, muted ? " [muted]" : "");
+    // EST-397 (rule 9): the length, never the body (the body is stored on the card and shown on the
+    // glass); the channel index is ours, not a person's.
+    Serial.printf("[mc] channel %d: %u B (hops %d snr %.2f)%s\n", channelIdx,
+                  (unsigned)strlen(m.text), (int)m.hops, (double)m.snr4 / 4.0,
+                  muted ? " [muted]" : "");
     // A muted channel still stores and counts unread; mute is about the sound only. EST-359: the
     // shell watches these two serials and plays the message or the brighter mention sound; the
     // audio itself lives in audio.cpp, never on this receive path.
@@ -2527,7 +2532,8 @@ void meshPhoneChannelSent(uint8_t channelIdx, const char* text) {
   // EST-348: our own message is stored (mine, no unread Meta), exactly like a send from the glass.
   m.logId = history::store().appendMsg(histChannelSlot(ui), histFromChannel(m), 0);
   ++s_storeSerial;
-  Serial.printf("[ble] phone sent ch%d: %s\n", ui, m.text);
+  // EST-397 (rule 9): channel index and length only; the text the phone typed is already on the card.
+  Serial.printf("[ble] phone sent ch%d: %u B\n", ui, (unsigned)strlen(m.text));
 }
 
 void meshPhoneDmSent(const uint8_t* prefix, uint8_t prefixLen, const char* text) {
@@ -2550,7 +2556,9 @@ void meshPhoneDmSent(const uint8_t* prefix, uint8_t prefixLen, const char* text)
   snprintf(m.text, sizeof(m.text), "%s", text);
   m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m), 0);
   if (thread >= 0) s_dmRing->clearUnread(thread);
-  Serial.printf("[ble] phone sent a DM to %s: %s\n", ci->name, m.text);
+  // EST-397 (rule 9): the DM seq and the length, never the contact's name or the text.
+  Serial.printf("[ble] phone sent DM seq %lu: %u B\n", (unsigned long)m.seq,
+                (unsigned)strlen(m.text));
 }
 
 bool meshLinkSend(int channelIdx, const char* text) {

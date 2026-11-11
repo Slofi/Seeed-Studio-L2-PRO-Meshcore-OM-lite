@@ -285,6 +285,10 @@ uint32_t raisedFloor(uint32_t floorUtc, uint32_t epochUtc) {
 }
 
 void TimeKeeper::systemSet(uint32_t epoch) {
+  // EST-397: the last gate before the cast. time_t is 32 bits and signed here, so an epoch above
+  // INT32_MAX becomes a negative tv_sec and settimeofday() sets the clock into 1901. saneEpoch() uses
+  // the same bound, so a caller that forgot it cannot get one through to the syscall.
+  if (!saneEpoch(epoch)) return;
   struct timeval tv;
   tv.tv_sec = (time_t)epoch;
   tv.tv_usec = 0;

@@ -6346,3 +6346,4 @@ TLS client adds about 141 KB of flash to this build.
 
 ## 2026-11-11 11:44 (Claude): EST-388 built; its pinned CA does not match the server
 - Build + tests green (RAM 160,120 B, flash 2,977,089 B: +~147 KB for TLS). The pinned ISRG Root X1 is correct (SHA-256 96:BC:EC:06:...), but game.cl0.eu serves the newer Let's Encrypt chain leaf -> YE1 -> Root YE -> ISRG Root X2 (openssl s_client from TestBox, verify 0). With only X1 pinned the probe would fail on the certificate and look like a memory failure -> EST-389 pins X1 + X2. Not on the device.
+- ISRG Root X2 on TestBox: 69:72:9B:8E:15:A8:6E:FC:17:7A:57:AF:B7:17:1D:FC:64:AD:D2:8C:2F:CA:8C:F1:50:7E:34:45:3C:CB:14:70

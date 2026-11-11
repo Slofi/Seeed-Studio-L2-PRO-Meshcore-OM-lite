@@ -90,5 +90,26 @@ Fusb302 fusb302Fields(const RegisterSet& regs);
 // The BC_LVL encoding as words (STATUS0 5:4), for the log line's parenthetical.
 const char* bcLevelName(uint8_t bcLvl);
 
+// --- the runtime RX-boost choice (EST-377) -------------------------------------------------------
+// `radio boost on|off` is RAM only, but the choice must outlive the resetAGC() calls that radio_diag
+// runs later (a TCXO change, the AGC retry): that reset can drop the RX gain because this build does
+// not define SX126X_RX_BOOSTED_GAIN. "none set" (known() false) means no boost command has been
+// accepted since boot, so a reset must not invent one.
+class BoostChoice {
+ public:
+  void note(bool on) {
+    known_ = true;
+    on_ = on;
+  }
+  bool known() const { return known_; }
+  bool on() const { return on_; }
+  // True exactly when a choice exists AND the chip's read-back differs from it.
+  bool needsReapply(bool chipReadBack) const { return known_ && chipReadBack != on_; }
+
+ private:
+  bool known_ = false;
+  bool on_ = false;
+};
+
 }  // namespace diag
 }  // namespace om

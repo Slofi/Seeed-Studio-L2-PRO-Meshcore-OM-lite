@@ -4,6 +4,10 @@
 // Everything here is RAM only: a reboot restores target.h's 1.8 V and the build's boosted-gain
 // default. Nothing is saved, nothing is a setting, nothing changes what the user sees.
 //
+// EST-377: the last `radio boost on|off` choice is remembered for the rest of the boot. Every
+// resetAGC() this module runs after a boost command (a TCXO change, the AGC retry) re-applies that
+// choice when the chip reads back differently, so `radio tcxo 3.0` cannot silently drop a boost.
+//
 // The commands only RECORD a request. The radio work (RadioLib setTCXO / setRxBoostedGainMode, the
 // warm-sleep + calibrate RX re-entry, the noise restart) runs from loop() through radioDiagLoop(),
 // so the USB command stack never blocks on the radio (the EST-350 rule). The status code is printed

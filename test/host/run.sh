@@ -55,7 +55,8 @@ BIN34="$(mktemp /tmp/om-lite-est370.XXXXXX)"
 BIN35="$(mktemp /tmp/om-lite-est373.XXXXXX)"
 BIN36="$(mktemp /tmp/om-lite-est374.XXXXXX)"
 BIN37="$(mktemp /tmp/om-lite-est376.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37"' EXIT
+BIN38="$(mktemp /tmp/om-lite-est377.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -321,3 +322,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est376.cpp \
   ../../src/diag_logic.cpp ../../src/radio_stats.cpp ../../src/usb_cmd_logic.cpp \
   ../../src/sound_synth.cpp -o "$BIN37"
 "$BIN37"
+
+# EST-377: the battery log. The exact CSV line and its 12 columns, the header only on a new file,
+# the local /log/power-YYYYMMDD.csv name, the once-per-minute gate (first line at once, the millis
+# wrap), the saved switch (missing key = ON, a set writes it, a failed write still flips RAM), the
+# `log power on|off|tail` command surface, and the boost choice that survives a later resetAGC.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est377.cpp \
+  ../../src/power_log_logic.cpp ../../src/diag_logic.cpp ../../src/usb_cmd_logic.cpp \
+  ../../src/sound_synth.cpp -o "$BIN38"
+"$BIN38"

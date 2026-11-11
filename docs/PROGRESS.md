@@ -5029,3 +5029,90 @@ command in `tools/cmd.py` / `src/usb_commands.cpp`.
 - Checked: the 0x22 read sends only the register pointer (no data write anywhere), the forbidden FUSB302 registers are excluded by a list + rule with a test, all radio work runs from the loop, setTCXO/setRxBoostedGainMode are plain RadioLib calls followed by MeshCore's own resetAGC.
 - One gap, fixed in EST-377: a later TCXO-only change runs resetAGC, which can drop a boost set earlier at runtime (status then shows boost=0, honest but it would mix the A/B). Until then, after every tcxo change run `radio boost on|off` again and check `radio status`.
 - Sandbox build exit 0 (RAM 157,384 B, flash 2,810,929 B, firmware.bin 2,811,296 B), tests exit 0. Committed locally, not pushed, not flashed.
+
+## 2026-11-11 02:20 (DeepSeek): EST-377 battery log on the card + boost survives a radio reset, built and tested, NOT on the device
+
+**Ticket:** diagnostics for tomorrow's device session. Nothing the user sees changes, no default moves
+(the boost has no default, the log switch defaults ON as asked). No SD work from the USB frame
+handler; the log is written by the loop only.
+
+**1. Battery log (`/log/power-YYYYMMDD.csv`, local date)**
+- `log power on|off` saves the switch in NVS `"omlite"`, key `plogen`, default ON. A missing key takes
+  the default WITHOUT writing it (same rule as the map layers); `off` then `on` writes both ways.
+  `log power tail` prints the last 5 lines of today's file (the header counts as a line).
+- One line per minute, 12 CSV columns:
+  `time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s`
+  (local `YYYY-MM-DD HH:MM`, cell mV, screen 0/1, applied backlight 0..255, GNSS rail 0/1, fix 0/1,
+  satellites used, Wi-Fi 0/1, BLE 0/1, packets heard in that minute, MeshCore noise floor, uptime s).
+  The header line is written only when the file is new (a `stat` before the append decides it).
+- The first line is written as soon as the switch is on (so a full card or a wrong switch shows in the
+  first minute, not after one); then exactly every 60 s of monotonic time, including the `millis()`
+  wrap. A minimum of two SD calls per line: `exists` + append; the directory `/log` is made lazily.
+- **The loop is the only writer**: `plog::loop()` is called from `loop()`; the USB command only flips
+  the NVS switch or reads the tail. The radio counters are read only on a due minute, because
+  `meshRadioStats()` reads the SX1262 gain register over SPI.
+- `log power tail` runs in `usbCommandExecute`, i.e. `otaCommandPoll` on the loop task after
+  `otaPoll()` returned (EST-350), like `history`; the 1 KB tail buffer is static so the command stack
+  does not grow.
+- **One difference from the ticket's wording:** today the SD rail (expander bit 14) is powered once by
+  `board::sdMount()` at boot and stays up; nothing unmounts it. The log therefore uses the same
+  mounted card as the history store and the map, and adds no second mount or power cycle. A per-write
+  power cycle would break those two users, so it is NOT done here (Claude decides if it is wanted).
+- The GPS rail has no switch yet; `board::gpsRailOn()` returns the latched expander bit (1 today), so
+  the column follows the day GPS duty cycling lands instead of being a constant.
+
+**2. Boost choice across `resetAGC()` (`src/radio_diag.cpp`)**
+- A new plain-C++ `diag::BoostChoice` (in `diag_logic.h`) remembers the last runtime `radio boost
+  on|off` ("none set" until the first command). `requestBoost()` notes the choice.
+- After EVERY `resetAGC()` this module runs: the normal apply (TCXO change and/or boost change) and
+  the AGC retry. `reassertBoost()` reads the chip back and, when a choice exists and the register
+  differs, calls `radioDiagSetBoost(choice)` again. The apply line's `boost=` is the read-back and
+  `boost_status=` carries the re-apply's RadioLib status; the AGC retry prints its own apply line
+  when it had to restore the boost, and updates `radio status`.
+- With no boost command since boot, a reset never invents a value (the host test pins this).
+
+**Build** (`docs/REBUILD.md` command, real exit code)
+- `pio run -e om_lite_l2` **exit 0**, SUCCESS. RAM **158,440 B** of 327,680 (48.4 %; EST-376 was
+  157,384, **+1,056 B**), flash **2,814,253 B** of 6,553,600 (42.9 %; EST-376 was 2,810,929,
+  **+3,324 B**), `firmware.bin` **2,814,624 B** (EST-376 was 2,811,296, **+3,328 B**). Only the two
+  pre-existing RadioLib `#warning`s (god mode, USB CDC), none from the new code.
+
+**Tests** (`sh test/host/run.sh` **exit 0**)
+- New `test_est377.cpp` (built with `power_log_logic.cpp`, `diag_logic.cpp`, `usb_cmd_logic.cpp`):
+  - the exact CSV line for a fixed sample and local minute, 12 columns (11 commas) in header and
+    line, the local `/log/power-20261111.csv` name, a too-small buffer refused (never truncated);
+  - `formatAppend`: header + one line for a new file, line only for an existing file, too-small
+    buffer refused;
+  - the gate: first call writes, then 59.999 s is not due, 60.000 s is, wrap at `0xFFFFFF00` + 60 s;
+    `reset()` re-arms;
+  - the switch: missing key -> ON with zero writes, stored OFF loads, a set writes `plogen`, a failed
+    write still flips RAM but returns false; wrong key never touched; packet delta incl. wrap;
+  - commands: `log power on|off|tail` (also quoted), missing/extra/unknown word refused, `history` and
+    `radio status` still parse;
+  - the ticket's boost sequence: boost on -> chip on -> TCXO reset loses it -> `needsReapply` true ->
+    set again -> chip on; off after a reset that left it on is put back; "none set" never re-applies.
+- The rest of the suite is unchanged and green (38 C++ binaries + 5 Python checks).
+
+**Could not check (no device, no card, no radio, no glass)**
+- The real card write, the `exists`+append timing on the loop, and whether the VFS logs an error line
+  on `/log` the first time. The host test proves the bytes and the rules, not FatFs.
+- That `radio boost on` then `radio tcxo 3.0` really keeps the SX1262 gain on this board; the test is a
+  model of the read-back rule, the device is the proof.
+- The log's own power draw (one open+stat per minute) and the CSV's value over a night on battery.
+
+**Next step for Claude**
+1. Review the diff (the SD-rail wording above is the one deliberate difference).
+2. Flash `firmware.bin` (2,814,624 B) and check the boot line `[plog] battery log on (key plogen,
+   default on)`.
+3. `tools/cmd.py log power tail` -> `[cmd] ok log power tail N` (0 on a fresh card), then wait one
+   minute and `tools/cmd.py log power off` / `on` to see the switch answer and the first `[plog]
+   write ...` line. The file is `/log/power-YYYYMMDD.csv`.
+4. For the boost: `radio boost on`, wait for the apply line, then `radio tcxo 3.0`; the second apply
+   line must show `boost=1`, and `radio status` must keep `boost=1`. Then the A/B run from EST-376.
+
+
+## 2026-11-11 02:24 (Claude): EST-377 reviewed and built, NOT on the device
+- Battery CSV (12 columns, no position, so the file is safe to share), one line a minute from the loop only; switch `log power on|off` (NVS `plogen`, default ON), `log power tail`. DS was right that the SD rail stays mounted from boot (the ticket wording was wrong), so no per-write power cycle.
+- Boost choice is now re-asserted after every resetAGC that radio_diag runs.
+- Watch on the first flash: static RAM is +1.6 KB over EST-375 (the 1 KB `s_tail` buffer is .bss); Bluetooth once ran out of internal RAM (EST-356), so switch BLE on and check its start line before trusting this build. Moving `s_tail` to PSRAM is the easy fix if needed.
+- Sandbox build exit 0 (RAM 158,440 B, flash 2,814,253 B, firmware.bin 2,814,624 B), tests exit 0. Committed locally, not pushed, not flashed.

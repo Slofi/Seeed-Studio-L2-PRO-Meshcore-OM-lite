@@ -34,6 +34,7 @@ bool s_pendingTcxo = false;
 float s_pendingTcxoVolts = 0.0f;
 bool s_pendingBoost = false;
 bool s_pendingBoostOn = false;
+om::diag::BoostChoice s_boostChoice;   // EST-377: the last `radio boost on|off`, until reboot
 bool s_waitLogged = false;      // "waiting for a quiet moment" printed once per request
 bool s_agcPending = false;      // a packet landed in the reset's way; try again next pass
 
@@ -72,16 +73,38 @@ void printApplyLine(int tcxoStatus, int boostStatus, int nfBefore, int nfAfter) 
                 boostStatus, statusName(boostStatus), nfBefore, nfAfter);
 }
 
+// EST-377: resetAGC() can put the SX1262's RX gain back at its reset value in this build (the wrapper
+// re-applies it only under SX126X_RX_BOOSTED_GAIN, which is not defined). After EVERY reset this file
+// runs, read the chip back: if a runtime `radio boost on|off` choice exists and the chip disagrees,
+// set it again. The status of that re-apply goes into the apply line, so a TCXO change that had to
+// restore the boost says so.
+void reassertBoost(int& boostStatus) {
+  if (s_boostChoice.needsReapply(radio_driver.getRxBoostedGainMode())) {
+    boostStatus = radioDiagSetBoost(s_boostChoice.on());
+  }
+  s_boostOn = radio_driver.getRxBoostedGainMode();
+  s_boostSeen = true;
+  s_boostReadMs = millis();
+}
+
 // Applies whatever the commands queued. Called once per loop pass; never from the USB handler.
 void applyPending() {
   // A reset that lost the race with a packet is retried here, before anything else: the change is
   // already in the chip, only the noise restart is still owed.
   if (s_agcPending && !s_pendingTcxo && !s_pendingBoost) {
     if (radio_driver.isReceiving()) return;
+    const int nfBefore = radio_driver.getNoiseFloor();
     radio_driver.resetAGC();
+    // EST-377: an AGC retry is a reset too, so the same boost recall runs here.
+    int boostStatus = kStatusNone;
+    reassertBoost(boostStatus);
     if (radio_driver.getNoiseFloor() == 0) {
       s_agcPending = false;
       Serial.println("[radio] agc reset done");
+    }
+    if (boostStatus != kStatusNone) {
+      s_boostStatus = boostStatus;
+      printApplyLine(kStatusNone, boostStatus, nfBefore, radio_driver.getNoiseFloor());
     }
     return;
   }
@@ -122,13 +145,10 @@ void applyPending() {
   radio_driver.resetAGC();
 
   // sx126xResetAGC() re-applies the RX gain only under #ifdef SX126X_RX_BOOSTED_GAIN, which this
-  // build does not define. Read the chip back and set it again if the reset lost it.
-  if (boostRequested && radio_driver.getRxBoostedGainMode() != boostWanted) {
-    boostStatus = radioDiagSetBoost(boostWanted);
-  }
-  s_boostOn = radio_driver.getRxBoostedGainMode();
-  s_boostSeen = true;
-  s_boostReadMs = millis();
+  // build does not define. EST-377: put the last runtime `radio boost` choice back after EVERY reset,
+  // so a later TCXO change cannot silently drop a boost set earlier. The apply line carries the
+  // read-back and the status of that re-apply.
+  reassertBoost(boostStatus);
   // A zero floor is resetAGC's own mark. Anything else means the reset was skipped (STATE_INT_READY
   // with a packet waiting to be read), so keep the retry armed.
   s_agcPending = radio_driver.getNoiseFloor() != 0;
@@ -193,6 +213,9 @@ bool requestTcxo(float volts) {
 bool requestBoost(bool on) {
   s_pendingBoost = true;
   s_pendingBoostOn = on;
+  // EST-377: remember the choice itself, not just the pending request: later resetAGC calls (a TCXO
+  // change, an AGC retry) must leave the chip on this setting.
+  s_boostChoice.note(on);
   return true;
 }
 

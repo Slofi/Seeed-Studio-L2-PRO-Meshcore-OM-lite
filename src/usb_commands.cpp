@@ -23,6 +23,7 @@
 #include "msg_order.h"
 #include "mesh_link.h"
 #include "ota.h"
+#include "power_log.h"
 #include "radio.h"
 #include "radio_diag.h"
 #include "radio_stats.h"
@@ -942,6 +943,30 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       snprintf(reply, cap,
                "[cmd] ok pmu probe usb=0x22 regs=%d/%d vbusok=%s adc=%d/4",
                read, om::diag::kFusbReadCount, vbus, adcOk);
+      return;
+    }
+
+    // EST-377: the battery log's switch and its tail. The switch is NVS (safe on the command path,
+    // like `wifi on|off`); the tail read is the same shape as `history`, i.e. from usbCommandExecute,
+    // which otaCommandPoll runs on the loop task after otaPoll() returns (EST-350), with a static
+    // buffer so the handler's stack does not grow.
+    case om::usb::Kind::Log: {
+      if (cmd.text != nullptr && (strcmp(cmd.text, "on") == 0 || strcmp(cmd.text, "off") == 0)) {
+        const bool on = strcmp(cmd.text, "on") == 0;
+        const bool saved = om::plog::setEnabled(on);
+        snprintf(reply, cap, "[cmd] ok log power on=%d saved=%d", on ? 1 : 0, saved ? 1 : 0);
+        return;
+      }
+      if (cmd.text != nullptr && strcmp(cmd.text, "tail") == 0) {
+        const int lines = om::plog::printTail();
+        if (lines < 0) {
+          cmdError(reply, cap, "log power tail: no file on the card");
+          return;
+        }
+        snprintf(reply, cap, "[cmd] ok log power tail %d", lines);
+        return;
+      }
+      cmdError(reply, cap, "args");
       return;
     }
 

@@ -308,6 +308,33 @@ Command parseCommand(char* line) {
     if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
     return c;
   }
+  // EST-377: the battery log. One form only: `log power on|off|tail`. No path, no file content and
+  // no date can be named from the host; the device owns the file name (/log/power-YYYYMMDD.csv).
+  if (strcmp(verb, "log") == 0) {
+    c.kind = Kind::Log;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "power") != 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    const char* word = cur.next();
+    if (word == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(word, "on") != 0 && strcmp(word, "off") != 0 && strcmp(word, "tail") != 0) {
+      c.error = "value";
+      return c;
+    }
+    c.text = word;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
   if (strcmp(verb, "history") == 0) {
     c.kind = Kind::History;
     c.target = cur.next();

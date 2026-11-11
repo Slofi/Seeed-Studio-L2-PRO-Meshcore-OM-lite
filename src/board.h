@@ -135,6 +135,9 @@ void adcProbe(AdcProbe& out);
 // satellites heard at once since boot.
 void gpsBegin(bool swapPins = false);
 void gpsPoll(GpsState& out);
+// EST-377: the GNSS power rail's latched state (expander bit 13). It is set high at boot and never
+// dropped by this firmware today, so this is the honest 1 the battery log writes, not a constant.
+bool gpsRailOn();
 
 // Speaker amplifier enable (expander bit 12). The codec itself lives in audio.cpp.
 bool setAudioPa(bool on);

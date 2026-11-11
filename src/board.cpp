@@ -593,6 +593,13 @@ void sdUnmount() {
   (void)setOutput(kBitSdPower, false);
 }
 
+// EST-377: the latched expander output, not a diagnostic. No code path drops the GNSS rail today
+// (see the bring-up note above), so this reads 1; it becomes a real switch the day GPS duty cycling
+// lands, and the battery log follows it without a second source of truth.
+bool gpsRailOn() {
+  return (s_output[kBitGnssPower >> 3] & (uint8_t)(1U << (kBitGnssPower & 7))) != 0;
+}
+
 // ---------------------------------------------------------------------------- battery
 
 // ADS1115 at 0x48, single-ended AIN0..AIN3, single shot, 128 SPS. The config byte is the one the

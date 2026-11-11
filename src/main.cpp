@@ -24,6 +24,7 @@
 #include "history_store.h"
 #include "mem_stats.h"
 #include "ota.h"
+#include "power_log.h"
 #include "psram_alloc.h"
 #include "radio.h"
 #include "radio_fault.h"
@@ -350,6 +351,8 @@ static bool mapLayerPrefRead(void*, const char* key, bool fallback, bool& out) {
 static bool mapLayerPrefWrite(void*, const char* key, bool value) {
   return g_prefs.putBool(key, value) != 0;   // Preferences returns the bytes written (0 = failed)
 }
+// EST-377: both callbacks are key-generic, so the battery log's switch (om::plog, key "plogen",
+// default ON) uses them too: one NVS rule for every saved bool in this shell.
 
 // The emoji Recent row: 16 little-endian u32 then the valid count, 65 bytes in NVS "omlite".
 // Unknown trailing bytes are ignored by restore(), so an older/longer blob is safe.
@@ -4733,6 +4736,9 @@ void setup() {
   om::crashCheckpoint("[om] history");
   if (!om::meshHistoryBegin(g_sdOk)) Serial.println("[hist] store not ready (no SD, no SPIFFS)");
 #endif
+  // EST-377: the battery log's switch, loaded after Preferences is open (a missing key is ON and is
+  // not written). The card itself is only touched from the loop, below.
+  om::plog::begin(mapLayerPrefRead, mapLayerPrefWrite, nullptr);
   drawHome();
   // EST-355: the first screen is on the glass now, so its brightness is known before the first
   // change is asked for.
@@ -5479,6 +5485,26 @@ void loop() {
   // stack: EST-350), and `radio sample` prints its one line every 5 s and the summary. With nothing
   // queued and no sample running this is two bool tests and one SPI register read per 5 s.
   om::rdiag::loop(millis());
+
+  // EST-377: the battery log's ONLY writer, once a minute (EST-349: the loop owns the card). The
+  // state is what the status bar and the screens already use; plog::loop() reads the radio counters
+  // only when the minute is due, so this is a handful of atomics on every other pass.
+  {
+    const uint32_t t = micros();
+    om::plog::State ps;
+    ps.battMv = g_battMv;
+    ps.screenOn = screenOn;
+    const int backlight = g_change.active() ? g_change.level() : g_fade.level();
+    ps.brightness = screenOn ? (uint8_t)backlight : 0;
+    ps.gpsRailOn = om::gpsRailOn();
+    ps.fix = g_gps.valid;
+    ps.sats = g_gps.sats;
+    ps.wifiOn = om::wifiIsEnabled();
+    ps.bleOn = om::bleIsEnabled();
+    ps.uptimeSec = millis() / 1000;
+    om::plog::loop(millis(), ps);
+    om::radio::addPart(om::radio::Part::History, micros() - t);
+  }
 
   // EST-356: the phone changed a store through MyMesh (channels, radio, name). One toast says so and
   // the redraw rebuilds the screen from the same stores, so the change is visible at once.

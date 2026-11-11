@@ -34,6 +34,7 @@ enum class Kind : uint8_t {
             // radio tcxo 1.8|3.0 | radio boost on|off | radio sample <10..600>
             // (EST-365: what the L2 hears and the loop histogram; EST-376: the diagnostics)
   Pmu,      // pmu probe   (EST-376: read-only FUSB302 at 0x22 + the four ADS1115 inputs)
+  Log,      // log power on|off|tail   (EST-377: the battery log on the card)
   Play,     // play <event> [sound-id]   (EST-359/361: hear the device's shared library)
 };
 

@@ -28,6 +28,7 @@ enum class Kind : uint8_t {
   Drag,     // drag <x0> <y0> <x1> <y1> <ms>
   KeyWake,  // key wake
   Wifi,     // wifi status | scan | on | off   (EST-354; never a password)
+  Ntp,      // ntp now | status   (EST-385: one attempt now, or the schedule's last result + next)
   Ble,      // ble status | on | off   (EST-356; never the pairing PIN)
   Rptr,     // rptr scan | rptr status <name> | rptr regions [name] | rptr login <name> <pw>
   Radio,    // radio | radio packets | radio status

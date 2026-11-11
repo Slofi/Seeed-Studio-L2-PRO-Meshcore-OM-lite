@@ -444,6 +444,25 @@ Command parseCommand(char* line) {
     return c;
   }
 
+  // EST-385: the Wi-Fi clock's own two verbs. `ntp now` starts one attempt through the same path the
+  // schedule uses; `ntp status` reports the last attempt, its server and result, and the next attempt.
+  // Neither takes an argument, and neither can name a network or an address.
+  if (strcmp(verb, "ntp") == 0) {
+    c.kind = Kind::Ntp;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "now") != 0 && strcmp(sub, "status") != 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
+
   // EST-356: Bluetooth is read and switched from the host. Like `wifi`, the subcommand list is the
   // whole surface: there is deliberately no word that reads the pairing PIN back.
   if (strcmp(verb, "ble") == 0) {

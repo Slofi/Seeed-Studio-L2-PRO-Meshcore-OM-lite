@@ -5,7 +5,9 @@
 // and polled, and both have timeouts in wifi_model.h; the Arduino loop never waits for either. The
 // only synchronous call is the one-time driver init inside `WiFi.mode(WIFI_STA)` when the switch is
 // turned on (its duration is measured and logged). Nothing else goes on the network: the only client
-// is SNTP against pool.ntp.org, once per successful connection, and its answer goes through
+// is SNTP, and EST-385 gives it a retry schedule instead of one query per connection: attempts at
+// 0 s / 30 s / 2 min / then every 10 min, rotating pool.ntp.org, time.google.com, a fixed public IP
+// and the default gateway (ntp_plan.h). Its answer goes through
 // timeKeeper().setFromSource(..., TimeSource::Wifi) so the source ranking stays GPS first.
 //
 // Passwords: the five saved networks are one NVS blob (namespace "omwifi") and the password typed on
@@ -15,6 +17,7 @@
 
 #include <stdint.h>
 
+#include "ntp_plan.h"
 #include "wifi_model.h"
 
 namespace om {
@@ -46,6 +49,29 @@ bool wifiConnect(const char* ssid, const char* password);
 bool wifiConnectSaved(int index);
 
 const wifi::Status& wifiStatus();
+
+// --- NTP (EST-385) -------------------------------------------------------------------------------
+// The retry schedule's own state: attempts, the last result/server, the next attempt. The USB
+// `ntp status` answer reads this; nothing here carries a LAN address or an SSID.
+const ntp::Plan& wifiNtpPlan();
+
+// What `ntp now` did: Started, or why not. It goes through the same attempt path the schedule uses.
+enum class NtpNowResult : uint8_t { Started = 0, Off, NotConnected, BetterSource, Busy };
+NtpNowResult wifiNtpNow();
+
+// The station's DNS servers as COUNT and set/unset flags only (their addresses are never exposed).
+struct NtpDns {
+  int count = 0;
+  bool main = false;
+  bool backup = false;
+  bool fallback = false;
+};
+NtpDns wifiNtpDns();
+
+// Measurement facts for `ntp status`: the lwIP client's own enabled flag and whether modem sleep is
+// on (false while an attempt is in flight, because it is turned off for the exchange).
+bool wifiNtpClientUp();
+bool wifiNtpSleepOn();
 
 // Changes whenever the page or the status bar would look different (phase, scan count, saved list,
 // switch). The shell redraws on a change instead of polling every field.

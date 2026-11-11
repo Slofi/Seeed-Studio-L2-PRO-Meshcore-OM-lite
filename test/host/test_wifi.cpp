@@ -416,6 +416,28 @@ static void testPasswordKeyboard() {
   }
 }
 
+// EST-385: the two NTP verbs are exactly `ntp now` and `ntp status`; nothing else is accepted, so no
+// word can name a server, a network or an address.
+static void testNtpCommand() {
+  char a[] = "ntp now";
+  const char* sub = nullptr;
+  const char* err = nullptr;
+  check(parse(a, &sub, &err) == om::usb::Kind::Ntp, "ntp now is accepted");
+  check(err == nullptr && sub != nullptr && strcmp(sub, "now") == 0, "ntp now word");
+  char b[] = "ntp status";
+  check(parse(b, &sub, &err) == om::usb::Kind::Ntp && err == nullptr && strcmp(sub, "status") == 0,
+        "ntp status is accepted");
+
+  char c[] = "ntp";
+  check(om::usb::parseCommand(c).error != nullptr, "ntp alone is refused");
+  char d[] = "ntp server";
+  check(om::usb::parseCommand(d).error != nullptr, "there is no word that sets a server");
+  char e[] = "ntp now extra";
+  check(om::usb::parseCommand(e).error != nullptr, "ntp now takes no arguments");
+  char f[] = "ntp pool.ntp.org";
+  check(om::usb::parseCommand(f).error != nullptr, "ntp cannot name a host");
+}
+
 int main() {
   testSavedStore();
   testScanList();
@@ -423,6 +445,7 @@ int main() {
   testScanGate();
   testPasswordKeyboard();
   testWifiCommand();
+  testNtpCommand();
   if (g_fail) {
     printf("est354/355: %d failure(s)\n", g_fail);
     return 1;

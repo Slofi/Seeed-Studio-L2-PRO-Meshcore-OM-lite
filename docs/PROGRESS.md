@@ -5820,3 +5820,158 @@ Claude's to check.
 
 ## 2026-11-11 10:22 (Claude): EST-384 built, NOT reviewed in detail, NOT on the device
 - Sandbox build + tests green. Committed so the NTP ticket starts from a clean tree; review + device test owed.
+
+## 2026-11-11 10:40 (DeepSeek): EST-385, Wi-Fi NTP measured, retried on a schedule, server rotation
+
+**The measured bug.** Claude, device 2026-11-11 10:18 (build 5cf263f): Wi-Fi connected, one
+`[wifi] NTP: pool.ntp.org (one query)`, 20 s later `NTP: no answer, clock unchanged`, `clock=None`.
+The same LAN answers a PC in 3-38 ms. So the fault is on the L2, and the old code gave it exactly one
+window per association.
+
+### A. What this stack actually does (Arduino-ESP32 2.0.17 / ESP-IDF 4.4, PlatformIO core)
+Paths under `/home/slofi/.cache/pio-om-lite/core/packages/framework-arduinoespressif32/tools/sdk/esp32s3/`:
+- **The `esp_sntp_*` wrappers already marshal to the tcpip thread.** `nm`/`objdump -r` on
+  `lib/liblwip.a` member `sntp.c.obj`: `esp_sntp_init`, `esp_sntp_stop` and
+  `esp_sntp_setoperatingmode` are a `tcpip_callback(...)` (asynchronous), and
+  `esp_sntp_setserver`/`setservername` a `tcpip_api_call(...)` (blocking until the tcpip thread runs
+  it). `esp_sntp_getserver`/`getservername`/`enabled` call the lwIP getter directly.
+- **`LOCK_TCPIP_CORE()` does not exist on this build.** `CONFIG_LWIP_TCPIP_CORE_LOCKING` is not set
+  (`sdkconfig:1449`), so `include/lwip/port/esp32/include/lwipopts.h:58-61` takes the `#else` branch:
+  only `LWIP_TCPIP_CORE_LOCKING 0` is defined, `LOCK_TCPIP_CORE`/`UNLOCK_TCPIP_CORE` are not. Writing
+  them would not compile, and wrapping `esp_sntp_setservername()` in the lock would **deadlock**
+  against its own `tcpip_api_call`. So no missing lock is the cause, and no lock was added.
+- **A wrong-thread call fails silently here.** `LWIP_ASSERT_CORE_LOCKED()` is the empty default
+  (`include/lwip/lwip/src/include/lwip/opt.h:226-228`) because `CONFIG_LWIP_CHECK_THREAD_SAFETY` is not
+  set (`sdkconfig:1450`). Silence proves nothing, which is why the client's own state is now logged
+  (`enabled`, `addr`, `sync`, `reach`).
+- **DNS names are enabled**: `SNTP_SERVER_DNS 1` (`lwipopts.h:1209`), so a name is resolved by lwIP in
+  the tcpip thread. `SNTP_MAX_SERVERS 3`, `LWIP_DHCP_GET_NTP_SRV y`, update delay 3 h
+  (`sdkconfig:1570-1573`); `DNS_MAX_SERVERS 3` (`sdkconfig:1579`), so `WiFi.dnsIP(0..2)` is in range.
+- **The startup delay and the retry timeout are the real trap.** `LWIP_RAND` is `esp_random`
+  (`lwipopts.h:86`), so `SNTP_STARTUP_DELAY` turns on and the first request is delayed by
+  `LWIP_RAND() % 5000` ms (`include/lwip/lwip/src/include/lwip/apps/sntp_opts.h:144-157`).
+  `SNTP_RECV_TIMEOUT` is the 15000 ms default and is also `SNTP_RETRY_TIMEOUT` (`sntp_opts.h:163-190`).
+  One 20 s window therefore ends 0-5 s before or exactly when lwIP's own second send is due: the old
+  "no answer" is what cutting that retry looks like. `SNTP_UPDATE_DELAY` is
+  `sntp_get_sync_interval()` (`lwipopts.h:1214`), which we do not rely on: the schedule stops and
+  restarts the client per attempt.
+- **Per-send tracing**: `CONFIG_LWIP_SNTP_DEBUG` is not in the sdkconfig, so lwIP prints nothing per
+  send/receive. The closest per-exchange fact it exposes is `sntp_getreachability(idx)`
+  (`sntp.h:61-63`, `SNTP_MONITOR_SERVER_REACHABILITY` on, `sntp_opts.h:207-209`) plus the sync status
+  and the capture hooks. All three are logged.
+- The capture path is intact and verified in the built ELF: the weak `W sntp_sync_time` is replaced by
+  ours (`T sntp_sync_time` at 0x421708a8) and `sntp_set_system_time` holds its address in the literal
+  at 0x4207fd2c, so a reply still lands in `s_ntpGot` and goes through
+  `timeKeeper().setFromSource(..., TimeSource::Wifi)` with the floor checks untouched. Note for the
+  record: IDF's own `sntp_sync_time()` body is what calls the notification callback, so with our
+  replacement that callback never fires on this stack; it stays registered as the second hook and its
+  call count is logged (`notify=`), so a future core that does call it is visible, not silent.
+
+### B. The fix
+- **`src/ntp_plan.h` (new, plain C++, host-tested)**: the retry schedule and the rotation.
+  Attempts at **0 s, 30 s, 2 min** counted from the connection (a slow attempt cannot push the next
+  one out), then **every 10 min**, and every 10 min after a success (a refresh, not a stop). Per
+  attempt the server rotates: **pool.ntp.org, time.google.com, 162.159.200.1 (Cloudflare),
+  the DHCP default gateway**, then round again. An attempt's window is **25 s** (5 s maximum SNTP
+  start delay + 15 s `SNTP_RECV_TIMEOUT` + margin), which still fits inside the 30 s slot.
+- **Stop rule, one function, pinned against the real ranking**: `ntp::wanted(clockReal, priority)` is
+  false only when a real clock is held by a source ranked above Wi-Fi. `timeSourcePriority()` is
+  GPS 5, Wi-Fi 4, phone 3, manual 2, gps-nofix 1, so **only a GPS fix stops the retries**; a phone or
+  hand-set time does not, and a Wi-Fi time keeps being refreshed. When it stops, one line:
+  `[ntp] stop: clock is from GPS, better than Wi-Fi (N attempt(s))`.
+- **`src/wifi_link.cpp`**: one attempt at a time, non-blocking.
+  - the station's DNS servers are logged as **count + set/unset only** (`dns=3 main=set backup=set
+    fallback=unset (addresses not printed)`);
+  - `dns_gethostbyname()` is called directly with our own callback (the same call
+    `WiFi.hostByName()` makes at `libraries/WiFi/src/WiFiGeneric.cpp:1574`), but it is **polled with a
+    3 s timeout** instead of blocking up to 16 s + 15 s; the answer is logged with the **public IP**
+    (`[ntp] dns pool.ntp.org ok public_ip=... in N ms`) or the error;
+  - a name that resolved is handed to the client **as an IP** (no second DNS); a name that failed is
+    handed over as a name so lwIP still tries it; the cached address is zeroed first
+    (`esp_sntp_setserver(0, nullptr)`) because lwIP's `sntp_setservername()` stores only the pointer
+    and keeps the old resolved address otherwise;
+  - modem sleep is logged and **turned off only while an attempt is in flight** (`WiFi.setSleep(false)`
+    at the start, back on when the attempt ends), with the driver's return value logged;
+  - 100 ms after init the client's own state is logged (`enabled`, `addr`, `sync`, `notify`, `reach`);
+    if `esp_sntp_enabled()` is false the attempt ends at once as `not-started` instead of sitting out
+    the window (that is what a failed `tcpip_callback` looks like, and its return value is not visible
+    through the API);
+  - a failed attempt logs `result=timeout|dns-fail` with `addr=set|unset` and `reach=`, then
+    `next attempt in N s (attempt K, server=...)`;
+  - the success line is unchanged in shape: `[wifi] NTP <epoch> s: applied, source Wi-Fi`.
+- **USB**: `ntp now` (one attempt through the same path; refused with `wifi off`,
+  `wifi not connected`, `clock from gps`, `ntp busy`) and `ntp status`
+  (`attempts= active= last= server= last_age= last_ms= next_in= next_server= clock= dns= dns_set=
+  client= sleep=`). Parser: exactly those two words.
+- No NTP log or answer print can carry a LAN address or an SSID: the only address formatter is
+  `ntpIpText()`, fed a resolved **public** address; the gateway is the word `gateway`. `test_est385.py`
+  greps every `[ntp]` literal and the whole `ntp` answer for an address format, `ssid`, `bssid`, a
+  password word, `ip=`/`gw=`/`gateway=`, and proves `ntpIpText()` is only fed the public sources.
+
+### C. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` (the REBUILD.md command): **exit 0**, SUCCESS, `OM_BUILD_ID = b96a392-dirty`
+  (HEAD moved from 473b6f1 to b96a392, Claude's Python-cache cleanup, while this ticket ran).
+- RAM **159,008 B** of 327,680 (48.5 %; 158,952 before, **+56 B**); flash **2,834,873 B** of 6,553,600
+  (43.3 %; 2,829,753 before, **+5,120 B**); `firmware.bin` **2,835,232 B** (was 2,830,112, **+5,120 B**).
+  Only RadioLib's two known `#warning`s; none from a changed file.
+- `test/host/run.sh`: **exit 0**, **44 C++ binaries + 11 Python checks**. New `test_ntp.cpp` proves:
+  the schedule (0 s, 30 s from the connection, 2 min from the connection, then 10 min from the last
+  end; one attempt at a time; the 25 s window), the rotation and its wrap, the stop rule against the
+  real `timeSourcePriority()` (GPS stops; Wi-Fi, phone, manual and gps-nofix do not; nothing is due
+  when not wanted), `force()` (the `ntp now` path) on an idle plan and its refusal while one is in
+  flight, reset, and millis() wrap. `test_wifi.cpp` adds the `ntp now|status` parser cases and the
+  refusals (`ntp`, `ntp server`, `ntp now extra`, `ntp pool.ntp.org`). `test_est385.py` finds 21 NTP
+  literals and clears them.
+
+### D. Device test for Claude (one reader on the port)
+1. Flash. Run `tools/cmd.py wifi on` (the saved network auto-connects) and watch the serial.
+   Expected, in this order:
+   `[ntp] attempt 1 window=25000 ms server=pool.ntp.org (dns)` /
+   `[ntp] dns=3 main=set backup=set fallback=unset (addresses not printed)` /
+   `[ntp] sleep=on -> off for the attempt (set=1)` /
+   `[ntp] dns pool.ntp.org ok public_ip=<public IP> in N ms` (or `failed err=N` / `asked, waiting`) /
+   `[ntp] client server=pool.ntp.org addr=<public IP> (no second DNS)` /
+   `[ntp] client enabled=1 addr=<public IP> sync=0 notify=0 reach=0`.
+2. `tools/cmd.py ntp status` at once: `attempts=1 active=1 last=none server=- ... next_in=0
+   next_server=pool.ntp.org clock=None client=1 sleep=0`.
+3. **The one number that matters**: after the reply, `[wifi] NTP <epoch> s: applied, source Wi-Fi`,
+   `[ntp] attempt 1 server=pool.ntp.org result=ok after N ms`, then `tools/cmd.py status` ->
+   **`clock=Wi-Fi`** and the top bar shows HH:MM; `ntp status` -> `last=ok server=pool.ntp.org
+   last_age=... next_in=600 next_server=time.google.com clock=Wi-Fi sleep=1`.
+4. If it still fails, the new lines name the cause, so **comment them verbatim**:
+   - `addr=unset` (and `result=dns-fail`) -> the station's DNS is the fault;
+   - `addr=set` with `reach=0` at the timeout -> a packet went out and nothing came back (UDP path or
+     modem sleep; the `sleep=` line says whether it was off);
+   - `reach` bit set but no `result=ok` -> a reply came and was not accepted;
+   - `client enabled=0` -> the tcpip callback did not run (`not-started`);
+   - `result=timeout` on names but `result=ok` when attempt 3 uses the fixed `162.159.200.1` (2 min
+     in) -> DNS, not NTP.
+   Attempt 2 (30 s, time.google.com) and attempt 3 (2 min, the fixed public IP) run by themselves;
+   `ntp status` between them shows `next_in` and `next_server`.
+5. `tools/cmd.py ntp now` -> `[cmd] ok ntp now attempt=N server=...`; again while one is in flight ->
+   `[cmd] error ntp busy`; with a GPS fix holding the clock -> `[cmd] error clock from gps`.
+6. With a GPS fix, watch for `[ntp] stop: clock is from GPS, better than Wi-Fi (N attempt(s))` and no
+   further `[ntp] attempt` lines; `ntp status` keeps the last attempt.
+
+### E. Could not check (no device, no serial)
+- Whether any attempt now gets an answer, and which of DNS / a lost packet / modem sleep it was: the
+  host proves the policy, the device lines above prove the network fact. The gateway path can only be
+  judged on the device (a router may answer NTP or ignore it).
+- The measured cost of `dns_gethostbyname()` and the two `tcpip_api_call` setters on the loop:
+  `wifi status`'s `service_us_max` will show it.
+- The status bar HH:MM after a Wi-Fi set (unchanged path, `realSinceBoot()`), and that a 10 min refresh
+  does not disturb anything.
+
+### F. One thing for Claude to decide (rule 9)
+The PRE-EXISTING lines `[wifi] connected to "<SSID>" ip=<LAN IP>` and
+`[wifi] status ... ssid="..." ip=...` still print an SSID and a LAN address. This ticket leaves them
+untouched (his device measurements quote them), and the rule is enforced on the whole NTP surface.
+Say the word and a small follow-up strips the SSID/address from those two lines too.
+
+### G. Next step
+Claude reviews the diff, flashes, and runs D1-D6. Comment the `[ntp]` lines of attempts 1-3, the two
+`ntp status` answers and `status`'s `clock=`.
+
+## 2026-11-11 10:44 (Claude): EST-384 + EST-385 reviewed
+- EST-384: one writer of the node position (position.cpp via PositionSource), the phone set-location taken as Fixed, MeshCore's boot copy of its saved lat/lon overwritten right after meshLinkBegin(); coordinates on screen only.
+- EST-385: root-cause analysis accepted (0-5 s SNTP start delay + 15 s lwIP retry vs the old 20 s window); schedule, rotation, stop rule and the no-LAN-address test checked. One gap: WiFi.setSleep(false) during an attempt has no Bluetooth check (coexistence needs modem sleep with BLE on) -> EST-386 before flashing.

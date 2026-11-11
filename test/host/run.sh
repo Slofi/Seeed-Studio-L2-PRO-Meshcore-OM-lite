@@ -20,6 +20,8 @@ python3 -B test_fonts.py
 python3 -B test_est379.py
 # EST-384: the new position code's log and answer format strings carry no coordinate (rule 9).
 python3 -B test_est384.py
+# EST-385: no NTP log or answer format prints a LAN address, an SSID or a password (rule 9).
+python3 -B test_est385.py
 
 # Layout / hit testing, the migration bytes and the other pure-C++ logic (no Arduino): build them
 # with the system g++.
@@ -66,7 +68,8 @@ BIN40="$(mktemp /tmp/om-lite-est381.XXXXXX)"
 BIN41="$(mktemp /tmp/om-lite-est382.XXXXXX)"
 BIN42="$(mktemp /tmp/om-lite-gpsraw.XXXXXX)"
 BIN43="$(mktemp /tmp/om-lite-est384.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43"' EXIT
+BIN44="$(mktemp /tmp/om-lite-ntp.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -391,3 +394,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps_raw.cpp \
 # token is gps/fixed/none and carries no coordinate. The log-format grep is test_est384.py above.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est384.cpp -o "$BIN43"
 "$BIN43"
+
+# EST-385: the Wi-Fi NTP retry schedule (0 s / 30 s / 2 min / every 10 min), the four-server rotation,
+# the stop rule against the real timeSourcePriority() (a GPS fix stops it, Wi-Fi/phone/manual do not),
+# one attempt at a time, the forced attempt (USB `ntp now`), the 25 s window and millis() wrap.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_ntp.cpp ../../src/timekeeper.cpp -o "$BIN44"
+"$BIN44"

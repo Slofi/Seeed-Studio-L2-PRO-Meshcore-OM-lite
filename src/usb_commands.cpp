@@ -560,6 +560,46 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       return;
     }
 
+    case om::usb::Kind::Ntp: {
+      // EST-385. One attempt through the schedule's own path, and the schedule's state. No line here
+      // names an SSID or a LAN address: the servers are the rotation's public tokens (the gateway is
+      // the word "gateway"), and the DNS servers are a count plus set/unset flags.
+      if (cmd.target == nullptr) {
+        cmdError(reply, cap, "args");
+        return;
+      }
+      const om::ntp::Plan& ntp = om::wifiNtpPlan();
+      if (strcmp(cmd.target, "now") == 0) {
+        switch (om::wifiNtpNow()) {
+          case om::NtpNowResult::Started:
+            snprintf(reply, cap, "[cmd] ok ntp now attempt=%lu server=%s",
+                     (unsigned long)ntp.attempts(), ntp.server().text);
+            return;
+          case om::NtpNowResult::Off: cmdError(reply, cap, "wifi off"); return;
+          case om::NtpNowResult::NotConnected: cmdError(reply, cap, "wifi not connected"); return;
+          case om::NtpNowResult::BetterSource: cmdError(reply, cap, "clock from gps"); return;
+          case om::NtpNowResult::Busy: cmdError(reply, cap, "ntp busy"); return;
+          default: cmdError(reply, cap, "ntp busy"); return;
+        }
+      }
+      const uint32_t now = millis();
+      const om::NtpDns dns = om::wifiNtpDns();
+      const int lastServer = ntp.lastServer();
+      const char* lastServerText =
+          lastServer >= 0 && lastServer < om::ntp::kServerCount ? om::ntp::kServers[lastServer].text : "-";
+      const uint32_t lastAge = ntp.lastAtMs() == 0 ? 0 : (now - ntp.lastAtMs()) / 1000U;
+      snprintf(reply, cap,
+               "[cmd] ok ntp attempts=%lu active=%d last=%s server=%s last_age=%lu last_ms=%lu "
+               "next_in=%lu next_server=%s clock=%s dns=%d dns_set=%d%d%d client=%d sleep=%d",
+               (unsigned long)ntp.attempts(), ntp.active() ? 1 : 0,
+               om::ntp::resultToken(ntp.lastResult()), lastServerText, (unsigned long)lastAge,
+               (unsigned long)ntp.lastMs(), (unsigned long)ntp.nextInSec(now),
+               ntp.nextServer().text, om::timeSourceName(om::timeKeeper().source()), dns.count,
+               dns.main ? 1 : 0, dns.backup ? 1 : 0, dns.fallback ? 1 : 0,
+               om::wifiNtpClientUp() ? 1 : 0, om::wifiNtpSleepOn() ? 1 : 0);
+      return;
+    }
+
     case om::usb::Kind::Ble: {
       // EST-356. The PIN is never printed on this surface: `pin_set` answers whether one exists.
       const char* sub = cmd.target;

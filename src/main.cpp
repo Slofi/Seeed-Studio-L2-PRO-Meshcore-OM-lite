@@ -34,6 +34,7 @@
 #include "rptr_link.h"    // EST-358: the repeater session (scan, login, status, CLI)
 #include "rptr_model.h"   // EST-358: the row table, the CLI line builders, the parsers
 #include "screen_change.h"
+#include "screen_idle.h"   // EST-405: the screen auto-off timer and its two saved values
 #include "target.h"
 #include "timekeeper.h"
 #include "touch_gate.h"
@@ -298,6 +299,22 @@ static bool g_spent = false;
 // after boardBegin().
 static om::FadeRamp g_fade;
 
+// EST-405: the screen's on/off state moved here from the loop's own statics when the idle timer
+// became a second caller of the sleep transition. One state, one sleep path, one wake path: the wake
+// button and the auto-off timer both end in screenSleep()/screenWake() below.
+static bool g_screenOn = true;
+static bool g_sleepPending = false;      // the backlight is fading out; the panel is still awake
+static bool g_sleepByTimer = false;      // the current sleep was the auto-off timer's, not the button
+static bool g_wakePrev = false;          // the wake button's last sampled level (the press edge)
+// The gesture state screenSleep() must drop when the screen goes dark, so a finger that was on the
+// glass cannot turn into a tap in the dark. They live here rather than inside loop() because the
+// sleep transition is now a function with two callers.
+static bool g_down = false;
+static bool g_drag = false;
+static bool g_acted = false;
+static om::ScreenIdle g_idle;            // the auto-off timer (screen_idle.h)
+static om::ScreenIdlePrefs g_idlePrefs;  // its two saved values
+
 // EST-390: the pressed look's worst case, printed once a minute like the other timings. One
 // sample per armed press: from the press edge being seen to the end of that frame's push.
 static om::ui::PressLatencyLog g_pressLatency;
@@ -413,6 +430,18 @@ static bool mapLayerPrefWrite(void*, const char* key, bool value) {
 // EST-377: both callbacks are key-generic, so the battery log's switch (om::plog, key "plogen",
 // default ON) uses them too: one NVS rule for every saved bool in this shell.
 
+// EST-405: the screen auto-off timer's two one-byte keys ("saoff" the switch, "saoft" the time
+// index). One key-generic pair, the same rule as the bool callbacks above: a missing key is the
+// caller's default and nothing is written for it.
+static bool u8PrefRead(void*, const char* key, uint8_t fallback, uint8_t& out) {
+  if (!g_prefs.isKey(key)) return false;
+  out = g_prefs.getUChar(key, fallback);
+  return true;
+}
+static bool u8PrefWrite(void*, const char* key, uint8_t value) {
+  return g_prefs.putUChar(key, value) == sizeof(uint8_t);
+}
+
 // The emoji Recent row: 16 little-endian u32 then the valid count, 65 bytes in NVS "omlite".
 // Unknown trailing bytes are ignored by restore(), so an older/longer blob is safe.
 // EST-399: the ONE write of this blob, and it ANSWERS whether it landed. The pick path does not call
@@ -497,6 +526,76 @@ static void drawHome();
 // screen with the toast in the frame" (EST-344). It answers whether it drew (EST-381), so a frame
 // refused by a running screen change can be asked for again instead of being lost.
 static bool redrawCurrentScreen();
+
+// ------------------------------------------------------------------------ EST-405: sleep and wake
+// ONE sleep transition and ONE wake path, shared by the wake button and the screen auto-off timer.
+// The bodies are the wake button's own code, moved verbatim out of loop(): the fade-out over
+// kFadeOutMs, then the panel sleep once the light has reached 0 (the `g_sleepPending` tick further
+// down), and the ordered wake (panel out of sleep, DISPOFF, sleep-out, frame push, DISPON, one frame
+// period, then the backlight ramp) with the TouchGate armed. `why` labels the log lines; fromTimer
+// separates the timer's sleep from the button's for the touch wake rule (see loop()).
+static void screenSleep(const char* why, bool fromTimer) {
+  if (!g_screenOn) return;
+  // A gesture in flight is dropped, so the finger that was on the glass cannot turn into a tap in
+  // the dark. The same three resets the button path always did.
+  g_screenOn = false;
+  g_down = false;
+  g_drag = false;
+  g_acted = false;
+  g_sleepPending = true;
+  // EST-355: a screen change that is still running is abandoned; the fade-out below owns the light
+  // from here and starts at whatever level the change had really reached.
+  const int fromLevel = g_change.active() ? g_change.level() : g_fade.level();
+  g_change.cancel();
+  g_fade.start(millis(), fromLevel, 0, om::kFadeOutMs);
+  g_sleepByTimer = fromTimer;
+  Serial.printf("[wake] screen off (%s, fade out %lums from %d)\n", why,
+                (unsigned long)om::kFadeOutMs, fromLevel);
+}
+
+static void screenWake(const char* why) {
+  if (g_screenOn) return;
+  // Wake, in the order that leaves no diagonal on the glass (Filip, EST-336): the panel out of
+  // sleep, DISPOFF at once (LovyanGFX's wakeup() ends with DISPON, see board.h), its sleep-out
+  // time, the whole current frame pushed into the panel's RAM while the display is still off,
+  // then DISPON, one full frame period, and only then the backlight ramps up. A finger already
+  // down (or one that lands during the gate) is swallowed by g_touchGate.
+  g_screenOn = true;
+  g_sleepByTimer = false;
+  g_idle.onActivity(millis());   // a wake is the by-definition end of an idle stretch
+  uint16_t tx = 0, ty = 0;
+  const bool downAtWake = om::omTouch(tx, ty);
+  const uint32_t wakeMs = millis();
+  if (g_sleepPending) {
+    // Woken while the fade-out was still running: the panel never slept, so reverse the ramp from
+    // the current level instead of waking (and flashing) the panel.
+    g_sleepPending = false;
+    g_fade.start(wakeMs, g_fade.level(), om::kScreenBrightness, om::kFadeInMs);
+    g_touchGate.onWake(wakeMs, downAtWake);
+    Serial.printf("[wake] screen on (%s, fade reversed at %d), %lums masked\n", why, g_fade.level(),
+                  (unsigned long)om::TouchGate::kGateMs);
+  } else {
+    om::boardSetBrightness(0);   // stays dark through the panel's sleep-out and the frame push
+    om::panelPower(true);
+    om::panelDisplay(false);
+    delay(om::kPanelWakeOutMs);
+    redrawCurrentScreen();
+    om::panelDisplay(true);
+    delay(om::kPanelFramePeriodMs);
+    // The gate starts when the light starts, so it covers the whole fade-in; the fade now runs on a
+    // gamma 2.2 curve for 300 ms, so it is longer than the gate (EST-339).
+    const uint32_t litMs = millis();
+    g_fade.start(litMs, 0, om::kScreenBrightness, om::kFadeInMs);
+    g_touchGate.onWake(litMs, downAtWake);
+    Serial.printf("[wake] screen on (%s, %s at wake), %lums masked\n", why,
+                  downAtWake ? "finger held" : "no finger",
+                  (unsigned long)om::TouchGate::kGateMs);
+  }
+}
+
+// Everything the ticket says must keep the auto-off timer paused. One place, read by the loop; the
+// Settings page's note and this function therefore describe the same rule.
+static om::IdleBlockers idleBlockersNow();
 
 // ----------------------------------------------------------------------------- new UI: Nodes data
 // The UI layer is fed from the real MeshCore contact table. meshContactList() returns 0 when the
@@ -3253,6 +3352,8 @@ enum SetAct : uint16_t {
   A_None = 0,
   A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_BtToggle, A_BtNewPin, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
+  // EST-405: the screen auto-off switch and the row that opens its five time choices.
+  A_IdleAutoOff, A_IdleTime,
   // EST-392: ONE position source control (the General page's `Position` row); it opens the small
   // GPS / Fixed choice, so EST-384's page and its three actions are gone.
   A_PosSource,
@@ -3274,6 +3375,7 @@ enum SetAct : uint16_t {
   A_TimeFieldBase = 220,   // 220..224 year / month / day / hour / minute
   A_WifiNetBase = 240,     // 240..247 the scan rows on the Wi-Fi page (strongest first)
   A_WifiForgetBase = 250,  // 250..254 the saved rows on the Saved networks page
+  A_IdleTimeBase = 260,    // 260..264 the five screen auto-off times, in kIdleTimes order
 };
 
 // EST-350: where a page came from is the navigation history (ui/settings_layout.h SettingsNav), not a
@@ -3487,6 +3589,13 @@ static void buildSettingsRows() {
       setSection("DISPLAY");
       snprintf(v, sizeof(v), "%u", (unsigned)g_setBrightness);
       setAdd(om::ui::SetRowKind::Stepper, A_Brightness, "Brightness", v);
+      // EST-405: the screen auto-off switch, DEFAULT OFF, and (only while it is on) the row that
+      // opens its five time choices. The time row is hidden when the switch is off, so the default
+      // page looks exactly as it did before this ticket.
+      setAdd(om::ui::SetRowKind::Toggle, A_IdleAutoOff, "Screen auto-off", "ON", g_idle.enabled());
+      if (g_idle.enabled()) {
+        setAdd(om::ui::SetRowKind::Chevron, A_IdleTime, "Auto-off after", g_idle.timeLabel());
+      }
 
       setSection("TIME");
       clockLine(v, sizeof(v));
@@ -3667,6 +3776,24 @@ static void buildSettingsRows() {
       g_setActionLabel = "Apply";
       g_setActionId = A_CustomApply;
       g_setActionOn = true;
+      break;
+    }
+
+    // EST-405: the screen auto-off time. Five Check rows, the chosen one dotted, straight from
+    // om::kIdleTimes so the labels, the milliseconds the timer uses and the row order cannot drift.
+    // The page is reached only while the switch is on (General hides its row when it is off).
+    case SetPage::AutoOff: {
+      snprintf(g_setTitle, sizeof(g_setTitle), "Screen auto-off");
+      setSection("TURN THE SCREEN OFF AFTER");
+      for (int i = 0; i < om::kIdleTimeCount; ++i) {
+        setAdd(om::ui::SetRowKind::Check, (uint16_t)(A_IdleTimeBase + i), om::kIdleTimes[i].label,
+               "", g_idle.timeIndex() == i);
+      }
+      // Two notes, measured to fit the body's 306 px at 11 px (the ellipsis would otherwise cut the
+      // second one at its most important word, the OTA upload).
+      setAdd(om::ui::SetRowKind::Note, A_None, "Touch, wake or a USB command restarts it.");
+      setAdd(om::ui::SetRowKind::Note, A_None,
+             "Never during typing, a pop-up, OTA or a map drag.");
       break;
     }
 
@@ -4363,6 +4490,18 @@ static void handleSettingsRow(uint16_t id) {
     }
     case A_Sound:    setGo(SetPage::Sound); break;
     case A_Time:     setGo(SetPage::Time); break;
+    // EST-405: the switch. Both stores move together: the saved one writes ONLY when the value
+    // changes (the store's own rule), the live one restarts the count from now. Switching on leaves
+    // the time at its saved value, which is 1 min on a fresh install (the ticket's default).
+    case A_IdleAutoOff: {
+      const bool on = !g_idle.enabled();
+      const bool saved = g_idlePrefs.setEnabled(on);
+      g_idle.setEnabled(on, millis());
+      if (!saved) showToast("Auto-off setting not saved");
+      Serial.printf("[idle] screen auto-off %s, %s\n", on ? "on" : "off", g_idle.timeLabel());
+      break;
+    }
+    case A_IdleTime: setGo(SetPage::AutoOff); break;
     case A_TimeManual:
       timeInitFromClock();
       setGo(SetPage::TimeEdit);
@@ -4627,6 +4766,15 @@ static void handleSettingsRow(uint16_t id) {
       } else if (id >= A_ChanBase && id < A_ChanBase + om::kMaxChannels) {
         openChannelPage((int)(id - A_ChanBase));
         return;
+      } else if (id >= A_IdleTimeBase && id < A_IdleTimeBase + om::kIdleTimeCount) {
+        // EST-405: a time choice. The store writes ONLY when the index changes; the live timer
+        // restarts its count from now. The page stays open with the dot moved, like every other
+        // Check list, and Back returns to General.
+        const int choice = (int)(id - A_IdleTimeBase);
+        const bool saved = g_idlePrefs.setTimeIndex(choice);
+        g_idle.setTimeoutIndex(choice, millis());
+        if (!saved) showToast("Auto-off time not saved");
+        Serial.printf("[idle] auto-off after %s\n", g_idle.timeLabel());
       }
       break;
   }
@@ -5064,6 +5212,14 @@ void setup() {
   Serial.printf("[map] layers traces=%d names=%d hidden=%d\n", om::map_tab::tracesOn() ? 1 : 0,
                 om::map_tab::namesOn() ? 1 : 0, om::map_tab::tabsHidden() ? 1 : 0);
   loadEmojiRecent();
+  // EST-405: the screen auto-off switch and time. DEFAULT OFF and 1 min; a missing key writes
+  // nothing, so an upgrade from an image without them changes no NVS byte. The timer starts its
+  // count here, so an image that boots with the switch on still shows the screen for a full time.
+  g_idlePrefs.begin(u8PrefRead, u8PrefWrite, nullptr);
+  g_idlePrefs.load();
+  g_idle.begin(g_idlePrefs.enabled(), g_idlePrefs.timeIndex(), millis());
+  Serial.printf("[idle] screen auto-off %s, %s\n", g_idle.enabled() ? "enabled" : "off",
+                g_idle.timeLabel());
   // EST-347: the one brightness setting, in NVS as "bright". The fade starts from it.
   g_setBrightness = g_prefs.getUChar("bright", om::kScreenBrightness);
   if (g_setBrightness < 20) g_setBrightness = 20;
@@ -5779,6 +5935,32 @@ static void deleteArmTick(uint32_t now) {
   if (expired && g_settings && g_setEditor == om::ui::SettingsEditor::None) drawSettings();
 }
 
+// EST-405: everything the ticket says must keep the auto-off timer paused. Defined here, after every
+// screen's own state it reads and just before its one caller.
+static om::IdleBlockers idleBlockersNow() {
+  om::IdleBlockers b;
+  // The keyboard sheet covers every composer and editor: the chat composer, the message sheet's
+  // REPLY/COPY/MENTION, the DM composer, every Settings text editor and the RPTR sheet.
+  b.keyboard =
+      g_kb.open || g_rptrOsk || (g_settings && g_setEditor != om::ui::SettingsEditor::None);
+  // Pop-ups, confirmations, sheets and dropdowns: things that never finish themselves and that a tap
+  // must not reach behind, so the timer waits. The own-position picker and the RPTR map picker are
+  // full frames, but the user is in the middle of choosing a point, so they wait too.
+  b.popup = g_clearAsk || g_setSelOpen || g_posChoice || g_ownPick || g_selector || g_advertMenu ||
+            g_bubMenuSeq != 0 || g_nodeMenu >= 0 || g_nodeTraceOpen || g_rptrAskOpen ||
+            g_rptrMapPick;
+  b.ota = om::otaActive();
+  // A drag is the finger down and moving; a stale canvas is a pan, zoom or recentre whose tiles are
+  // still being decoded, which is the "zoom in progress" the ticket means.
+  const bool mapVisible = g_tab == 2 && !g_settings;
+  b.mapGesture = (mapVisible && (g_drag || om::mapViewStale())) ||
+                 (g_ownPick && g_ownPickDragging) || (g_rptrMapPick && g_rptrPickDragging);
+  // Rule 3's other half: the pop-up on the glass keeps the screen on for its 5 s. `visible()` is the
+  // same test the drawing and the touch dismissal use.
+  b.toast = om::ui::toastState().visible(millis());
+  return b;
+}
+
 void loop() {
   // EST-365: one pass timer, and one bucket per block the ticket names. The parts are measured
   // around the calls below; endPass() charges the remainder to Other, so a long pass always names
@@ -5837,18 +6019,12 @@ void loop() {
     om::radio::addPart(om::radio::Part::Ble, micros() - t);
   }
   static uint32_t lastBeat = 0;
-  static bool screenOn = true;
-  om::toasts::setScreenOn(screenOn);   // EST-366/371: the notification door checks the panel once
-  static bool sleepPending = false;   // the backlight is fading out; the panel is still awake
-  static bool wakePrev = false;
+  om::toasts::setScreenOn(g_screenOn);   // EST-366/371: the notification door checks the panel once
   static uint32_t lastTap = 0;
-  // Gesture state lives here, not down in the touch section, because switching the screen off must
-  // be able to drop a gesture in flight (see the wake button below).
-  static bool g_down = false;
+  // Gesture state (g_down / g_drag / g_acted, file scope since EST-405) lives outside the touch
+  // section because switching the screen off must be able to drop a gesture in flight.
   static int g_sx = 0, g_sy = 0, g_scroll0 = 0, g_setScroll0 = 0, g_lastX = 0, g_lastY = 0;
   static int g_upX = 0, g_upY = 0;
-  static bool g_drag = false;
-  static bool g_acted = false;
   static uint32_t g_lastRender = 0, g_upMs = 0, g_downMs = 0;
   (void)g_setScroll0;
 
@@ -5862,63 +6038,31 @@ void loop() {
     havePress = true;
   }
   if (havePress) {
-    if (pressed && !wakePrev) {
-      if (screenOn) {
-        // Sleep: fade the backlight out over kFadeOutMs, THEN put the panel to sleep. Any gesture in
-        // flight is dropped, so the finger that was on the glass cannot turn into a tap in the dark.
-        screenOn = false;
-        g_down = false;
-        g_drag = false;
-        g_acted = false;
-        sleepPending = true;
-        // EST-355: a screen change that is still running is abandoned; the fade-out below owns the
-        // light from here and starts at whatever level the change had really reached.
-        const int fromLevel = g_change.active() ? g_change.level() : g_fade.level();
-        g_change.cancel();
-        g_fade.start(millis(), fromLevel, 0, om::kFadeOutMs);
-        Serial.printf("[wake] screen off (fade out %lums from %d)\n",
-                      (unsigned long)om::kFadeOutMs, fromLevel);
+    if (pressed && !g_wakePrev) {
+      // The same two transitions the auto-off timer calls (EST-405), so there is one way to sleep
+      // and one way to wake. The button's own labels are "button".
+      if (g_screenOn) {
+        screenSleep("button", false);
       } else {
-        // Wake, in the order that leaves no diagonal on the glass (Filip, EST-336): the panel out of
-        // sleep, DISPOFF at once (LovyanGFX's wakeup() ends with DISPON, see board.h), its sleep-out
-        // time, the whole current frame pushed into the panel's RAM while the display is still off,
-        // then DISPON, one full frame period, and only then the backlight ramps up. A finger already
-        // down (or one that lands during the gate) is swallowed by g_touchGate.
-        screenOn = true;
-        uint16_t tx = 0, ty = 0;
-        const bool downAtWake = om::omTouch(tx, ty);
-        g_down = false;
-        g_drag = false;
-        g_acted = false;
-        const uint32_t wakeMs = millis();
-        if (sleepPending) {
-          // Pressed again while the fade-out was still running: the panel never slept, so reverse
-          // the ramp from the current level instead of waking (and flashing) the panel.
-          sleepPending = false;
-          g_fade.start(wakeMs, g_fade.level(), om::kScreenBrightness, om::kFadeInMs);
-          g_touchGate.onWake(wakeMs, downAtWake);
-          Serial.printf("[wake] screen on (fade reversed at %d), %lums masked\n", g_fade.level(),
-                        (unsigned long)om::TouchGate::kGateMs);
-        } else {
-          om::boardSetBrightness(0);   // stays dark through the panel's sleep-out and the frame push
-          om::panelPower(true);
-          om::panelDisplay(false);
-          delay(om::kPanelWakeOutMs);
-          redrawCurrentScreen();
-          om::panelDisplay(true);
-          delay(om::kPanelFramePeriodMs);
-          // The gate starts when the light starts, so it covers the whole fade-in; the fade now runs
-          // on a gamma 2.2 curve for 300 ms, so it is longer than the gate (EST-339).
-          const uint32_t litMs = millis();
-          g_fade.start(litMs, 0, om::kScreenBrightness, om::kFadeInMs);
-          g_touchGate.onWake(litMs, downAtWake);
-          Serial.printf("[wake] screen on (%s at wake), %lums masked\n",
-                        downAtWake ? "finger held" : "no finger",
-                        (unsigned long)om::TouchGate::kGateMs);
-        }
+        screenWake("button");
       }
     }
-    wakePrev = pressed;
+    g_wakePrev = pressed;
+  }
+
+  // EST-405: a screen the AUTO-OFF TIMER put to sleep wakes on a touch too, and that touch only
+  // wakes: screenWake() arms the same TouchGate with "finger down at wake", so the press is
+  // swallowed until it lifts and nothing under it is pressed. The glass is polled at
+  // kIdleTouchPollMs rather than every pass to keep the I2C read off the hot path. A screen the
+  // wake button slept is deliberately NOT woken by a touch (rule 4: with the feature off, nothing
+  // changes from today); g_sleepByTimer is the one difference.
+  if (!g_screenOn && g_sleepByTimer) {
+    static uint32_t lastIdleTouchPoll = 0;
+    uint16_t wx = 0, wy = 0;
+    if (millis() - lastIdleTouchPoll >= om::kIdleTouchPollMs) {
+      lastIdleTouchPoll = millis();
+      if (om::omTouch(wx, wy)) screenWake("touch");
+    }
   }
 
   // The non-blocking backlight ramp: at most one level (one I2C write) per loop pass. When the fade
@@ -5930,8 +6074,8 @@ void loop() {
       Serial.printf("[wake] fade done at %d (%d steps)\n", g_fade.level(), g_fade.steps());
     }
   }
-  if (sleepPending && !g_fade.active()) {
-    sleepPending = false;
+  if (g_sleepPending && !g_fade.active()) {
+    g_sleepPending = false;
     om::panelDisplay(false);
     om::panelPower(false);
     Serial.println("[wake] panel asleep");
@@ -5942,7 +6086,7 @@ void loop() {
   screenChangeLoop();
   // Everything below draws an ordinary, in-page frame; while a change is running the light and the
   // frame belong to it (redrawCurrentScreen has the same rule for the toast and the clock paths).
-  const bool uiDrawOk = screenOn && !g_change.active();
+  const bool uiDrawOk = g_screenOn && !g_change.active();
 
   // EST-402: the charging bolt's one source. Every kChargePollMs (2 s) ONE read of STATUS0 (0x40),
   // no write, decoded to VBUSOK and fed to the two-read debounce. A failed read is Unavailable
@@ -6039,7 +6183,7 @@ void loop() {
   om::radio::addPart(om::radio::Part::Gps, micros() - gpsStartUs);
   // EST-371: the toast module's once-per-pass work: expiry, and the one queued notice taking the
   // screen when the current toast is gone.
-  om::toasts::pump(screenOn);
+  om::toasts::pump(g_screenOn);
   // The floor is a one-way lower bound; persistence every 10 minutes is enough once a sync has set it.
   if (om::timeKeeper().saveDue(millis() / 1000)) saveTimeFloor();
   static bool gpsRetried = false;
@@ -6125,7 +6269,7 @@ void loop() {
     }
     if (strcmp(shownClock, clockText) != 0) {
       snprintf(shownClock, sizeof(shownClock), "%s", clockText);
-      if (screenOn) redrawCurrentScreen();
+      if (g_screenOn) redrawCurrentScreen();
     }
   }
 
@@ -6140,6 +6284,17 @@ void loop() {
     // reader's call chain (see docs/PROGRESS.md: 1,136 B otaPoll + 304 B frame handler + the command's
     // own 1,632 B, on an 8,192 B loop-task stack).
     om::otaCommandPoll();
+    // EST-405: one executed USB command restarts the auto-off count and opens the 30 s quiet window
+    // (the ticket's "a USB command arrived in the last 30 s"). The OMSHOT screenshot is not one: it
+    // reads the off-screen frame and never runs through the command slot.
+    {
+      static uint32_t seenCmdSerial = 0;
+      const uint32_t cs = om::otaCommandSerial();
+      if (cs != seenCmdSerial) {
+        seenCmdSerial = cs;
+        g_idle.onUsbCommand(millis());
+      }
+    }
     om::radio::addPart(om::radio::Part::Usb, micros() - t);
   }
   // EST-354: one redraw when the Wi-Fi state a screen draws has changed (the status icon, the
@@ -6150,7 +6305,7 @@ void loop() {
     const uint32_t ws = om::wifiSerial();
     if (ws != seenWifi) {
       seenWifi = ws;
-      if (screenOn && g_setEditor == om::ui::SettingsEditor::None) redrawCurrentScreen();
+      if (g_screenOn && g_setEditor == om::ui::SettingsEditor::None) redrawCurrentScreen();
     }
   }
   // EST-356: the Bluetooth page and the status icon follow the switch and the phase (off /
@@ -6160,7 +6315,7 @@ void loop() {
     const uint32_t bs = om::bleSerial();
     if (bs != seenBle) {
       seenBle = bs;
-      if (screenOn && g_setEditor == om::ui::SettingsEditor::None) redrawCurrentScreen();
+      if (g_screenOn && g_setEditor == om::ui::SettingsEditor::None) redrawCurrentScreen();
     }
   }
 #if defined(OM_ENABLE_MESH)
@@ -6199,9 +6354,9 @@ void loop() {
     const uint32_t t = micros();
     om::plog::State ps;
     ps.battMv = g_battMv;
-    ps.screenOn = screenOn;
+    ps.screenOn = g_screenOn;
     const int backlight = g_change.active() ? g_change.level() : g_fade.level();
-    ps.brightness = screenOn ? (uint8_t)backlight : 0;
+    ps.brightness = g_screenOn ? (uint8_t)backlight : 0;
     ps.gpsRailOn = om::gpsRailOn();
     ps.fix = g_gps.valid;
     ps.sats = g_gps.sats;
@@ -6236,8 +6391,8 @@ void loop() {
       }
       if (last[0] != 0) {
         Serial.printf("[ble] %s\n", last);
-        if (screenOn) showToast(last);
-      } else if (screenOn && g_setEditor == om::ui::SettingsEditor::None) {
+        if (g_screenOn) showToast(last);
+      } else if (g_screenOn && g_setEditor == om::ui::SettingsEditor::None) {
         redrawCurrentScreen();
       }
     }
@@ -6343,7 +6498,7 @@ void loop() {
       } else if (st == om::MeshPingState::Failed) {
         snprintf(text, sizeof(text), "Ping: send failed");
       }
-      if (text[0] && screenOn) showToast(text);
+      if (text[0] && g_screenOn) showToast(text);
       if (text[0]) Serial.printf("[nodes] %s\n", text);
     }
   }
@@ -6372,9 +6527,9 @@ void loop() {
           g_nodeTraceOpen = true;
           g_nodeMenu = -1;
           if (g_tab == 0 && !g_settings && uiDrawOk) drawHome();
-          else if (screenOn) showToast("Trace came back");
+          else if (g_screenOn) showToast("Trace came back");
           Serial.printf("[nodes] trace: %d hop(s), %lu ms\n", tv.count, (unsigned long)tv.rttMs);
-        } else if (screenOn) {
+        } else if (g_screenOn) {
           showToast("Trace: no data back");
         }
       }
@@ -6429,11 +6584,15 @@ void loop() {
   } else if (om::usbTouchSample(millis(), &injectedX, &injectedY, &injectedDown)) {
     x = injectedX;
     y = injectedY;
-    rawDown = screenOn && injectedDown;
+    rawDown = g_screenOn && injectedDown;
   } else {
-    rawDown = screenOn && om::omTouch(x, y);
+    rawDown = g_screenOn && om::omTouch(x, y);
   }
   const bool isDown = changing ? false : g_touchGate.accept(millis(), rawDown);
+  // EST-405: a finger on the glass (held included) restarts the auto-off count. It is the physical
+  // sample, not the gated tap, so a press the wake gate swallows still counts as the user being
+  // there. The screen being off makes rawDown false, so a dark screen never feeds the timer.
+  if (rawDown) g_idle.onActivity(millis());
   if (!isDown) {
     if (g_down) {
       g_down = false;
@@ -6518,7 +6677,7 @@ void loop() {
         }
         // The Info page's scroll snaps its give back the same way, and its last drawn position is
         // always painted here too (the drag may not have drawn in the last 60 ms).
-        if (g_tab == 0 && !g_settings && screenOn && g_nodeInfo >= 0) {
+        if (g_tab == 0 && !g_settings && g_screenOn && g_nodeInfo >= 0) {
           const om::ui::NodeInfoLayout nl = om::ui::nodeInfoLayoutFor(om::ui::l2());
           const int maxScroll =
               om::ui::nodeInfoMaxScroll(om::ui::nodeInfoLineCount(g_nodeInfoModel), nl);
@@ -6526,7 +6685,7 @@ void loop() {
           const bool changed = clamped != g_nodeInfoScroll;
           g_nodeInfoScroll = clamped;
           if (g_drag || changed) drawHome();
-        } else if (g_tab == 0 && !g_settings && screenOn) {
+        } else if (g_tab == 0 && !g_settings && g_screenOn) {
           // The Nodes scroll is clamped and snapped back when the finger lifts; the last 60 ms of a
           // drag may not have been drawn, so the final position is always drawn here.
           const int maxScroll = om::ui::l2().maxScroll(g_nodeCount);
@@ -6539,7 +6698,7 @@ void loop() {
         // EST-394: the last 60 ms of a map drag may not have been drawn. One full draw here leaves
         // the final pan on the glass with the trace projected for THAT view, and a composited canvas
         // that matches it, so the replay's 30 fps frames can resume at once after the finger lifts.
-        if (g_tab == 2 && !g_settings && screenOn && g_drag) om::map_tab::draw();
+        if (g_tab == 2 && !g_settings && g_screenOn && g_drag) om::map_tab::draw();
         // The repeater list and a page's rows snap their give back the same way. The map picker has
         // no scroll of its own: its pan is applied live, so the release does nothing.
         if (g_tab == 3 && !g_settings && !g_rptrOsk && !g_rptrMapPick) {
@@ -6927,6 +7086,17 @@ void loop() {
     // repaint); the ACTION rule is untouched, so the release does exactly what it did before.
     if (om::ui::pressMove((int)x, (int)y)) redrawCurrentScreen();
   }
+
+  // EST-405: the auto-off timer's once-per-pass step, AFTER this pass's touch sample and USB poll so
+  // both are already in. The timer only decides; screenSleep() is the wake button's own transition,
+  // so an auto-off and a button sleep look and behave the same. `screenOn` false makes step() a no-op.
+  if (g_idle.step(millis(), g_screenOn, idleBlockersNow())) {
+    screenSleep("idle", true);
+    // The message that is on the glass is NOT the reason to stay awake: a new message pop-up keeps
+    // the screen on for its own 5 s only while the screen was already on. It never wakes an
+    // auto-off screen; the wake button and the chime are the alerts (the ticket says so).
+  }
+
   // EST-365: charge the frame (compose then SPI push) to the pass it happened in. A frame composes
   // inside the block that drew it, so the tile decode is taken out of Draw to keep the parts from
   // double-counting it; the push has its own measured number from board.cpp.

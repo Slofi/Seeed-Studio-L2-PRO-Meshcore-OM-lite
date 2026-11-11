@@ -74,6 +74,9 @@ enum class SetPage : uint8_t {
   GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
   Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
   Sound, SoundPicker, Wifi, WifiSaved, WifiPass, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash,
+  // EST-405: the screen auto-off time page, reached from General's DISPLAY section only while the
+  // switch is on.
+  AutoOff,
   Count,
 };
 constexpr int kSetPageCount = (int)SetPage::Count;

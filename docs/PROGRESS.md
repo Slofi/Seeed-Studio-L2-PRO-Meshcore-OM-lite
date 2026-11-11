@@ -8150,3 +8150,166 @@ bar, so the tips outside the frame are visible exactly as on the panel. It is no
 
 Next step: Claude flashes over USB OTA and takes the screenshot; the tips and the edge on the glass
 are the review. Nothing else is pending in this ticket.
+
+## 2026-11-11 21:15 (DS, EST-405): L2 Pro firmware, optional screen auto-off
+
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). Filip, 2026-11-11: screen auto-off "should be a toggleable feature with
+adjustable time-till-off; a good-to-have but not essential, since there is a convenient wake button.
+I generally do not like auto screen-off features." So: DEFAULT OFF, a missing NVS key is OFF, the
+time row appears only while it is on, and with the switch off nothing below runs at all.
+
+### 1. The switch and the time
+
+- Settings > General > DISPLAY: Brightness, then **Screen auto-off** (toggle, value OFF in the dimmer
+  ink, ON in green), then, ONLY while it is on, **Auto-off after** with the current time. The default
+  page therefore has exactly the rows it had before this ticket.
+- A tap on the time row opens a sub-page with five Check rows, the chosen one dotted: 30 s, 1 min,
+  2 min, 5 min, 10 min, from `om::kIdleTimes` so the label, the milliseconds and the order cannot
+  drift. Picking stays on the page (the dot moves), Back returns to General at its scroll. The page
+  cannot be reached while the switch is off because its row is not built.
+- First switched on: the time is the stored one, and a fresh install has no key, so it reads as the
+  1 min default. Nothing is written just because the switch went on (or because a boot loaded it).
+- NVS, namespace "omlite": `saoff` (one byte, 0/1) and `saoft` (one byte, 0..4). Both are read with
+  one key-generic u8 callback pair (the same shape as the map layers' and the battery log's bool
+  pair). A set writes ONLY when the value really changes; the host test's fake NVS counts the writes
+  to prove it. A value out of range in NVS falls back to 1 min, and a non-zero switch byte is ON.
+
+### 2. The timer (`src/screen_idle.h`, new, plain C++)
+
+`ScreenIdle::step(nowMs, screenOn, blockers)` runs once per loop pass and returns true on the ONE
+pass that must sleep the screen. Its rules, in order:
+
+1. the screen is on and the switch is on, or nothing happens;
+2. a blocker (see 4) or a USB command inside its 30 s window holds the count at zero;
+3. otherwise `now - lastActivity >= timeout` sleeps it.
+
+`onActivity()` (a touch sample with the finger down, or a wake press) and `onUsbCommand()` restart
+the count. Everything is `uint32_t` subtraction, so a `millis()` wrap is one of the tested cases.
+
+**Judgment call A, a blocker PAUSES the count.** The ticket says "do not turn the screen off while
+X". Holding the count at zero while X is up, instead of only postponing the moment, means that when
+the keyboard closes or the pop-up goes the user gets the WHOLE time again. The alternative would
+sleep the screen the instant a five-minute-old pop-up closes, which is the one behaviour nobody
+asked for. The test checks both halves for every blocker: no sleep however long it is blocked, and a
+full timeout after it lifts.
+
+**The pop-up counts as a blocker (rule 3).** A message pop-up has to keep the screen on for its 5 s
+when the screen was on, so a visible toast holds the count too. A pop-up that arrives on a screen the
+timer already slept never reaches this code (`step()` is a no-op while the screen is off) and the
+notice door already refuses it with `screen-off`, so a message still cannot wake an auto-off screen:
+the wake button and the chime are the alerts, as the ticket says.
+
+### 3. One sleep path and one wake path
+
+The wake button's two transitions moved out of `loop()` into `screenSleep(why, fromTimer)` and
+`screenWake(why)`, and the state they own (`g_screenOn`, `g_sleepPending`, the press edge, and the
+three gesture flags the sleep drops) moved from loop locals to file-scope statics. The bodies are
+the old code, not a second copy: the timer and the button both end in the same fade-out over
+`kFadeOutMs` (150 ms), the same panel sleep after the light reaches 0 (the `g_sleepPending` tick),
+and the same wake order (panel wakeup, DISPOFF, sleep-out, the frame push, DISPON, one frame period,
+then the backlight ramp, with the TouchGate armed). The auto-off calls `screenSleep("idle", true)`;
+the button calls `screenSleep("button", false)` / `screenWake("button")`.
+
+### 4. Touch wakes only a screen the TIMER slept (a deliberate reading, please review)
+
+The ticket says in rule 2 "any touch while it is off only wakes (consumed, never presses what is
+under it), like the wake button today", and in rule 4 "when off (default), nothing changes from
+today". Today a touch on a dark screen does nothing at all: only the wake button brings it back.
+Read together, rule 2 is about the screens this feature creates, so a touch now wakes a screen the
+AUTO-OFF put to sleep and nothing else: `g_sleepByTimer` is the one difference, and a screen slept
+with the button still needs the button. That keeps rule 4 literally true (with the switch off, and
+for button sleeps, the behaviour is the old one) and avoids a pocket tap waking the panel.
+
+- The dark glass is polled every `kIdleTouchPollMs` (40 ms), not every pass, so the GT911 read stays
+  off the hot path.
+- The wake arms the SAME gate with `downAtWake` true, so the waking press is swallowed until it
+  lifts and can never also press the row under it. This is the tested TouchGate rule, unchanged.
+- If Filip would rather have a touch wake a button-slept screen too, it is dropping
+  `g_sleepByTimer &&` from the one condition in `loop()`. I did not do it because rule 4 says the
+  default must not change.
+
+### 5. The blockers, from the shell's own state
+
+- **Keyboard/composer:** `g_kb.open` (the chat composer, the DM composer and the message sheet's
+  REPLY/COPY/MENTION all use the one sheet), `g_rptrOsk`, and any Settings text editor.
+- **Pop-up/confirmation:** the Clear-messages confirmation, the chat selector and the ADVERT
+  dropdown, the Position choice, the message sheet, the node sheet and the trace sheet, the RPTR
+  confirmation, and both map pickers (the own-position picker and the RPTR one: the user is choosing
+  a point, not idling).
+- **OTA:** `om::otaActive()`.
+- **Map drag/zoom:** `g_drag` or `om::mapViewStale()` while the Map is on screen (a stale canvas is a
+  pan, zoom or recentre whose tiles are still decoding), plus the two pickers' own drag flags.
+- **USB command:** `om::otaCommandSerial()` (new: a monotonic count bumped in `otaCommandPoll()` when
+  a command is EXECUTED, not when its frame arrives). The OMSHOT screenshot does not bump it; it is a
+  frame read, not a command.
+- **Pop-up toast:** `om::ui::toastState().visible()`.
+
+### Files
+
+- `src/screen_idle.h` (new): the times, `IdleBlockers`, `ScreenIdle`, `ScreenIdlePrefs`.
+- `src/main.cpp`: the file-scope screen/gesture state, `screenSleep()`/`screenWake()`,
+  `idleBlockersNow()`, the u8 NVS callbacks, the boot load, the DISPLAY rows, the time page, the
+  three action handlers, the touch-wake poll, the USB command watch, and the once-per-pass step.
+- `src/ui/settings_layout.h`: `SetPage::AutoOff`.
+- `src/ota.h`, `src/ota.cpp`: `otaCommandSerial()`.
+- `test/host/test_est405.cpp` (new), `test/host/run.sh` (BIN60).
+- `test/host/test_est394.py`: ONE literal, `screenOn` -> `g_screenOn`, because the state that test
+  checks moved to file scope. The check itself is the same.
+- `tools/mkest405.py` (new), `docs/shots/2026-11-11-est405-auto-off-rows.png` (preview).
+
+### Build and tests (real exit codes, this tree)
+
+- `pio run -e om_lite_l2`: **SUCCESS**, exit 0. **RAM 160,480 / 327,680 B (49.0 %; before 160,416,
+  +64 B)**, **Flash 2,993,097 / 6,553,600 B (45.7 %; before 2,991,497, +1,600 B)**, `firmware.bin`
+  2,993,456 B. No warning in our files (the two RadioLib `#warning`s are pre-existing).
+- `test/host/run.sh`: **exit 0**, every suite green, **0 FAIL lines**, `est405` ran and passed.
+- `test_est405.cpp` covers: the five times and their labels in order with 1 min as the default; a
+  fresh timer and a missing key both OFF, and a disabled timer never sleeping (an hour of passes);
+  the exact timeout boundary and the restart right after a sleep; a touch, a wake press and a USB
+  command each restarting the count; the switch off/on and a new time choice restarting it; out of
+  range time indices refused; `millis()` wrapping for the count and for the USB window; `idleBlocked`
+  for every field and every blocker alone (keyboard, pop-up, OTA, map gesture, toast) never sleeping
+  however long it is up and needing the WHOLE time again when it lifts; the 30 s USB window on its
+  own; and the store: missing keys write nothing, a set writes once, setting the same value again
+  writes nothing, values reload, an out-of-range stored time falls back to 1 min, a failed write
+  still flips RAM, no backend at all still loads defaults, and the saved ON + 2 min really sleeps at
+  120 s from boot.
+
+### Preview
+
+`docs/shots/2026-11-11-est405-auto-off-rows.png`: two panels at 2x, the switch OFF (default, no time
+row) and ON (green ON and "Auto-off after  1 min >" under it). The rectangles come from
+`ui/settings_layout.h` (`settingsLayoutFor`, `settingsRowRect`, the stepper's keys) and the colours
+from `ui/theme.h`, dumped by a small C++ program the tool compiles; the text is desktop DejaVu, not
+the firmware's VLW faces, and the status and tab bars are drawn only as context. It is not a
+screenshot.
+
+### What I could not check, and the device test
+
+- **No device.** Everything here is source, host tests and arithmetic. The one fact that needs the
+  glass is whether the GT911 still answers while the panel is asleep: touch wake depends on it. If it
+  does not, a touch will simply not wake and the button still will.
+- Claude's device checks:
+  1. Settings > General > DISPLAY shows "Screen auto-off  OFF" and no "Auto-off after" row; the boot
+     log says `[idle] screen auto-off off, 1 min`.
+  2. Turn it on: `[idle] screen auto-off on, 1 min`, the row "Auto-off after  1 min" appears, and
+     opening it shows the five rows with the dot on 1 min.
+  3. Leave the screen alone for about 61 s: `[wake] screen off (idle, fade out 150ms from 160)` and
+     then `[wake] panel asleep`. The fade and the sleep must look like the button's.
+  4. Touch the dark glass: `[wake] screen on (touch, finger held at wake), 300ms masked`, the frame
+     comes back, and the touch does NOT press anything.
+  5. Open the chat keyboard and wait 2 minutes: no sleep. Close it and wait the full time: it sleeps.
+  6. A USB OTA upload: no sleep during it. A map drag and a zoom: no sleep during it.
+  7. Run any command (`python3 tools/cmd.py status`): nothing sleeps for 30 s, and the full time
+     starts after that.
+  8. A message arriving on a dark screen: the chime plays, the screen stays off, the log says
+     `[notice] skip(screen-off)`. On a lit screen the pop-up stays its 5 s.
+  9. Sleep it with the wake button: a touch then does NOT wake it (rule 4, the reading in 4). A
+     wake-button press does.
+  10. Switch it off: the page is as before this ticket and nothing sleeps.
+
+Next step: Claude flashes over USB OTA and runs the checks above. The review points are the two
+judgment calls (a blocker pauses; touch wakes only a timer sleep), the GT911 read while the panel is
+asleep, and whether the page's wording is what Filip wants.

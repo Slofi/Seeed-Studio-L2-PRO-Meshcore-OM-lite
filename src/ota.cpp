@@ -27,6 +27,7 @@ namespace {
 constexpr char kMagic[6] = {'O', 'M', 'O', 'T', 'A', '1'};
 constexpr char kShotMagic[6] = {'O', 'M', 'S', 'H', 'O', 'T'};
 bool s_active = false;
+uint32_t s_cmdSerial = 0;   // EST-405: incremented for every command otaCommandPoll() executes
 
 bool readExact(uint8_t* dst, size_t len, uint32_t timeoutMs) {
   const uint32_t start = millis();
@@ -115,12 +116,17 @@ void sendScreenshot() {
 
 bool otaActive() { return s_active; }
 
+// EST-405: how many commands have run. Bumped at the point a command is really EXECUTED, not when its
+// frame arrives, so the auto-off timer counts a command the device acted on.
+uint32_t otaCommandSerial() { return s_cmdSerial; }
+
 // EST-350: the command slot's other end. Called by loop() AFTER otaPoll() returns, so everything the
 // command touches (the history store's own loop-owned read path, the SD card, the radio) runs with
 // the reader's frames off the stack.
 void otaCommandPoll() {
   if (!s_cmdReady) return;
   s_cmdReady = false;   // freed before running: a command that takes a while must not block the host
+  ++s_cmdSerial;        // EST-405: one executed command, for the auto-off timer's activity rule
   // EST-357: `status` grew the internal heap fields; 256 cut the psram field on a long node name.
   // EST-365: `radio` carries the counters and the loop histogram on one line, so the buffer is 512.
   // The loop task's stack is 16 KB (SET_LOOP_TASK_STACK_SIZE), so the extra bytes are cheap.

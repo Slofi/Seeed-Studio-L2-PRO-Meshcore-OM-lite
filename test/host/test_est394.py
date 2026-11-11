@@ -97,7 +97,9 @@ def main():
         fail("pump() does not check that the dragged canvas matches the view")
     if "if (!uiDrawOk || !freshCanvas) return;" not in pump:
         fail("an animation frame can still be drawn over a stale canvas")
-    if "if (g_tab == 2 && !g_settings && screenOn && g_drag) om::map_tab::draw();" not in main_cpp:
+    # EST-405 moved the screen's on/off state from a loop local to a file-scope static (g_screenOn),
+    # because the screen auto-off timer is now a second caller of the sleep transition. Same test.
+    if "if (g_tab == 2 && !g_settings && g_screenOn && g_drag) om::map_tab::draw();" not in main_cpp:
         fail("the release of a map drag does not draw the final position and its trace")
 
     # 5. The drawing side is unchanged: it still gets a pixel frame, so clipping and the palette are

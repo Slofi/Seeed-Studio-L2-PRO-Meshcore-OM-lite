@@ -5177,3 +5177,140 @@ the id, so the same tree always produces the same one.
 - Correction (Claude): the DS entry above is stamped 02:47; the ticket went to in_review at 02:39 by the clock, so that stamp is an estimate.
 - Committed, then rebuilt from the clean commit (see the next line for the id and size). Not pushed, not flashed.
 - 02:43 (Claude): rebuilt from `092542b`: build id `092542b` (no -dirty), RAM 158,440 B, flash 2,814,341 B, firmware.bin 2814704 B, the id string is in the image. Reviewed copy: `~/.cache/pio-om-lite/reviewed/est379.bin` (this is the tip to flash; it contains EST-374..379). Later notes-only commits do not change the image.
+
+
+## 2026-11-11 08:32 (DeepSeek): EST-380 the card's open-file limit covers every SD handle, and a failed append is retried, never dropped silently
+
+**Ticket:** URGENT, Filip lost chat history. Claude proved on the device (2026-11-11 08:10, build
+`092542b`) that the mount took the Arduino default `maxOpenFiles = 5`; the map keeps five files open
+for good (main pack 1 + z16 idx+pack + z17 idx+pack), so after four taps on `+` every later
+`fopen`/`exists`/history append failed, and every message after that lived in RAM only. The status
+line said `hist_dropped=0` while it happened. Nothing on the card or the glass was available in this
+sandbox, so this run changes the code, the boot lines and the tests; the device proof is the flash.
+
+**A. The file budget (one place, checked by the compiler and the host test)**
+- New `src/sd_budget.h`, named constants and the sum the ticket asks for:
+  map main pack **1** + overlays **2 levels x 2 files = 4** + history pool (history_store.cpp
+  `kFiles`) **4** + battery log **1** + transient **6** + margin **2** = **18**.
+  The transients are the ones `rg "SD_MMC\.open|\.open\(|exists\("` finds: the `exists()` probe 1, the
+  `size()` probe's read 1, `mapBegin`'s one-time `tiles.idx` read 1, `printTail` 1, a directory
+  listing (dir + one entry) 2, and the screenshot 0 (the frame travels over USB; the device opens no
+  card file for it). They run one after another on the loop task, so the real peak is lower than six;
+  they are all counted on purpose, the two margin slots then cover a combination nobody thought of.
+- `board.cpp` mounts with `sd_budget::kBeginMaxOpenFiles` (18) and prints
+  `[sd] open-file budget 18 = map 1 + overlays 4 + history 4 + power log 1 + transient 6 + margin 2`
+  at boot. The counting comment is next to the `begin()` call. `static_assert`s: the limit is >= the
+  sum, the margin is >= 2, it fits the `uint8_t` the Arduino API takes; `map.cpp` asserts the overlay
+  table has `kMapOverlayLevels` entries and `history_store.cpp` takes `kFiles` from the budget and
+  asserts it is 4. A later change to any of the three now fails the build, not a card at z17.
+- **What a slot costs, and where it comes from.** This build has `CONFIG_WL_SECTOR_SIZE_4096` and
+  `CONFIG_FATFS_PER_FILE_CACHE=1`, so `FF_MAX_SS = 4096` and `FF_FS_TINY = 0`: every FATFS `FIL`
+  carries its own 4096 B sector buffer. From the shipped `libfatfs.a`
+  (`vfs_fat.c.obj`, `esp_vfs_fat_register`) the table is ONE `ff_memalloc(max_files * 4136 + 6248)`:
+  4,136 B per slot, 6,248 B of context. 18 slots is **80,696 B** (the old 5 was 26,928 B, so +53,768 B).
+  `ff_memalloc` in the same archive calls
+  `heap_caps_malloc_prefer(size, 2, MALLOC_CAP_DEFAULT|MALLOC_CAP_SPIRAM, MALLOC_CAP_DEFAULT|MALLOC_CAP_INTERNAL)`
+  (SPIRAM first) and the build sets `CONFIG_FATFS_ALLOC_PREFER_EXTRAM=1`, so the table is **PSRAM**,
+  not the internal heap Bluetooth needs (EST-356). The LFN working buffer is on the stack
+  (`FF_USE_LFN=2`), not the heap.
+- **The measurement the ticket asks for.** Two new lines bracket the mount:
+  `[mem] boot (before the SD mount): internal=N largest=M psram=P heap=H` and the same after it, so
+  the next flash answers it exactly. It cannot be answered here: no device, no serial in the sandbox.
+  The static RAM number did not carry it: **+8 B** (158,440 -> 158,448 B, the retry flags/counters in
+  the store, not the table). If the flashed before/after internal number moves by tens of KB, the
+  PSRAM allocation fell back to internal (PSRAM short, or `ff_memalloc`'s second preference taken);
+  then 18 is too big for this board and the slot count can come down (the true peak is 11: 5 map +
+  4 history + 1 power log + 1 probe). With the `[hb] psram=` number in the same log this is one look.
+
+**B. A message is no longer lost silently (`src/history/history_log.h`, `src/history_store.*`, `src/main.cpp`)**
+- A card error no longer pops the record: `flushOne()` returns `Written / Dropped / Failed`, and
+  `Failed` (open, write, header, repair, rotate) leaves the record at the head of the RAM queue
+  untouched. `history::loop()` retries it on the next pass, forever, without the send path ever
+  touching the card. A cap (`full_`) and a late-scan id collision still drop on purpose and are
+  counted in `hist_dropped`; those are not card errors.
+- `status` has the new `hist_write_fail=` field: the number of RECORDS whose append failed at least
+  once (a per-record flag in the queue), not retry attempts, so it does not climb while one record
+  waits. A clean card reads 0.
+- `[hist] write FAILED <reason>` (`open` / `write` / `header` through `write`, `repair`, `rotate`) is
+  printed at most once a minute (`micros()`, wrap-safe); the first failure of an episode prints at
+  once. The reason is in the text.
+- One pop-up per failure episode, through the existing toast door and a one-shot notice the store
+  clears when taken: `History not saved: card error`. It is shown by the loop right after
+  `history::loop()`, so a repaint or the next pass cannot repeat it and new messages do not each get
+  one. **One declared extra:** if the RAM queue overflows during that episode, the number of records
+  really lost is in `hist_dropped` and the pop-up is shown once more, `History not saved: card error,
+  N dropped` (a burst that overflows while the card is fine gets `History not saved: queue full, N
+  dropped`). Without that second line the loss would again be silent, which is the ticket's subject.
+- Recovery: the first successful write drains the whole backlog in that one pass (bounded by the 16
+  queue slots) and logs exactly
+  `[hist] write recovered, N record(s) flushed`. A short write marks the chat's tail torn
+  (`needsRepair`, the bytes after the last known-good length) so the retry repairs it first; otherwise
+  every later record would sit behind a torn one and read as lost.
+- **Battery log:** `plog` counts its card errors (the `/log` directory, the open, a short write) and
+  `log power tail` now ends with `write_fail=N` in both the ok and the error answer. A lost minute is
+  no longer only a serial line.
+- **One deliberate change Claude should review:** the EST-349 runtime switch to the SPIFFS fallback
+  on a failed WRITE is gone. That path cleared the queue (its ids were assigned against the card's
+  counters), i.e. it dropped exactly what this ticket forbids. A card error now retries; the SPIFFS
+  fallback still happens when the card cannot be MOUNTED at boot (`begin()`). If Claude wants the
+  runtime fallback back, it needs a re-encode of the queued ids, which is a separate ticket.
+
+**C. Tests**
+- New `test/host/test_est380.cpp` (39th C++ binary, `run.sh` exit 0):
+  - the budget: every named constant, the overlay x2 rule, `kHistoryPoolFiles == 4`, the sum ==
+    `kMaxOpenFiles`, margin >= 2, above the old 5, fits `uint8_t`;
+  - retry: a refused `openAppend` keeps the record (`queued` 1, `hist_dropped` 0), `hist_write_fail`
+    is 1 and stays 1 across retries, `[hist] write FAILED open` is printed once, a retry inside the
+    minute adds no line, past 60 s it adds one; one `CardError` notice, taken once;
+  - recovery: the pass drains the backlog, the file holds the message, one
+    `[hist] write recovered, 1 record(s) flushed`, a new episode prints its first FAILED at once;
+  - short write: the record is kept, `write FAILED write`, the retry repairs and writes, a fresh store
+    reading the same volume sees the message (the tail really is intact);
+  - queue full: 16 queued records are all kept, the 17th is dropped (`hist_dropped` 1) and the notice
+    is `CardErrorDropped` with `dropped=1`; recovery drains all 16 and logs `16 record(s) flushed`;
+    a healthy burst's overflow is `QueueFull`.
+- The rest of the suite is unchanged and green: **39 C++ binaries + 8 Python checks**, `run.sh` exit 0.
+
+**Build** (`docs/REBUILD.md` command, real exit code)
+- `pio run -e om_lite_l2` **exit 0**, SUCCESS. `build_id: OM_BUILD_ID = 12c24f3-dirty` (HEAD plus these
+  edits; Claude's commit changes the id and needs a full rebuild). RAM **158,448 B** of 327,680
+  (48.4 %; `092542b` was 158,440, **+8 B**), flash **2,815,265 B** of 6,553,600 (43.0 %; `092542b`
+  was 2,814,341, **+924 B**), `firmware.bin` **2,815,632 B** (`092542b` was 2,814,704, **+928 B**).
+  Only the two pre-existing RadioLib `#warning`s. `strings firmware.elf` carries the new budget line,
+  `hist_write_fail=`, both recovery lines and both `write_fail=` answers.
+
+**Could not check (no device, no card, no serial, no glass)**
+- The real boot heap numbers (the two new `[mem]` lines are the measurement), the z17 path on the
+  card, the pop-up on the panel, and the real `chats card=` after z17. The host tests prove the rules
+  and the arithmetic, not FatFs or the glass.
+- That 18 slots fit the PSRAM at boot on this board. The archive says PSRAM-first; the `[mem]` lines
+  say whether it really went there.
+
+**How to check after a flash (this ticket adds the z17 steps)**
+1. Boot log: `[sd] open-file budget 18 = map 1 + overlays 4 + history 4 + power log 1 + transient 6 +
+   margin 2`, then `[mem] boot (before the SD mount): internal=A ... psram=P1` and
+   `[mem] boot (after the SD mount): internal=B ... psram=P2`. Write A-B and P1-P2 here. A-B should
+   be a few hundred bytes (static work), P1-P2 about 80 KB; a B far below A or an internal drop of
+   tens of KB means the table went to internal.
+2. `tools/cmd.py status` -> `history=sd ... hist_dropped=0 hist_write_fail=0`.
+3. Open the Map, tap `+` four times to z17; the log says `[map] overlay z17 opened: N tiles`. After
+   that there must be **no** `[E][vfs_api.cpp:301] fopen(...) failed` line and no `[plog] write failed`.
+4. `tools/cmd.py chats` -> for every chat that has history, `card` is **> 0** (and `mismatches=0`).
+5. Receive/send a message with the map at z17, then `status` -> `hist_records` grew,
+   `hist_write_fail=0`, `hist_dropped=0`; OTA the same image and `tools/cmd.py history "<chat>" 5`
+   shows the message (it really reached the card, not RAM).
+6. `tools/cmd.py log power tail` -> `[cmd] ok log power tail N write_fail=0` (a lost minute would show
+   a number > 0 here even when no serial log is being watched).
+
+**Next step for Claude**
+1. Review the diff, then commit and rebuild (the id changes). The two decisions to look at: no
+   runtime fallback on a write error (the old one dropped the queue), and the one extra pop-up when
+   the queue overflows.
+2. Flash and run the list above; the boot `[mem]` pair is the number this ticket still owes.
+3. Then the separate map pop-up and GPS time tickets.
+
+## 2026-11-11 08:28 (Claude): EST-380 reviewed
+- Mount now passes sd_budget::kBeginMaxOpenFiles (18) with static_asserts; failed appends stay queued and retry; hist_write_fail in status; one pop-up per episode; plog counts write_fail. Agreed: the runtime SPIFFS fallback had to go (it cleared the queue).
+- Follow-up risk (not blocking): a record that fails forever at the queue head (one broken chat file) blocks every other chat behind it until the queue overflows. Per-chat skip-ahead after N failures of the same file is a later ticket.
+- The 80 KB slot table is claimed to be PSRAM (FATFS prefers external RAM); the new [mem] boot lines before/after the mount are the proof on the first flash. If internal drops by tens of KB, lower the slot count (true peak 11).
+- Correction (Claude): the DS entry above is stamped 08:32; the ticket went to in_review at 08:26 by the clock.

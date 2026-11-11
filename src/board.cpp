@@ -15,6 +15,7 @@
 #include "fonts.h"
 #include "frame_metrics.h"   // the one luma rule (EST-355): the change dip's brightness numbers
 #include "gps_mode.h"
+#include "sd_budget.h"   // EST-380: the SD open-file budget the mount limit is checked against
 #include "timekeeper.h"
 #include "ui/layout.h"   // clampTouchToScreen: the same edge rule the hit tests use
 #include "ui/rgb565.h"   // the one byte-order rule for native image pushes (EST-352)
@@ -584,8 +585,26 @@ bool sdMount() {
   if (!setOutput(kBitSdPower, true)) return false;
   delay(50);
   SD_MMC.setPins(2, 3, 1);
+  // EST-380: the file budget. The Arduino/IDF default is 5 handles, and the map alone keeps five
+  // open for good (main pack 1 + z16 idx+pack + z17 idx+pack), so after the first zoom to z17 every
+  // later open, exists() and history append failed. The count lives in sd_budget.h with a
+  // static_assert, and this line prints it at boot so the number in the image is visible:
+  //   map main pack 1 + overlay 2 levels x 2 files = 4 + history pool 4 + battery log 1 +
+  //   transient 6 (exists probe, size probe, map index read, tail reader, directory listing,
+  //   screenshot 0) + margin 2 = 18.
+  // The limit is not free: with CONFIG_FATFS_PER_FILE_CACHE=1 every FATFS file carries a
+  // FF_MAX_SS (4096 B) sector buffer, so one slot is about 4,136 B and 18 slots about 80 KB. IDF
+  // allocates that table in ONE ff_memalloc() and this build has CONFIG_FATFS_ALLOC_PREFER_EXTRAM,
+  // so it is PSRAM first (measured in the libfatfs object: heap_caps_malloc_prefer with
+  // MALLOC_CAP_SPIRAM first, then internal). The [mem] boot lines around this call show the real
+  // internal/PSRAM split on the device.
+  Serial.printf("[sd] open-file budget %d = map %d + overlays %d + history %d + power log %d + "
+                "transient %d + margin %d\n",
+                sd_budget::kMaxOpenFiles, sd_budget::kMapMainPack, sd_budget::kMapOverlayFiles,
+                sd_budget::kHistoryPoolFiles, sd_budget::kPowerLogFiles,
+                sd_budget::kTransientFiles, sd_budget::kMargin);
   // 20 MHz, 1-bit: CLK/CMD/D0 are ordinary GPIOs through the matrix, not an IOMUX SD pad group.
-  return SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_DEFAULT);
+  return SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_DEFAULT, sd_budget::kBeginMaxOpenFiles);
 }
 
 void sdUnmount() {

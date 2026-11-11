@@ -428,14 +428,15 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       snprintf(reply, cap,
                "[cmd] ok status mesh=%s name=\"%s\" build=%s path=%s channels=%d contacts=%d dm=%d "
                "unread=%d clock=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
-               "hist_worst_us=%lu hist_dropped=%lu loop_stack_free=%u loop_stack_size=%u "
-               "internal=%u internal_max=%u heap=%u psram=%u",
+               "hist_worst_us=%lu hist_dropped=%lu hist_write_fail=%lu loop_stack_free=%u "
+               "loop_stack_size=%u internal=%u internal_max=%u heap=%u psram=%u",
                om::meshLinkReady() ? "up" : "down", name, OM_BUILD_ID, path, om::mcChannelCount(), om::app::nodeCount(),
                om::meshDmCount(), om::app::unreadTotal(),
                om::timeSourceName(om::timeKeeper().source()),
                !hs.ready ? "off" : (hs.sd ? "sd" : "spiffs"), (unsigned long)hs.bytes, hs.slots,
                (unsigned long)hs.records, (unsigned long)hs.worstFlushUs,
-               (unsigned long)hs.dropped, (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+               (unsigned long)hs.dropped, (unsigned long)hs.writeFail,
+               (unsigned)uxTaskGetStackHighWaterMark(nullptr),
                kLoopStackSize, (unsigned)om::internalFreeBytes(),
                (unsigned)om::internalLargestBlock(), (unsigned)ESP.getFreeHeap(),
                (unsigned)ESP.getFreePsram());
@@ -960,11 +961,15 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       }
       if (cmd.text != nullptr && strcmp(cmd.text, "tail") == 0) {
         const int lines = om::plog::printTail();
+        // EST-380: the failure count is part of the answer, so a lost minute shows in `log power
+        // tail` itself and not only in a serial line nobody reads.
         if (lines < 0) {
-          cmdError(reply, cap, "log power tail: no file on the card");
+          snprintf(reply, cap, "[cmd] error log power tail: no file on the card write_fail=%lu",
+                   (unsigned long)om::plog::writeFailures());
           return;
         }
-        snprintf(reply, cap, "[cmd] ok log power tail %d", lines);
+        snprintf(reply, cap, "[cmd] ok log power tail %d write_fail=%lu", lines,
+                 (unsigned long)om::plog::writeFailures());
         return;
       }
       cmdError(reply, cap, "args");

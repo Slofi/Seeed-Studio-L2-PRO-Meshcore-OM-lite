@@ -4723,8 +4723,14 @@ void setup() {
   const bool present = om::sdPresent();
   Serial.printf("[sd] present: %s\n", present ? "yes" : "no");
   if (present) {
+    // EST-380: measure the mount's own cost. The FATFS file table (maxOpenFiles x FIL, about 4,136 B
+    // per slot with a 4 KB per-file sector buffer) is allocated during SD_MMC.begin(). These two
+    // [mem] lines say where it came from: internal RAM (which Bluetooth needs 80 KB of, EST-356) or
+    // PSRAM (where IDF's ff_memalloc puts it on this build).
+    om::printMemLine("boot (before the SD mount)");
     g_sdOk = om::sdMount();
     Serial.printf("[sd] mount: %s\n", g_sdOk ? "ok" : "FAILED");
+    om::printMemLine("boot (after the SD mount)");
     if (g_sdOk) {
       File p = SD_MMC.open("/maps/slo/tiles.pack");
       if (p) {
@@ -5148,6 +5154,28 @@ void loop() {
     const uint32_t t = micros();
     om::history::loop();
     om::radio::addPart(om::radio::Part::History, micros() - t);
+  }
+  // EST-380: the history store kept a record it could not write. Say so ONCE per failure episode
+  // (the store clears its notice when it is taken here, so a repaint or the next pass cannot repeat
+  // it); the queue overflow is the one case where messages are really gone, and then the text says
+  // how many. Same toast door as every other one-line notice.
+  {
+    uint32_t dropped = 0;
+    const om::history::WriteNotice hn = om::history::takeWriteNotice(&dropped);
+    if (hn != om::history::WriteNotice::None) {
+      char text[64];
+      if (hn == om::history::WriteNotice::CardErrorDropped) {
+        snprintf(text, sizeof(text), "History not saved: card error, %lu dropped",
+                 (unsigned long)dropped);
+      } else if (hn == om::history::WriteNotice::QueueFull) {
+        snprintf(text, sizeof(text), "History not saved: queue full, %lu dropped",
+                 (unsigned long)dropped);
+      } else {
+        snprintf(text, sizeof(text), "History not saved: card error");
+      }
+      Serial.printf("[hist] notice: %s\n", text);
+      showToast(text);
+    }
   }
   // EST-354: Wi-Fi is polled, never waited on: the driver's scan and the supplicant's connect are
   // serviced here, and the model's timeouts are checked on the same pass. The status bar, a packet

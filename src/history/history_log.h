@@ -532,6 +532,9 @@ constexpr uint32_t kCountBudgetBytes = 256UL * 1024UL;   // the `chats` count's 
 struct HistoryQueuedRecord {
   uint8_t slot = 0;
   uint16_t len = 0;
+  // EST-380: this record's append failed at least once and it is still waiting for a retry. It stays
+  // `true` until the record is written, so hist_write_fail counts RECORDS, not retry attempts.
+  bool failed = false;
   uint8_t data[kMaxRecord] = {};
 };
 
@@ -579,9 +582,25 @@ struct HistoryStatus {
   uint32_t records = 0;      // records written since boot
   uint32_t worstFlushUs = 0;
   uint32_t dropped = 0;
-  uint32_t switches = 0;     // SD write failures that moved the store to SPIFFS
+  // EST-380: records whose append hit a card error at least once (open, write, repair, rotate). The
+  // record is NOT dropped; it stays at the head of the RAM queue and is retried. 0 = a clean card.
+  uint32_t writeFail = 0;
   int slots = 0;             // chats with a log
 };
+
+// EST-380: what the shell must say about a history write failure. One notice per failure episode,
+// never one per message; `CardErrorDropped` is a second, once-only warning when the RAM queue
+// overflowed during that episode (the messages from then on really are lost, and the pop-up says so).
+enum class WriteNotice : uint8_t {
+  None = 0,
+  CardError = 1,          // a card append failed; the record is kept and retried
+  CardErrorDropped = 2,   // ...and the RAM queue was full, so `dropped` records are gone
+  QueueFull = 3,          // the queue overflowed while writes worked (a burst); say so too
+};
+
+// EST-380: what one flushOne() did with the record at the head of the queue. `Failed` means the
+// volume refused it: the record is still there, untouched, and the next pass retries it.
+enum class FlushOutcome : uint8_t { Written = 0, Dropped = 1, Failed = 2 };
 
 using NowFn = uint32_t (*)();      // microseconds, wrapping
 using LogFn = void (*)(const char*);
@@ -670,9 +689,22 @@ class HistoryStore {
     status_.records = records_;
     status_.worstFlushUs = worstFlushUs_;
     status_.dropped = dropped_;
-    status_.switches = switches_;
+    status_.writeFail = writeFail_;
     status_.slots = slotCount_;
     return status_;
+  }
+
+  // EST-380: the shell's pop-up door. The store keeps ONE pending notice (a second failure replaces
+  // nothing: it only escalates to the drop warning), and the caller gets it once. `dropped` is the
+  // number to put in the text: the queue overflow of the current failure episode for
+  // CardErrorDropped, the cumulative count for QueueFull.
+  WriteNotice takeWriteNotice(uint32_t* dropped = nullptr) {
+    const WriteNotice n = notice_;
+    notice_ = WriteNotice::None;
+    if (dropped != nullptr) {
+      *dropped = (n == WriteNotice::CardErrorDropped) ? droppedInEpisode_ : dropped_;
+    }
+    return n;
   }
 
   // --- slots --------------------------------------------------------------------------------------
@@ -902,8 +934,27 @@ class HistoryStore {
   // --- flushing -----------------------------------------------------------------------------------
   // Writes at most `maxRecords` queued records. Called from the mesh loop, so the worst single call
   // is one open + one write + flush + close; status().worstFlushUs measures it.
+  //
+  // EST-380: a failed append never drops the record. The record stays at the head of the queue and
+  // the next pass retries it; while an episode lasts, the pass retries and then drains the whole
+  // backlog in one go, and the first success logs one `[hist] write recovered, N record(s) flushed`.
   void flushStep(int maxRecords = 1) {
-    for (int i = 0; i < maxRecords && queueCount_ > 0; ++i) flushOne();
+    if (episode_) maxRecords = queueSlots_ > 0 ? queueSlots_ : 1;
+    int written = 0;
+    for (int i = 0; i < maxRecords && queueCount_ > 0; ++i) {
+      const FlushOutcome r = flushOne();
+      if (r == FlushOutcome::Failed) return;   // the head stays; the next loop pass tries again
+      if (r == FlushOutcome::Written) ++written;
+    }
+    if (episode_ && written > 0 && queueCount_ == 0) {
+      // The card answers again and the backlog is on it. One line, with the count the ticket asks
+      // for; the next outage logs `[hist] write FAILED` at once (failLogArmed_ starts false).
+      episode_ = false;
+      failLogArmed_ = false;
+      char line[80];
+      snprintf(line, sizeof(line), "[hist] write recovered, %d record(s) flushed", written);
+      logLine(line);
+    }
   }
   int queued() const { return queueCount_; }
 
@@ -1018,7 +1069,14 @@ class HistoryStore {
     records_ = 0;
     worstFlushUs_ = 0;
     dropped_ = 0;
-    switches_ = 0;
+    droppedInEpisode_ = 0;
+    writeFail_ = 0;
+    episode_ = false;
+    overflowNoticed_ = false;
+    queueFullNoticed_ = false;
+    failLogArmed_ = false;
+    failLogUs_ = 0;
+    notice_ = WriteNotice::None;
     slotsFullLogged_ = false;
   }
 
@@ -1428,20 +1486,36 @@ class HistoryStore {
     if (!ready_ || queue_ == nullptr || queueSlots_ <= 0) return false;
     if (len <= 0 || len > kMaxRecord) return false;
     // EST-349: NEVER write from here. This runs on the send path and inside MeshCore callbacks; the
-    // card is touched only by flushStep() on the loop task. A full queue drops the record instead.
+    // card is touched only by flushStep() on the loop task.
+    // EST-380: a full queue is now the ONLY way a message is lost, so it is counted and said out
+    // loud: during a card-error episode the pop-up learns that records are really gone, and a burst
+    // that overflows while writes work gets its own QueueFull notice.
     if (queueCount_ >= queueSlots_) {
       ++dropped_;
+      if (episode_) {
+        ++droppedInEpisode_;
+        if (!overflowNoticed_) {
+          overflowNoticed_ = true;
+          notice_ = WriteNotice::CardErrorDropped;
+        }
+      } else if (!queueFullNoticed_) {
+        queueFullNoticed_ = true;
+        notice_ = WriteNotice::QueueFull;
+      }
       return false;
     }
     HistoryQueuedRecord& p = queue_[(queueHead_ + queueCount_) % queueSlots_];
     p.slot = (uint8_t)slot;
     p.len = (uint16_t)len;
+    p.failed = false;   // a recycled slot must not inherit the previous record's failure
     memcpy(p.data, data, (size_t)len);
     ++queueCount_;
     return true;
   }
 
-  bool writeHeader(Slot& s, HistoryFile* f) {
+  // `partial` (EST-380): the header write returned a short count, so bytes are on the card but
+  // headerWritten stays false; the caller must repair the tail before the retry.
+  bool writeHeader(Slot& s, HistoryFile* f, bool* partial = nullptr) {
     char name[kMeshNameCap];
     snprintf(name, sizeof(name), "%s", s.name);
     uint8_t payload[kMaxPayload];
@@ -1451,7 +1525,11 @@ class HistoryStore {
     uint8_t rec[kMaxRecord];
     const int rn = encodeRecord(Type::Chat, payload, n, rec, (int)sizeof(rec));
     if (rn < 0) return false;
-    if (f->write(rec, rn) != rn) return false;
+    const int written = f->write(rec, rn);
+    if (written != rn) {
+      if (partial != nullptr && written > 0) *partial = true;
+      return false;
+    }
     s.fileBytes += (uint32_t)rn;
     totalBytes_ += (uint32_t)rn;
     s.headerWritten = true;
@@ -1479,19 +1557,19 @@ class HistoryStore {
 
   // The ONE place that touches the volume. Runs from history::loop() on the loop task, never from a
   // caller, an ISR, a MeshCore callback or a critical section (EST-349).
-  void flushOne() {
-    if (!ready_ || queue_ == nullptr || queueCount_ == 0) return;
+  //
+  // EST-380: a volume error keeps the record. `Failed` leaves the head of the queue exactly as it
+  // was, so the next loop pass retries it; a card error never drops a message. Only two things drop
+  // on purpose: a cap (`full_`) and an id collision after a late scan, both counted in `dropped_`.
+  FlushOutcome flushOne() {
+    if (!ready_ || queue_ == nullptr || queueCount_ == 0) return FlushOutcome::Dropped;
     HistoryQueuedRecord& p = queue_[queueHead_];
     Slot& s = slots_[p.slot];
     // Safety net: every slot is scanned at begin(), so this only fires for a slot that appeared
     // after boot. It is still the loop task doing it, before the first write of that slot.
     const bool wasScanned = s.scanned;
     if (!wasScanned) scanTail(s);
-    if (s.needsRepair && !repairTail(s)) {
-      ++dropped_;
-      popQueue();
-      return;
-    }
+    if (s.needsRepair && !repairTail(s)) return failWrite("repair");
     if (!wasScanned) {
       // A late scan found log ids this boot had not seen: never overwrite them. Drop the record
       // rather than write a colliding id.
@@ -1509,36 +1587,35 @@ class HistoryStore {
       if (recId != 0 && recId <= s.maxLogId) {
         ++dropped_;
         popQueue();
-        return;
+        return FlushOutcome::Dropped;
       }
     }
     const uint32_t t0 = nowUs_ != nullptr ? nowUs_() : 0;
     // Rotate FIRST: replacing .old frees room, so a store at the total cap can still move on.
     if (s.fileBytes > 0 && s.fileBytes + p.len + (s.headerWritten ? 0 : (uint32_t)kMaxRecord) >
                               cfg_.perChatCap) {
-      if (!rotate(s)) {
-        ++dropped_;
-        popQueue();
-        return;
-      }
+      if (!rotate(s)) return failWrite("rotate");
     }
     if (totalBytes_ + p.len > cfg_.totalCap) {
       full_ = true;
       ++dropped_;
       popQueue();
-      return;
+      return FlushOutcome::Dropped;
     }
     char path[64];
     buildPath(s, ".log", path, sizeof(path));
     HistoryFile* f = vol_->openAppend(path);
-    if (f == nullptr) {
-      popQueue();
-      ++dropped_;
-      return;
-    }
+    if (f == nullptr) return failWrite("open");
     bool ok = true;
-    if (!s.headerWritten && !writeHeader(s, f)) ok = false;
-    if (ok && f->write(p.data, p.len) != p.len) ok = false;
+    bool partial = false;
+    if (!s.headerWritten && !writeHeader(s, f, &partial)) ok = false;
+    if (ok) {
+      const int wn = f->write(p.data, p.len);
+      if (wn != p.len) {
+        ok = false;
+        if (wn > 0) partial = true;   // a short write left bytes after the last valid record
+      }
+    }
     if (ok) {
       s.fileBytes += p.len;
       totalBytes_ += p.len;
@@ -1550,14 +1627,42 @@ class HistoryStore {
     const uint32_t dt = t1 - t0;
     if (dt > worstFlushUs_) worstFlushUs_ = dt;
     if (!ok) {
-      ++dropped_;
-      // A card that answers the mount but not the write: move the whole store to the fallback. The
-      // queue is dropped, not retried: its log ids were assigned against the card's counters.
-      if (vol_ == primary_ && fallback_ != nullptr) switchToFallback();
-      else popQueue();
-    } else {
-      popQueue();
+      // A partial write leaves a torn record; the retry repairs the tail first, otherwise every
+      // later record would sit behind it and read as lost. A zero-byte failure needs no repair.
+      if (partial) {
+        s.needsRepair = true;
+        s.repairBytes = s.fileBytes;
+      }
+      return failWrite("write");
     }
+    popQueue();
+    return FlushOutcome::Written;
+  }
+
+  // EST-380: one card error, said at most once a minute, and the record is marked as failed ONCE
+  // (hist_write_fail counts records, not the retries). The first failure of an episode also arms the
+  // shell's one pop-up.
+  FlushOutcome failWrite(const char* why) {
+    HistoryQueuedRecord& p = queue_[queueHead_];
+    if (!p.failed) {
+      p.failed = true;
+      ++writeFail_;
+    }
+    if (!episode_) {
+      episode_ = true;
+      droppedInEpisode_ = 0;
+      overflowNoticed_ = false;
+      notice_ = WriteNotice::CardError;
+    }
+    const uint32_t now = nowUs_ != nullptr ? nowUs_() : 0;
+    if (!failLogArmed_ || (uint32_t)(now - failLogUs_) >= 60000000u) {
+      failLogArmed_ = true;
+      failLogUs_ = now;
+      char line[72];
+      snprintf(line, sizeof(line), "[hist] write FAILED %s", why);
+      logLine(line);
+    }
+    return FlushOutcome::Failed;
   }
 
   void popQueue() {
@@ -1568,43 +1673,14 @@ class HistoryStore {
     }
     queueHead_ = (queueHead_ + 1) % queueSlots_;
     if (queueCount_ > 0) --queueCount_;
+    if (queueCount_ < queueSlots_) queueFullNoticed_ = false;
   }
 
-  // Loop task (called from flushOne). Re-reads the fallback's directory and tails so the RAM truth
-  // matches the volume before another record is enqueued. The queue is cleared because its ids were
-  // assigned against the card's counters; losing them is better than writing a colliding id.
-  void switchToFallback() {
-    ++switches_;
-    if (!fallback_->mount()) {
-      ready_ = false;
-      logLine("[hist] SD write failed and SPIFFS did not mount: history is off");
-      return;
-    }
-    // flushOne() already counted the record that failed to write; count only the rest.
-    const int lost = queueCount_ > 0 ? queueCount_ - 1 : 0;
-    queueHead_ = 0;
-    queueCount_ = 0;
-    dropped_ += (uint32_t)lost;
-    vol_ = fallback_;
-    cfg_ = fallbackCfg_;
-    totalBytes_ = 0;
-    for (int i = 0; i < kMaxChatSlots; ++i) {
-      Slot& s = slots_[i];
-      if (!s.used) continue;
-      s.fileBytes = 0;
-      s.oldBytes = 0;
-      s.scanned = false;
-      s.headerWritten = false;
-      s.needsRepair = false;
-      s.repairBytes = 0;
-      // EST-367: a different volume has different messages; every summary is read again on demand.
-      if (summaries_ != nullptr) summaries_[i] = ChatSummary{};
-    }
-    scanDirectory();
-    scanAllTails();
-    logLine("[hist] SD write failed: switched to the SPIFFS fallback");
-    if (lost > 0) logLine("[hist] queued records from the card were dropped in the switch");
-  }
+  // EST-380: there is deliberately no runtime switch to the SPIFFS fallback any more. The EST-349
+  // path moved the store to SPIFFS on the first failed write and DROPPED the whole queue (its ids
+  // were assigned against the card's counters): exactly the silent loss this ticket removes. A card
+  // write error now keeps every record in RAM and retries it (flushOne -> failWrite); the fallback is
+  // still used when the card cannot be mounted at all, chosen once in begin().
 
   HistoryVolume* primary_ = nullptr;
   HistoryVolume* fallback_ = nullptr;
@@ -1641,7 +1717,17 @@ class HistoryStore {
   uint32_t records_ = 0;
   uint32_t worstFlushUs_ = 0;
   uint32_t dropped_ = 0;
-  uint32_t switches_ = 0;
+  // EST-380: the retry state. `episode_` is true from the first failed append until the backlog is
+  // on the card again; `writeFail_` counts records that failed at least once; `notice_` is the one
+  // pop-up the shell has not taken yet; `failLogArmed_`/`failLogUs_` throttle `[hist] write FAILED`.
+  uint32_t writeFail_ = 0;
+  uint32_t droppedInEpisode_ = 0;
+  bool episode_ = false;
+  bool overflowNoticed_ = false;
+  bool queueFullNoticed_ = false;
+  bool failLogArmed_ = false;
+  uint32_t failLogUs_ = 0;
+  WriteNotice notice_ = WriteNotice::None;
   bool slotsFullLogged_ = false;
   mutable HistoryStatus status_{};
 };

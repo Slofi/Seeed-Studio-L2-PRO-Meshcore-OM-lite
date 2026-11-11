@@ -13,6 +13,8 @@
 #include <SD_MMC.h>
 #include <SPIFFS.h>
 
+#include "sd_budget.h"   // EST-380: kFiles is part of the SD open-file budget
+
 namespace om {
 namespace history {
 namespace {
@@ -110,7 +112,10 @@ class FsVolume : public HistoryVolume {
   }
 
  protected:
-  static constexpr int kFiles = 4;   // one repair reads one and writes another, plus a margin
+  // EST-380: history_store.cpp's part of the SD open-file budget. A repair reads one file and writes
+  // another, plus a margin, and sd_budget.h counts the same number for the mount limit.
+  static constexpr int kFiles = sd_budget::kHistoryPoolFiles;
+  static_assert(kFiles == 4, "the SD budget in sd_budget.h was counted with four history files");
   fs::FS& fs_;
   DeviceFile files_[kFiles];
   bool dirOk_ = false;
@@ -208,12 +213,15 @@ bool begin(bool sdMounted) {
 }
 
 // Called at the top of loop(), on the loop task only. Two records per pass drains the queue under a
-// burst without a card write sitting in the packet path (worst case ~600 B).
+// burst without a card write sitting in the packet path (worst case ~600 B). EST-380: during a card
+// error the store ignores this number, retries the head and drains the recovered backlog in one pass.
 void loop() {
   s_store.flushStep(s_store.queued() > 4 ? 2 : 1);
 }
 
 const HistoryStatus& status() { return s_store.status(); }
+
+WriteNotice takeWriteNotice(uint32_t* dropped) { return s_store.takeWriteNotice(dropped); }
 
 HistoryStore& store() { return s_store; }
 

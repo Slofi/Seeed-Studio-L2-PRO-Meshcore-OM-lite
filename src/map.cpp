@@ -16,6 +16,7 @@
 #include "board.h"
 #include "psram_alloc.h"
 #include "radio_stats.h"
+#include "sd_budget.h"   // EST-380: the overlay count is part of the SD open-file budget
 #include "ui/map_chrome.h"   // EST-370: the canvas size and centre are one source (the chrome's dot)
 #include "ui/rgb565.h"
 #include "ui/theme.h"
@@ -64,6 +65,10 @@ Overlay s_ov[2] = {
   {"/maps/slo16/tiles.idx", "/maps/slo16/tiles.pack", 16},
   {"/maps/slo17/tiles.idx", "/maps/slo17/tiles.pack", 17},
 };
+// EST-380: every open overlay keeps TWO card handles (its .idx and its .pack) until the device is
+// rebooted, and the mount's open-file budget counts exactly this table (sd_budget.h).
+static_assert(sizeof(s_ov) / sizeof(s_ov[0]) == sd_budget::kMapOverlayLevels,
+              "sd_budget.h's overlay count must match the levels map.cpp keeps open");
 uint8_t* s_index = nullptr;
 uint32_t s_count = 0;
 uint8_t* s_tile = nullptr;

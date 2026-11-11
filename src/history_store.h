@@ -22,6 +22,11 @@ void loop();
 
 const HistoryStatus& status();
 
+// EST-380: the shell's one pop-up per history write-failure episode ("History not saved: card
+// error"). The store clears the notice when it is taken, so a repaint or the next pass cannot show
+// it twice; `dropped` receives the number to put in the text when records were really lost.
+WriteNotice takeWriteNotice(uint32_t* dropped = nullptr);
+
 // The one store. Slots are created on first use and keyed by the ticket's chat id, so a caller can
 // ask on every message without keeping an index.
 HistoryStore& store();

@@ -41,6 +41,11 @@ bool setEnabled(bool on);
 // switch is on) and prints one `[plog] write ...` line with the path, bytes and the line's values.
 void loop(uint32_t nowMs, const State& st);
 
+// EST-380: card errors since boot (the /log directory, the open, a short write). A failed minute is
+// no longer only a serial line: `log power tail` prints this number, so a lost battery log is
+// visible in the same check as the CSV itself.
+uint32_t writeFailures();
+
 // `log power tail`: prints the last 5 lines of today's file (the header counts as a line). Returns
 // the number printed, 0 for an empty file, or -1 when there is no card, no clock or no file.
 int printTail();

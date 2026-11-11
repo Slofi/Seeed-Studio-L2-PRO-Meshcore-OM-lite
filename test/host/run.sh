@@ -59,7 +59,8 @@ BIN35="$(mktemp /tmp/om-lite-est373.XXXXXX)"
 BIN36="$(mktemp /tmp/om-lite-est374.XXXXXX)"
 BIN37="$(mktemp /tmp/om-lite-est376.XXXXXX)"
 BIN38="$(mktemp /tmp/om-lite-est377.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38"' EXIT
+BIN39="$(mktemp /tmp/om-lite-est380.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -334,3 +335,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est377.cpp \
   ../../src/power_log_logic.cpp ../../src/diag_logic.cpp ../../src/usb_cmd_logic.cpp \
   ../../src/sound_synth.cpp -o "$BIN38"
 "$BIN38"
+
+# EST-380: the SD open-file budget (the named constants sum to the mount limit, with the two slots of
+# margin) and the history retry: a refused open or a short write keeps the record, hist_write_fail is
+# counted once per record, [hist] write FAILED is throttled to one a minute, the recovery drains the
+# backlog and logs one `write recovered, N`, the queue overflow is the only loss, and the pop-up
+# notice is taken once.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est380.cpp -o "$BIN39"
+"$BIN39"

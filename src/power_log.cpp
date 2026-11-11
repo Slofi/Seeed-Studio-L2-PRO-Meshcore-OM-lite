@@ -26,6 +26,9 @@ bool s_havePackets = false;
 uint32_t s_lastPackets = 0;
 bool s_dirOk = false;
 bool s_noCardLogged = false;
+// EST-380: card errors since boot, so `log power tail` can answer with a number instead of a line
+// that only ever appeared in the serial log (which nobody reads after a night on battery).
+uint32_t s_writeFail = 0;
 
 // The tail read's buffer. Static on purpose: it keeps the command handler's stack where EST-350
 // left it (the history command's depth was the panic), and only the loop task touches it.
@@ -81,6 +84,8 @@ bool setEnabled(bool on) {
   return saved;
 }
 
+uint32_t writeFailures() { return s_writeFail; }
+
 void loop(uint32_t nowMs, const State& st) {
   if (!s_pref.on()) return;
   if (!s_gate.due(nowMs)) return;
@@ -102,6 +107,7 @@ void loop(uint32_t nowMs, const State& st) {
   char path[40];
   if (formatFileName(t, path, sizeof(path)) < 0) return;
   if (!ensureDir()) {
+    ++s_writeFail;   // EST-380: a card error is counted, not only printed
     Serial.println("[plog] no /log directory on the card");
     return;
   }
@@ -137,7 +143,8 @@ void loop(uint32_t nowMs, const State& st) {
   const bool newFile = !SD_MMC.exists(path);
   File f = SD_MMC.open(path, FILE_APPEND);
   if (!f) {
-    Serial.printf("[plog] write failed %s\n", path);
+    ++s_writeFail;   // EST-380: counted so `log power tail` can report it
+    Serial.printf("[plog] write failed %s (write_fail=%lu)\n", path, (unsigned long)s_writeFail);
     return;
   }
   char buf[256];
@@ -150,6 +157,12 @@ void loop(uint32_t nowMs, const State& st) {
   const size_t wrote = f.write((const uint8_t*)buf, (size_t)n);
   f.flush();
   f.close();
+  if (wrote != (size_t)n) {
+    ++s_writeFail;   // a short write is a lost minute, not a clean line
+    Serial.printf("[plog] write short %s %u/%d (write_fail=%lu)\n", path, (unsigned)wrote, n,
+                  (unsigned long)s_writeFail);
+    return;
+  }
 
   Serial.printf("[plog] write %s new=%d bytes=%u/%d batt=%umV screen=%d bright=%u gps=%d fix=%d "
                 "sats=%u wifi=%d ble=%d pkts=%lu noise=%d uptime=%lus\n",

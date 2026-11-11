@@ -634,6 +634,10 @@ bool boardBegin() {
   Wire.end();
   Wire.begin(kPinSda, kPinScl, 100000);
   Serial.printf("[om] display %dx%d\n", s_display.width(), s_display.height());
+  // EST-401: the one write to the USB-C controller, on the re-owned bus and before anything else
+  // talks to 0x22. Step 1 of the charging bolt: without it STATUS0's VBUSOK is dead and the battery
+  // log's `vbus` column would say "no cable" forever. It never reports a bolt.
+  usbPdPowerBegin();
   return expander && light;
 }
 
@@ -797,12 +801,21 @@ void adcProbe(AdcProbe& out) {
   }
 }
 
+// EST-401: AIN1..AIN3 for the battery log's once-a-minute line. Same scale as the battery read, so
+// the numbers go straight into the CSV; a failed channel stays 0 and the log says so.
+void adcAuxProbe(AdcAux& out) {
+  out = AdcAux();
+  for (uint8_t i = 0; i < 3; ++i) {
+    uint16_t raw = 0;
+    out.ok[i] = adsReadChannel((uint8_t)(i + 1), &raw);
+    out.mv[i] = out.ok[i] ? adsPinMilliVolts(raw) : 0;
+  }
+}
+
 // ---------------------------------------------------------------------------- USB-C port controller
 
 // EST-376: READ ONLY. The register pointer is sent (that is how an I2C register read addresses a
-// byte) and exactly one byte is read back; no data byte is ever written. A write to SWITCHES0
-// (0x02) could drop the board's USB sink role and stop charging, which is why there is deliberately
-// no write function next to this one at all.
+// byte) and exactly one byte is read back; no data byte is ever written here.
 bool usbPdReadRegister(uint8_t reg, uint8_t* out) {
   if (out == nullptr) return false;
   Wire.beginTransmission(diag::kUsbPdAddr);
@@ -812,6 +825,67 @@ bool usbPdReadRegister(uint8_t reg, uint8_t* out) {
   *out = (uint8_t)Wire.read();
   return true;
 }
+
+// EST-401: the one and only data write this firmware sends to 0x22. Static on purpose: it cannot be
+// reached from another file, so `test/host/test_est401.py` can prove that the single two-byte
+// transmission to this address writes POWER and nothing else. SWITCHES0 (0x02) must never be
+// written: its default pull-downs are what make the board a USB sink and let it charge.
+static bool usbPdWritePower(uint8_t value) {
+  Wire.beginTransmission(diag::kUsbPdAddr);
+  Wire.write(diag::kRegPower);   // 0x0B POWER
+  Wire.write(value);             // read-back | PWR0 | PWR1 | PWR2 (diag_logic.h)
+  return Wire.endTransmission() == 0;
+}
+
+// EST-401: one attempt. Reads POWER first, so the byte written is the chip's own value plus the three
+// measure bits, then reads it back: "accepted" is never claimed from the write's return code alone.
+// `why` names the failure for the boot line.
+static bool usbPdMeasureAttempt(uint8_t* readBack, char* why, size_t whyCap) {
+  *readBack = 0;
+  uint8_t power = 0;
+  if (!usbPdReadRegister(diag::kRegPower, &power)) {
+    snprintf(why, whyCap, "no answer at 0x22");
+    return false;
+  }
+  if (!diag::powerReadSane(power)) {
+    // A byte with 7:4 set is not a POWER value this build understands: fail closed, write nothing.
+    snprintf(why, whyCap, "POWER read 0x%02X, not written back", power);
+    return false;
+  }
+  const uint8_t want = diag::powerValueToWrite(power);
+  if (!usbPdWritePower(want)) {
+    snprintf(why, whyCap, "write refused (read=0x%02X want=0x%02X)", power, want);
+    return false;
+  }
+  if (!usbPdReadRegister(diag::kRegPower, readBack)) {
+    snprintf(why, whyCap, "no read-back after the write");
+    return false;
+  }
+  if (!diag::powerBitsPresent(*readBack)) {
+    snprintf(why, whyCap, "read-back 0x%02X, want 0x%02X", *readBack, want);
+    return false;
+  }
+  return true;
+}
+
+void usbPdPowerBegin() {
+  uint8_t readBack = 0;
+  char why[64];
+  if (usbPdMeasureAttempt(&readBack, why, sizeof(why))) {
+    Serial.printf("[pmu] measure block on (POWER=0x%02X)\n", readBack);
+    return;
+  }
+  // One more try: a chip that shares the 3.3 V rail can miss the first exchange right after boot.
+  Serial.printf("[pmu] measure block not ready (%s), retrying\n", why);
+  delay(20);
+  if (usbPdMeasureAttempt(&readBack, why, sizeof(why))) {
+    Serial.printf("[pmu] measure block on (POWER=0x%02X)\n", readBack);
+    return;
+  }
+  Serial.printf("[pmu] measure block FAILED (%s)\n", why);
+}
+
+bool usbPdStatus0(uint8_t* out) { return usbPdReadRegister(diag::kRegStatus0, out); }
 
 // ---------------------------------------------------------------------------- GNSS
 

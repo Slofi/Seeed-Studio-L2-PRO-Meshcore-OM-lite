@@ -83,7 +83,8 @@ BIN52="$(mktemp /tmp/om-lite-est394.XXXXXX)"
 BIN53="$(mktemp /tmp/om-lite-est397.XXXXXX)"
 BIN54="$(mktemp /tmp/om-lite-est399.XXXXXX)"
 BIN55="$(mktemp /tmp/om-lite-est400.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55"' EXIT
+BIN56="$(mktemp /tmp/om-lite-est401.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -355,10 +356,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est376.cpp \
   ../../src/sound_synth.cpp -o "$BIN37"
 "$BIN37"
 
-# EST-377: the battery log. The exact CSV line and its 12 columns, the header only on a new file,
-# the local /log/power-YYYYMMDD.csv name, the once-per-minute gate (first line at once, the millis
-# wrap), the saved switch (missing key = ON, a set writes it, a failed write still flips RAM), the
-# `log power on|off|tail` command surface, and the boost choice that survives a later resetAGC.
+# EST-377: the battery log. The exact CSV line and its columns (12, then EST-401's four), the header
+# only on a new file, the local /log/power-YYYYMMDD.csv name, the once-per-minute gate (first line at
+# once, the millis wrap), the saved switch (missing key = ON, a set writes it, a failed write still
+# flips RAM), the `log power on|off|tail` command surface, and the boost choice that survives a later
+# resetAGC.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est377.cpp \
   ../../src/power_log_logic.cpp ../../src/diag_logic.cpp ../../src/usb_cmd_logic.cpp \
   ../../src/sound_synth.cpp -o "$BIN38"
@@ -544,3 +546,16 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est400.cpp \
   ../../src/ui/node_menu.cpp -o "$BIN55"
 "$BIN55"
 python3 -B test_est400.py
+
+# EST-401: step 1 of the charging bolt. POWER (0x0B) is written once at boot so the measure block and
+# its references come up and STATUS0's VBUSOK means something; then the once-a-minute battery log line
+# carries vbus + AIN1..AIN3. The C++ half: the three PWR bits (0x07 built from any read-back, unnamed
+# bits preserved), the read-back rule that decides "the write took", the STATUS0 bit-7 decode (and the
+# probe's own decode agreeing with it), the address/register map, and the four appended CSV columns
+# (-1 for a failed STATUS0 read, never 0). test_est401.py is the source half: every I2C transmission to
+# 0x22 is classified, and exactly one data write exists, to POWER, from the static helper the boot
+# call reaches; SWITCHES0 is never written.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est401.cpp \
+  ../../src/power_log_logic.cpp ../../src/diag_logic.cpp -o "$BIN56"
+"$BIN56"
+python3 -B test_est401.py

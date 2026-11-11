@@ -14,6 +14,8 @@
 
 #include "mesh_link.h"
 #include "radio_stats.h"
+#include "board.h"        // EST-401: usbPdStatus0(), adcAuxProbe()
+#include "diag_logic.h"   // EST-401: status0VbusOk()
 #include "timekeeper.h"
 
 namespace om {
@@ -119,6 +121,14 @@ void loop(uint32_t nowMs, const State& st) {
   const om::radio::Snapshot snap = om::radio::snapshot();
   const int noise = snap.noise.samples > 0 ? snap.noise.last : (up ? c.noiseFloor : 0);
 
+  // EST-401: the charging-bolt measurement, read ONLY here for the same reason (each ADS1115 channel
+  // is about 18 ms of I2C): STATUS0's VBUSOK and the three spare ADC inputs. A failed read is not a
+  // zero: `vbus` stays -1 and the line says "unknown" rather than "no cable".
+  uint8_t status0 = 0;
+  const bool haveStatus0 = om::usbPdStatus0(&status0);
+  om::AdcAux aux;
+  om::adcAuxProbe(aux);
+
   Sample s;
   s.battMv = st.battMv;
   s.screenOn = st.screenOn;
@@ -130,6 +140,10 @@ void loop(uint32_t nowMs, const State& st) {
   s.bleOn = st.bleOn;
   s.noiseDbm = noise;
   s.uptimeSec = st.uptimeSec;
+  s.vbus = haveStatus0 ? (om::diag::status0VbusOk(status0) ? 1 : 0) : -1;
+  s.ain1Mv = aux.mv[0];
+  s.ain2Mv = aux.mv[1];
+  s.ain3Mv = aux.mv[2];
   const uint32_t total = up ? c.rxPackets : 0;
   s.packets = packetDelta(total, s_lastPackets, s_havePackets && up);
   if (up) {
@@ -165,11 +179,13 @@ void loop(uint32_t nowMs, const State& st) {
   }
 
   Serial.printf("[plog] write %s new=%d bytes=%u/%d batt=%umV screen=%d bright=%u gps=%d fix=%d "
-                "sats=%u wifi=%d ble=%d pkts=%lu noise=%d uptime=%lus\n",
+                "sats=%u wifi=%d ble=%d pkts=%lu noise=%d uptime=%lus vbus=%d ain1=%u ain2=%u "
+                "ain3=%u\n",
                 path, newFile ? 1 : 0, (unsigned)wrote, n, (unsigned)s.battMv,
                 s.screenOn ? 1 : 0, (unsigned)s.brightness, s.gpsRailOn ? 1 : 0, s.fix ? 1 : 0,
                 (unsigned)s.sats, s.wifiOn ? 1 : 0, s.bleOn ? 1 : 0, (unsigned long)s.packets,
-                s.noiseDbm, (unsigned long)s.uptimeSec);
+                s.noiseDbm, (unsigned long)s.uptimeSec, (int)s.vbus, (unsigned)s.ain1Mv,
+                (unsigned)s.ain2Mv, (unsigned)s.ain3Mv);
 }
 
 int printTail() {

@@ -108,10 +108,22 @@ void sdUnmount();
 uint16_t batteryMilliVolts();
 
 // EST-376: one READ-ONLY 8-bit register read from the USB-C port controller at 0x22 (believed
-// AW35615, FUSB302-compatible). There is deliberately no write function here: a write to SWITCHES0
-// could drop the board's USB sink role and stop charging. Which registers are safe to read is
-// diag_logic.h's rule, not this function's.
+// AW35615, FUSB302-compatible). Which registers are safe to read is diag_logic.h's rule, not this
+// function's.
 bool usbPdReadRegister(uint8_t reg, uint8_t* out);
+
+// EST-401: the measure block. The chip's POWER register (0x0B) comes up at 0x01 (bandgap and wake
+// only), so STATUS0's VBUSOK reads 0 even with a cable in. This is the ONE write this firmware ever
+// makes to 0x22: POWER, read back, ORed with PWR0/PWR1/PWR2 (diag_logic.h's mask). SWITCHES0 (0x02)
+// and every CC/termination/PD register stay untouched; a write there could drop the board's USB sink
+// role and stop charging. Called once from boardBegin(), retried once when the chip was not ready,
+// and it logs `[pmu] measure block on (POWER=0x07)` - or, on a failure, the reason (twice: once before
+// the retry, once as the final `FAILED`).
+void usbPdPowerBegin();
+
+// EST-401: one read of STATUS0 (0x40) for the battery log's `vbus` column. False when the I2C read
+// failed, which the log must record as "unknown", never as "no cable".
+bool usbPdStatus0(uint8_t* out);
 
 // EST-376: the ADS1115's four single-ended inputs in ADC mV at the pin (the cell's x2 divider is
 // applied only by batteryMilliVolts()). AIN1, AIN2 and AIN3 are read first and AIN0 LAST, so the
@@ -122,6 +134,16 @@ struct AdcProbe {
   uint16_t raw[4] = {0, 0, 0, 0};  // the ADC's own counts, for a divider ratio later
 };
 void adcProbe(AdcProbe& out);
+
+// EST-401: AIN1, AIN2 and AIN3 only, for the battery log's once-a-minute line (about 18 ms per
+// channel, so the minute is the only caller). AIN0 is NOT read here: the line's batt_mv is the same
+// number the status bar shows. The conversion register is left holding AIN3; every read below
+// re-programs the MUX with OS=1, so nothing depends on that leftover.
+struct AdcAux {
+  bool ok[3] = {false, false, false};
+  uint16_t mv[3] = {0, 0, 0};   // at the pin, the same scale the battery read uses
+};
+void adcAuxProbe(AdcAux& out);
 
 // L76K GNSS: UART1, RX 18 / TX 17 at 9600. gpsPoll() chews whatever has arrived and returns the
 // latest GGA/GSV state; it never blocks. gpsBegin() only opens the UART; after the first

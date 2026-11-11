@@ -90,6 +90,40 @@ Fusb302 fusb302Fields(const RegisterSet& regs);
 // The BC_LVL encoding as words (STATUS0 5:4), for the log line's parenthetical.
 const char* bcLevelName(uint8_t bcLvl);
 
+// --- POWER (0x0B): the ONE register this firmware writes (EST-401) -------------------------------
+// The chip answers 0x01 after power-on: the bandgap and wake circuitry only, so the measure block
+// that feeds STATUS0 is dead and VBUSOK reads 0 even with a cable in (measured 2026-11-11). The
+// datasheet's POWER bits this build sets, by name:
+//   PWR0 (bit 0) bandgap and wake circuitry
+//   PWR1 (bit 1) receiver and current references
+//   PWR2 (bit 2) measure block
+// Nothing else in POWER is touched: the byte to write is the read-back ORed with these three bits,
+// so bits 3..7 stay exactly as the chip reported them. SWITCHES0 (0x02) is never written, and
+// neither is any CC, termination or PD register: the default pull-downs are what make this board a
+// USB sink and let it charge.
+constexpr uint8_t kPowerBandgapBit = 1U << 0;
+constexpr uint8_t kPowerReferencesBit = 1U << 1;
+constexpr uint8_t kPowerMeasureBit = 1U << 2;
+constexpr uint8_t kPowerMeasureOnMask =
+    (uint8_t)(kPowerBandgapBit | kPowerReferencesBit | kPowerMeasureBit);   // 0x07
+
+// The byte to write: the read-back value with the three bits above set (0x01 -> 0x07, 0x0F -> 0x0F).
+uint8_t powerValueToWrite(uint8_t readBack);
+
+// True when a POWER read-back is a value this build is willing to write back. The register's PWR
+// field is bits 3:0 (its reset value is the measured 0x01), so a byte with any of 7:4 set did not come
+// from the register we think we are reading; the attempt then FAILS CLOSED and writes nothing, rather
+// than driving reserved bits. bit 3 is left to the chip: if the hardware ever sets it, it survives the
+// OR above untouched.
+bool powerReadSane(uint8_t readBack);
+
+// True when a read-back carries every bit powerValueToWrite() asks for, i.e. the write took.
+bool powerBitsPresent(uint8_t readBack);
+
+// STATUS0 (0x40) bit 7 VBUSOK: the one field the battery log records. No other bit of STATUS0 is
+// interpreted here (BC_LVL is fusb302Fields' business).
+bool status0VbusOk(uint8_t status0);
+
 // --- the runtime RX-boost choice (EST-377) -------------------------------------------------------
 // `radio boost on|off` is RAM only, but the choice must outlive the resetAGC() calls that radio_diag
 // runs later (a TCXO change, the AGC retry): that reset can drop the RX gain because this build does

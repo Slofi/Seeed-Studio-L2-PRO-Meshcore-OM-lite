@@ -55,7 +55,7 @@ Fusb302 fusb302Fields(const RegisterSet& regs) {
   if (regs.valid[kRegStatus0]) {
     f.haveStatus0 = true;
     f.status0 = regs.value[kRegStatus0];
-    f.vbusOk = (f.status0 & (uint8_t)(1U << kStatus0VbusOkBit)) != 0;
+    f.vbusOk = status0VbusOk(f.status0);
     f.bcLvl = (uint8_t)((f.status0 >> kStatus0BcLvlShift) & kStatus0BcLvlMask);
     f.comp = (f.status0 & (uint8_t)(1U << kStatus0CompBit)) != 0;
   }
@@ -69,6 +69,22 @@ const char* bcLevelName(uint8_t bcLvl) {
     case 0x02: return "1.5A";
     default: return "3A";
   }
+}
+
+uint8_t powerValueToWrite(uint8_t readBack) {
+  return (uint8_t)(readBack | kPowerMeasureOnMask);
+}
+
+bool powerReadSane(uint8_t readBack) {
+  return (readBack & 0xF0) == 0;
+}
+
+bool powerBitsPresent(uint8_t readBack) {
+  return (readBack & kPowerMeasureOnMask) == kPowerMeasureOnMask;
+}
+
+bool status0VbusOk(uint8_t status0) {
+  return (status0 & (uint8_t)(1U << kStatus0VbusOkBit)) != 0;
 }
 
 }  // namespace diag

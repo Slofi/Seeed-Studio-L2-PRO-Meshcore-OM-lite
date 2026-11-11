@@ -46,13 +46,20 @@ struct Sample {
   uint32_t packets = 0;     // packets heard in this minute
   int noiseDbm = 0;         // MeshCore's noise floor, 0 = still converging
   uint32_t uptimeSec = 0;   // millis()/1000
+  // EST-401: the charging-bolt measurement, step 1. Nothing in the UI reads these yet; they exist so
+  // the device can prove whether USB power has a real signal (cable on vs off) before a bolt is drawn.
+  int8_t vbus = -1;         // STATUS0 bit 7 VBUSOK: 1 present, 0 absent, -1 the read failed
+  uint16_t ain1Mv = 0;      // ADS1115 AIN1..AIN3 at the pin, 0 = the read failed
+  uint16_t ain2Mv = 0;
+  uint16_t ain3Mv = 0;
 };
 
-// The header line, WITHOUT a newline. A new file gets this line first.
+// The header line, WITHOUT a newline. A new file gets this line first. The four EST-401 columns are
+// APPENDED, so every position a reader already used keeps its meaning.
 constexpr const char* kPowerLogHeader =
-    "time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s";
+    "time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s,vbus,ain1,ain2,ain3";
 
-// "YYYY-MM-DD HH:MM,<11 more fields>\n". Returns the length written (without the NUL) or -1 when
+// "YYYY-MM-DD HH:MM,<15 more fields>\n". Returns the length written (without the NUL) or -1 when
 // the buffer is too small.
 int formatLine(const Sample& s, const LocalStamp& t, char* out, size_t cap);
 

@@ -39,6 +39,8 @@ bool setEnabled(bool on);
 
 // Once per loop pass, from loop(): the only card writer. Writes when the minute is due (and the
 // switch is on) and prints one `[plog] write ...` line with the path, bytes and the line's values.
+// EST-401: when a line is due it also reads STATUS0 (VBUSOK) and the ADS1115's AIN1..AIN3, the four
+// appended columns; that is ~55 ms of I2C, once a minute, on this task like the radio counters.
 void loop(uint32_t nowMs, const State& st);
 
 // EST-380: card errors since boot (the /log directory, the open, a short write). A failed minute is

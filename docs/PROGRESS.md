@@ -7727,3 +7727,130 @@ body's floor).
   number.
 - The third sweep (`ui/map_trace.cpp`, `screens/map_tab.cpp`) is still not done; it was the EST-398 report's "next
   step" and is outside this ticket.
+
+## 2026-11-11 19:20 (DS, EST-401): L2 Pro firmware, charging bolt step 1 (measure block on, VBUSOK + AIN1..3 in the battery log)
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). Step 1 of the charging bolt, per `research-2026-11-11.md` section 2 and the
+2026-11-11 "Measured on the device" note: the chip at 0x22 (AW35615, FUSB302 family, DEVICE_ID 0x91) reported
+POWER 0x01 (bandgap and wake only), so STATUS0's VBUSOK read 0 although a cable was in. Nothing in the UI changes;
+no bolt is drawn anywhere.
+
+### 1. The one write: POWER (0x0B) = 0x07, and why that value
+
+`POWER` is read first and the byte written is `read-back | PWR0 | PWR1 | PWR2`, i.e. **0x01 -> 0x07** on this unit.
+The three bits, by the datasheet's names: **PWR0 (bit 0) bandgap and wake circuitry**, **PWR1 (bit 1) receiver and
+current references**, **PWR2 (bit 2) the measure block**. So 0x07 = those three on, nothing else: the bandgap was
+already on and stays on, the references and the measure block (the ADC behind MEASURE/SLICE and STATUS0) come up.
+The register is written as a read-modify-write on purpose, so a bit this build does not name (bit 3) survives
+untouched instead of being cleared by a constant byte.
+
+Two guards on top of the ticket's instruction, both about "one careful write":
+- **Bits 7:4 are never written back.** They are not the PWR field. A read that returns any of them (for example a
+  bus answering 0xFF) is treated as "not ready": the attempt FAILS CLOSED, logs the byte and writes nothing
+  (`diag::powerReadSane`). Bit 3 is left to the chip and only preserved.
+- **The write is only ever sent from one static function**, `usbPdWritePower()` in `board.cpp`, and it is reached
+  from `usbPdPowerBegin()` in `boardBegin()` (after the display init re-owns the I2C bus) with **one retry 20 ms
+  later** if the chip was not ready. Then POWER is read back and the log is exactly one line:
+  `[pmu] measure block on (POWER=0x07)` or `[pmu] measure block FAILED (<why>)` (a failed first attempt logs
+  `[pmu] measure block not ready (<why>), retrying` in between). "Accepted" is never claimed from the write's return
+  code: the read-back must carry the three bits (`diag::powerBitsPresent`).
+
+**Never written: SWITCHES0 (0x02) and every CC, termination and PD register.** §`test_est401.py` proves it from the
+sources, not from a comment: every I2C transmission to 0x22 in `src/` is classified (1 byte = a register pointer for
+a read, 2 bytes = a real write), and exactly ONE two-byte transmission exists, its register byte is `diag::kRegPower`,
+its data byte is that helper's parameter, and the helper is file-static.
+
+**Where the bit names come from (state of verification).** The register map is confirmed from a source on this
+machine: the running kernel's own FUSB302 driver (`fusb302.ko`, decompressed and disassembled) does
+`i2c_smbus_write_byte_data(0x0B, 0x0F)` at init and `0x0C = 0x01` for SW_RESET, so 0x0B is POWER and 0x0C is RESET,
+not the other way round. The **individual bit names are not verified against a datasheet in my reach** (no network,
+no datasheet in the sandbox, and the driver writes all four bits at once so the binary cannot separate them): they are
+the ticket's three groups in the order the measured 0x01 supports (bit 0 = the bandgap that is already on). If the
+device test shows VBUSOK still 0 with a cable, the documented next try is **0x0F** - the byte the kernel driver
+writes, i.e. the three bits plus bit 3 - one line in `diag_logic.h` (`kPowerMeasureOnMask`), and the OR then carries
+whatever the chip reports for bit 3 anyway, so a chip that really needs bit 3 would already survive it if the
+hardware sets that bit itself.
+
+### 2. The minute line: four appended columns
+
+`/log/power-YYYYMMDD.csv` gains `vbus,ain1,ain2,ain3` **appended after `uptime_s`**, so every position a reader
+already used keeps its meaning (16 columns now):
+
+```
+time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s,vbus,ain1,ain2,ain3
+```
+
+- `vbus` = STATUS0 (0x40) bit 7 VBUSOK read once a minute: **1** present, **0** absent, **-1** the I2C read failed.
+  The -1 matters: an unreadable chip must not look like "no cable" in the evidence.
+- `ain1..3` = the ADS1115's AIN1, AIN2, AIN3 at the pin in mV, same scale as the battery read. 0 = that channel's
+  read failed (the measured values on USB were 3285 / 576 / 575 mV).
+- AIN0 is NOT read here: `batt_mv` stays the number the status bar shows. The three channels cost about 55 ms of I2C,
+  once a minute, in `plog::loop()` on the loop task, next to the radio counters (the EST-349 rule is untouched: the
+  loop is still the only card writer).
+- `log power tail` needed no change and already follows: it prints the file's lines verbatim (header counts as a
+  line). `pmu probe` also needed no change and now shows `vbusok=1` with a cable, because the measure block is on.
+
+### Files
+
+- `src/diag_logic.h/.cpp`: POWER bit constants + `kPowerMeasureOnMask` (0x07), `powerValueToWrite()`,
+  `powerReadSane()`, `powerBitsPresent()`, `status0VbusOk()`; `fusb302Fields()` now uses `status0VbusOk()` for VBUSOK
+  (one bit test, not two).
+- `src/board.h/.cpp`: `usbPdPowerBegin()`, the static `usbPdWritePower()`, `usbPdMeasureAttempt()`, `usbPdStatus0()`,
+  `adcAuxProbe()` (AIN1..3 only); the boot call at the end of `boardBegin()`.
+- `src/power_log_logic.h/.cpp`: the four `Sample` fields, the header, the format string.
+- `src/power_log.cpp`: the once-a-minute STATUS0 + ADC reads and the four values in the `[plog] write ...` line.
+- `test/host/test_est401.cpp` (new), `test/host/test_est401.py` (new), `test/host/run.sh` (wired, `BIN56`),
+  `test/host/test_est377.cpp` (its exact CSV line and its comma count moved from 12 to 16 columns - the ticket
+  changes the CSV, so that expectation had to move with it).
+
+### Build and tests (real exit codes, this tree)
+
+- `PLATFORMIO_CORE_DIR=/home/slofi/.cache/pio-om-lite/core pio run -e om_lite_l2`: **SUCCESS**, exit 0, no warning.
+  **RAM 160,400 / 327,680 B (49.0 %; unchanged)**, **Flash 2,990,089 / 6,553,600 B (45.6 %; before 2,988,985,
+  +1,104 B)**, `firmware.bin` 2,990,448 B. RAM is flat because only the stack copy of `Sample` grew; the constants
+  are compile-time.
+- `test/host/run.sh`: **exit 0**, all suites green (log: 0 lines containing FAIL). Two new halves:
+  `test_est401.cpp` (the three bits and 0x01 -> 0x07, bit 3 preserved, 0x10/0x81/0xF0/0xFF refused, the read-back
+  rule, the STATUS0 bit-7 decode against fixed bytes and against `fusb302Fields`, the address/register map, and the
+  four CSV columns with `-1` for a failed STATUS0 read) and `test_est401.py` (the source scan above, the boot call
+  being in `boardBegin()` after the display init, the read-before/read-after/verify shape, the exact `[pmu]` line, and
+  the once-a-minute wiring of STATUS0 + the ADC).
+- **The scan can fail:** checked on a doctored snippet with a second two-byte transmission to 0x22 (`Wire.write(0x02);
+  Wire.write(0x03)`) - it is classified as a write with register 0x02 and the test then fails on it; a commented-out
+  write is ignored.
+- `test_est377.cpp` is the one existing test whose expectation changed (12 -> 16 columns), and it changed because the
+  ticket changes the CSV.
+
+### Device test plan (for Claude, USB and a battery)
+
+Everything below is on the battery log, one line per minute, `vbus` + `ain1..ain3`. Flashing and screenshots stay
+yours. **Have the log switched on** (`log power on` writes the NVS key; the default is on) and a card inserted.
+
+1. **Battery only, 3 minutes** (unplugged, screen state as it is): expect `[pmu] measure block on (POWER=0x07)` at
+   boot and `vbus=0` on every line. Record `ain1..ain3`: this is the baseline the cable must move.
+2. **A phone charger or a power bank with no data, 3 minutes** (a dumb 5 V source, no USB host): expect `vbus=1` on
+   every line. That is the half that says "USB power present" without a data connection - the solar/charger case.
+   (If the app is off/Hung, the chip keeps the measure block on until the next boot; nothing here needs the CPU.)
+3. **USB to TestBox, 3 minutes**, then `log power tail` and `pmu probe`: expect `vbus=1`, `power=0x07`, `vbusok=1`,
+   `bc_lvl` naming the port's current level, and `batt_mv` rising over the three minutes (the "charging" half).
+4. **Back to battery for 3 minutes**: expect `vbus=0` again - the flag must FOLLOW the cable, both ways, or there is
+   no bolt.
+
+Read it as: `vbus` 1 with a cable in all three supply shapes and 0 on battery = a real signal. Then step 2 of the
+bolt (a status-bar icon plus "charging" vs "full" from the voltage trend) has something honest to draw.
+
+### What I could not check, and what is left
+
+- **No device.** I cannot see the chip, so the value that matters (does VBUSOK really follow the cable with the
+  measure block on) is exactly what step 1 of the plan above decides. If 0x07 is not enough, the fallback is 0x0F
+  (see §1); say so and it is a one-line change plus the mask test.
+- **Whether the chip answers at 0x22 on battery at boot.** If it does not, the boot log says
+  `[pmu] measure block not ready (...)`, retries once, and may end in `FAILED`; the minute lines then carry
+  `vbus=-1`. That is not a bug, it is the measurement: the battery-only phase is where that will show. (A later
+  retry on the first USB insert is NOT in this ticket and is not built.)
+- **The measure block's current draw** is not measured. PWR1/PWR2 are two small internal blocks; the device test's
+  battery-only night is what would show it if it matters.
+- Nothing in the UI changed: no bolt, no icon, no string. The status bar and the screens do not read the new columns.
+- Next step (after the device test says the signal is real): the bolt in the status bar, with "charging" only when
+  the cell voltage is also rising (and `bc_lvl` as the port's claim, never as proof).

@@ -5975,3 +5975,87 @@ Claude reviews the diff, flashes, and runs D1-D6. Comment the `[ntp]` lines of a
 ## 2026-11-11 10:44 (Claude): EST-384 + EST-385 reviewed
 - EST-384: one writer of the node position (position.cpp via PositionSource), the phone set-location taken as Fixed, MeshCore's boot copy of its saved lat/lon overwritten right after meshLinkBegin(); coordinates on screen only.
 - EST-385: root-cause analysis accepted (0-5 s SNTP start delay + 15 s lwIP retry vs the old 20 s window); schedule, rotation, stop rule and the no-LAN-address test checked. One gap: WiFi.setSleep(false) during an attempt has no Bluetooth check (coexistence needs modem sleep with BLE on) -> EST-386 before flashing.
+
+## 2026-11-11 (DS, EST-386): NTP keeps Wi-Fi modem sleep on while Bluetooth is on
+
+### A. The gap
+EST-385 turned modem sleep off for EVERY attempt (`WiFi.setSleep(false)`, the old
+`src/wifi_link.cpp:292`) without looking at Bluetooth. With Wi-Fi and BLE both up (Filip runs them
+together) the ESP32 coexistence rule is the opposite: modem sleep must stay on.
+
+### B. What the framework really does (read from the PlatformIO core, no SDK source)
+- `esp_wifi_set_ps()` (libnet80211.a, `ieee80211_api.o`) has NO Bluetooth check. It returns
+  `ESP_ERR_WIFI_NOT_INIT` when the driver is not started, rejects a type above 2 (`ESP_ERR_WIFI_ARG`),
+  and otherwise posts `ieee80211_ioctl(24, ...)` to the Wi-Fi task and returns 0. The caller therefore
+  sees success BEFORE the change is applied.
+- The check lives in libpp.a `pm.o`, function `pm_set_sleep_type()` (run by the Wi-Fi task). For a
+  type that is neither MIN_MODEM nor MAX_MODEM (WIFI_PS_NONE is 0) and with `g_mesh_is_started == 0`
+  (we are plain STA, not mesh), it calls the coexistence adapter's "BT enabled" hook (offset 0x190 of
+  the OSI func table, `g_osi_funcs_p`) and, when that answers non-zero, it logs
+  `Error! Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled!!!!!!` (rodata
+  section `.rodata_wlog_error.47`) and then calls `abort()` (both calls are in the relocation table
+  of that same section). libcoexist.a `coexist_core.o` carries the same sentence, with a `[%u] `
+  prefix, for its own condition check.
+- So on THIS build it is worse than "refuses and logs": the Wi-Fi task aborts asynchronously, after
+  `WiFi.setSleep(false)` has already returned true. The guard below is what keeps us out of that path.
+- Not verified: which BT stack registers that adapter hook at runtime (Bluedroid's `libbt.a`), and
+  whether the abort really fires on the device. Only the device log can show it.
+
+### C. What changed
+- New `src/ntp_sleep.h`: `om::ntp::SleepGuard`, the whole decision as plain C++ (header only, no
+  Arduino), with `begin(bluetoothOn)` / `offResult(offNow)` / `poll(bluetoothOn)` / `end()`.
+  - BT off at the start: `begin()` says TurnOff; the attempt owns the off state and `end()` restores
+    it exactly once.
+  - BT on at the start: `begin()` is neutral; `poll()` and `end()` can never touch the radio.
+  - BT starts mid-attempt: `poll()` returns TurnOn exactly once; a later BLE stop in the same attempt
+    does not turn sleep off again (the guard never fights a BLE start/stop).
+  - A refused change (`offResult(false)`) leaves the guard neutral, so `end()` cannot turn sleep on
+    for a change this attempt did not make.
+- `src/wifi_link.cpp`: includes `ble_link.h` + `ntp_sleep.h`, one static guard; `ntpBeginAttempt()`
+  asks `om::bleIsEnabled()` and either turns sleep off (existing `[ntp] sleep=...` line) or logs
+  `[ntp] modem sleep kept on (Bluetooth is on)`; `pollNtp()` puts sleep back at once if BLE starts
+  (`[ntp] modem sleep back on (Bluetooth started during the attempt)`); the three restore sites
+  (`ntpEndAttempt`, `ntpStop`, the stop-rule branch) only call `WiFi.setSleep(true)` when the guard
+  owns an off state. BLE code untouched.
+- Both the BLE change and the NTP poll run on the loop task, so nothing can change BLE between the
+  `poll()` check and the `setSleep()` call (read from `src/main.cpp`'s loop; not measured).
+
+### D. Build and host tests
+- Build (`pio run -e om_lite_l2`): exit 0. RAM **159,016 B** of 327,680 (48.5 %; 159,008 before,
+  **+8 B**); flash **2,835,217 B** of 6,553,600 (43.3 %; 2,834,873 before, **+344 B**).
+- `test/host/run.sh`: exit 0, all suites green including the new `test_est386.cpp` (BT off -> TurnOff,
+  then one TurnOn at the end; BT on -> begin/poll/end all neutral, a stray off-report cannot create
+  ownership; BT starts mid-attempt -> one TurnOn, a later BLE stop does not re-off; refused change ->
+  neutral; a stale attempt is dropped, not fought; and a fake radio composes exactly one off + one on
+  for the BT-off attempt). EST-385's own suite still passes and `test_est385.py` still sees no LAN
+  address, SSID or password in any NTP literal.
+- Nothing committed, nothing pushed.
+
+### E. Device test for Claude
+1. Bluetooth OFF, `tools/cmd.py wifi on`: the EST-385 D1-D6 lines are unchanged, including
+   `[ntp] sleep=on -> off for the attempt (set=1)` and `ntp status` -> `sleep=1` once the attempt ends.
+2. Bluetooth ON (`tools/cmd.py ble on`) and then Wi-Fi on: each attempt must log
+   `[ntp] modem sleep kept on (Bluetooth is on)` and NOT the `sleep=... -> off` line; `ntp status`
+   keeps `sleep=1` before, during and after an attempt. This is a safety fix, not a fix for a lost
+   reply: with modem sleep on an attempt may still time out, and `sleep=1` is then the expected
+   evidence, not a bug.
+3. Start an attempt with BT off, then `tools/cmd.py ble on` while it is in flight: exactly one
+   `[ntp] modem sleep back on (Bluetooth started during the attempt)`, and the attempt's end must not
+   print or perform another restore (no second change in the log).
+4. `tools/cmd.py ntp status` after each attempt: `sleep=` is 1.
+
+### F. Could not check (no device, no serial)
+- The abort in `pm_set_sleep_type()`: the disassembly is clear, but only the device shows the adapter
+  hook answered "BT enabled".
+- Whether an NTP reply arrives at all with modem sleep on (the reason EST-385 turned it off was a
+  timeout; this ticket removes the unsafe workaround, it does not explain a lost packet).
+- The real timing of a BLE start against an attempt (both are loop-task calls; not measured).
+
+### G. Next step
+Claude reviews the diff, builds, flashes, and runs EST-385's D1-D6 plus E2-E3 above. The `sleep=` and
+`modem sleep` lines answer whether the device now stays out of the coexistence abort and whether NTP
+still gets an answer with BLE on.
+
+## 2026-11-11 10:57 (Claude): EST-386 built (guard), GPS no-fix time PROVEN on the device
+- EST-386: modem sleep is switched off for an NTP attempt only while Bluetooth is off; DS read the framework: esp_wifi_set_ps(PS_NONE) with BT up makes the Wi-Fi task abort, so the guard prevents a crash. Build + tests green.
+- Device, build 5cf263f, 10:52 power-off/on by Filip, L2 near the window: at ~10:55 `clock=gps-nofix`, `gps raw` ZDA 09:55:05 UTC 11.11.2026 matching TestBox to the second, 2 heard / 0 used / best 29 dB-Hz. The EST-383 no-fix path works.

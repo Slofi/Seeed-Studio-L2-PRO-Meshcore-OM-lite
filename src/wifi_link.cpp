@@ -11,8 +11,10 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "ble_link.h"
 #include "mem_stats.h"
 #include "ntp_plan.h"
+#include "ntp_sleep.h"
 #include "timekeeper.h"
 
 // The SNTP reply is captured here instead of being written straight into the system clock. The
@@ -92,6 +94,9 @@ bool s_rememberPending = false;
 // One attempt at a time; s_ntpActive says the lwIP client is running for it.
 ntp::Plan s_ntp;
 bool s_ntpActive = false;
+// EST-386: owns the attempt's modem-sleep change (ntp_sleep.h). It is the only code that turns sleep
+// off and the only code that may turn it back on: see the header for the Bluetooth rule.
+ntp::SleepGuard s_ntpSleep;
 uint32_t s_ntpInitMs = 0;
 bool s_ntpChecked = false;      // the "did the client really start" line was printed
 bool s_ntpStopLogged = false;   // the "a better source holds the clock" stop was printed
@@ -255,7 +260,8 @@ void ntpStartClient(uint32_t nowMs) {
 }
 
 // Ends the open attempt: the schedule's next slot, the client stopped, modem sleep back to the
-// default. One line with the result and one with the next attempt.
+// default when this attempt turned it off (EST-386: never over a running BT stack). One line with the
+// result and one with the next attempt.
 void ntpEndAttempt(ntp::Result r, uint32_t nowMs) {
   const char* server = s_ntp.server().text;
   const uint32_t took = s_ntp.attemptAgeMs(nowMs);
@@ -263,7 +269,7 @@ void ntpEndAttempt(ntp::Result r, uint32_t nowMs) {
   const bool enabled = esp_sntp_enabled();
   s_ntp.result(r, nowMs);
   stopNtp();
-  WiFi.setSleep(true);
+  if (s_ntpSleep.end() == ntp::SleepAction::TurnOn) WiFi.setSleep(true);
   Serial.printf("[ntp] attempt %lu server=%s result=%s after %lu ms (client=%d clock=%s)\n",
                 (unsigned long)n, server, ntp::resultToken(r), (unsigned long)took, enabled ? 1 : 0,
                 timeSourceName(timeKeeper().source()));
@@ -275,7 +281,8 @@ void ntpEndAttempt(ntp::Result r, uint32_t nowMs) {
 }
 
 // Opens the next attempt: the rotation's server, the DNS picture, modem sleep off while it is in
-// flight (the measured option the ticket names), and our own non-blocking lookup for a name.
+// flight ONLY when Bluetooth is off (EST-386: the coexistence rule), and our own non-blocking lookup
+// for a name.
 void ntpBeginAttempt(uint32_t nowMs) {
   if (!s_ntp.start(nowMs)) return;
   const ntp::Server& srv = s_ntp.server();
@@ -288,10 +295,19 @@ void ntpBeginAttempt(uint32_t nowMs) {
   Serial.printf("[ntp] attempt %lu window=%lu ms server=%s (%s)\n", (unsigned long)s_ntp.attempts(),
                 (unsigned long)ntp::kAttemptWindowMs, srv.text, ntp::serverKindToken(srv.kind));
   ntpLogDnsServers();
+  const bool btOn = om::bleIsEnabled();
   const wifi_ps_type_t ps = WiFi.getSleep();
-  const bool sleepOff = WiFi.setSleep(false);
-  Serial.printf("[ntp] sleep=%s -> off for the attempt (set=%d)\n", ps == WIFI_PS_NONE ? "off" : "on",
-                sleepOff ? 1 : 0);
+  if (s_ntpSleep.begin(btOn) == ntp::SleepAction::TurnOff) {
+    // Already off counts as applied: Arduino's setSleep() returns false when the type did not change.
+    const bool set = WiFi.setSleep(false);
+    s_ntpSleep.offResult(set || ps == WIFI_PS_NONE);
+    Serial.printf("[ntp] sleep=%s -> off for the attempt (set=%d)\n",
+                  ps == WIFI_PS_NONE ? "off" : "on", set ? 1 : 0);
+  } else {
+    // Bluetooth is on: ESP-IDF refuses PS_NONE while BT is enabled (libpp.a pm.o aborts on this
+    // build), so the radio is left alone for the whole attempt.
+    Serial.println("[ntp] modem sleep kept on (Bluetooth is on)");
+  }
 
   if (srv.kind == ntp::ServerKind::Name) {
     // dns_gethostbyname() from the loop task is what WiFi.hostByName() does too (WiFiGeneric.cpp:1574);
@@ -322,14 +338,14 @@ void ntpBeginAttempt(uint32_t nowMs) {
 }
 
 // The link went down, the switch went off, or a new connect took over: drop the schedule and the
-// client, and put modem sleep back.
+// client, and put modem sleep back when this attempt turned it off.
 void ntpStop(const char* why) {
   if (s_ntp.linked()) {
     Serial.printf("[ntp] stop: %s after %lu attempt(s)\n", why, (unsigned long)s_ntp.attempts());
   }
   s_ntp.result(ntp::Result::Held, millis());
   stopNtp();
-  if (s_driverUp) WiFi.setSleep(true);
+  if (s_ntpSleep.end() == ntp::SleepAction::TurnOn && s_driverUp) WiFi.setSleep(true);
   s_ntp.reset();
   s_ntpStopLogged = false;
 }
@@ -337,13 +353,21 @@ void ntpStop(const char* why) {
 void pollNtp(uint32_t nowMs) {
   if (!s_ntp.linked()) return;
 
+  // EST-386: Bluetooth started while this attempt had modem sleep off. Put sleep back at once, once;
+  // the attempt keeps it on to its end. Both run on the loop task, so no BLE change can fall between
+  // this check and the setSleep() call.
+  if (s_ntpSleep.poll(om::bleIsEnabled()) == ntp::SleepAction::TurnOn) {
+    WiFi.setSleep(true);
+    Serial.println("[ntp] modem sleep back on (Bluetooth started during the attempt)");
+  }
+
   // The stop rule: only a source better than Wi-Fi (a GPS fix) ends the schedule (ntp_plan.h).
   const bool want = ntp::wanted(timeKeeper().realSinceBoot(),
                                 timeSourcePriority(timeKeeper().source()));
   if (!want) {
     if (s_ntp.active()) s_ntp.result(ntp::Result::Held, nowMs);
     if (s_ntpActive) stopNtp();
-    if (s_driverUp) WiFi.setSleep(true);
+    if (s_ntpSleep.end() == ntp::SleepAction::TurnOn && s_driverUp) WiFi.setSleep(true);
     if (!s_ntpStopLogged) {
       s_ntpStopLogged = true;
       Serial.printf("[ntp] stop: clock is from %s, better than Wi-Fi (%lu attempt(s))\n",

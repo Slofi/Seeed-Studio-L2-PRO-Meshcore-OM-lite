@@ -69,7 +69,8 @@ BIN41="$(mktemp /tmp/om-lite-est382.XXXXXX)"
 BIN42="$(mktemp /tmp/om-lite-gpsraw.XXXXXX)"
 BIN43="$(mktemp /tmp/om-lite-est384.XXXXXX)"
 BIN44="$(mktemp /tmp/om-lite-ntp.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44"' EXIT
+BIN45="$(mktemp /tmp/om-lite-est386.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -400,3 +401,10 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est384.cpp -o "$BIN43
 # one attempt at a time, the forced attempt (USB `ntp now`), the 25 s window and millis() wrap.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_ntp.cpp ../../src/timekeeper.cpp -o "$BIN44"
 "$BIN44"
+
+# EST-386: the attempt's modem-sleep decision. Bluetooth off -> off for the attempt, restored once at
+# its end; Bluetooth on -> the radio is never touched; Bluetooth starting mid-attempt -> sleep back on
+# at once, once, and a later BLE stop does not turn it off again; a refused change -> neutral, so the
+# end never turns sleep on behind the caller's back; and the four actions composed with a fake radio.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est386.cpp -o "$BIN45"
+"$BIN45"

@@ -62,7 +62,8 @@ BIN38="$(mktemp /tmp/om-lite-est377.XXXXXX)"
 BIN39="$(mktemp /tmp/om-lite-est380.XXXXXX)"
 BIN40="$(mktemp /tmp/om-lite-est381.XXXXXX)"
 BIN41="$(mktemp /tmp/om-lite-est382.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41"' EXIT
+BIN42="$(mktemp /tmp/om-lite-gpsraw.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -371,3 +372,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est381.cpp \
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est382.cpp \
   ../../src/ui/chat_layout.cpp ../../src/usb_cmd_logic.cpp ../../src/sound_synth.cpp -o "$BIN41"
 "$BIN41"
+
+# EST-383: the `gps raw` diagnostic and the no-fix clock. The four sentence types print only their
+# safe fields (a latitude/longitude never appears, even one shaped like a time); the window's 5..120 s
+# bounds, type tally and zda flag; the advance-by-1s gate; the 2080 default-year rejection for RMC V
+# and ZDA; and the precedence gps-nofix < manual < phone < Wi-Fi < GPS fix, with each better source
+# replacing an approximate clock at once and the approximate one never overwriting any of them.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_gps_raw.cpp \
+  ../../src/gps_raw.cpp ../../src/timekeeper.cpp -o "$BIN42"
+"$BIN42"

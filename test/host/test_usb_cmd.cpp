@@ -356,6 +356,34 @@ static void testParseOthers() {
   CHECK(c.error != nullptr && strcmp(c.error, "args") == 0);
   char o[] = "key wake now";
   CHECK(parse(o).error != nullptr);
+
+  // EST-383: `gps raw <seconds>`, 5..120 s, one closed form.
+  char p1[] = "gps raw 30";
+  c = parse(p1);
+  CHECK(c.error == nullptr && c.kind == om::usb::Kind::Gps && c.count == 30);
+  char p2[] = "gps raw 5";
+  c = parse(p2);
+  CHECK(c.error == nullptr && c.count == 5);
+  char p3[] = "gps raw 120";
+  c = parse(p3);
+  CHECK(c.error == nullptr && c.count == 120);
+  char p4[] = "gps raw 4";
+  c = parse(p4);
+  CHECK(c.error != nullptr && strcmp(c.error, "value") == 0);
+  char p5[] = "gps raw 121";
+  c = parse(p5);
+  CHECK(c.error != nullptr && strcmp(c.error, "value") == 0);
+  char p6[] = "gps raw x";
+  c = parse(p6);
+  CHECK(c.error != nullptr && strcmp(c.error, "number") == 0);
+  char p7[] = "gps raw";
+  CHECK(parse(p7).error != nullptr);
+  char p8[] = "gps";
+  CHECK(parse(p8).error != nullptr);
+  char p9[] = "gps raw 30 extra";
+  CHECK(parse(p9).error != nullptr);
+  char p10[] = "gps status 30";
+  CHECK(parse(p10).error != nullptr);
 }
 
 static void testRefusals() {

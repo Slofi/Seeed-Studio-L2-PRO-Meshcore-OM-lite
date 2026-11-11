@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "gps_raw.h"   // EST-383: the `gps raw` window's own 5..120 s limits
+
 namespace om {
 namespace usb {
 namespace {
@@ -290,6 +292,34 @@ Command parseCommand(char* line) {
       return c;
     }
     c.error = cur.bad() ? "quote" : "args";   // an unknown sub-command
+    return c;
+  }
+  // EST-383: `gps raw <seconds>`, the L76K diagnostic window. One form only, 5..120 s; the same
+  // closed-argument rule as `radio sample`, so nothing but a window length reaches the GNSS code.
+  if (strcmp(verb, "gps") == 0) {
+    c.kind = Kind::Gps;
+    const char* sub = cur.next();
+    if (sub == nullptr || strcmp(sub, "raw") != 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    const char* word = cur.next();
+    if (word == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    int seconds = 0;
+    if (!toInt(word, &seconds)) {
+      c.error = "number";
+      return c;
+    }
+    if (seconds < kGpsRawMinSeconds || seconds > kGpsRawMaxSeconds) {
+      c.error = "value";
+      return c;
+    }
+    c.count = seconds;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
     return c;
   }
   // EST-376: the read-only charge probe. One form only: `pmu probe`.

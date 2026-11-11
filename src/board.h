@@ -135,6 +135,15 @@ void adcProbe(AdcProbe& out);
 // satellites heard at once since boot.
 void gpsBegin(bool swapPins = false);
 void gpsPoll(GpsState& out);
+
+// EST-383: `gps raw <seconds>`. Opens a time-boxed diagnostic window in gpsPoll(): every RMC, ZDA,
+// GGA and GSA line is printed with its SAFE fields only (never a latitude or longitude), and one
+// `[gpsraw] done ... types="..." zda=N` line names every talker+type that arrived. The window runs
+// from the loop, so the USB command never blocks. start() returns false when a window is already
+// running or the length is outside 5..120.
+bool gpsRawStart(int seconds, uint32_t nowMs);
+bool gpsRawActive();
+int gpsRawSecondsLeft(uint32_t nowMs);
 // EST-377: the GNSS power rail's latched state (expander bit 13). It is set high at boot and never
 // dropped by this firmware today, so this is the honest 1 the battery log writes, not a constant.
 bool gpsRailOn();

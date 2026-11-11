@@ -55,6 +55,16 @@ class FrameTest(unittest.TestCase):
         self.assertFalse(cmd.is_answer(b"[cmd] something else\n"))
         self.assertTrue(cmd.is_ok(b"[cmd] ok nodes 3\n"))
         self.assertFalse(cmd.is_ok(b"[cmd] error args\n"))
+        # EST-383: the `gps raw` start line is data, not an answer; the window's final line is.
+        self.assertFalse(cmd.is_answer(b"[gpsraw] start secs=30\n"))
+        self.assertTrue(cmd.is_answer(b'[cmd] ok gps raw secs=30 types="GNRMC:30" zda=1 bad=0\n'))
+
+    def test_answer_timeout(self):
+        self.assertEqual(cmd.answer_timeout(["status"]), cmd.ANSWER_TIMEOUT)
+        self.assertEqual(cmd.answer_timeout(["gps", "raw", "30"]), 35.0)
+        self.assertEqual(cmd.answer_timeout(["gps", "raw", "120"]), 125.0)
+        self.assertEqual(cmd.answer_timeout(["gps", "raw"]), cmd.ANSWER_TIMEOUT)
+        self.assertEqual(cmd.answer_timeout(["gps", "raw", "x"]), cmd.ANSWER_TIMEOUT)
 
 
 class FakeDevice:

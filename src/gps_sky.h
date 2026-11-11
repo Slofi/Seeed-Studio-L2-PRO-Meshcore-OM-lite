@@ -94,6 +94,8 @@ struct GpsState {
   uint32_t sentences = 0;  // complete NMEA lines
   uint32_t checksumBad = 0;  // lines whose '*' checksum did not match (skipped, never parsed)
   uint32_t timeEpoch = 0;  // latest UTC time from RMC/ZDA, 0 = none yet
+  bool timeEpochFix = false;  // EST-383: true when timeEpoch came from a position fix (RMC A),
+                              // false for the accepted no-fix path (RMC V / ZDA)
 
   // GSV, per constellation: satellites the module EXPECTS from its almanac, and satellites it HEARS
   // (a C/N0 field with a value above zero in the current cycle).

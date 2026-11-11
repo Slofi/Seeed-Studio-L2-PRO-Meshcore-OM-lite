@@ -870,6 +870,27 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       return;
     }
 
+    // EST-383: `gps raw <seconds>`. The window runs from gpsPoll() in the loop, so this answer comes
+    // back at once and the `[gpsraw]` lines follow on the serial; one `[gpsraw] done ...` line ends
+    // the window. Nothing here prints a position: the fields are formatted by gps_raw.cpp.
+    case om::usb::Kind::Gps: {
+      const uint32_t now = millis();
+      if (om::gpsRawActive()) {
+        snprintf(reply, cap, "[cmd] error gps raw busy (%d s left)",
+                 om::gpsRawSecondsLeft(now));
+        return;
+      }
+      if (!om::gpsRawStart(cmd.count, now)) {
+        cmdError(reply, cap, "value");
+        return;
+      }
+      // The start line is deliberately NOT an answer line: the data follows for the whole window
+      // and gpsPoll() prints the one `[cmd] ok gps raw ...` answer at the end, so tools/cmd.py
+      // prints every sentence instead of returning before the first one arrives.
+      snprintf(reply, cap, "[gpsraw] start secs=%d", cmd.count);
+      return;
+    }
+
     // EST-376: the read-only charge probe. Reads 0x01..0x10, 0x3C, 0x3D, 0x40 and 0x41 of the
     // USB-C port controller at 0x22 and the ADS1115's four single-ended inputs. NOTHING is written
     // to 0x22; 0x3E/0x3F/0x42 (interrupt, clear on read) and 0x43 (FIFO, a read pops a byte) are

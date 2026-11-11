@@ -5586,3 +5586,116 @@ Claude's to check.
 
 ## 2026-11-11 09:18 (Claude): EST-382 built, NOT reviewed in detail, NOT on the device
 - Sandbox build + tests green (RAM 158,648 B, flash 2,821,573 B). The boot-time advert comment and send are gone from the boot block (checked by grep; the device boot log is the real proof). Committed locally; detailed review and device tests owed. Not pushed.
+
+## 2026-11-11 09:45 (DeepSeek): EST-383 GPS time without a position fix, diagnostic first, `clock=gps-nofix`
+
+### A. Does this L76K send ZDA? Yes, per the device's own log, so no PCAS03 was added
+- The ticket's step 2 is conditional on the module NOT sending ZDA. This unit already does: the 2026-11-10
+  device reads recorded in this file (EST-331 08:20, EST-333 08:53) and in `pocket-mesh.md` (09:28) show
+  ZDA arriving and the clock being set from it while RMC was void ("the time came from ZDA (RMC was
+  void)"). So no command was added to the GNSS init, nothing new was written to the module, and the baud
+  rate, PCAS04,7 and every other init byte are unchanged. The new `gps raw` window settles it with numbers.
+- If the diagnostic prints `zda=0`, the known command is `$PCAS03,1,1,1,1,1,1,1,1` (fields in CASIC /
+  Quectel L76K PCAS order: GGA, GLL, GSA, GSV, RMC, VTG, ZDA, ANT). The repo already proves the field
+  order at position 4: EST-338 used `$PCAS03,1,1,1,0,1,1,1,1` to turn GSV OFF and it went off, so the
+  4th field is GSV and ZDA is the 7th. It would be sent once next to the existing `$PCAS04,7`, from the
+  same one-shot block after the first checksum-valid sentence, only if the raw window shows no ZDA.
+
+### B. `gps raw <5..120>`: what it prints (new `src/gps_raw.h/.cpp`)
+- The command starts a time-boxed window in `gpsPoll()` (the USB command never blocks the loop; the
+  EST-350 rule). Every complete RMC/ZDA/GGA/GSA line prints ONE data line with only these fields:
+  `[gpsraw] t=<elapsed>s type=GNRMC time=123456.00 status=V date=101126`,
+  `type=GNZDA time=... date=10.11.2026`, `type=GNGGA time=... quality=0 sats=00`,
+  `type=GNGSA time=- fixmode=1` (GSA has no time field). At the end, ONE answer line names every
+  talker+type that arrived: `[cmd] ok gps raw secs=30 types="GNGGA:30,GNGSA:30,GNRMC:30,
+  GPGSV:15,GNVTG:30,GNZDA:30" zda=1 bad=0 dropped=0`.
+- Rule 9 is enforced by construction, not by trust: the formatter never reads RMC fields 3..6 or GGA
+  fields 2..5, and every copied field must match its NMEA shape (the time field is exactly hhmmss[.sss];
+  dates/quality/satellites/fixmode are digits only). A refused field prints `-`. A position-shaped value
+  in the time column prints `time=-`; a garbled field can never leak a coordinate into another column.
+  Bad-checksum lines are still tallied and printed with `badsum=1` (that is a fact worth seeing), but
+  they never move the fix or the clock.
+- `type=` is the talker+type token (GNRMC, GNGGA, ...). The summary is printed once even when the module
+  sends nothing (`types="none"`). At most 12 distinct types are remembered; `dropped=` says if more came.
+- Protocol shape: the immediate reply is `[gpsraw] start secs=N` (a data line, not an answer), then the
+  data lines, then the one `[cmd] ok gps raw ...` answer when the window closes. `tools/cmd.py` gained
+  `answer_timeout(argv)`: for `gps raw N` it waits N+5 s instead of the default 10 s, so the diagnostic
+  can be read with the project's own tool (`tools/cmd.py gps raw 30`).
+
+### C. Time without a fix (new `GpsNoFix` source + `NoFixTimeGate`)
+- `parseNmeaTime(sentence, allowNoFix)` now also parses RMC status V, and marks `hasFix` (A = true).
+  A void RMC's date must pass the SAME build-year gate as ZDA (`buildYear() .. buildYear()+1`), so the
+  2080 default is refused on both paths; 1980 already fails the civil-date range. The fix path (RMC A)
+  is unchanged.
+- `NoFixTimeGate::offer(epoch, satsTracked)` accepts a no-fix time only when ALL hold: the first
+  sentence is never accepted (nothing to compare); the step from the previous offered sentence is 1..2 s
+  (0 = frozen clock, >2 = jump/restart, both refused); at least one satellite is being tracked
+  (`GpsState.heardTotal > 0`, i.e. a GSV C/N0 above zero). Every offered sentence moves the chain on,
+  so one sentence with nothing tracked only withholds that sentence. `gpsBegin()` resets the chain.
+- Both RMC V and ZDA now go through that gate. This is deliberate: the ticket ranks a no-fix GPS time
+  BELOW Wi-Fi/phone, and ZDA is exactly such a time. A ZDA from a module's free-running clock no longer
+  counts as top-priority "GPS".
+- New `TimeSource::GpsNoFix`, priority 1 (Gps 5 > Wifi 4 > Phone 3 > Manual 2 > GpsNoFix 1 > None 0).
+  `timeSourceName()` returns `gps-nofix`, so `status` prints `clock=gps-nofix`; `TimeKeeper::approximate()`
+  is true while that is the source. A later fix/Wi-Fi/phone/manual time replaces it immediately (the
+  6-hour hold only stops LOWER sources); the no-fix time can never overwrite any of them. `main.cpp`
+  applies `g_gps.timeEpoch` as `Gps` when `timeEpochFix` is true and as `GpsNoFix` otherwise, and it
+  compares the flag too, so a fix arriving on the same second still upgrades the source.
+- If the device shows a default or frozen V/ZDA clock, the gate rejects it (step 0 or the year gate) and
+  the clock keeps the last better source or stays `--:--`: today's behaviour in effect, no special case.
+
+### D. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` (the REBUILD.md command): **exit 0**, SUCCESS, `OM_BUILD_ID = e73fb14-dirty`;
+  only RadioLib's two known `#warning`s, no warning from a changed file.
+- RAM **158,824 B** of 327,680 (48.5 %; 158,648 before, **+176 B**); flash **2,825,533 B** of 6,553,600
+  (43.1 %; 2,821,573 before, **+3,960 B**); `firmware.bin` **2,825,904 B** (was 2,821,936, **+3,968 B**).
+- `test/host/run.sh` **exit 0**: now **42 C++ binaries + the 9 Python checks** (test_cmd's unittest count
+  went 11 -> 12). New `test/host/test_gps_raw.cpp` proves: RMC/ZDA/GGA/GSA formatting with distinctive
+  lat/lon digits that must never appear (including a position-shaped time field printing `time=-`); GSV
+  and VTG are not formatted; the 5..120 s window, one-window rule, type tally/counts, `zda=0|1`,
+  bad-checksum count and the 12-type cap; the gate (first sentence refused, +1 and +2 accepted, 0 and +5
+  refused, nothing-tracked refused, reset); the 2080 default refused for RMC V and ZDA while RMC A is
+  unaffected; and the full precedence matrix (each better source replaces a no-fix clock at once; a
+  no-fix time never replaces fix/Wi-Fi/phone/manual). `test_usb_cmd.cpp` adds the `gps raw` parser cases
+  (5/30/120 accepted; 4/121 `value`; `x` `number`; missing/extra words refused). `test_cmd.py` adds the
+  `[gpsraw] start` is-not-an-answer case and the per-command timeout.
+- `strings firmware.elf` carries `[gpsraw] start secs=%d`, `[gpsraw] t=%lus %s%s`,
+  `[cmd] ok gps raw secs=%d types="%s" zda=%d bad=%lu dropped=%d`, `gps-nofix` and the busy error.
+
+### E. Exact device test (indoors, no fix expected)
+1. `cd /home/slofi/Projects/pocket-mesh/firmware`
+2. `tools/cmd.py gps raw 30` (it now waits up to 35 s). Expected first line
+   `[gpsraw] start secs=30`, then one `[gpsraw] t=Ns ...` line per RMC/ZDA/GGA/GSA, then one answer:
+   `[cmd] ok gps raw secs=30 types="..." zda=1 bad=0 dropped=0`.
+3. **Comment on the ticket**: the exact `types="..."` list and `zda=` value (does ZDA arrive by
+   default?), the RMC `status=` (A or V), whether the `time=` values advance by exactly 1 s between
+   consecutive lines, and `bad=`.
+4. `tools/cmd.py status` right after: **comment** the `clock=` token. It should be `clock=gps-nofix`
+   with the top bar showing HH:MM if the module's V/ZDA clock advanced and at least one satellite is
+   heard; `clock=GPS` with a fix; anything else means the gate refused the no-fix time (say which
+   field failed: frozen step 0, year gate, or no satellite heard).
+5. Walk outside until a fix: the next `status` must show `clock=GPS` and the log one
+   `[time] GPS -> ...` line; the approximate time must be replaced immediately.
+6. With Wi-Fi connected (Settings > Wi-Fi, or `tools/cmd.py wifi on` once saved), `status` shows
+   `clock=Wi-Fi`; a later `gps raw 30`/V sentence must not produce a `[time] gps-nofix ->` line while
+   Wi-Fi is the source.
+
+### F. Could not check (no device, no sky, no serial)
+- What THIS L76K really sends while it hears 1-2 satellites and has no fix: the whole point of `gps raw`.
+  The V/ZDA clock may be frozen or default; the gate is built to reject exactly that, but only the device
+  can say which it is.
+- Whether one tracked satellite is enough for the module to publish UTC, and how long after the first
+  satellite the V time starts advancing (the first sentence is never accepted by design).
+- The top bar with `gps-nofix` (it uses the same `realSinceBoot()` path as a fix, so it should show
+  HH:MM), and the Settings > General Source row reading `gps-nofix, just now`.
+- The Wi-Fi/phone handover on the device; the host test proves the policy, not the real NTP call.
+
+### G. Next step
+- Claude flashes and runs E1-E4, then comments the measured `types`/`zda`/`status`/`clock` numbers here.
+  If `zda=0`, a small follow-up adds the `$PCAS03,1,1,1,1,1,1,1,1` enable after the existing
+  `$PCAS04,7` (and only then, per the ticket's condition). If RMC V/ZDA time is frozen or default, the
+  gate already keeps today's rule and no further change is needed.
+
+## 2026-11-11 09:45 (Claude): EST-383 reviewed
+- ZDA already arrives on this unit (DS cites the 2026-11-10 logs), so no PCAS03 was sent; RMC V and ZDA now pass one gate (plausible year, 1..2 s steps, a satellite tracked) as GpsNoFix, priority below Wi-Fi/phone/manual; a fix replaces it at once. gps raw strips lat/lon by construction.
+- Note: the year gate is build year .. +1, so a 2026 build refuses no-fix time from 2028 on until rebuilt (fix time unaffected). Acceptable.

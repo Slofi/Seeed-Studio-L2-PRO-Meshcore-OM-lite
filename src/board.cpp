@@ -15,6 +15,7 @@
 #include "fonts.h"
 #include "frame_metrics.h"   // the one luma rule (EST-355): the change dip's brightness numbers
 #include "gps_mode.h"
+#include "gps_raw.h"     // EST-383: the `gps raw` diagnostic window
 #include "sd_budget.h"   // EST-380: the SD open-file budget the mount limit is checked against
 #include "timekeeper.h"
 #include "ui/layout.h"   // clampTouchToScreen: the same edge rule the hit tests use
@@ -717,6 +718,11 @@ static uint8_t s_nmeaLen = 0;
 // module's flash is never written ($PCAS00 is never sent).
 static GpsModeCommand s_gpsMode;
 
+// EST-383: the `gps raw` window and the no-fix time gate. The gate compares the module's own
+// consecutive RMC/ZDA sentences; the window only tallies types and prints the safe fields.
+static GpsRawWindow s_gpsRaw;
+static NoFixTimeGate s_noFixTime;
+
 // One complete $... command with the L76K's XOR checksum.
 static void sendL76KCommand(const char* body) {
   uint8_t sum = 0;
@@ -751,9 +757,22 @@ void gpsBegin(bool swapPins) {
   // which starts zeroed. The only re-begin is the 10 s pin retry, and that runs only while no byte
   // has ever arrived (bytes == 0), so there is no sky state to clear here.
   // A re-begin means the module may have restarted too, so the command is armed again and goes out
-  // once more as soon as the module talks.
+  // once more as soon as the module talks, and the no-fix chain starts over (a time before a
+  // restart is not a consecutive sentence).
   s_gpsMode.onModuleReboot();
+  s_noFixTime.reset();
 }
+
+// EST-383: the `gps raw` window. It is started by the USB command and runs from gpsPoll(), so no
+// command ever blocks the loop for up to the window's 120 s.
+bool gpsRawStart(int seconds, uint32_t nowMs) {
+  // The command's reply line is the start marker; nothing extra is printed here.
+  return s_gpsRaw.start(seconds, nowMs);
+}
+
+bool gpsRawActive() { return s_gpsRaw.active(); }
+
+int gpsRawSecondsLeft(uint32_t nowMs) { return s_gpsRaw.secondsLeft(nowMs); }
 
 void gpsPoll(GpsState& out) {
   while (Serial1.available()) {
@@ -764,7 +783,18 @@ void gpsPoll(GpsState& out) {
       ++out.sentences;
       s_nmea[s_nmeaLen] = 0;
       s_nmeaLen = 0;
-      if (!gpsNmeaChecksumOk(s_nmea)) {
+      const bool checksumOk = gpsNmeaChecksumOk(s_nmea);
+      // EST-383: the raw window sees every complete line, including a bad-checksum one (that is a
+      // fact worth knowing), but only the four named types are printed, and only their safe fields.
+      if (s_gpsRaw.active()) {
+        s_gpsRaw.noteSentence(s_nmea, checksumOk);
+        char safe[96];
+        if (gpsRawFormat(s_nmea, safe, sizeof(safe))) {
+          Serial.printf("[gpsraw] t=%lus %s%s\n", (unsigned long)s_gpsRaw.elapsedSec(millis()), safe,
+                        checksumOk ? "" : " badsum=1");
+        }
+      }
+      if (!checksumOk) {
         ++out.checksumBad;   // a garbled line is never parsed, so it cannot move the fix or the clock
         continue;
       }
@@ -798,10 +828,21 @@ void gpsPoll(GpsState& out) {
         gpsParseGsv(s_nmea, out, millis());
       } else if (strlen(s_nmea) >= 6 &&
                  (strncmp(s_nmea + 3, "RMC", 3) == 0 || strncmp(s_nmea + 3, "ZDA", 3) == 0)) {
-        // Time (and date) from RMC/ZDA. The parser checks the checksum, the fix status and the date
-        // range, so the module's default date before its first fix never reaches the clock.
-        const ParsedTime t = parseNmeaTime(s_nmea);
-        if (t.ok) out.timeEpoch = t.epoch;
+        // Time (and date) from RMC/ZDA. The parser checks the checksum and the date range, so the
+        // module's default date before its first fix never reaches the clock. EST-383: RMC status A
+        // is trusted as a fix. RMC V and ZDA are offered to the no-fix gate, which also requires two
+        // consecutive advancing sentences and at least one satellite with a signal.
+        const ParsedTime t = parseNmeaTime(s_nmea, /*allowNoFix=*/true);
+        if (t.ok) {
+          const bool noFixAccepted = s_noFixTime.offer(t.epoch, out.heardTotal > 0);
+          if (t.hasFix) {
+            out.timeEpoch = t.epoch;
+            out.timeEpochFix = true;
+          } else if (noFixAccepted) {
+            out.timeEpoch = t.epoch;
+            out.timeEpochFix = false;
+          }
+        }
       }
       continue;
     }
@@ -810,6 +851,28 @@ void gpsPoll(GpsState& out) {
   // Once per poll, with no data needed: the 60 s best-C/N0 window has to expire even when the module
   // has gone quiet (a stale "best" from the last satellite heard would otherwise stay for ever).
   gpsSkyRefresh(out, millis());
+
+  // EST-383: one summary when the `gps raw` window is over, even if the module sent nothing.
+  if (s_gpsRaw.finished(millis())) {
+    char types[200];
+    int at = 0;
+    types[0] = 0;
+    for (int i = 0; i < s_gpsRaw.typeCount(); ++i) {
+      const int n = snprintf(types + at, sizeof(types) - (size_t)at, "%s%s:%lu",
+                             i > 0 ? "," : "", s_gpsRaw.typeAt(i),
+                             (unsigned long)s_gpsRaw.countAt(i));
+      if (n <= 0 || (size_t)n >= sizeof(types) - (size_t)at) break;
+      at += n;
+    }
+    // The final line is the command's answer (tools/cmd.py stops on it), so the data lines above it
+    // are all printed first, exactly like `nodes`. The immediate reply to the command is a plain
+    // `[gpsraw] start` line, which the host tool correctly does not mistake for an answer.
+    Serial.printf(
+        "[cmd] ok gps raw secs=%d types=\"%s\" zda=%d bad=%lu dropped=%d\n", s_gpsRaw.seconds(),
+        types[0] != 0 ? types : "none", s_gpsRaw.sawZda() ? 1 : 0,
+        (unsigned long)s_gpsRaw.badSum(), s_gpsRaw.droppedTypes());
+    s_gpsRaw.stop();
+  }
 }
 
 bool setAudioPa(bool on) { return setOutput(kBitAudioPa, on); }

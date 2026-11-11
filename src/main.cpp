@@ -5465,15 +5465,23 @@ void loop() {
   om::targetSetGpsFix(g_gps.lat, g_gps.lon, g_gps.valid);   // MeshCore adverts/telemetry
   // Feed the GPS time to the one clock. RMC repeats every second; timekeeper refreshes the source's
   // 6-hour hold each time but only writes/NVS-saves when the clock is off by more than a second.
+  // EST-383: a time accepted without a fix is the LOWER source `gps-nofix`, so a fix, Wi-Fi, phone or
+  // manual time replaces it at once. The source is compared too, so a fix arriving on the same
+  // second as the no-fix time still upgrades it.
   {
     static uint32_t lastGpsTime = 0;
-    if (g_gps.timeEpoch != 0 && g_gps.timeEpoch != lastGpsTime) {
+    static bool lastGpsTimeFix = false;
+    if (g_gps.timeEpoch != 0 &&
+        (g_gps.timeEpoch != lastGpsTime || g_gps.timeEpochFix != lastGpsTimeFix)) {
       lastGpsTime = g_gps.timeEpoch;
-      const bool applied = om::timeKeeper().setFromSource(
-          g_gps.timeEpoch, om::TimeSource::Gps, millis() / 1000);
+      lastGpsTimeFix = g_gps.timeEpochFix;
+      const om::TimeSource gpsSource =
+          g_gps.timeEpochFix ? om::TimeSource::Gps : om::TimeSource::GpsNoFix;
+      const bool applied =
+          om::timeKeeper().setFromSource(g_gps.timeEpoch, gpsSource, millis() / 1000);
       if (applied) {
         saveTimeFloor();
-        Serial.printf("[time] GPS -> %lu s, floor %lu s (%s)\n",
+        Serial.printf("[time] %s -> %lu s, floor %lu s (%s)\n", om::timeSourceName(gpsSource),
                       (unsigned long)g_gps.timeEpoch, (unsigned long)om::timeKeeper().floor(),
                       om::timeSourceName(om::timeKeeper().source()));
       }

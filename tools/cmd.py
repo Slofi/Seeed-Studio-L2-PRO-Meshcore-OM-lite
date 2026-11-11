@@ -56,6 +56,21 @@ def is_ok(line):
     return line.decode("utf-8", "replace").strip().startswith("[cmd] ok")
 
 
+def answer_timeout(argv):
+    """How long to wait for the answer line.
+
+    `gps raw N` answers only when its N-second window closes: the start line is not an answer, so
+    the default 10 s would expire long before the diagnostic has printed anything useful."""
+    try:
+        if len(argv) == 3 and argv[0] == "gps" and argv[1] == "raw":
+            seconds = int(argv[2])
+            if seconds > 0:
+                return max(ANSWER_TIMEOUT, seconds + 5.0)
+    except (TypeError, ValueError):
+        pass
+    return ANSWER_TIMEOUT
+
+
 def run(dev, argv, clock=time.monotonic, log=print):
     """Send one frame and print lines until the answer line. Returns the process exit code."""
     frame = frame_for(command_text(argv))
@@ -69,7 +84,8 @@ def run(dev, argv, clock=time.monotonic, log=print):
     dev.flush()
 
     shown = None
-    end = clock() + ANSWER_TIMEOUT
+    timeout = answer_timeout(argv)
+    end = clock() + timeout
     while clock() < end:
         line = dev.readline()
         if not line:
@@ -81,7 +97,7 @@ def run(dev, argv, clock=time.monotonic, log=print):
             shown = line
             break
     if shown is None:
-        print("device never answered the command within 10 s", file=sys.stderr)
+        print(f"device never answered the command within {timeout:g} s", file=sys.stderr)
         return 1
     return 0 if is_ok(shown) else 1
 

@@ -59,16 +59,20 @@ const char* timeSourceName(TimeSource s) {
     case TimeSource::Wifi: return "Wi-Fi";
     case TimeSource::Phone: return "Phone";
     case TimeSource::Manual: return "Manual";
+    // EST-383: the one token `status` prints and the Settings Source row shows for an approximate
+    // clock, i.e. time from RMC V or ZDA with no position fix.
+    case TimeSource::GpsNoFix: return "gps-nofix";
     default: return "None";
   }
 }
 
 int timeSourcePriority(TimeSource s) {
   switch (s) {
-    case TimeSource::Gps: return 4;
-    case TimeSource::Wifi: return 3;
-    case TimeSource::Phone: return 2;
-    case TimeSource::Manual: return 1;
+    case TimeSource::Gps: return 5;
+    case TimeSource::Wifi: return 4;
+    case TimeSource::Phone: return 3;
+    case TimeSource::Manual: return 2;
+    case TimeSource::GpsNoFix: return 1;
     default: return 0;
   }
 }
@@ -85,7 +89,7 @@ bool parseNmeaClock(const char* field, int& hour, int& minute, int& second) {
   return hour >= 0 && hour < 24 && minute >= 0 && minute < 60 && second >= 0 && second <= 60;
 }
 
-ParsedTime parseNmeaTime(const char* sentence) {
+ParsedTime parseNmeaTime(const char* sentence, bool allowNoFix) {
   ParsedTime out;
   if (!sentence) return out;
   const char* dollar = strchr(sentence, '$');
@@ -125,7 +129,12 @@ ParsedTime parseNmeaTime(const char* sentence) {
   if (strcmp(tail, "RMC") == 0) {
     // $..RMC,hhmmss.ss,A,lat,N,lon,E,...,ddmmyy,...
     if (n < 10) return out;
-    if (fields[2][0] != 'A') return out;   // V = void: no fix, no date worth trusting
+    // EST-383: status A is a real fix and its date can be trusted. Status V (void) is only parsed
+    // when the caller asked for the no-fix path, and then the same build-year gate as ZDA applies:
+    // without a fix the module may still be sending its default date.
+    const char status = fields[2][0];
+    const bool fix = status == 'A';
+    if (!fix && !(allowNoFix && status == 'V')) return out;
     int hh = 0, mm = 0, ss = 0;
     if (!parseNmeaClock(fields[1], hh, mm, ss)) return out;
     const char* date = fields[9];
@@ -136,10 +145,15 @@ ParsedTime parseNmeaTime(const char* sentence) {
     if (day < 0 || mon < 0 || yy < 0) return out;
     const int year = 2000 + yy;
     if (!validCivil(year, mon, day, hh, mm, ss)) return out;
+    if (!fix) {
+      const int built = buildYear();
+      if (built > 0 && (year < built || year > built + kZdaYearsAhead)) return out;
+    }
     const uint32_t epoch = makeUtcEpoch(year, mon, day, hh, mm, ss);
     if (!saneEpoch(epoch)) return out;
     out.ok = true;
     out.hasDate = true;
+    out.hasFix = fix;
     out.epoch = epoch;
     return out;
   }
@@ -169,6 +183,24 @@ ParsedTime parseNmeaTime(const char* sentence) {
   }
 
   return out;
+}
+
+void NoFixTimeGate::reset() {
+  have_ = false;
+  last_ = 0;
+}
+
+bool NoFixTimeGate::offer(uint32_t epochUtc, bool satsTracked) {
+  if (!saneEpoch(epochUtc)) return false;
+  const bool hadPrevious = have_;
+  const uint32_t previous = last_;
+  // Remember every offered sentence, accepted or not: the chain is "two consecutive sentences", not
+  // "two accepted ones", so a sentence with nothing tracked still moves the reference forward.
+  have_ = true;
+  last_ = epochUtc;
+  if (!hadPrevious || !satsTracked) return false;
+  const int32_t step = (int32_t)(epochUtc - previous);
+  return step >= 1 && step <= 2;
 }
 
 int buildYear() {
@@ -269,7 +301,7 @@ void TimeKeeper::begin(uint32_t savedFloorUtc, uint32_t buildEpochUtc, uint32_t 
   real_ = false;
   floorDirty_ = false;
   source_ = TimeSource::None;
-  for (int i = 0; i < 5; ++i) {
+  for (int i = 0; i < kTimeSourceCount; ++i) {
     seen_[i] = false;
     seenAt_[i] = 0;
   }
@@ -282,7 +314,7 @@ bool TimeKeeper::maySet(TimeSource source, uint32_t uptimeSec) const {
   if (source == TimeSource::None) return false;
   if (source == TimeSource::Manual) return true;   // the user did it now
   const int incoming = timeSourcePriority(source);
-  for (int i = 1; i <= 4; ++i) {
+  for (int i = 1; i < kTimeSourceCount; ++i) {
     const TimeSource other = (TimeSource)i;
     if (timeSourcePriority(other) <= incoming) continue;   // equal or lower does not block
     if (!seen_[i]) continue;

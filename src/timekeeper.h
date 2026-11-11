@@ -6,9 +6,10 @@
 // the system time (settimeofday/time), which survives a sync and is what MeshCore reads through an
 // RTCClock adapter (mesh_link.cpp).
 //
-// Sources, best first: GPS, Wi-Fi NTP, phone over Bluetooth, manual. A lower source may set the clock
-// only when no higher source has set it in the last 6 hours; manual always applies when the user does
-// it, and the next GPS fix takes over immediately. Never set the clock from an advert or a message.
+// Sources, best first: GPS fix, Wi-Fi NTP, phone over Bluetooth, manual, GPS without a fix (EST-383,
+// an approximate clock). A lower source may set the clock only when no higher source has set it in the
+// last 6 hours; manual always applies when the user does it, and the next GPS fix (or Wi-Fi/phone)
+// takes over from an approximate GPS time immediately. Never set the clock from an advert or a message.
 //
 // A floor (saved in NVS by the shell) keeps MeshCore timestamps rising across reboots even with no
 // source. It is a lower bound, NOT a real time: realSinceBoot() stays false until a real source has
@@ -22,11 +23,16 @@
 
 namespace om {
 
-enum class TimeSource : uint8_t { None = 0, Gps, Wifi, Phone, Manual };
+enum class TimeSource : uint8_t { None = 0, Gps, Wifi, Phone, Manual, GpsNoFix };
+
+// The number of TimeSource values, indexed 0..kTimeSourceCount-1 (the class below sizes its
+// bookkeeping from it).
+constexpr int kTimeSourceCount = 6;
 
 const char* timeSourceName(TimeSource s);
-// 0 = unknown, 1 = manual, 2 = phone, 3 = Wi-Fi, 4 = GPS. Manual is lowest for ranking but always
-// applies when the user sets it.
+// 0 = unknown, 1 = GPS without a fix (approximate), 2 = manual, 3 = phone, 4 = Wi-Fi, 5 = GPS fix.
+// Manual is ranked above the approximate GPS time but always applies when the user sets it. A
+// no-fix GPS time can never overwrite a fix, Wi-Fi, phone or manual source within the 6-hour hold.
 int timeSourcePriority(TimeSource s);
 
 constexpr uint32_t kTimeSourceHoldSec = 6UL * 60UL * 60UL;   // 6 hours
@@ -72,13 +78,17 @@ struct ParsedTime {
   bool ok = false;
   uint32_t epoch = 0;
   bool hasDate = false;
+  // EST-383: RMC with status A is a position fix (trusted). ZDA and a void RMC are the no-fix
+  // path, which only counts after NoFixTimeGate has accepted it.
+  bool hasFix = false;
 };
 
-// Parses one complete $..RMC or $..ZDA sentence (checksum included). RMC needs status A AND a sane
-// date; ZDA needs a sane date AND a year the build can vouch for (see kZdaYearsAhead). A void RMC
-// or the module's default date before a satellite is rejected. Returns ok=false for a bad checksum,
-// a split/truncated line, or an impossible date.
-ParsedTime parseNmeaTime(const char* sentence);
+// Parses one complete $..RMC or $..ZDA sentence (checksum included). RMC with status A needs a sane
+// date; ZDA needs a sane date AND a year the build can vouch for (see kZdaYearsAhead). A void RMC is
+// rejected unless allowNoFix is true, and then its date must pass the same build-year gate: without
+// a fix the module can still be sending its default date. Returns ok=false for a bad checksum, a
+// split/truncated line, or an impossible date.
+ParsedTime parseNmeaTime(const char* sentence, bool allowNoFix = false);
 
 // The year this firmware was compiled in, taken from this file's __DATE__. 0 if it cannot be read.
 int buildYear();
@@ -88,6 +98,25 @@ int buildYear();
 // build year .. build year + 1 is therefore refused (a device flashed in December is still running
 // in January, hence the one year of slack).
 constexpr int kZdaYearsAhead = 1;
+
+// EST-383: "two consecutive sentences advance by 1 s (+-1 s)". One second is the sentence period,
+// two seconds tolerate one missed line; 1..2 s is the only accepted step. A step of 0 is a frozen
+// clock and a larger jump is a restart or a default, so both are refused. The first sentence in a
+// stream is never accepted (there is nothing to compare it with) and a reset() starts a new stream.
+class NoFixTimeGate {
+ public:
+  void reset();
+  // Offers one parsed RMC/ZDA time. `satsTracked` is the ticket's third condition (at least one
+  // satellite with a signal); a sentence offered while nothing is tracked still moves the chain on,
+  // it just cannot be accepted. True only when this sentence may set the clock without a fix.
+  bool offer(uint32_t epochUtc, bool satsTracked);
+  bool haveLast() const { return have_; }
+  uint32_t last() const { return last_; }
+
+ private:
+  bool have_ = false;
+  uint32_t last_ = 0;
+};
 
 // NMEA time hhmmss(.sss) -> seconds since midnight.
 bool parseNmeaClock(const char* field, int& hour, int& minute, int& second);
@@ -145,6 +174,9 @@ class TimeKeeper {
   uint32_t floor() const { return floor_; }
   bool realSinceBoot() const { return real_; }
   TimeSource source() const { return source_; }
+  // EST-383: the clock was set from GPS without a position fix, so it is real enough to show but
+  // approximate. Any fix, Wi-Fi, phone or manual source replaces it as soon as it arrives.
+  bool approximate() const { return source_ == TimeSource::GpsNoFix; }
   uint32_t sourceAgeSec(uint32_t uptimeSec) const;
 
   bool saveDue(uint32_t uptimeSec) const;
@@ -158,8 +190,8 @@ class TimeKeeper {
   bool real_ = false;
   bool floorDirty_ = false;
   TimeSource source_ = TimeSource::None;
-  bool seen_[5] = {false, false, false, false, false};
-  uint32_t seenAt_[5] = {0, 0, 0, 0, 0};
+  bool seen_[kTimeSourceCount] = {};
+  uint32_t seenAt_[kTimeSourceCount] = {};
   uint32_t lastSavedUptime_ = 0;
   bool begun_ = false;
   SetEpochFn set_ = &TimeKeeper::systemSet;

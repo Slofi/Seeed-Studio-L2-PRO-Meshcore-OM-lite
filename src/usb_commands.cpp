@@ -22,6 +22,7 @@
 #include "mem_stats.h"
 #include "msg_order.h"
 #include "mesh_link.h"
+#include "om_build.h"
 #include "ota.h"
 #include "power_log.h"
 #include "radio.h"
@@ -425,11 +426,11 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       // EST-348: the history store's own line (sd / spiffs, bytes, worst flush).
       const om::history::HistoryStatus& hs = om::history::status();
       snprintf(reply, cap,
-               "[cmd] ok status mesh=%s name=\"%s\" path=%s channels=%d contacts=%d dm=%d "
+               "[cmd] ok status mesh=%s name=\"%s\" build=%s path=%s channels=%d contacts=%d dm=%d "
                "unread=%d clock=%s history=%s hist_bytes=%lu hist_chats=%d hist_records=%lu "
                "hist_worst_us=%lu hist_dropped=%lu loop_stack_free=%u loop_stack_size=%u "
                "internal=%u internal_max=%u heap=%u psram=%u",
-               om::meshLinkReady() ? "up" : "down", name, path, om::mcChannelCount(), om::app::nodeCount(),
+               om::meshLinkReady() ? "up" : "down", name, OM_BUILD_ID, path, om::mcChannelCount(), om::app::nodeCount(),
                om::meshDmCount(), om::app::unreadTotal(),
                om::timeSourceName(om::timeKeeper().source()),
                !hs.ready ? "off" : (hs.sd ? "sd" : "spiffs"), (unsigned long)hs.bytes, hs.slots,

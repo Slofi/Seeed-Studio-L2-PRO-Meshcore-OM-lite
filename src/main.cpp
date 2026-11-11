@@ -35,6 +35,7 @@
 #include "timekeeper.h"
 #include "touch_gate.h"
 #include "msg_order.h"
+#include "om_build.h"
 #include "radio_stats.h"
 #include "radio_diag.h"
 #include "usb_cmd.h"
@@ -3327,6 +3328,10 @@ static void buildSettingsRows() {
 
       setSection("ABOUT");
       setAdd(om::ui::SetRowKind::Value, A_None, "Firmware", __DATE__);
+      // EST-379: the commit this image was built from, in the page's small dim text. The serial
+      // boot line and the `status` answer carry the same id.
+      snprintf(v, sizeof(v), "Build %s", OM_BUILD_ID);
+      setAdd(om::ui::SetRowKind::Note, A_None, v);
       key[0] = 0;
       om::meshPubKeyShort(key, sizeof(key));
       setAdd(om::ui::SetRowKind::Value, A_None, "Node id", key);
@@ -4603,6 +4608,8 @@ void setup() {
   Serial.println(" OM Lite - L2 Pro P2");
   Serial.println("======================================");
   Serial.printf("build: %s %s\n", __DATE__, __TIME__);
+  // EST-379: the commit this image was built from, so the serial log names the build by itself.
+  Serial.printf("[om] build %s\n", OM_BUILD_ID);
 
   // Before anything that can crash: print the previous boot's ending, its RTC_NOINIT checkpoint and
   // one core-dump summary line (then erase a dump that printed). EST-341.

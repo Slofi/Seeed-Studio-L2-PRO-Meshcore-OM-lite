@@ -5116,3 +5116,63 @@ handler; the log is written by the loop only.
 - Boost choice is now re-asserted after every resetAGC that radio_diag runs.
 - Watch on the first flash: static RAM is +1.6 KB over EST-375 (the 1 KB `s_tail` buffer is .bss); Bluetooth once ran out of internal RAM (EST-356), so switch BLE on and check its start line before trusting this build. Moving `s_tail` to PSRAM is the easy fix if needed.
 - Sandbox build exit 0 (RAM 158,440 B, flash 2,814,253 B, firmware.bin 2,814,624 B), tests exit 0. Committed locally, not pushed, not flashed.
+
+## 2026-11-11 02:47 (DeepSeek): EST-379 the image says which build it runs, built and tested, NOT on the device
+
+**Ticket:** the handover test (EST-378) found that nothing on the device names its build. One id, in
+three places: the boot log, the USB `status` answer and Settings > General. No date and no path in
+the id, so the same tree always produces the same one.
+
+**What changed**
+- New `tools/build_id.py`, wired as `extra_scripts = pre:tools/build_id.py` in `platformio.ini`. It
+  runs exactly `git describe --always --dirty --abbrev=7` with cwd = `$PROJECT_DIR`, so the id is
+  the short commit hash and `-dirty` when the tree has changes. `git describe` only reads `.git`,
+  so the sandbox's read-only `.git` is enough. If git is missing or returns non-zero/empty, it
+  prints `build_id: WARNING ... OM_BUILD_ID = unknown` and exports `unknown`; the build continues.
+  The define goes through PlatformIO's `env.StringifyMacro()`: a plain quoted string in
+  `CPPDEFINES` lost its quotes and `1ee888c-dirty` compiled as arithmetic (the first build failed
+  on `'dirty' was not declared`, fixed before the sizes below).
+- New `src/om_build.h`: uses the `-D OM_BUILD_ID="..."` from the build, with an `"unknown"` fallback
+  for a non-PlatformIO compile.
+- `main.cpp` prints `[om] build <id>` once, immediately after the existing first boot line
+  `build: <date> <time>`.
+- `usb_commands.cpp` puts `build=<id>` in the one `status` answer line, after `name=`.
+- Settings > General > ABOUT, directly under the existing `Firmware <date>` row, gets a dim Note row
+  `Build <id>` (the page's small dim text).
+
+**Build** (`docs/REBUILD.md` command, real exit code)
+- `pio run -e om_lite_l2` **exit 0**, SUCCESS in 133.7 s. The pre-build line was
+  `build_id: OM_BUILD_ID = 1ee888c-dirty` (HEAD `1ee888c` plus the uncommitted ticket edits; once
+  Claude commits and rebuilds it becomes the new hash with no suffix). RAM **158,440 B** of 327,680
+  (48.4 %, unchanged from EST-377); flash **2,814,357 B** of 6,553,600 (42.9 %; EST-377 was
+  2,814,253, **+104 B**); `firmware.bin` **2,814,720 B** (EST-377 was 2,814,624, **+96 B**).
+  `strings firmware.bin` contains `1ee888c-dirty`, so the id really is in the image. Only the two
+  pre-existing RadioLib `#warning`s, none from the new code.
+
+**Tests** (`sh test/host/run.sh` **exit 0**)
+- New `test_est379.py`, with a fake git: the exact command and cwd; a clean answer `1ee888c`; a dirty
+  answer `1ee888c-dirty`; a non-zero exit -> `unknown` + a warning line; a missing git binary ->
+  `unknown` + a warning; an empty answer -> `unknown`. The module imports cleanly outside SCons
+  (the `Import("env")` NameError is the guard), so the test needs no PlatformIO.
+- The rest of the suite is unchanged and green (38 C++ binaries + 8 Python checks).
+
+**Could not check (no device, no serial, no glass)**
+- The three places on the real device: the `[om] build ...` boot line, `build=` in the `status`
+  answer, and the dim `Build ...` row in ABOUT (and whether it reads well at 11 px).
+- That a build with git unavailable really succeeds: the fallback and its warning are unit-tested,
+  but the full `pio run` with git missing was not run (it would need a second PATH).
+
+**Next step for Claude**
+1. Review the diff, **commit, then rebuild**: the commit changes the id, so flash the image built
+   after the commit, not the `1ee888c-dirty` one from this run.
+2. Flash and check the boot log's second line: `[om] build <new hash>`.
+3. `tools/cmd.py status` -> the answer line starts
+   `[cmd] ok status mesh=.. name=".." build=<same id> path=..`.
+4. Settings > General, scroll to ABOUT: `Build <same id>` in dim text under `Firmware <date>`.
+
+
+## 2026-11-11 02:40 (Claude): EST-379 reviewed
+- `tools/build_id.py` runs only `git describe --always --dirty --abbrev=7` (reads .git, no date, no path), falls back to "unknown" with a warning; `env.StringifyMacro` keeps the quotes. Boot line `[om] build <id>`, `build=` in `status`, dim `Build <id>` row in Settings > General > ABOUT.
+- Note: a change of id changes every compile command line, so the first build after each commit is a full rebuild (~2 min). Fine.
+- Correction (Claude): the DS entry above is stamped 02:47; the ticket went to in_review at 02:39 by the clock, so that stamp is an estimate.
+- Committed, then rebuilt from the clean commit (see the next line for the id and size). Not pushed, not flashed.

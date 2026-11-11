@@ -15,6 +15,9 @@ python3 -B test_build_flags.py
 # EST-346: the four generated VLW faces really carry ASCII + U+00A0..U+017F (every letter the ticket
 # names has a bitmap), so the fonts and the range constant cannot drift.
 python3 -B test_fonts.py
+# EST-379: the build id's one command, the dirty suffix and the "unknown" fallback with a warning,
+# against a fake git (success, dirty, failure, git missing).
+python3 -B test_est379.py
 
 # Layout / hit testing, the migration bytes and the other pure-C++ logic (no Arduino): build them
 # with the system g++.

@@ -83,7 +83,9 @@ void chatScreenDraw(const ChatView& v);
 
 enum class ChatHit : uint8_t {
   None, Head, SelRow, SelManage, SelClose, Msg, SenderName, SheetRow, SheetClose, Field, Key, Outside,
-  EmojiCell, EmojiCat, EmojiBack, EmojiSend,
+  // EST-406: SendDraft is the composer's send button on the draft line. EmojiSend is gone: the emoji
+  // page sends through that one button, which stays visible above the emoji grid.
+  EmojiCell, EmojiCat, EmojiBack, SendDraft,
   // EST-382: the ADVERT key and its two options. AdvertClose is a point in the menu that is not an
   // option (or a stray tap while it is open): it only closes the menu, never acts behind it.
   Advert, AdvertFlood, AdvertLocal, AdvertClose,

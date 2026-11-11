@@ -302,8 +302,27 @@ void drawDraft(lgfx::LovyanGFX* d, const Rect& field, uint16_t bg, const ChatVie
   }
 }
 
-// The compose line: the draft field only. The Send button moved into the keyboard (Filip, 2026-11-10)
-// and the keyboard button is gone as well: a tap anywhere on the field opens the sheet.
+// EST-406: the send button on the chat's draft line: a gold button with a right-arrow when there is
+// something to send, dim (kDimmer arrow, kKeyBg plate) while the draft is empty or only whitespace.
+// One rectangle from the layout drives both this drawing and the tap; the pressed look (EST-390)
+// tints exactly this rect. Nothing here sends: the shell's one chatSendDraft() does.
+void drawSendButton(lgfx::LovyanGFX* d, const Rect& r, bool enabled) {
+  if (r.empty()) return;
+  const uint16_t bg = enabled ? kSelBg2 : kKeyBg;
+  const uint16_t edge = enabled ? kAcc : kKeyLine;
+  const uint16_t ink = enabled ? kAccInk : kDimmer;
+  d->fillRoundRect(r.x, r.y, r.w, r.h, kKeyRadius, bg);
+  d->drawRoundRect(r.x, r.y, r.w, r.h, kKeyRadius, edge);
+  // A plain send arrow from primitives: a 2 px shaft and a solid triangular head, 12 px wide and
+  // 11 px tall in the 30 x 26 button, so it reads at a glance and is not a font glyph.
+  const int cx = r.x + r.w / 2;
+  const int cy = r.y + r.h / 2;
+  d->fillRect(cx - 6, cy - 1, 8, 2, ink);
+  d->fillTriangle(cx + 6, cy, cx - 1, cy - 5, cx - 1, cy + 5, ink);
+}
+
+// The compose line (keyboard closed): the draft field only. EST-406 puts the send button on the
+// sheet's draft line just above the keyboard, so the closed line still only opens the sheet.
 void drawCompose(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->fillRect(g.compose.x, g.compose.y, g.compose.w, g.compose.h, kScreen);
   d->drawFastHLine(g.compose.x, g.compose.y, g.compose.w, kLine);
@@ -325,8 +344,9 @@ void drawAccentBubble(lgfx::LovyanGFX* d, const ChatLayout& g, const ChatView& v
   ui::drawAccentBubble(d, g.keys[v.accentRow][v.accentCol], v.accentCp);
 }
 
-// The emoji page: a rail of group icons plus "abc", the Recent strip with Send, and the scrolling
-// 22 px grid. Every rectangle comes from emojiPadLayout(), the same one the hit test uses.
+// The emoji page: a rail of group icons plus "abc", the Recent strip and the scrolling 22 px grid.
+// Every rectangle comes from emojiPadLayout(), the same one the hit test uses. EST-406: the page has
+// no Send button of its own any more; the composer's send button on the draft line above it sends.
 void drawEmojiPage(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
   const int count = group ? group->count : 0;
@@ -367,13 +387,6 @@ void drawEmojiPage(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   }
   d->drawFastHLine(e.recentStrip.x, e.recentStrip.bottom() - 1, e.recentStrip.w, kRowLine);
 
-  d->fillRoundRect(e.send.x, e.send.y, e.send.w, e.send.h, kKeyRadius, kSelBg2);
-  d->drawRoundRect(e.send.x, e.send.y, e.send.w, e.send.h, kKeyRadius, kAcc);
-  setRole(d, FontRole::SansTab);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kAccInk, kSelBg2);
-  d->drawString("Send", e.send.x + e.send.w / 2, e.send.y + e.send.h / 2);
-
   // Only the cells that intersect the viewport are painted. A clip is still set, so a half cell
   // at the top or bottom edge is cut exactly where the drag put it.
   d->setClipRect(e.grid.x, e.grid.y, e.grid.w, e.grid.h);
@@ -408,6 +421,10 @@ void drawSheet(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   d->fillRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kCodeBg);
   d->drawRoundRect(g.draft.x, g.draft.y, g.draft.w, g.draft.h, kKeyRadius, kAcc);
   drawDraft(d, g.draft, kCodeBg, v, true);
+  // EST-406: the one send door, on the same line as the draft, at its right end. The draft plate is
+  // narrower by exactly this rect, so no typed text can ever run under the arrow. It stays visible on
+  // the emoji page too (which has no Send of its own).
+  if (!g.sendBtn.empty()) drawSendButton(d, g.sendBtn, sendEnabled(v.draft));
 
   if (v.emoji) {
     drawEmojiPage(d, v, g);
@@ -636,6 +653,12 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   }
 
   if (v.osk) {
+    // EST-406: the send button's one rect. It is checked before the draft because it is the line's
+    // right end; the draft plate itself no longer reaches under it.
+    if (sendButtonHit(g, x, y)) {
+      r.hit = ChatHit::SendDraft;
+      return r;
+    }
     if (g.draft.contains(x, y)) {
       r.hit = ChatHit::Field;
       return r;
@@ -654,10 +677,6 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
         r.emojiGroup = h.cat;
         return r;
       }
-      if (h.send) {
-        r.hit = ChatHit::EmojiSend;
-        return r;
-      }
       if (h.recent >= 0 && v.emojiRecent != nullptr && h.recent < v.emojiRecentCount) {
         r.hit = ChatHit::EmojiCell;
         r.emojiCp = v.emojiRecent[h.recent];
@@ -672,7 +691,7 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
       return r;
     }
     // keyAt() uses keyHit: the outer keys reach the screen edges and the bottom row reaches the
-    // floor, so a firm tap low on Send (or on 123/space) is still that key, not "outside" (EST-338).
+    // floor, so a firm tap low on a key (or on 123/space) is still that key, not "outside" (EST-338).
     const KeyHit key = keyAt(g, v.nums, x, y);
     if (key.row >= 0) {
       KeyDef defs[10];
@@ -761,15 +780,22 @@ PressTarget chatPressTarget(const ChatView& v, int x, int y) {
       if (h.emojiGroup < 0 || h.emojiGroup >= kEmojiGroupCount) return t;
       return pressTargetForEmojiCell(e.cat[h.emojiGroup], 0);
     }
-    case ChatHit::EmojiBack:
-    case ChatHit::EmojiSend: {
+    case ChatHit::EmojiBack: {
       const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
       const EmojiPadLayout e = emojiPadLayout(l2(), g, v.emojiRecentCount, v.emojiGroup,
                                              v.emojiScroll, group ? group->count : 0);
       t.kind = PressKind::Button;
-      t.rect = (h.hit == ChatHit::EmojiBack) ? e.abc : e.send;
+      t.rect = e.abc;
       return t;
     }
+
+    // EST-406: the send button is a target only while it can act. A dim (empty / whitespace draft)
+    // button shows no pressed look, exactly as it does nothing when tapped.
+    case ChatHit::SendDraft:
+      if (!sendEnabled(v.draft) || g.sendBtn.empty()) return t;
+      t.kind = PressKind::Button;
+      t.rect = g.sendBtn;
+      return t;
 
     case ChatHit::Advert:
       t.kind = PressKind::Button;

@@ -364,21 +364,31 @@ static void testKeyboardSheet() {
       CHECK(keyAt(g, nums != 0, 160, g.sheet.y - 1, f).row < 0);
     }
   }
-  // The chat's own rows are unchanged by the refactor: same counts as EST-346.
+  // The chat's own rows are unchanged by the refactor, except EST-406: Send left the bottom row of
+  // both pages and the space bar took its room.
   KeyDef defs[10];
   CHECK(keyRow(false, 0, defs) == 10);
   CHECK(keyRow(false, 1, defs) == 9);
   CHECK(keyRow(false, 2, defs) == 9);
-  CHECK(keyRow(false, 3, defs) == 6);
+  CHECK(keyRow(false, 3, defs) == 5);
   CHECK(keyRow(true, 0, defs) == 10);
   CHECK(keyRow(true, 1, defs) == 10);
   CHECK(keyRow(true, 2, defs) == 10);
-  CHECK(keyRow(true, 3, defs) == 6);
-  // The sheet's rectangle does not depend on the field: one widget, one height.
-  CHECK(chatLayoutFor(L, true, false, false, false, KeyboardField::Chat).sheet.y ==
-        chatLayoutFor(L, true, false, false, false, KeyboardField::Base64Key).sheet.y);
-  CHECK(chatLayoutFor(L, true, false, false, false, KeyboardField::NodeName).draft.y ==
-        chatLayoutFor(L, true, false, false, false, KeyboardField::Chat).draft.y);
+  CHECK(keyRow(true, 3, defs) == 5);
+  // One widget, one shape for the editor fields; EST-406 gives the chat's draft line the send
+  // button's own 26 px height, so only the chat sheet is 8 px taller. The keys below it do not move.
+  const ChatLayout chat = chatLayoutFor(L, true, false, false, false, KeyboardField::Chat);
+  const ChatLayout b64 = chatLayoutFor(L, true, false, false, false, KeyboardField::Base64Key);
+  const ChatLayout name = chatLayoutFor(L, true, false, false, false, KeyboardField::NodeName);
+  CHECK(b64.sheet.y == name.sheet.y);
+  CHECK(chat.sheet.h == b64.sheet.h + (kSendBtnH - kOskDraftH));
+  CHECK(chat.draft.h == kSendBtnH && !chat.sendBtn.empty());
+  CHECK(name.draft.h == kOskDraftH && name.sendBtn.empty());
+  CHECK(name.draft.w == L.width - 2 * kOskPad);
+  CHECK(chat.draft.w < name.draft.w);
+  // the key rows sit on the same y on both sheets: only the line above them grew into the messages
+  CHECK(chat.keys[0][0].y == name.keys[0][0].y);
+  CHECK(chat.keys[3][0].bottom() == name.keys[3][0].bottom());
 }
 
 int main() {

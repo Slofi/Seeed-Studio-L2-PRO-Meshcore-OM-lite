@@ -307,6 +307,10 @@ constexpr int16_t kMissingBoxH  = 6;
 
 // Keyboard sheet: .osk padding 4px, a 15 px .draft line, key rows 2 px apart; keys "about 22 px"
 // (the ticket). 4 + 18 + 3 + 4*22 + 3*2 + 4 = 123 px, so the sheet covers the tab bar completely.
+// EST-406: the CHAT's draft line is kSendBtnH tall, because the send button that now ends that line
+// must be at least 30 x 26 and its drawn rect IS its tap target. The Settings / RPTR editors keep the
+// 18 px line (kOskDraftH); only the chat composer grows, by 8 px upward: the keys below it do not
+// move (the sheet is bottom-anchored and the draft line's floor stays the same).
 constexpr int16_t kOskPad      = 4;
 constexpr int16_t kOskRadius   = 6;
 // EST-400: the message / action sheets round their TOP corners with this and overflow the bottom
@@ -318,10 +322,18 @@ constexpr int16_t kOskKeyGap   = 2;
 constexpr int16_t kOskDraftH   = 18;
 constexpr int16_t kOskDraftGap = 3;
 constexpr int16_t kOskReplyH   = 18;
+// EST-406: the composer's send button, at the right end of the chat draft line. Exactly the ticket's
+// minimum 30 x 26, and the line's height is the button's height, so the button never overhangs it.
+constexpr int16_t kSendBtnW    = 30;
+constexpr int16_t kSendBtnH    = 26;
 constexpr int16_t kKeyRadius   = 3;
 constexpr uint8_t kKeyUnit     = 10;   // a normal key; wide keys are 22 units (the mock's flex 2.2)
 constexpr uint8_t kKeyUnitWide = 22;
 constexpr uint8_t kKeyUnitSpace = 40;  // the bottom row's space, wider than the comma and the dot
+// EST-406: Send left the chat's bottom row, so its 22 units go to the space bar: the keys before the
+// space keep their place (within the 1 px the row's lost gap costs) and the space becomes the long
+// thumb bar phones have. The editors keep kKeyUnitSpace (their Send key is still there).
+constexpr uint8_t kKeyUnitSpaceChat = kKeyUnitSpace + kKeyUnitWide;
 
 // The accent preview (EST-346): a long press on s, c or z holds a small bubble above that key with the
 // accented letter (š, č, ž, or the capital with shift). 26 px fits the widest glyph at 14 px with air,
@@ -332,14 +344,14 @@ constexpr int16_t kAccentBubbleGap = 2;
 
 // The emoji page takes exactly the four key rows' rectangle (94 px), so the sheet height and the
 // message band above it do not move. A group cell is the ticket's 22 px; the Recent strip uses
-// 15 px cells so all 16 fit in one row beside Send, with a 13 px glyph centred in each.
+// 15 px cells so all 16 fit in one row, with a 13 px glyph centred in each. EST-406: the page has no
+// Send of its own any more, the composer's send button above it is the one door.
 constexpr int16_t kEmojiCell      = 22;
 constexpr int16_t kEmojiRecentCell = 15;
 constexpr int16_t kEmojiRailW     = 40;
 constexpr int16_t kEmojiRailCellH = 15;
 constexpr int16_t kEmojiStripH    = 20;
 constexpr int16_t kEmojiGridGap   = 2;
-constexpr int16_t kEmojiSendW     = 26;
 constexpr int16_t kEmojiAbcH      = 17;
 
 // The message sheet (a tap on a message, EST-336): a bottom sheet in the mock's style, like the

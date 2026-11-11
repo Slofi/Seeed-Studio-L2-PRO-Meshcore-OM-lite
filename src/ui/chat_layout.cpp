@@ -11,8 +11,11 @@ namespace ui {
 namespace {
 
 // The sheet is exactly as tall as its contents: padding, the draft line, and four 22 px key rows.
-int sheetHeight(bool replying) {
-  return kOskPad * 2 + kOskDraftH + kOskDraftGap + 4 * kOskKeyH + 3 * kOskKeyGap +
+// EST-406: the CHAT's draft line is the send button's own 26 px (the button has to be at least
+// 30 x 26 and its drawn rect is its tap target); the editors keep the 18 px line.
+int sheetHeight(bool replying, KeyboardField field) {
+  const int draftH = (field == KeyboardField::Chat) ? kSendBtnH : kOskDraftH;
+  return kOskPad * 2 + draftH + kOskDraftGap + 4 * kOskKeyH + 3 * kOskKeyGap +
          (replying ? kOskReplyH + kOskDraftGap : 0);
 }
 
@@ -143,6 +146,9 @@ int keyRow(bool nums, int row, KeyDef* out, KeyboardField field) {
         // Filip, 2026-11-10: "where are the dot and comma?" The bottom row is
         // 123, emoji, comma, space, dot, Send. The smiley opens the emoji page; the password field
         // puts its show/hide key in the smiley's place (EST-354).
+        // EST-406 (Filip, 2026-11-11): the chat's Send left the keyboard for the message input line,
+        // so the space bar takes its 22 units; the keys before it keep their place. The Settings and
+        // RPTR editors keep their Send key (their sheet's commit key), hence the field test.
         put(out[n++], "123", kKeyUnitWide, KeyKind::Mode);
         if (field == KeyboardField::WifiPassword) {
           put(out[n++], "show", kKeyUnitWide, KeyKind::Reveal);
@@ -150,9 +156,10 @@ int keyRow(bool nums, int row, KeyDef* out, KeyboardField field) {
           put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
         }
         putChar(field, out, n, ",", kKeyUnit, KeyKind::Char);
-        putChar(field, out, n, "space", kKeyUnitSpace, KeyKind::Space);
+        putChar(field, out, n, "space",
+                field == KeyboardField::Chat ? kKeyUnitSpaceChat : kKeyUnitSpace, KeyKind::Space);
         putChar(field, out, n, ".", kKeyUnit, KeyKind::Char);
-        put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
+        if (field != KeyboardField::Chat) put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
         return n;
     }
   }
@@ -226,18 +233,31 @@ int keyRow(bool nums, int row, KeyDef* out, KeyboardField field) {
       return n;
     default:
       // The dot and the comma stay on the 123 page too, and the smiley is always one key away (the
-      // password field's show/hide key takes that slot).
+      // password field's show/hide key takes that slot). EST-406: the chat's Send is gone (the draft
+      // line's button sends) and the space bar takes its room; the editors keep their Send key.
       put(out[n++], "abc", kKeyUnitWide, KeyKind::Mode);
       if (field == KeyboardField::WifiPassword) {
         put(out[n++], "show", kKeyUnitWide, KeyKind::Reveal);
       }
       else if (keyboardEmoji(field)) put(out[n++], "emoji", kKeyUnitWide, KeyKind::Emoji);
-      putChar(field, out, n, "space", kKeyUnitSpace, KeyKind::Space);
+      putChar(field, out, n, "space",
+              field == KeyboardField::Chat ? kKeyUnitSpaceChat : kKeyUnitSpace, KeyKind::Space);
       putChar(field, out, n, ",", kKeyUnit, KeyKind::Char);
       putChar(field, out, n, ".", kKeyUnit, KeyKind::Char);
-      put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
+      if (field != KeyboardField::Chat) put(out[n++], "Send", kKeyUnitWide, KeyKind::Send);
       return n;
   }
+}
+
+// EST-406: the send button's state. A draft that is only whitespace has nothing to send, so the
+// button is drawn dim and a tap on it does nothing at all.
+bool sendEnabled(const char* draft) {
+  if (draft == nullptr) return false;
+  for (const char* p = draft; *p != 0; ++p) {
+    const char c = *p;
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') return true;
+  }
+  return false;
 }
 
 ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bool selector,
@@ -265,7 +285,7 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
                      (int16_t)(g.head.h - 1)};
 
   if (osk) {
-    const int16_t sh = (int16_t)sheetHeight(replying);
+    const int16_t sh = (int16_t)sheetHeight(replying, field);
     g.sheet = Rect{0, (int16_t)(L.height - sh), L.width, sh};
   }
 
@@ -301,8 +321,18 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
       g.replyBar = Rect{kOskPad, (int16_t)y, innerW, kOskReplyH};
       y += kOskReplyH + kOskDraftGap;
     }
-    g.draft = Rect{kOskPad, (int16_t)y, innerW, kOskDraftH};
-    y += kOskDraftH + kOskDraftGap;
+    // EST-406: the chat draft line ends with the send button. Its height is the button's (26 px), so
+    // the button never overhangs the line, and the text plate stops kOskKeyGap short of it: the
+    // visible text area shrinks by the button, which is why a long draft's tail never runs under it.
+    // The Settings / RPTR editors have no send button and keep the whole width and the 18 px line.
+    const int16_t draftH = (field == KeyboardField::Chat) ? kSendBtnH : kOskDraftH;
+    if (field == KeyboardField::Chat) {
+      g.sendBtn = Rect{(int16_t)(L.width - kOskPad - kSendBtnW), (int16_t)y, kSendBtnW, draftH};
+      g.draft = Rect{kOskPad, (int16_t)y, (int16_t)(g.sendBtn.x - kOskKeyGap - kOskPad), draftH};
+    } else {
+      g.draft = Rect{kOskPad, (int16_t)y, innerW, draftH};
+    }
+    y += draftH + kOskDraftGap;
     for (int r = 0; r < 4; ++r) {
       KeyDef defs[10];
       const int n = keyRow(nums, r, defs, field);
@@ -380,8 +410,6 @@ EmojiPadLayout emojiPadLayout(const Layout& L, const ChatLayout& g, int recentCo
                          kEmojiRecentCell, kEmojiRecentCell};
     }
   }
-  e.send = Rect{(int16_t)(cx + kEmojiRecentMax * kEmojiRecentCell + 2),
-                (int16_t)(e.area.y + 2), kEmojiSendW, (int16_t)(kEmojiStripH - 4)};
 
   e.grid = Rect{cx, (int16_t)(e.recentStrip.bottom() + kEmojiGridGap), cw,
                 (int16_t)(e.area.bottom() - e.recentStrip.bottom() - kEmojiGridGap)};
@@ -423,10 +451,6 @@ EmojiPadHit emojiPadHit(const EmojiPadLayout& e, int x, int y) {
       h.cat = i;
       return h;
     }
-  }
-  if (e.send.contains(x, y)) {
-    h.send = true;
-    return h;
   }
   for (int i = 0; i < kEmojiRecentMax; ++i) {
     if (e.recent[i].contains(x, y)) {

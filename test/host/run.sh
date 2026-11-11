@@ -88,7 +88,8 @@ BIN57="$(mktemp /tmp/om-lite-est402.XXXXXX)"
 BIN58="$(mktemp /tmp/om-lite-est403.XXXXXX)"
 BIN59="$(mktemp /tmp/om-lite-est404.XXXXXX)"
 BIN60="$(mktemp /tmp/om-lite-est405.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60"' EXIT
+BIN61="$(mktemp /tmp/om-lite-est406.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -605,3 +606,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est404.cpp -o "$BIN59
 # when a value changes, with a failed write still flipping RAM.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est405.cpp -o "$BIN60"
 "$BIN60"
+
+# EST-406: Send left the chat keyboard for the message input line. The chat's letters and 123 bottom
+# rows have no Send key and the space bar took its room; Backspace is exactly where it was and the
+# other keys are within 1 px of their old place (the editors keep their own Send key and sheet). The
+# new send button on the draft line is one 30 x 26 rect that draws and hits the same pixels, the text
+# plate stops before it, and it is dim and inert while the draft is null, empty or only whitespace.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est406.cpp ../../src/ui/chat_layout.cpp \
+  -o "$BIN61"
+"$BIN61"

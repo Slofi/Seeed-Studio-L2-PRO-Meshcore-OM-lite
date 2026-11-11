@@ -1305,7 +1305,9 @@ static int chatDraftAllowance() {
 // the frame. Nothing is cut here: an over-long draft is refused and logged instead of going on the
 // air short (EST-334).
 static bool chatSend() {
-  if (g_kbText[0] == 0) return false;
+  // EST-406: the send button's dim state is this same rule. A draft that is empty or only whitespace
+  // has nothing to send, so neither the look nor the action may pretend otherwise.
+  if (!om::ui::sendEnabled(g_kbText)) return false;
   const int allow = chatDraftAllowance();
   if ((int)strlen(g_kbText) > allow) {
     Serial.printf("[chat] send refused: %u bytes, %d allowed\n", (unsigned)strlen(g_kbText), allow);
@@ -1339,8 +1341,10 @@ static bool chatSend() {
   return sent;
 }
 
-// Send the draft through the open chat (channel or DM). One place for the keyboard's Send key and
-// the emoji page's Send button, so both clear the same state.
+// Send the draft through the open chat (channel or DM, a reply or not, from the letters page or the
+// emoji page). EST-406: the composer's send button on the draft line is the ONE door; every path
+// ends here, so they all clear the same state. It does nothing on an empty or whitespace-only draft
+// (chatSend() refuses it), which is the same state the button is drawn dim in.
 static void chatSendDraft() {
   if (!chatSend()) return;
   g_kbText[0] = 0;
@@ -1655,7 +1659,10 @@ static void handleChatTap(int x, int y) {
       g_kb.showLetters();   // back to the letters/numbers keyboard page
       g_emojiScroll = 0;
       break;
-    case om::ui::ChatHit::EmojiSend:
+    // EST-406: the one Send door for channel, DM, reply and the emoji page. The button is on the
+    // draft line and is drawn dim while the draft is empty or only whitespace; chatSendDraft() then
+    // does nothing, exactly like the dim look says.
+    case om::ui::ChatHit::SendDraft:
       chatSendDraft();
       break;
     case om::ui::ChatHit::Outside:

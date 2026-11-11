@@ -97,8 +97,9 @@ bool keyboardAcceptsBytes(KeyboardField field, int usedBytes, int addBytes);
 bool keyboardAccents(KeyboardField field);           // the s/c/z long press
 bool keyboardEmoji(KeyboardField field);             // the smiley key / emoji page
 
-// The four key rows of the sheet: 10/9/9/3 keys in letters, 10/10/10/2 in numbers. Labels are the
-// device keyboard's own characters (QWERTZ letters as today) with the mock's row structure. Glyphs
+// The four key rows of the sheet: 10/9/9/5 keys in letters, 10/10/10/5 in numbers on the CHAT field
+// (EST-406 removed the Send key); every other field keeps its Send key. Labels are the device
+// keyboard's own characters (QWERTZ letters as today) with the mock's row structure. Glyphs
 // the ASCII-only faces do not carry (the mock's shift arrow and backspace) are drawn as vectors by
 // ui/widgets.cpp; the label stays empty for Del. A non-Chat field drops the character keys it does
 // not accept (and the space / emoji key when the field has no use for them).
@@ -114,7 +115,11 @@ struct ChatLayout {
   bool osk = false;
   Rect sheet;
   Rect replyBar;    // empty when the draft is not answering a message
-  Rect draft;
+  Rect draft;       // the draft line's text plate (EST-406: the send button is NOT inside it)
+  // EST-406: the send button at the right end of the CHAT draft line. One rectangle drives the
+  // drawing and the tap (sendButtonHit), it is 30 x 26, and it is empty on the Settings / RPTR
+  // editors, whose sheet keeps its Send key.
+  Rect sendBtn;
   Rect keys[4][10];       // the DRAWN key rectangles (the mock's 4 px side pad stays visible)
   Rect keyHit[4][10];     // the touch rectangles: outer keys reach the screen edges, bottom row the floor
   uint8_t keyCount[4] = {0, 0, 0, 0};
@@ -128,6 +133,16 @@ struct ChatLayout {
   Rect advertMenu;         // the small panel under the key
   Rect advertOpt[2];       // Flood, Local
 };
+
+// EST-406: does the draft send? False for a null, empty or whitespace-only draft, which is the send
+// button's dim, no-action state. Plain C++ so test/host proves the rule the drawing and the shell use.
+bool sendEnabled(const char* draft);
+
+// The send button's hit test: one rectangle, the one the button is drawn on. Cannot answer while the
+// layout has no button (the keyboard is closed or a Settings editor is up).
+inline bool sendButtonHit(const ChatLayout& g, int x, int y) {
+  return !g.sendBtn.empty() && g.sendBtn.contains(x, y);
+}
 
 // A key under a point. keyAt() uses keyHit, never the drawn rectangles.
 struct KeyHit {
@@ -252,7 +267,8 @@ int selDragScroll(int base, int dyUp, int maxScroll);
 
 // --- emoji keyboard page -----------------------------------------------------------------------
 // The smiley key swaps the four key rows for this: a rail of five group buttons plus "abc", a
-// Recent strip of the last 16 picks with Send at its right, and a scrolling 22 px grid below it.
+// Recent strip of the last 16 picks, and a scrolling 22 px grid below it. EST-406 removed the page's
+// own Send button: the composer's send button on the draft line above it is the one door.
 // `area` is exactly the rectangle the key rows would have taken, so the sheet height does not
 // change. All arithmetic lives here so the grid draws and answers with one cell rectangle.
 struct EmojiPadLayout {
@@ -262,7 +278,6 @@ struct EmojiPadLayout {
   Rect abc;                // back to the letters/numbers keyboard
   Rect recentStrip;
   Rect recent[kEmojiRecentMax];
-  Rect send;               // Send at the right of the Recent strip
   Rect grid;
   int cols = 0;
   int rows = 0;            // visible rows
@@ -280,12 +295,11 @@ EmojiPadLayout emojiPadLayout(const Layout& L, const ChatLayout& g, int recentCo
 Rect emojiPadCell(const EmojiPadLayout& e, int index);
 
 // What a point hits on the emoji page. `cat` is a group index, `recent` an index into the Recent
-// row, `cell` an index into the selected group; -1 when nothing. `send` and `abc` are flags.
+// row, `cell` an index into the selected group; -1 when nothing. `abc` is a flag.
 struct EmojiPadHit {
   int cat = -1;
   int recent = -1;
   int cell = -1;
-  bool send = false;
   bool abc = false;
 };
 EmojiPadHit emojiPadHit(const EmojiPadLayout& e, int x, int y);

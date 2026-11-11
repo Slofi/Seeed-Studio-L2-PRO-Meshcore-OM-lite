@@ -322,10 +322,20 @@ static void testComposeAndSheet() {
   // the sheet covers the tab bar completely and its contents are the four 22 px key rows
   CHECK(o.osk);
   CHECK(o.sheet.y < L.tabbar.y);
-  CHECK(o.sheet.h == kOskPad * 2 + kOskDraftH + kOskDraftGap + 4 * kOskKeyH + 3 * kOskKeyGap);
+  // EST-406: the chat draft line is as tall as the send button (26 px) so the button, drawn and
+  // tapped on the same rect, never overhangs the line. The editors keep the 18 px line.
+  CHECK(o.sheet.h == kOskPad * 2 + kSendBtnH + kOskDraftGap + 4 * kOskKeyH + 3 * kOskKeyGap);
   CHECK(o.draft.y == o.sheet.y + kOskPad);
   CHECK(o.draft.x == kOskPad);
-  CHECK(o.draft.w == L.width - 2 * kOskPad);
+  CHECK(o.draft.h == kSendBtnH);
+  // the send button ends the line; the text plate stops one key gap short of it
+  CHECK(o.sendBtn.w == kSendBtnW && o.sendBtn.h == kSendBtnH);
+  CHECK(o.sendBtn.y == o.draft.y);
+  CHECK(o.sendBtn.right() == L.width - kOskPad);
+  CHECK(o.draft.right() + kOskKeyGap == o.sendBtn.x);
+  CHECK(o.draft.w == L.width - 2 * kOskPad - kSendBtnW - kOskKeyGap);
+  CHECK(o.draft.w > 2 * kFieldPadX + 100);   // still a wide text line
+  CHECK(!o.draft.overlaps(o.sendBtn));
   CHECK(o.keys[0][0].y == o.draft.bottom() + kOskDraftGap);
   CHECK(o.keys[3][0].bottom() + kOskPad == o.sheet.bottom());
   CHECK(o.replyBar.empty());
@@ -347,22 +357,22 @@ static void testComposeAndSheet() {
     }
   }
   CHECK(kOskKeyH == 22);
-  CHECK(o.keyCount[0] == 10 && o.keyCount[1] == 9 && o.keyCount[2] == 9 && o.keyCount[3] == 6);
+  // EST-406: the chat's Send key is gone from the bottom row of both pages.
+  CHECK(o.keyCount[0] == 10 && o.keyCount[1] == 9 && o.keyCount[2] == 9 && o.keyCount[3] == 5);
 
-  // the bottom row of the letters page: 123, emoji, comma, space, dot, Send (EST-345)
+  // the bottom row of the letters page: 123, emoji, comma, space, dot (no Send)
   const Rect* row3 = o.keys[3];
-  // 123, the smiley and Send are the wide keys (the last one takes the rounding remainder)
-  CHECK(row3[0].w >= 50 && row3[1].w >= 50 && row3[5].w >= 50);
+  CHECK(row3[0].w >= 50 && row3[1].w >= 50);               // 123 and the smiley are the wide keys
   CHECK(row3[0].w - row3[1].w <= 1 && row3[1].w - row3[0].w <= 1);
-  CHECK(row3[5].w - row3[0].w <= 1 && row3[0].w - row3[5].w <= 1);
-  CHECK(row3[3].w > row3[2].w && row3[3].w > row3[4].w);   // the space is the widest of the three
-  CHECK(row3[2].w == row3[4].w);                       // comma and dot are one unit each
+  CHECK(row3[3].w > 2 * row3[2].w);                        // the space bar took Send's room
+  CHECK(row3[2].w - row3[4].w <= 1 && row3[4].w - row3[2].w <= 1);   // comma and dot, one unit
+  CHECK(row3[4].right() == L.width - kOskPad);             // the row still ends on the edge
 
   // the numbers page has the same footprint and its own keys
   const ChatLayout num = chatLayoutFor(L, true, false, true, false);
   CHECK(num.sheet.y == o.sheet.y && num.sheet.h == o.sheet.h);
   CHECK(num.keyCount[0] == 10 && num.keyCount[1] == 10 && num.keyCount[2] == 10 &&
-        num.keyCount[3] == 6);
+        num.keyCount[3] == 5);
   for (int r = 0; r < 4; ++r) {
     for (int i = 0; i < num.keyCount[r]; ++i) CHECK(num.keys[r][i].h == kOskKeyH);
   }
@@ -384,27 +394,34 @@ static void testComposeAndSheet() {
   CHECK(defs[0].kind == KeyKind::Shift);
   CHECK(defs[1].label[0] == 'y' && defs[7].label[0] == 'm');
   CHECK(defs[8].kind == KeyKind::Del);
-  // the new bottom row: 123, emoji, comma, space, dot, Send
-  CHECK(keyRow(false, 3, defs) == 6);
+  // EST-406: the chat's bottom row is 123, emoji, comma, space, dot. No Send key anywhere.
+  CHECK(keyRow(false, 3, defs) == 5);
   CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "123") == 0);
   CHECK(defs[1].kind == KeyKind::Emoji);
   CHECK(defs[2].kind == KeyKind::Char && defs[2].label[0] == ',');
   CHECK(defs[3].kind == KeyKind::Space);
   CHECK(defs[4].kind == KeyKind::Char && defs[4].label[0] == '.');
-  CHECK(defs[5].kind == KeyKind::Send);
   CHECK(defs[3].units > defs[2].units);   // the space takes more of the row
+  for (int r = 0; r < 4; ++r) {
+    const int n = keyRow(false, r, defs);
+    CHECK(n > 0);
+    for (int i = 0; i < n; ++i) CHECK(defs[i].kind != KeyKind::Send);
+  }
   CHECK(keyRow(true, 0, defs) == 10 && defs[0].label[0] == '1');
   CHECK(keyRow(true, 1, defs) == 10 && defs[0].label[0] == '@');
   CHECK(keyRow(true, 2, defs) == 10);
   CHECK(defs[0].kind == KeyKind::Mode && defs[9].kind == KeyKind::Del);
   // the dot and the comma are on the 123 page too, and the smiley is one key away there as well
-  CHECK(keyRow(true, 3, defs) == 6);
+  CHECK(keyRow(true, 3, defs) == 5);
   CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "abc") == 0);
   CHECK(defs[1].kind == KeyKind::Emoji);
   CHECK(defs[2].kind == KeyKind::Space);
   CHECK(defs[3].kind == KeyKind::Char && defs[3].label[0] == ',');
   CHECK(defs[4].kind == KeyKind::Char && defs[4].label[0] == '.');
-  CHECK(defs[5].kind == KeyKind::Send);
+  // The Settings / RPTR editors keep their Send key: it is their sheet's commit key.
+  CHECK(keyRow(false, 3, defs, KeyboardField::NodeName) == 4 && defs[3].kind == KeyKind::Send);
+  CHECK(keyRow(false, 3, defs, KeyboardField::WifiPassword) == 6 &&
+        defs[5].kind == KeyKind::Send);
   CHECK(keyRow(false, 9, defs) == 0);
   CHECK(keyRow(false, 0, nullptr) == 0);
 }
@@ -905,17 +922,18 @@ static void testKeyboardEdges() {
   const ChatLayout g = chatLayoutFor(L, true, false, false, false);
   KeyDef defs[10];
   const int n = keyRow(false, 3, defs);
-  CHECK(n == 6);
+  CHECK(n == 5);
   CHECK(defs[0].kind == KeyKind::Mode && strcmp(defs[0].label, "123") == 0);
   CHECK(defs[1].kind == KeyKind::Emoji);
+  CHECK(defs[2].kind == KeyKind::Char && defs[2].label[0] == ',');
   CHECK(defs[3].kind == KeyKind::Space);
-  CHECK(defs[5].kind == KeyKind::Send);
-  CHECK(g.keyCount[3] == 6);
+  CHECK(defs[4].kind == KeyKind::Char && defs[4].label[0] == '.');
+  CHECK(g.keyCount[3] == 5);
 
   // The DRAWN rectangles did not move: the 4 px side pad and the 4 px pad under the last row stay.
   CHECK(g.keys[3][0].x == kOskPad);
   CHECK(g.keys[3][0].bottom() == (int16_t)(L.height - kOskPad));
-  CHECK(g.keys[3][5].right() == (int16_t)(L.width - kOskPad));
+  CHECK(g.keys[3][4].right() == (int16_t)(L.width - kOskPad));
 
   // The TOUCH rectangles reach the floor and the side edges on every row.
   for (int r = 0; r < 4; ++r) {
@@ -925,19 +943,19 @@ static void testKeyboardEdges() {
   }
   for (int c = 0; c < g.keyCount[3]; ++c) CHECK(g.keyHit[3][c].bottom() == L.height);
 
-  // y = 239 (the last pixel row) still hits Send, space and 123.
-  const int xSend = g.keyHit[3][4].x + g.keyHit[3][4].w / 2;
-  const int xSpace = g.keyHit[3][2].x + g.keyHit[3][2].w / 2;
+  // y = 239 (the last pixel row) still hits the dot, the space bar and 123.
+  const int xDot = g.keyHit[3][4].x + g.keyHit[3][4].w / 2;
+  const int xSpace = g.keyHit[3][3].x + g.keyHit[3][3].w / 2;
   const int x123 = g.keyHit[3][0].x + g.keyHit[3][0].w / 2;
-  KeyHit h = keyAt(g, false, xSend, 239);
+  KeyHit h = keyAt(g, false, xDot, 239);
   CHECK(h.row == 3 && h.col == 4);
   h = keyAt(g, false, xSpace, 239);
-  CHECK(h.row == 3 && h.col == 2);
+  CHECK(h.row == 3 && h.col == 3);
   h = keyAt(g, false, x123, 239);
   CHECK(h.row == 3 && h.col == 0);
 
   // A raw y on or past the bottom edge is clamped into the screen before the hit test.
-  int cx = xSend, cy = 240;
+  int cx = xDot, cy = 240;
   clampTouchToScreen(cx, cy, L.width, L.height);
   CHECK(cy == L.height - 1);
   h = keyAt(g, false, cx, cy);
@@ -947,7 +965,7 @@ static void testKeyboardEdges() {
   clampTouchToScreen(cx, cy, L.width, L.height);
   CHECK(cy == L.height - 1);
   h = keyAt(g, false, cx, cy);
-  CHECK(h.row == 3 && h.col == 2);
+  CHECK(h.row == 3 && h.col == 3);
 
   // A 2 px gap between two keys is inside the sheet but hits no key: it does nothing (no close).
   const int gapX = g.keyHit[3][0].right();
@@ -1105,21 +1123,26 @@ static void testEmojiPad() {
   CHECK(e.rows == 3);
   CHECK(e.grid.h >= e.rows * kEmojiCell);
   CHECK(e.recent[0].w == kEmojiRecentCell && e.recent[0].h == kEmojiRecentCell);
-  CHECK(e.recent[15].right() <= e.send.x);
-  CHECK(e.send.right() <= e.recentStrip.right());
+  // EST-406: no Send of its own any more; the Recent strip is free to its right and the composer's
+  // send button sits on the draft line above the whole page.
+  CHECK(e.recent[15].right() < e.recentStrip.right());
+  CHECK(!g.sendBtn.empty());
+  CHECK(g.sendBtn.bottom() <= e.area.y);
   CHECK(e.recentStrip.bottom() <= e.grid.y);
   CHECK(e.cat[4].bottom() <= e.abc.y);
 
-  // Every drawn rectangle answers at its own centre, in the rail, the strip, the grid and Send.
+  // Every drawn rectangle answers at its own centre, in the rail, the strip and the grid.
   const Rect c0 = emojiPadCell(e, 0);
   CHECK(c0.x == e.grid.x && c0.y == e.grid.y);
   CHECK(emojiPadHit(e, e.cat[2].x + 2, e.cat[2].y + 2).cat == 2);
   CHECK(emojiPadHit(e, e.recent[3].x + 2, e.recent[3].y + 2).recent == 3);
-  CHECK(emojiPadHit(e, e.send.x + 2, e.send.y + 2).send);
   CHECK(emojiPadHit(e, e.abc.x + 2, e.abc.y + 2).abc);
   CHECK(emojiPadHit(e, c0.x + 2, c0.y + 2).cell == 0);
   CHECK(emojiPadHit(e, emojiPadCell(e, 5).x + 2, emojiPadCell(e, 5).y + 2).cell == 5);
   CHECK(emojiPadHit(e, e.grid.x - 2, e.grid.y + 2).cell == -1);   // the rail is not the grid
+  // The old Send slot (right of the Recent row) is no longer a hit: it belongs to the strip's pad.
+  CHECK(emojiPadHit(e, e.recentStrip.right() - 2, e.recent[0].y + 2).recent == -1);
+  CHECK(emojiPadHit(e, e.recentStrip.right() - 2, e.recent[0].y + 2).cell == -1);
 
   // A 40-entry group needs two rows of scroll; at max the last cell ends on the viewport floor.
   const int maxS = emojiPadMaxScroll(e, 40);

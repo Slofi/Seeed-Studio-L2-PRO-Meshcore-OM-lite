@@ -8313,3 +8313,138 @@ screenshot.
 Next step: Claude flashes over USB OTA and runs the checks above. The review points are the two
 judgment calls (a blocker pauses; touch wakes only a timer sleep), the GT911 read while the panel is
 asleep, and whether the page's wording is what Filip wants.
+
+## 2026-11-11 21:42 (DS, EST-406): L2 Pro firmware, Send moves from the keyboard onto the message input line
+
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). Filip, 2026-11-11: "Send sits right under Backspace, easy to send instead
+of delete", option A of three: move Send onto the message input line, like on phones. So the chat's
+keyboard keeps no Send, the space bar takes its room, and one gold send-arrow button ends the draft
+line above the keyboard.
+
+### 1. The keyboard: Send gone, space bar wider, fingers not re-trained
+
+- The CHAT field's bottom rows are now five keys: letters `123, emoji, comma, space, dot` and 123
+  `abc, emoji, space, comma, dot`. `KeyKind::Send` is not on any chat row.
+- Send's `kKeyUnitWide` (22 units) went to the space bar: `kKeyUnitSpaceChat` = 62 on the chat field.
+  The row is one gap shorter, so the keys before the space moved by at most 1 px (123 4..56 →
+  4..57, emoji 58..111 → 59..112, comma 113..137 → 114..138); the space bar grew 96 → 149 px on the
+  letters page, and the trailing keys moved into Send's old slot (dot 291..316 on letters; comma and
+  dot 265..316 on the 123 page), still ending on the same right edge at x = 316.
+- Backspace is EXACTLY where it was on both pages, verified against a dump of the pre-ticket tree:
+  letters `[258,190,58,22]`, 123 `[263,190,53,22]`. Only the line ABOVE the keys grew (see 2), so the
+  key rows keep their y.
+- The Settings / RPTR editors are untouched: their field still gets its `Send` key (it is the sheet's
+  commit key, drawn as OK / Log in / Apply / Send), their space stays 40 units and their draft line
+  stays 18 px. `sheetHeight()` now takes the field for exactly this reason.
+
+### 2. The send button on the message input line
+
+- `ChatLayout::sendBtn`, at the right end of the CHAT draft line: exactly **30 x 26** (the ticket's
+  minimum), `sendBtn.right() = screen - kOskPad`, `y` and `h` equal to the draft line's. It is one
+  rectangle: `drawSendButton()` paints it and `sendButtonHit()` (inline in chat_layout.h) hits it.
+- The chat draft line grew to the button's 26 px (`kSendBtnH`; the editors keep `kOskDraftH` = 18), so
+  the button never overhangs the line. The sheet grows **8 px upward** only: the draft line's floor,
+  the four key rows and their y are unchanged, and the message band is 8 px shorter while the sheet
+  is open.
+- The draft plate shrank by the button plus one `kOskKeyGap`: 312 → **280 px**. `drawDraft()` is
+  unchanged and measures the tail inside that narrower plate, so the existing tail scroll still
+  works and text cannot run under the arrow.
+- The icon is drawn from primitives (a 2 px shaft and a solid triangular head), no font glyph. Bright
+  state: `kSelBg2` plate, `kAcc` edge, `kAccInk` arrow. Dim state: `kKeyBg` plate, `kKeyLine` edge,
+  `kDimmer` arrow. The EST-390 pressed tint is the shared overlay on `sendBtn`, exactly the hit rect;
+  a disabled button is no press target at all (no pressed look, no action).
+
+### 3. Empty and whitespace-only drafts
+
+`sendEnabled(const char*)` in chat_layout.h is the ONE rule: null, empty or only spaces/tabs/CR/LF =
+false. The drawing, `chatPressTarget()` and the shell all ask it. I also replaced `chatSend()`'s old
+`g_kbText[0] == 0` guard with this same call: without that, a draft of only spaces would have passed
+the old check and been sent from a dim button (the ticket says no action).
+
+### 4. One send door
+
+`ChatHit::SendDraft` is the only hit; `handleChatTap` calls `chatSendDraft()`, which every send
+already went through (channel, DM, reply are the same call; the wire text and the reply mention are
+untouched). Judgment call, please review: the **emoji page's own Send button is gone** (its
+`EmojiPadLayout::send`, `EmojiPadHit::send`, `ChatHit::EmojiSend` and the `kEmojiSendW` drawing/const
+were removed). Requirement 4 says the emoji page uses "this button", and the composer button stays
+visible on the emoji page above the grid; the Recent strip now has its right space free. Nothing else
+about sending changed (the same draft, budget, sounds, log lines and `g_kb.close()`).
+
+Judgment call 2, please review: the compose line shown with the keyboard CLOSED (the 27 px row at the
+bottom; `g.compose`/`g.field`) has **no** send button. The ticket names "the composer text line above
+the keyboard", which is the sheet's draft line; adding a 26 px button to the closed row would mean
+growing that row too, and tapping it still opens the keyboard (the existing door). If Filip wants the
+button on the closed row as well, it is a second rect with the same `sendEnabled()` and
+`chatSendDraft()`, one more small ticket.
+
+### Files
+
+- `src/ui/chat_layout.h`: `ChatLayout::sendBtn`, `sendEnabled()`, `sendButtonHit()`, the emoji page
+  loses `send` / `EmojiPadHit::send`.
+- `src/ui/chat_layout.cpp`: `sheetHeight(replying, field)`, the chat key rows, the draft line +
+  send button, `sendEnabled()`, emoji layout without Send.
+- `src/ui/theme.h`: `kSendBtnW` / `kSendBtnH` (30 / 26), `kKeyUnitSpaceChat` (62), removed
+  `kEmojiSendW`.
+- `src/ui/screen_chat.cpp`: `drawSendButton()`, drawing it on the draft line, `ChatHit::SendDraft`
+  in the hit test and the press target, emoji Send drawing gone.
+- `src/ui/screen_chat.h`: `ChatHit::SendDraft` replaces `EmojiSend`.
+- `src/main.cpp`: the `SendDraft` tap, `chatSend()` asks `sendEnabled()`.
+- `test/host/test_chat.cpp` and `test/host/test_est351.cpp`: the rows that pinned the old 6-key
+  bottom row and the old draft width follow the new layout.
+- `test/host/test_est406.cpp` (new), `test/host/run.sh` (BIN61).
+- `tools/mkest406.py` (new), `docs/shots/2026-11-11-est406-send-button.png` (preview).
+
+### Build and tests (real exit codes, this tree)
+
+- `pio run -e om_lite_l2`: **SUCCESS**, exit 0. **RAM 160,480 / 327,680 B (49.0 %; unchanged)**,
+  **Flash 2,993,433 / 6,553,600 B (45.7 %; before 2,993,097, +336 B)**, `firmware.bin` 2,993,792 B.
+  No warning in our files (the two RadioLib `#warning`s are pre-existing).
+- `test/host/run.sh`: **exit 0**, every suite green, **0 FAIL lines**, `est406` ran and passed.
+  - `test_est406.cpp` proves: no `KeyKind::Send` on any chat row of either page; the five-key bottom
+    rows and the space bar's 62 units; Backspace's exact pre-ticket rects on both pages (and the row
+    2 rectangles equal to the old arithmetic); the keys before the space within 1 px of the old row
+    and the row ending on the old right edge; the send button 30 x 26 at the line's right end, the
+    same rect on the 123 page and with a reply bar; the draft plate stopping before it (no overlap);
+    `sendButtonHit()` true on all four corners, the centre and a grid over the rect, false 1 px
+    outside and false on the text plate; no button on a closed sheet or on any editor field; and
+    `sendEnabled()` false for null / "" / spaces / tabs / CRLF and true for a letter, a dot, a UTF-8
+    accented letter and an emoji.
+  - `test_chat.cpp` and `test_est351.cpp` updated only where they pinned the old layout (row counts,
+    draft width, the chat sheet's height); `test_est351.cpp` now also proves the editors' sheet is
+    unchanged and the chat's key rows sit on the same y.
+
+### Preview
+
+`docs/shots/2026-11-11-est406-send-button.png`: two panels at 2x, the empty draft (dim grey arrow,
+"message" placeholder) and the draft "hello" (bright gold arrow, gold caret). Rectangles and colours
+are dumped from the firmware's own headers by a small C++ program the tool compiles; the keys are
+drawn with the same shapes as `drawKeyCap()`. DejaVu text, not the VLW faces; the status bar, header
+and the two invented messages ("Alice", "hello" - rule 9) are context only. It is not a screenshot.
+
+### What I could not check, and the device test
+
+- **No device.** Everything here is source, host tests and arithmetic. Please check on the glass:
+  1. Open the chat keyboard: the bottom row reads 123, emoji, comma, space, dot and the space bar is
+     about half the row. Backspace is where it was; the letters feel unchanged.
+  2. The draft line ends in a dim arrow; the placeholder "message" and the caret are not under it.
+  3. Type "hello": the arrow turns gold; the text stays left of it; a long draft scrolls its tail
+     inside the narrower plate.
+  4. Tap the gold arrow: the message sends, clears, the keyboard closes, the Sent sound plays, the
+     `[mc] UI send:` line is the same as before. Try a DM and a reply too.
+  5. Empty the draft (or type only spaces): the arrow is dim and tapping it does nothing at all
+     (no send, no sound, no log line).
+  6. Open the emoji page: no Send in its Recent strip, the composer arrow is still there and sends
+     the picked emoji.
+  7. Settings > a text editor: its keyboard still has the Send / OK key and its draft line is the
+     old full-width 18 px one.
+- The 8 px taller chat sheet is drawn upward into the message band; the newest message may be hidden
+  behind the sheet while it is open (it is a bottom sheet, so that is expected, but please confirm it
+  reads well).
+
+Next step: Claude flashes over USB OTA and takes the screenshot; the two judgment calls (emoji page's
+Send removed; no send button on the closed compose row) are the things to confirm with Filip. Nothing
+else is pending in this ticket.
+

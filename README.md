@@ -8,7 +8,7 @@ The L2 Pro has an ESP32-S3, an SX1262 LoRa radio, GPS, a 3.2" touch screen, a sp
 
 OM Lite is a handheld version of [OverMesh](https://github.com/Slofi/overmesh), our MeshCore dashboard.
 
-Status: work in progress. I use it every day on the Slovenian MeshCore mesh.
+Status: work in progress. It is my everyday carry (EDC) device.
 
 <p align="center">
   <img src="docs/shots/2026-11-10-1014-nodes-times.png" width="320" alt="Nodes list">

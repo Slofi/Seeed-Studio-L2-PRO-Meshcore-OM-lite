@@ -11,12 +11,16 @@ OM Lite is a handheld version of [OverMesh](https://github.com/Slofi/overmesh), 
 Status: work in progress. It is my everyday carry (EDC) device.
 
 <p align="center">
-  <img src="docs/shots/2026-11-10-1014-nodes-times.png" width="320" alt="Nodes list">
-  <img src="docs/shots/2026-11-10-1325-emoji-dm.png" width="320" alt="A direct message with emoji">
+  <img src="docs/shots/2026-11-11-nodes.png" width="320" alt="Nodes list">
+  <img src="docs/shots/2026-11-11-selector.png" width="320" alt="Chat with the channel list open">
 </p>
 <p align="center">
-  <img src="docs/shots/2026-11-10-1559-map-fixed.png" width="320" alt="Offline map">
-  <img src="docs/shots/2026-11-10-1401-settings-general.png" width="320" alt="Settings">
+  <img src="docs/shots/2026-11-11-map.png" width="320" alt="Offline map">
+  <img src="docs/shots/2026-11-11-map-tucked.png" width="320" alt="Map with the buttons and the bottom bar tucked away">
+</p>
+<p align="center">
+  <img src="docs/shots/2026-11-11-settings.png" width="320" alt="Settings, General tab">
+  <img src="docs/shots/2026-11-11-rptr.png" width="320" alt="Repeater scan with a new-node pop-up">
 </p>
 
 ## Features

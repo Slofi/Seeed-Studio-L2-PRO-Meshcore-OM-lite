@@ -81,4 +81,12 @@ uint32_t wifiSerial();
 // excluded (it is logged with its own duration), so this number answers "does Wi-Fi block the loop".
 uint32_t wifiServiceWorstUs();
 
+// --- HTTPS probe (EST-388) -----------------------------------------------------------------------
+// `https probe`: one GET to the game server with certificate validation on, for two facts: does the
+// TLS handshake fit in internal RAM on this unit, and how low does the internal heap go while it
+// runs. The command only records the request; wifiLoop() runs it (EST-350) in two polled phases plus
+// one bounded blocking exchange, then prints the `[https]` report line and the one `[cmd] ok` answer.
+// Returns nullptr when the probe was accepted, otherwise the reason word for the error line.
+const char* wifiHttpsProbeStart();
+
 }  // namespace om

@@ -18,6 +18,7 @@
 #include "frame_metrics.h"
 #include "history_store.h"
 #include "diag_logic.h"
+#include "https_probe.h"
 #include "map.h"
 #include "mem_stats.h"
 #include "msg_order.h"
@@ -1132,6 +1133,25 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       } else {
         snprintf(reply, cap, "[cmd] error advert radio not ready");
       }
+      return;
+    }
+
+    // EST-388: `https probe`, one measured HTTPS GET to the game server. Only Wi-Fi already connected
+    // is accepted (the ticket's refusal); the command starts nothing on this stack (EST-350), the
+    // lookup and the exchange run in wifiLoop() and print the `[https]` report line, then the one
+    // `[cmd] ok https probe` answer. The start line is deliberately NOT an answer, so tools/cmd.py
+    // keeps reading until the numbers are there (like `gps raw`).
+    case om::usb::Kind::Https: {
+      const char* why = om::wifiHttpsProbeStart();
+      if (why != nullptr) {
+        cmdError(reply, cap, why);
+        return;
+      }
+      snprintf(reply, cap,
+               "[https] probe start host=%s path=%s port=%u timeout_ms=%lu ca=isrg-root-x1 "
+               "(the report follows, one line)",
+               om::httpsprobe::kHost, om::httpsprobe::kPath, (unsigned)om::httpsprobe::kPort,
+               (unsigned long)om::httpsprobe::kTimeoutMs);
       return;
     }
 

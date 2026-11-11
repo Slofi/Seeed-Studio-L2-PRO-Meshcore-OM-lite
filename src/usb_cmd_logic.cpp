@@ -463,6 +463,25 @@ Command parseCommand(char* line) {
     return c;
   }
 
+  // EST-388: `https probe`, one closed form. The target (host, path, port) is firmware constants;
+  // no word here can name another server, another path or a query string. The measurement runs from
+  // the loop and prints its one report line when it is over.
+  if (strcmp(verb, "https") == 0) {
+    c.kind = Kind::Https;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "probe") != 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
+
   // EST-356: Bluetooth is read and switched from the host. Like `wifi`, the subcommand list is the
   // whole surface: there is deliberately no word that reads the pairing PIN back.
   if (strcmp(verb, "ble") == 0) {

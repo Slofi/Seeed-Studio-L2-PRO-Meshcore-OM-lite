@@ -402,6 +402,25 @@ static void testParseOthers() {
   CHECK(parse(q5).error != nullptr);
   char q6[] = "position gps";
   CHECK(parse(q6).error != nullptr);
+
+  // EST-388: `https probe`, exactly two words, and the target is a firmware constant. No word can
+  // name another host, another path or a query string, so a URL is not a command.
+  char r1[] = "https probe";
+  c = parse(r1);
+  CHECK(c.error == nullptr && c.kind == om::usb::Kind::Https && strcmp(c.target, "probe") == 0);
+  char r2[] = "https";
+  CHECK(parse(r2).error != nullptr);
+  char r3[] = "https get";
+  c = parse(r3);
+  CHECK(c.error != nullptr && strcmp(c.error, "args") == 0);
+  char r4[] = "https probe extra";
+  CHECK(parse(r4).error != nullptr);
+  char r5[] = "https probe https://example.org/";
+  CHECK(parse(r5).error != nullptr);
+  char r6[] = "https POST https://game.cl0.eu/api/v1/health";
+  CHECK(parse(r6).error != nullptr);
+  char r7[] = "probe";
+  CHECK(parse(r7).error != nullptr);
 }
 
 static void testRefusals() {

@@ -5,13 +5,20 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <esp_sntp.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
 #include <lwip/dns.h>
+#include <lwip/sockets.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509.h>
 #include <string.h>
 #include <sys/time.h>
 
 #include "ble_link.h"
+#include "https_probe.h"
+#include "https_probe_ca.h"
 #include "mem_stats.h"
 #include "ntp_plan.h"
 #include "ntp_sleep.h"
@@ -451,6 +458,309 @@ void pollNtp(uint32_t nowMs) {
   }
 }
 
+// --- EST-388: the HTTPS probe ------------------------------------------------------------------
+// One GET to the game server, certificate validation on, for the one question this device has never
+// answered: how much INTERNAL RAM does a TLS handshake need here. Nothing is tuned: if the handshake
+// dies for lack of memory, that IS the measurement and the report says so (`result=oom` plus the
+// mbedTLS code).
+//
+// Where it runs (EST-350): the command only records the request. wifiLoop() runs two polled phases
+// (the lwIP lookup, so no blocking DNS) and then ONE bounded blocking exchange: Arduino's
+// WiFiClientSecure::connect() is a single mbedTLS handshake call with no public way to step it, so
+// splitting it would mean writing a second TLS client. The whole probe is capped at 10 s by a
+// deadline, and it is a host-only diagnostic, so the screen may stall inside the exchange; the mesh
+// loop keeps its own core.
+//
+// Every path ends in httpsFinish(), which stops the sampler, takes the AFTER numbers and prints the
+// same fields, so five runs in a row compare like with like.
+static_assert(httpsprobe::kErrSslAllocFailed == MBEDTLS_ERR_SSL_ALLOC_FAILED,
+              "MBEDTLS_ERR_SSL_ALLOC_FAILED moved: update https_probe.h");
+static_assert(httpsprobe::kErrX509AllocFailed == MBEDTLS_ERR_X509_ALLOC_FAILED,
+              "MBEDTLS_ERR_X509_ALLOC_FAILED moved: update https_probe.h");
+
+httpsprobe::Report s_https;
+httpsprobe::Phase s_httpsPhase = httpsprobe::Phase::Idle;
+uint32_t s_httpsAttempt = 0;
+uint32_t s_httpsStartMs = 0;
+uint32_t s_httpsDnsStartMs = 0;
+// The lookup's answer, written in the tcpip thread and read once by the loop: 0 idle, 1 asked,
+// 2 ok, 3 failed. Same pattern as the NTP attempt's lookup above.
+volatile uint32_t s_httpsDnsState = 0;
+volatile uint32_t s_httpsDnsAddr = 0;
+// The low-water sampler: written by the esp_timer callback (its own task, core 0) while the loop is
+// stuck inside the handshake, read once after it.
+volatile uint32_t s_httpsLowInternal = 0;
+volatile uint32_t s_httpsLowLargest = 0;
+esp_timer_handle_t s_httpsTimer = nullptr;
+
+void httpsLowWaterSample(void*) {
+  const uint32_t freeNow = internalFreeBytes();
+  const uint32_t blockNow = internalLargestBlock();
+  if (freeNow < s_httpsLowInternal) s_httpsLowInternal = freeNow;
+  if (blockNow < s_httpsLowLargest) s_httpsLowLargest = blockNow;
+}
+
+// Created once at boot and kept: run 5 of the leak test then starts from the same heap as run 1.
+// The timer object is ~100 B and the esp_timer task already exists (IDF starts it); a FreeRTOS task
+// of our own would have cost 2 KB of the very RAM this probe measures.
+void httpsTimerInit() {
+  esp_timer_create_args_t args{};
+  args.callback = &httpsLowWaterSample;
+  args.arg = nullptr;
+  args.dispatch_method = ESP_TIMER_TASK;
+  args.name = "https-low";
+  args.skip_unhandled_events = true;
+  if (esp_timer_create(&args, &s_httpsTimer) != ESP_OK) {
+    s_httpsTimer = nullptr;
+    Serial.println("[https] low-water sampler unavailable: internal_min will equal internal_before");
+  }
+}
+
+void httpsDnsFound(const char* name, const ip_addr_t* addr, void* arg) {
+  (void)name;
+  (void)arg;
+  if (addr != nullptr && IP_IS_V4(addr) && !ip_addr_isany(addr)) {
+    s_httpsDnsAddr = ip4_addr_get_u32(ip_2_ip4(addr));
+    s_httpsDnsState = 2;
+  } else {
+    s_httpsDnsState = 3;
+  }
+}
+
+uint32_t httpsRemainingMs(uint32_t deadline) {
+  const int32_t left = (int32_t)(deadline - millis());
+  return left > 0 ? (uint32_t)left : 0;
+}
+
+// The socket EOF test the Arduino client does not offer: after a clean close_notify `_connected`
+// stays true and read() returns -1, so a zero-length MSG_PEEK on the socket is what tells "done"
+// from "no bytes yet".
+bool httpsSocketAtEof(int fd) {
+  if (fd < 0) return true;
+  char peek = 0;
+  const int r = recv(fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+  return r == 0;
+}
+
+// Ends the probe. One [https] report line for the numbers, then the one [cmd] answer line
+// tools/cmd.py waits for.
+void httpsFinish(const char* result, const char* stage, long err) {
+  if (s_httpsTimer != nullptr) esp_timer_stop(s_httpsTimer);
+  httpsprobe::Report& r = s_https;
+  r.result = result;
+  r.stage = stage;
+  r.err = err;
+  r.internalMin = s_httpsLowInternal;
+  r.largestMin = s_httpsLowLargest;
+  r.internalAfter = internalFreeBytes();
+  r.largestAfter = internalLargestBlock();
+  r.psramAfter = ESP.getFreePsram();
+  r.idfMinInternal = heap_caps_get_minimum_free_size(kInternalCaps);
+  if (r.totalMs == 0) r.totalMs = millis() - s_httpsStartMs;
+  char line[640];
+  httpsprobe::formatLine(line, sizeof(line), r);
+  Serial.println(line);
+  Serial.printf("[cmd] ok https probe %lu result=%s\n", (unsigned long)r.attempt, result);
+  s_httpsPhase = httpsprobe::Phase::Idle;
+}
+
+// Cancels a probe whose link went away (the exchange cannot outlive the loop pass it started in).
+void httpsProbeDrop(const char* why) {
+  if (s_httpsPhase == httpsprobe::Phase::Idle) return;
+  if (s_httpsTimer != nullptr) esp_timer_stop(s_httpsTimer);
+  s_httpsPhase = httpsprobe::Phase::Idle;
+  Serial.printf("[https] probe %lu dropped: %s\n", (unsigned long)s_httpsAttempt, why);
+}
+
+// The one blocking part. Everything it allocates is allocated after the BEFORE line and released
+// before the AFTER line (the WiFiClientSecure object is deleted, its stop() frees the mbedTLS
+// contexts, the cert and the 2 x 16 KB record buffers).
+void httpsExchange() {
+  httpsprobe::Report& r = s_https;
+  const uint32_t deadline = s_httpsStartMs + httpsprobe::kTimeoutMs;
+
+  r.internalBefore = internalFreeBytes();
+  r.largestBefore = internalLargestBlock();
+  r.psramBefore = ESP.getFreePsram();
+  r.ble = om::bleIsEnabled();
+  r.ntpActive = s_ntp.active() || esp_sntp_enabled();
+  s_httpsLowInternal = r.internalBefore;
+  s_httpsLowLargest = r.largestBefore;
+  if (s_httpsTimer != nullptr) esp_timer_start_periodic(s_httpsTimer, httpsprobe::kLowPeriodUs);
+
+  const IPAddress ip((uint32_t)s_httpsDnsAddr);
+
+  // 1. Plain TCP on its own connection: the transport time without TLS. It is measured separately
+  // because Arduino's secure connect() returns only after DNS + TCP + handshake, so conn/tls cannot
+  // be split any other way without a second TLS client. hs_ms = tls_ms - conn_ms is an estimate.
+  uint32_t budget = httpsRemainingMs(deadline);
+  if (budget == 0) {
+    httpsFinish("timeout", "tcp", 0);
+    return;
+  }
+  WiFiClient plain;
+  uint32_t t0 = millis();
+  const bool tcp = plain.connect(ip, httpsprobe::kPort, (int32_t)budget) == 1;
+  r.connMs = millis() - t0;
+  plain.stop();
+  if (!tcp) {
+    httpsFinish("connect", "tcp", 0);
+    return;
+  }
+
+  // 2. TLS + one GET + read.
+  WiFiClientSecure* client = new WiFiClientSecure();
+  if (client == nullptr) {
+    httpsFinish("alloc", "tls", 0);
+    return;
+  }
+  budget = httpsRemainingMs(deadline);
+  uint32_t secs = budget / 1000;
+  if (secs == 0) secs = 1;
+  client->setHandshakeTimeout(secs);
+  client->setTimeout(secs);
+  t0 = millis();
+  const bool tlsOk = client->connect(ip, httpsprobe::kPort, httpsprobe::kHost,
+                                     httpsprobe::kIsrgRootX1Pem, nullptr, nullptr) == 1;
+  r.tlsMs = millis() - t0;
+  if (!tlsOk) {
+    char text[96] = "";
+    const long err = client->lastError(text, sizeof(text));
+    client->stop();
+    delete client;
+    if (httpsprobe::isAllocFailure(err)) {
+      httpsFinish("oom", "tls", err);
+    } else if (err < -1) {
+      httpsFinish("tls", "tls", err);
+    } else {
+      httpsFinish("connect", "tls", err);
+    }
+    return;
+  }
+
+  char req[192];
+  const int reqLen = snprintf(req, sizeof(req),
+                              "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: om-lite/https-probe\r\n"
+                              "Accept: */*\r\nConnection: close\r\n\r\n",
+                              httpsprobe::kPath, httpsprobe::kHost);
+  const size_t wrote = client->write((const uint8_t*)req, (size_t)reqLen);
+  if (wrote != (size_t)reqLen) {
+    client->stop();
+    delete client;
+    httpsFinish("write", "request", 0);
+    return;
+  }
+
+  char buf[256];
+  char head[512];
+  size_t headLen = 0;
+  uint32_t body = 0;
+  bool inBody = false;
+  bool timedOut = false;
+  uint32_t lastData = millis();
+  while (true) {
+    if (httpsRemainingMs(deadline) == 0) {
+      timedOut = true;
+      break;
+    }
+    const int n = client->read((uint8_t*)buf, sizeof(buf));
+    if (n > 0) {
+      r.bytes += (uint32_t)n;
+      lastData = millis();
+      if (!inBody) {
+        const size_t take =
+            ((size_t)n < sizeof(head) - headLen) ? (size_t)n : sizeof(head) - headLen;
+        if (take > 0) {
+          memcpy(head + headLen, buf, take);
+          headLen += take;
+          if (r.status <= 0) r.status = httpsprobe::httpStatus(head, headLen);
+          const int end = httpsprobe::headerEnd(head, headLen);
+          if (end >= 0) {
+            inBody = true;
+            body = (uint32_t)(headLen - (size_t)end);
+          }
+        }
+      } else {
+        body += (uint32_t)n;
+      }
+      continue;
+    }
+    if (httpsSocketAtEof(client->fd())) break;
+    if (millis() - lastData >= httpsprobe::kReadIdleMs) break;
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
+  if (r.status <= 0) r.status = httpsprobe::httpStatus(head, headLen);
+  r.bodyBytes = inBody ? body : 0;
+  client->stop();
+  delete client;
+
+  if (timedOut) {
+    // The whole budget was spent: report the wall clock, not the last byte's timestamp.
+    httpsFinish("timeout", "read", 0);
+    return;
+  }
+  r.totalMs = lastData - s_httpsStartMs;
+  if (r.status > 0) {
+    httpsFinish("ok", "done", 0);
+  } else if (r.bytes > 0) {
+    httpsFinish("http", "read", 0);
+  } else {
+    httpsFinish("empty", "read", 0);
+  }
+}
+
+void pollHttpsProbe(uint32_t nowMs) {
+  switch (s_httpsPhase) {
+    case httpsprobe::Phase::Idle:
+      return;
+
+    case httpsprobe::Phase::Requested: {
+      s_https = httpsprobe::Report();
+      s_https.attempt = s_httpsAttempt;
+      s_httpsStartMs = nowMs;
+      s_httpsDnsStartMs = nowMs;
+      s_httpsDnsState = 0;
+      s_httpsDnsAddr = 0;
+      ip_addr_t addr;
+      const err_t err = dns_gethostbyname(httpsprobe::kHost, &addr, &httpsDnsFound, nullptr);
+      if (err == ERR_OK) {
+        if (IP_IS_V4(&addr) && !ip_addr_isany(&addr)) {
+          s_httpsDnsAddr = ip4_addr_get_u32(ip_2_ip4(&addr));
+          s_httpsDnsState = 2;
+        } else {
+          s_httpsDnsState = 3;
+        }
+      } else if (err == ERR_INPROGRESS) {
+        s_httpsDnsState = 1;
+      } else {
+        s_httpsDnsState = 3;
+      }
+      s_httpsPhase = httpsprobe::Phase::Dns;
+      Serial.printf("[https] probe %lu lookup %s %s\n", (unsigned long)s_httpsAttempt,
+                    httpsprobe::kHost, s_httpsDnsState == 2 ? "cached" : "asked");
+      return;
+    }
+
+    case httpsprobe::Phase::Dns: {
+      if (s_httpsDnsState == 2) {
+        s_https.dnsMs = nowMs - s_httpsDnsStartMs;
+        s_httpsPhase = httpsprobe::Phase::Connect;
+      } else if (s_httpsDnsState == 3) {
+        s_https.dnsMs = nowMs - s_httpsDnsStartMs;
+        httpsFinish("dns", "dns", 0);
+      } else if (nowMs - s_httpsDnsStartMs >= httpsprobe::kDnsTimeoutMs) {
+        s_https.dnsMs = nowMs - s_httpsDnsStartMs;
+        httpsFinish("dns", "dns", 0);
+      }
+      return;
+    }
+
+    case httpsprobe::Phase::Connect:
+      httpsExchange();
+      return;
+  }
+}
+
 void onAttemptFailed(const char* reason) {
   clearPendingPass();
   WiFi.disconnect(false, false);   // stop a late association after the timeout says failed
@@ -591,6 +901,7 @@ void startDriver(uint32_t nowMs) {
 
 void stopDriver() {
   ntpStop("driver down");
+  httpsProbeDrop("wifi off");
   clearPendingPass();
   s_autoActive = false;
   s_scanGate.driverDown();
@@ -617,6 +928,7 @@ void wifiBegin() {
   s_machine.reset();
   s_scanGate.reset();
   s_serial = 1;
+  httpsTimerInit();   // EST-388: one tiny timer for the probe's heap low-water mark
   // The radio itself is not touched here: the ESP32 boots with Wi-Fi off, and a switch that is off
   // must not allocate the driver at all. The first wifiLoop() applies a saved "on".
   Serial.printf("[wifi] off at boot: heap=%u psram=%u saved=%d switch=%s\n",
@@ -724,6 +1036,20 @@ NtpDns wifiNtpDns() {
 bool wifiNtpClientUp() { return esp_sntp_enabled(); }
 bool wifiNtpSleepOn() { return WiFi.getSleep() != WIFI_PS_NONE; }
 
+// --- HTTPS probe (EST-388) -----------------------------------------------------------------------
+// Only records the request: nothing blocks here, and no radio call happens on the USB command stack
+// (EST-350). wifiLoop() runs the lookup and the exchange, then prints the report and the answer.
+const char* wifiHttpsProbeStart() {
+  const char* why = httpsprobe::startRefusal(s_enabled && s_driverUp,
+                                            s_machine.status().phase == wifi::Phase::Connected,
+                                            s_httpsPhase != httpsprobe::Phase::Idle);
+  if (why != nullptr) return why;
+  ++s_httpsAttempt;
+  if (s_httpsAttempt == 0) s_httpsAttempt = 1;
+  s_httpsPhase = httpsprobe::Phase::Requested;
+  return nullptr;
+}
+
 void wifiLoop() {
   const uint32_t t0 = micros();
   const bool wasUp = s_driverUp;
@@ -820,9 +1146,12 @@ void wifiLoop() {
 
         case wifi::Phase::Connected: {
           if (WiFi.status() == WL_CONNECTED) {
+            // EST-388: the probe's polled phases and its one blocking exchange. Idle = one compare.
+            pollHttpsProbe(nowMs);
             pollNtp(nowMs);
           } else {
             ntpStop("link lost");
+            httpsProbeDrop("link lost");
             s_machine.failed("connection lost", nowMs);
             clearPendingPass();
             bump();

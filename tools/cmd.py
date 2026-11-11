@@ -24,6 +24,7 @@ import time
 MAGIC = b"OMCMD1"
 MAX_COMMAND = 300          # src/usb_frames.h kMaxCommandBytes
 ANSWER_TIMEOUT = 10.0      # the ticket's 10 s
+HTTPS_PROBE_TIMEOUT = 20.0 # EST-388: the probe's own 10 s budget plus the lookup and the loop
 
 
 def quote_arg(arg):
@@ -60,12 +61,16 @@ def answer_timeout(argv):
     """How long to wait for the answer line.
 
     `gps raw N` answers only when its N-second window closes: the start line is not an answer, so
-    the default 10 s would expire long before the diagnostic has printed anything useful."""
+    the default 10 s would expire long before the diagnostic has printed anything useful.
+    `https probe` (EST-388) answers after its own 10 s budget at most, plus the DNS phase; the host
+    must not give up at the device's own deadline."""
     try:
         if len(argv) == 3 and argv[0] == "gps" and argv[1] == "raw":
             seconds = int(argv[2])
             if seconds > 0:
                 return max(ANSWER_TIMEOUT, seconds + 5.0)
+        if len(argv) == 2 and argv[0] == "https" and argv[1] == "probe":
+            return max(ANSWER_TIMEOUT, HTTPS_PROBE_TIMEOUT)
     except (TypeError, ValueError):
         pass
     return ANSWER_TIMEOUT

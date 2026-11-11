@@ -6192,3 +6192,157 @@ further: `[gps] boot:` plus the two `gps raw 30` summaries settle it.
 
 ## 2026-11-11 11:18 (Claude): EST-387 reviewed
 - Reset table (reset only on power-on, brown-out, deep-sleep, unknown, or a line left asserted), the warm-boot path stages the level the line already has (no edge), PCAS04 not re-sent on a warm boot via onModuleWarmStart(). AID-INI built but kEnabled=false: field offsets written from memory, unverified; keep off until checked against the CASIC spec. Not on the device yet.
+
+## 2026-11-11 (DS, EST-388): `https probe`, how much internal RAM a TLS handshake needs
+Status: in_review (not committed, not pushed). Measurement only: nothing the user sees changes, and
+nothing is tuned.
+
+### A. What this run answers, and what it does not
+The ticket's number is the internal-RAM cost of one HTTPS GET to `game.cl0.eu` with certificate
+validation ON. The command now exists and reports it; the five device runs are Claude's (F below).
+This sandbox has no network and no device, so the handshake itself was NOT measured here. Two facts
+about the target are also unverified from here: that `game.cl0.eu` still chains to ISRG Root X1, and
+that its certificate matches the host name (the probe reports those as `result=tls err=...`).
+
+### B. The command, and where it runs (EST-350)
+- `https probe`, one closed form: no word carries a host, a path or a query, so the host can point
+  the probe nowhere else. Target: `game.cl0.eu`, `/api/v1/health`, 443, 10 s, from
+  `src/https_probe.h`.
+- The handler (`usb_commands.cpp`) only records the request. `wifiLoop()` runs it, never the USB
+  command stack: phase 1 starts the lwIP lookup with a callback (no blocking DNS), phase 2 polls it
+  (3 s cap), phase 3 does the exchange. The handler answers with the data line
+  `[https] probe start host=... path=... port=443 timeout_ms=10000 ca=isrg-root-x1`, then the loop
+  prints `[https] probe N lookup ...`, the report line and one `[cmd] ok https probe N result=...`.
+  `tools/cmd.py` waits 20 s for this command (its own budget is 10 s) and the start line is not an
+  answer line, like `gps raw`.
+- Refusals: `wifi off`, `wifi not connected`, `https busy`. A link that drops while the probe is
+  queued cancels it (`[https] probe N dropped: link lost`).
+- The one blocking call, and its justification: Arduino's `WiFiClientSecure::connect()` is DNS +
+  TCP + one `mbedtls_ssl_handshake()` call, with no public way to step it, so the exchange holds the
+  loop task until it ends (bounded by the 10 s deadline; the connect timeout is the remaining budget,
+  `setHandshakeTimeout()` the same). Splitting it means writing a second TLS client, which is not a
+  measurement ticket. The screen and MeshCore's RX may stall for the length of a probe; it is a
+  host-only diagnostic, and the alternative (a private task) would cost 4 to 8 KB of internal RAM
+  and pollute the number being measured. The loop task has 16 KB of stack; the probe adds about
+  1 KB of frames plus mbedTLS's own.
+
+### C. What is measured, and what "lowest during" means here
+One report line, every number the ticket names:
+`[https] probe N result=... stage=... status=... bytes=... body=... dns_ms=... conn_ms=...
+tls_ms=... hs_ms=... total_ms=... err=... internal_before=... internal_min=... internal_after=...
+largest_before=... largest_min=... largest_after=... psram_before=... psram_after=...
+idf_min=... ble=on|off ntp_active=0|1`.
+- `conn_ms` is a plain-TCP connect on its OWN connection to port 443 (no TLS), measured just before
+  the real one; `tls_ms` is the secure connect (TCP + handshake, no DNS); `hs_ms` is `tls_ms -
+  conn_ms`, an ESTIMATE from two connections, printed signed. Arduino returns only the sum, so this
+  is the closest split without a custom client.
+- `internal_min` / `largest_min` come from a 2 ms sampler, an `esp_timer` created once in
+  `wifiBegin()` and started only for the exchange: the handshake is one blocking call, so only a
+  second context can see the bottom. The timer is created at boot, not per probe, so run 5 starts
+  from the same heap as run 1. `idf_min` is `heap_caps_get_minimum_free_size(INTERNAL|8BIT)` after
+  the probe, i.e. IDF's all-time low since boot; it can be LOWER than `internal_before` from an
+  earlier moment (a BLE start, for example), which is why the sampled `internal_min` is the "during"
+  number and `idf_min` is the cross-check.
+- Caps are `MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT`, the same mask as `status`/`wifi status`
+  (`mem_stats.h`), so the numbers compare with the ones already in PROGRESS.
+- `ble=` says whether Bluetooth is on at the exchange (`bleIsEnabled()`); `ntp_active=` says an SNTP
+  attempt was in flight (it is not refused, it is recorded, so a noisy run can be spotted).
+- Certificate validation: pinned ISRG Root X1 (`src/https_probe_ca.h`, PEM, SHA-256 96:BC:EC:06:...).
+  The ticket allowed the built-in x509 bundle instead; on Arduino core 2.0.17 the bundle path
+  (`WiFiClientSecure::setCACertBundle`) needs a bundle binary the application supplies and nothing
+  in this tree supplies it (read in the framework's `esp_crt_bundle.c`), so pinning one root is both
+  the available and the quieter choice (one 2 KB PEM parse instead of a search over 136 roots).
+  `test_est388.py` decodes the PEM and checks that exact fingerprint. Note for the report: this
+  build has `CONFIG_MBEDTLS_HAVE_TIME_DATE` OFF, so mbedTLS checks the chain, signatures and the host
+  name but NOT certificate dates; that is a fact about the stack, not a change made here.
+- Freed after every run: `client->stop()` and `delete` free the mbedTLS contexts and the two 16 KB
+  record buffers, the plain client closes its socket, the read buffers are stack. The 5-run test
+  compares `internal_after` and `psram_after` for exactly this.
+
+### D. The mbedTLS levers that would move buffers to PSRAM (the ticket's item 3)
+Read from this core's own `tools/sdk/esp32/sdkconfig` and `mbedtls/port/include/mbedtls/esp_config.h`
+(Arduino core 2.0.17, IDF 4.4):
+1. `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC` (now internal: `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y`): makes
+   mbedTLS's allocator use PSRAM. The allocator is `esp_mbedtls_mem_calloc` in the PREBUILT
+   `libmbedcrypto.a`; objdump of that object shows the caps literal `0x00000804`
+   (`MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT`) compiled in. So: compile-time only, needs rebuilt IDF
+   libraries; not settable from `platformio.ini`, a `-D` or code. (PSRAM is in the heap here:
+   `CONFIG_SPIRAM_USE_MALLOC=y`, `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096`, but that threshold only
+   affects plain `malloc()`, and mbedTLS never goes through it on this build.)
+2. `CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN` (16384) and `CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN` (off):
+   the two record buffers are 16 KB + 16 KB of internal RAM. Setting 4096, or asymmetric (e.g.
+   1024 in / 4096 out), is the biggest single lever (32 KB down to 5 KB). Compile-time in the same
+   prebuilt libraries: needs rebuilt libs, not settable today.
+3. `CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH` (off) plus `mbedtls_ssl_conf_max_frag_len()`: would
+   shrink the buffers at runtime to the negotiated fragment length.
+   `MBEDTLS_SSL_MAX_FRAGMENT_LENGTH` IS compiled in, but the variable-buffer option is not, and
+   `WiFiClientSecure` does not expose `ssl_conf`, so it needs both a rebuilt library and a custom
+   client.
+4. `CONFIG_MBEDTLS_DYNAMIC_BUFFER` (frees the in/out buffers after the handshake): not present in
+   this IDF build's sdkconfig, so not available at all here.
+5. Not an mbedTLS setting, but the one hook that needs no rebuilt library: a linker wrap
+   (`-Wl,--wrap=esp_mbedtls_mem_calloc` plus `__wrap_esp_mbedtls_mem_calloc` allocating with
+   `MALLOC_CAP_SPIRAM`) redirects every mbedTLS allocation. It is a build-flag change, but it is
+   tuning and it changes cipher speed, so it stays out of this ticket; noted for a later decision.
+Nothing in 1 to 4 is settable on this stack without rebuilding the prebuilt mbedTLS/Arduino
+libraries; therefore this ticket measures the handshake AS IT IS, which is what the ticket asks.
+
+### E. Build and host tests
+- Build (`pio run -e om_lite_l2`), real exit code 0. RAM **160,120 B** of 327,680 (48.9 %; 159,024
+  before, **+1,096 B**); flash **2,977,089 B** of 6,553,600 (45.4 %; 2,835,921 before, **+141,168 B**).
+  The flash delta is the finding worth reading twice: the PEM is only 1.9 KB. The TLS code itself is
+  the cost: in the linked ELF the mbedTLS symbols sum to about 102 KB today against about 29 KB in
+  the 09:27 review build (a different tree, so an estimate), WiFiClientSecure's own three objects are
+  about 12 KB of .text, and ssl_client.cpp's name check pulls in some of the C++ string code. The
+  built-in 136-root bundle is NOT linked (no `_binary_x509_crt_bundle` symbol; checked). Carrying
+  this TLS client costs about 141 KB of flash on this build; the ticket's WHY deserves that number
+  as much as the RAM one.
+- `test/host/run.sh`: exit 0, every suite green.
+- New `test_est388.cpp`: the fixed target (host, path, 443, 10000 ms, the DNS and idle caps inside
+  it), the three refusal words and the accepted case, the HTTP status line (200/404/503/204/418, a
+  partial line, a bad prefix, a bad version, a four-digit "2000" that must not pass, the first status
+  winning over a second one), the header terminator (CRLF and bare LF, an unterminated header, the
+  empty line at the buffer's end), the two mbedTLS allocation codes and four errors that must not
+  classify as OOM, and the report line field by field (a negative `hs_ms`, a 32-byte buffer
+  truncation, a null buffer).
+- New `test_est388.py`: decodes the embedded PEM and checks its SHA-256 is ISRG Root X1, no private
+  key, the report format keeps every ticket field, the parser's https block accepts exactly `probe`
+  and no URL literal, the start line is not an answer line, and rule 9 (no coordinate or secret in
+  the new files).
+- `test_cmd.py` and `test_usb_cmd.cpp` grew the `https probe` cases (the 20 s answer window, the
+  parser cases, the refused spellings).
+
+### F. Device test for Claude (the ticket's plan; indoors, Wi-Fi on)
+1. Flash this build, `tools/cmd.py wifi on`, wait for `connected`, then `tools/cmd.py https probe`.
+   The first line is `[https] probe start ...`, then `[https] probe 1 lookup ...`, then one
+   `[https] probe 1 ...` line and one `[cmd] ok https probe 1 result=...`.
+2. BLE OFF: run `https probe` five times, keep the five `[https]` lines. Compare `internal_after`,
+   `largest_after` and `psram_after` across the five: equal values are the no-leak proof. Run 1 may
+   show a larger `dns_ms` (cold lookup); `conn_ms`/`tls_ms`/`total_ms` show the network jitter.
+3. `tools/cmd.py ble on`, wait until Bluetooth reports advertising, then five more `https probe`
+   runs. The interesting comparison: `internal_before` (lower with BLE up, the ticket's ~65 KB),
+   `internal_min` (the handshake's own bottom) and whether `result=ok`.
+4. If a run says `result=oom` (`err=-32512` or `err=-10368`), that IS the answer: the handshake does
+   not fit with that much internal RAM free. Do not tune; send the line.
+5. Also paste `wifi status` and `ble status` before the first run (their `internal`/`largest` are the
+   baseline) and the heartbeat `stack=` after a probe (the exchange's own stack high-water mark).
+
+### G. Could not check (no device, no network here)
+- Whether `game.cl0.eu` still chains to ISRG Root X1 and presents a matching name. If the device says
+  `result=tls` with an X509 error, the first check is the chain, not the RAM.
+- The real numbers: `internal_min`, the handshake time and whether the 10 s budget is enough.
+- That the 2 ms sampler catches the true bottom. It samples the same counters IDF itself keeps, and
+  `idf_min` (exact, all-time) is printed beside it, so a miss would show as `idf_min < internal_min`;
+  that would make `idf_min` the answer for that run, at the cost of possibly including an earlier low.
+- That the mbedTLS allocation-failure codes arrive as `MBEDTLS_ERR_SSL_ALLOC_FAILED` on this IDF: the
+  device build static_asserts the two numbers against the real macros, so a silent change fails the
+  build rather than producing a wrong result word.
+
+### H. Next step
+Claude reviews the diff, flashes, and runs F2 and F3 (five runs each). The two headlines for Filip
+should be: internal free at the handshake's bottom with BLE off and with BLE on, and the fact that a
+TLS client adds about 141 KB of flash to this build.
+
+
+## 2026-11-11 11:44 (Claude): EST-388 built; its pinned CA does not match the server
+- Build + tests green (RAM 160,120 B, flash 2,977,089 B: +~147 KB for TLS). The pinned ISRG Root X1 is correct (SHA-256 96:BC:EC:06:...), but game.cl0.eu serves the newer Let's Encrypt chain leaf -> YE1 -> Root YE -> ISRG Root X2 (openssl s_client from TestBox, verify 0). With only X1 pinned the probe would fail on the certificate and look like a memory failure -> EST-389 pins X1 + X2. Not on the device.

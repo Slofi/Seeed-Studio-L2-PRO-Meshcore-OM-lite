@@ -74,7 +74,8 @@ BIN43="$(mktemp /tmp/om-lite-est384.XXXXXX)"
 BIN44="$(mktemp /tmp/om-lite-ntp.XXXXXX)"
 BIN45="$(mktemp /tmp/om-lite-est386.XXXXXX)"
 BIN46="$(mktemp /tmp/om-lite-est387.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46"' EXIT
+BIN47="$(mktemp /tmp/om-lite-est388.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -421,3 +422,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est386.cpp -o "$BIN45
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est387.cpp \
   ../../src/timekeeper.cpp -o "$BIN46"
 "$BIN46"
+
+# EST-388: the HTTPS probe's pure parts. The one target (game.cl0.eu, /api/v1/health, 443, 10 s), the
+# three refusal words (wifi off / wifi not connected / https busy), the HTTP status line as it arrives
+# in pieces, the header terminator (CRLF and bare LF), the mbedTLS out-of-memory codes, and the one
+# report line the five device runs are compared by (every field, a negative hs_ms, truncation safe).
+# The python part decodes the embedded PEM and checks it is ISRG Root X1 by its SHA-256.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est388.cpp -o "$BIN47"
+"$BIN47"
+python3 -B test_est388.py

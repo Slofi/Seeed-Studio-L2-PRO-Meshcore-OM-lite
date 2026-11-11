@@ -58,6 +58,9 @@ class FrameTest(unittest.TestCase):
         # EST-383: the `gps raw` start line is data, not an answer; the window's final line is.
         self.assertFalse(cmd.is_answer(b"[gpsraw] start secs=30\n"))
         self.assertTrue(cmd.is_answer(b'[cmd] ok gps raw secs=30 types="GNRMC:30" zda=1 bad=0\n'))
+        # EST-388: the probe's start line is data too; only the report's closing line is the answer.
+        self.assertFalse(cmd.is_answer(b"[https] probe start host=game.cl0.eu path=/api/v1/health\n"))
+        self.assertTrue(cmd.is_answer(b"[cmd] ok https probe 1 result=ok\n"))
 
     def test_answer_timeout(self):
         self.assertEqual(cmd.answer_timeout(["status"]), cmd.ANSWER_TIMEOUT)
@@ -65,6 +68,11 @@ class FrameTest(unittest.TestCase):
         self.assertEqual(cmd.answer_timeout(["gps", "raw", "120"]), 125.0)
         self.assertEqual(cmd.answer_timeout(["gps", "raw"]), cmd.ANSWER_TIMEOUT)
         self.assertEqual(cmd.answer_timeout(["gps", "raw", "x"]), cmd.ANSWER_TIMEOUT)
+        # EST-388: the device may sit out its whole 10 s budget, so the host must wait longer.
+        self.assertEqual(cmd.answer_timeout(["https", "probe"]), cmd.HTTPS_PROBE_TIMEOUT)
+        self.assertGreater(cmd.HTTPS_PROBE_TIMEOUT, 10.0)
+        self.assertEqual(cmd.answer_timeout(["https"]), cmd.ANSWER_TIMEOUT)
+        self.assertEqual(cmd.answer_timeout(["https", "probe", "x"]), cmd.ANSWER_TIMEOUT)
 
 
 class FakeDevice:

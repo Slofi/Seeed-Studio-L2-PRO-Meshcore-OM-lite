@@ -868,24 +868,45 @@ static bool usbPdMeasureAttempt(uint8_t* readBack, char* why, size_t whyCap) {
   return true;
 }
 
+// EST-402: whether the boot brought the measure block up. STATUS0's VBUSOK is only meaningful once
+// the POWER write has been read back with its three bits, so this stays false on any failure and the
+// charging bolt is never drawn (unknown = no bolt).
+static bool s_usbPdReady = false;
+
 void usbPdPowerBegin() {
   uint8_t readBack = 0;
   char why[64];
-  if (usbPdMeasureAttempt(&readBack, why, sizeof(why))) {
-    Serial.printf("[pmu] measure block on (POWER=0x%02X)\n", readBack);
-    return;
+  bool ok = usbPdMeasureAttempt(&readBack, why, sizeof(why));
+  if (!ok) {
+    // One more try: a chip that shares the 3.3 V rail can miss the first exchange right after boot.
+    Serial.printf("[pmu] measure block not ready (%s), retrying\n", why);
+    delay(20);
+    ok = usbPdMeasureAttempt(&readBack, why, sizeof(why));
   }
-  // One more try: a chip that shares the 3.3 V rail can miss the first exchange right after boot.
-  Serial.printf("[pmu] measure block not ready (%s), retrying\n", why);
-  delay(20);
-  if (usbPdMeasureAttempt(&readBack, why, sizeof(why))) {
+  s_usbPdReady = ok;
+  if (ok) {
     Serial.printf("[pmu] measure block on (POWER=0x%02X)\n", readBack);
     return;
   }
   Serial.printf("[pmu] measure block FAILED (%s)\n", why);
+  // EST-402 item 4, said ONCE at boot: the chip did not answer or the POWER write was not verified,
+  // so VBUSOK is not a signal this build can trust. The bar stays exactly as it is today.
+  Serial.println("[pmu] charging bolt off (power flag unknown)");
 }
 
+bool usbPdReady() { return s_usbPdReady; }
+
 bool usbPdStatus0(uint8_t* out) { return usbPdReadRegister(diag::kRegStatus0, out); }
+
+// EST-402: the 2 s poll's one decode. usbPdStatus0() is a read (the register pointer is the only
+// byte sent); a failed read is "unknown", never "no cable".
+bool usbPdVbusPresent(bool* present) {
+  if (present == nullptr) return false;
+  uint8_t status0 = 0;
+  if (!usbPdStatus0(&status0)) return false;
+  *present = diag::status0VbusOk(status0);
+  return true;
+}
 
 // ---------------------------------------------------------------------------- GNSS
 

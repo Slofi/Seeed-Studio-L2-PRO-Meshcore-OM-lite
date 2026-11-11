@@ -33,6 +33,10 @@ struct StatusModel {
   bool wifi = false;        // EST-354: the Wi-Fi switch is on (icon present)
   bool wifiConnected = false;   // ...and associated: the icon is ink, otherwise dim
   RadioFault fault = RadioFault::None;   // the red mark; None draws nothing
+  // EST-402: external USB power is present, so the battery icon carries the gold bolt. The shell
+  // supplies the DEBOUNCED flag; false covers both "no cable" and "unknown", because unknown must
+  // never draw a bolt (the rule lives in charge_state.h and is tested there).
+  bool externalPower = false;
 };
 
 struct RowModel {

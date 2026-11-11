@@ -125,6 +125,16 @@ void usbPdPowerBegin();
 // failed, which the log must record as "unknown", never as "no cable".
 bool usbPdStatus0(uint8_t* out);
 
+// EST-402: did the boot bring the measure block up? True only when the chip answered at 0x22, the
+// POWER write was verified by a read-back, and STATUS0's VBUSOK therefore means something. False
+// latches "unknown" for the charging bolt: the bar never shows it, whatever a later read says.
+bool usbPdReady();
+
+// EST-402: one STATUS0 read for the charging bolt, decoded to "VBUSOK is set". Returns false when
+// the read failed; *present is then untouched/meaningless, and the caller must treat it as unknown,
+// never as "no cable". This is a read-only helper: the register pointer is the only byte sent.
+bool usbPdVbusPresent(bool* present);
+
 // EST-376: the ADS1115's four single-ended inputs in ADC mV at the pin (the cell's x2 divider is
 // applied only by batteryMilliVolts()). AIN1, AIN2 and AIN3 are read first and AIN0 LAST, so the
 // conversion register and the sense rail are left exactly as a battery read leaves them.

@@ -15,6 +15,7 @@
 #include "audio.h"
 #include "ble_link.h"
 #include "board.h"
+#include "charge_state.h"   // EST-402: the charging bolt's two-read debounce and its unknown rule
 #include "crash_report.h"
 #include "map.h"
 #include "mesh_link.h"
@@ -277,6 +278,9 @@ static om::MeshDm* g_dmScratch = nullptr;   // PSRAM, allocUiBuffers()
 static bool g_sdOk = false;
 static uint16_t g_packMb = 0;
 static uint16_t g_battMv = 0;
+// EST-402: the charging bolt's debounced state. buildStatus() reads bolt(); the loop feeds it one
+// STATUS0 read every kChargePollMs. Unknown (a chip that did not answer at boot) never shows a bolt.
+static om::ChargeBolt g_chargeBolt;
 static om::GpsState g_gps;
 // This firmware's build time (UTC), used only as the floor's seed in timeKeeper().begin(). It is NOT
 // a timestamp cut-off any more: that moves at every flash and turned every node into "--" (EST-333).
@@ -648,6 +652,8 @@ static void buildStatus(om::ui::StatusModel& s) {
   s.gpsHeard = g_gps.heardTotal;  // the one GPS number on the glass
   s.gpsTalked = g_gps.sentences > 0;
   s.batteryPct = batteryPercent(g_battMv);
+  // EST-402: the bolt is the DEBOUNCED external-power flag, false for "absent" AND for "unknown".
+  s.externalPower = g_chargeBolt.bolt();
   // The status icons that appear only when they are on. Wi-Fi (EST-354): present when the switch is
   // on, ink once the station has an IP and dim while it does not. Bluetooth (EST-356): present when
   // the switch is on, ink with a phone connected, dim while advertising, absent when off.
@@ -4994,6 +5000,10 @@ void setup() {
   g_boardOk = om::boardBegin();
   g_fade.reset(om::kScreenBrightness);   // boardBegin lit the panel already
   Serial.printf("[om] board: %s\n", g_boardOk ? "ok" : "FAILED");
+  // EST-402: the bolt's state machine starts from what the boot achieved. A chip that did not answer
+  // or a POWER write that was not verified latches "unknown", so no bolt is ever drawn; board.cpp
+  // prints that one line. The first two equal reads are what may raise it.
+  g_chargeBolt.begin(om::usbPdReady());
   om::useAppFont(om::om_display());   // the app font is the default everywhere
   om::omFrameInit();
   om::radio::begin(millis());   // EST-365: the noise window and the loop histogram start clean
@@ -5923,6 +5933,23 @@ void loop() {
   // Everything below draws an ordinary, in-page frame; while a change is running the light and the
   // frame belong to it (redrawCurrentScreen has the same rule for the toast and the clock paths).
   const bool uiDrawOk = screenOn && !g_change.active();
+
+  // EST-402: the charging bolt's one source. Every kChargePollMs (2 s) ONE read of STATUS0 (0x40),
+  // no write, decoded to VBUSOK and fed to the two-read debounce. A failed read is Unavailable
+  // (unknown), never "no cable". The flag only changes the bar, so a state change asks for one
+  // repaint; with the controller not ready at boot nothing is read and nothing can raise a bolt.
+  {
+    static uint32_t lastVbusPoll = 0;
+    if (g_chargeBolt.controllerReady() && millis() - lastVbusPoll >= om::kChargePollMs) {
+      lastVbusPoll = millis();
+      bool present = false;
+      const bool answered = om::usbPdVbusPresent(&present);
+      const om::VbusRead read =
+          !answered ? om::VbusRead::Unavailable
+                    : (present ? om::VbusRead::Present : om::VbusRead::Absent);
+      if (g_chargeBolt.sample(read) && uiDrawOk) redrawCurrentScreen();
+    }
+  }
 
   // EST-367: the chat open's own step. The tap only marked the chat; the newest page of that chat's
   // log is read HERE, on the loop task, so a slow card never sits inside the gesture. The numbers are

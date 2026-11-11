@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "ui/badge_font.h"
+#include "ui/battery_bolt.h"   // EST-402: the bolt's pixel rows, shared with the preview
 #include "ui/emoji.h"
 #include "ui/emoji_table.h"
 #include "ui/fonts.h"
@@ -37,16 +38,44 @@ void drawSignalBars(lgfx::LovyanGFX* d, int x, int bottom, int rssi) {
   }
 }
 
-void drawBattery(lgfx::LovyanGFX* d, int x, int cy, int pct) {
+// EST-402: the charging bolt. Gold is the theme's one accent, but gold on the green fill measures
+// about 1.1:1, so every row inside the icon gets a 1 px kBar edge: expanding the run one pixel left
+// and right and one row above and below is exactly a 1 px dilation, and the gold rows are drawn
+// afterwards over its middle. The two outer rows sit on the icon's own outline and need no edge.
+//
+// It means "external power is present" and nothing more. The cell voltage stays at about 4.19 V both
+// while charging and once full, and BC_LVL is the port's claim, not proof, so this build makes NO
+// "charging" vs "full" guess (EST-402 item 3; the rule is charge_state.h).
+void drawBolt(lgfx::LovyanGFX* d, int x, int y) {
+  const int bx = x + (kBattW - kBoltW) / 2;
+  for (int r = 0; r < kBoltH; ++r) {
+    if (r == 0 || r == kBoltH - 1) continue;   // the outer rows sit on the icon's outline
+    const int hx = bx + kBoltRuns[r].x - 1;
+    const int hw = kBoltRuns[r].w + 2;
+    const int hy = (r == 1) ? y + 1 : y + r - 1;
+    const int hh = (r == 1 || r == kBoltH - 2) ? 2 : 3;
+    d->fillRect(hx, hy, hw, hh, kBar);
+  }
+  for (int r = 0; r < kBoltH; ++r) {
+    d->fillRect(bx + kBoltRuns[r].x, y + r, kBoltRuns[r].w, 1, kAcc);
+  }
+}
+
+void drawBattery(lgfx::LovyanGFX* d, int x, int cy, int pct, bool externalPower) {
   const int y = cy - kBattH / 2;
   d->drawRect(x, y, kBattW, kBattH, kDim);
   d->fillRect(x + kBattW, y + 2, 2, kBattH - 4, kDim);
-  if (pct < 0) return;
-  int fill = (kBattW - 2) * (pct > 100 ? 100 : pct) / 100;
-  if (fill < 0) fill = 0;
-  if (fill == 0) return;
-  const uint16_t c = (pct <= 15) ? kBad : (pct <= 30 ? kWarn : kGreen);
-  d->fillRect(x + 1, y + 1, fill, kBattH - 2, c);
+  if (pct >= 0) {
+    int fill = (kBattW - 2) * (pct > 100 ? 100 : pct) / 100;
+    if (fill < 0) fill = 0;
+    if (fill > 0) {
+      const uint16_t c = (pct <= 15) ? kBad : (pct <= 30 ? kWarn : kGreen);
+      d->fillRect(x + 1, y + 1, fill, kBattH - 2, c);
+    }
+  }
+  // The bolt is drawn even when the percentage is unknown: the port controller can answer before the
+  // ADC has a reading, and "external power present" does not depend on the level.
+  if (externalPower) drawBolt(d, x, y);
 }
 
 // Blend a foreground RGB565 colour over a known background by a 0..255 coverage value. The widget
@@ -366,7 +395,8 @@ void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m) {
   // RIGHT, from the right edge: gear, battery (percent then icon), GPS, then the optional icons.
   drawGear(d, rects.gear, kDim, kBar);
   drawTextRight(d, FontRole::MonoStatus, kDim, kBar, rects.battText.right(), cy, pct);
-  drawBattery(d, rects.battIcon.x, cy, m.batteryPct);
+  // EST-402: the bolt is inside the icon; the percentage is unchanged and stays where it is.
+  drawBattery(d, rects.battIcon.x, cy, m.batteryPct, m.externalPower);
   // ONE GPS number: the satellites heard right now, dim while searching and in kGreen with a fix
   // (the fix is the colour, not a second number), "GPS --" when the module never talked.
   const uint16_t gpsColour = cell.valid ? kGreen : kDim;

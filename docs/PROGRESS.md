@@ -7854,3 +7854,95 @@ bolt (a status-bar icon plus "charging" vs "full" from the voltage trend) has so
 - Nothing in the UI changed: no bolt, no icon, no string. The status bar and the screens do not read the new columns.
 - Next step (after the device test says the signal is real): the bolt in the status bar, with "charging" only when
   the cell voltage is also rising (and `bc_lvl` as the port's claim, never as proof).
+
+## 2026-11-11 19:51 (DS, EST-402): L2 Pro firmware, the charging bolt in the status bar (step 2)
+
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). Step 2 of the charging bolt. The signal was proven on the device on
+2026-11-11 19:26-19:33 (Claude + Filip, battery log): on battery vbus=0 (4150 -> 4148 mV), on a
+power-only 100 W charger vbus=1 (4188-4190 mV), on USB to the PC vbus=1; AIN1..AIN3 did not move.
+STATUS0 (0x40) bit 7 VBUSOK is the one signal, and it means "external power is present", nothing more.
+
+### 1. The poll: one read of 0x40 every 2 s, two equal reads decide
+
+- `src/charge_state.h` (new, plain C++): `kChargePollMs = 2000`, `VbusRead {Absent, Present,
+  Unavailable}`, `VbusState {Unknown, Absent, Present}`, and `ChargeBolt`. `sample()` adopts a new
+  value only after TWO equal reads in a row (`streak_ < 2`); one bad read neither raises nor drops
+  the bolt.
+- `main.cpp`: `g_chargeBolt.begin(om::usbPdReady())` in setup; the loop calls
+  `om::usbPdVbusPresent(&present)` when the 2 s gate is due and feeds Present / Absent /
+  Unavailable. One read, no write. A failed read is Unavailable, never "no cable". A state change
+  asks for one repaint (`redrawCurrentScreen()`), and only when the screen is on and no change owns
+  the frame.
+- `board.cpp/.h`: `usbPdReady()` returns the boot result; `usbPdVbusPresent()` decodes STATUS0
+  through the existing `usbPdStatus0()` read and `diag::status0VbusOk()`. No new I2C transmission
+  exists: test_est401.py still finds exactly one write to 0x22 (POWER) and one read block.
+
+### 2. Unknown is no bolt, logged once
+
+`usbPdPowerBegin()` now keeps its result in a static (`s_usbPdReady = ok`, after the one retry and
+only when the read-back carries the three PWR bits). If the chip did not answer or the POWER write
+was not verified, `begin(false)` latches Unknown forever: the loop does not even read, and no sample
+can raise a bolt. The failure branch prints one line, `[pmu] charging bolt off (power flag unknown)`;
+there is no second copy (the source test counts it across `src/`). A poll read that fails mid-run is
+Unknown too: two consecutive failures drop the bolt, and this build does not log that episode (only
+the boot failure is logged, as the ticket asks).
+
+### 3. The drawing: a 5 x 7 gold bolt inside the battery icon
+
+- `theme.h`: `kBoltW = 5`, `kBoltH = 7` (the icon's own height), centred on the 16 px battery.
+- `ui/battery_bolt.h` (new): the seven pixel runs (2,2,2,5,2,2,2 px), one source for the panel and
+  the preview. Integer `fillRect` rows, so it is crisp at 1:1; no anti-aliased mask.
+- `ui/widgets.cpp` `drawBolt()`: gold `kAcc` rows. Gold on the green fill measures about 1.1:1, so
+  each interior row gets a 1 px `kBar` edge (the run expanded 1 px sideways and 1 row up/down is a
+  1 px dilation) and the gold is drawn over it. The two outer rows sit on the icon's outline. This
+  stays readable on `kGreen`, `kWarn` and `kBad`, and on the empty fill when the level is low.
+- `drawBattery()` now takes `bool externalPower`; the bolt is drawn even when the percentage is
+  unknown (the port can answer before the ADC reads). The percentage and every rectangle are
+  unchanged: `statusBarRects()` was not touched, so nothing moves and no tap target changes.
+- The code comment says it: external power present, NOT "charging vs full". The cell stays about
+  4.19 V in both states and BC_LVL is the port's claim, so no guess is made (ticket item 3).
+
+### Files
+
+- `src/charge_state.h` (new), `src/ui/battery_bolt.h` (new).
+- `src/main.cpp` (include, g_chargeBolt, buildStatus, setup begin, loop poll).
+- `src/board.h/.cpp` (usbPdReady, usbPdVbusPresent, s_usbPdReady, the one boot line).
+- `src/ui/theme.h` (kBoltW, kBoltH), `src/ui/widgets.h/.cpp` (externalPower, drawBolt).
+- `test/host/test_est402.cpp` + `.py` (new), `test/host/run.sh` (BIN57).
+- `tools/mkest402.py` (new), `docs/shots/2026-11-11-est402-charging-bolt.png` (preview).
+
+### Build and tests (real exit codes, this tree)
+
+- pio run -e om_lite_l2: **SUCCESS**, exit 0, no warning in our files (the two RadioLib `#warning`s
+  are pre-existing). **RAM 160,416 / 327,680 B (49.0 %; before 160,400, +16 B)**, **Flash 2,990,593
+  / 6,553,600 B (45.6 %; before 2,990,089, +504 B)**, `firmware.bin` 2,990,960 B.
+- `test/host/run.sh`: **exit 0**, every suite green, 0 FAIL lines.
+  - `test_est402.cpp`: one read is not a decision; two equal reads raise/drop the bolt; a single bad
+    read does not flicker; two Unavailable reads become Unknown and hide the bolt; flapping never
+    raises it; `begin(false)` refuses 100 Present reads; `begin` resets to Unknown; the 5 x 7 shape
+    is connected, every row non-empty, 17 gold px, inside the icon.
+  - `test_est402.py`: the 2 s constant, one STATUS0 read in loop(), the readiness from the real boot,
+    the single boot log across `src/`, the drawing under `externalPower`, the theme colours, and no
+    BC_LVL / charge-level word in code.
+- The preview is a host render of the firmware's own rectangles and the shared bolt runs, not a
+  screenshot: two full status bars (78 %, plain and with the bolt) and three 8x icon crops (plain,
+  bolt at 78 %, bolt at 12 %).
+
+### What I could not check, and what is left
+
+- **No device.** Nothing here was seen on the glass. On the panel, please check: (a) the bolt is
+  readable inside the green fill at 100 % and on the yellow/red fills; (b) it is centred and does
+  not touch the terminal nub; (c) with a cable in, the bolt appears within about 4 s (two 2 s polls)
+  and disappears within about 4 s after unplugging; (d) `pmu probe` / the minute log still agree
+  (`vbusok=1` with a cable).
+- **The I2C cost** of one STATUS0 read every 2 s is not measured. It is one byte read, but the loop
+  histogram will show it if it matters.
+- **A mid-run failed read is not logged.** Only the boot failure prints the one line (ticket item 4);
+  two consecutive failed polls hide the bolt silently. Say so if a log for that episode is wanted.
+- **Charging vs full is deliberately not guessed.** If Filip wants it later, it needs a real signal
+  (a voltage trend over minutes, with BC_LVL as the port's claim only); that is a new ticket.
+
+Next step: Claude flashes over USB OTA and takes the screenshots; the device check above is the
+review. Nothing else is pending in this ticket.

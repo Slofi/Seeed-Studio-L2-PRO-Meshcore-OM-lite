@@ -6,3 +6,5 @@
 
 # ...except the emoji table: it is generated source, not a build artefact (tools/mkemoji.py).
 !src/ui/emoji_data.bin
+__pycache__/
+*.pyc

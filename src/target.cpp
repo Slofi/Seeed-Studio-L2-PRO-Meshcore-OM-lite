@@ -10,6 +10,7 @@
 #include "target.h"
 
 #include "board.h"
+#include "clock_keep.h"   // EST-403: save the epoch before a restart we control
 #include "position.h"
 #include "radio_stats.h"
 #include "radio_fault.h"
@@ -119,7 +120,10 @@ void OmSX1262Wrapper::onSendFinished() {
 
 // --- board ---------------------------------------------------------------------------------------
 uint16_t OmBoard::getBattMilliVolts() { return om::batteryMilliVolts(); }
-void OmBoard::reboot() { ESP.restart(); }
+void OmBoard::reboot() {
+  om::clockKeepStoreNow();   // EST-403: the software reset keeps the RTC counter, not the epoch
+  ESP.restart();
+}
 float OmBoard::getMCUTemperature() { return temperatureRead(); }
 
 // --- clock ---------------------------------------------------------------------------------------

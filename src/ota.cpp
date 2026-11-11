@@ -17,6 +17,7 @@
 #include <stdio.h>   // snprintf: the command slot's copy
 
 #include "board.h"
+#include "clock_keep.h"   // EST-403: save the epoch before the OTA reboot
 #include "usb_cmd.h"
 #include "usb_frames.h"
 
@@ -252,6 +253,7 @@ void otaPoll() {
   Serial.printf("[ota] ok (%u bytes), rebooting\n", (unsigned)size);
   Serial.flush();
   delay(300);
+  om::clockKeepStoreNow();   // EST-403: the software reset keeps the RTC counter, not the epoch
   ESP.restart();
 }
 

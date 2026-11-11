@@ -35,6 +35,7 @@
 #include <helpers/BaseChatMesh.h>
 
 #include "DataStore.h"
+#include "clock_keep.h"   // EST-403: save the epoch before the crash guard's restart
 #include "rptr_link.h"   // EST-358: the repeater session's hooks (see rptr_link.h)
 #include "channels.h"
 #include "crash_report.h"
@@ -1347,6 +1348,7 @@ bool meshLinkBegin() {
     if (fails < 3) {
       s_netPrefs.putBool("crashed", false);
       delay(1500);
+      om::clockKeepStoreNow();   // EST-403: this restart keeps the RTC counter, not the epoch
       ESP.restart();
     }
     s_netPrefs.putBool("crashed", true);   // parked: stays up for OTA

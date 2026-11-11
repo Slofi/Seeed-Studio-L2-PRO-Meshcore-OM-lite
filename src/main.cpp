@@ -16,6 +16,7 @@
 #include "ble_link.h"
 #include "board.h"
 #include "charge_state.h"   // EST-402: the charging bolt's two-read debounce and its unknown rule
+#include "clock_keep.h"     // EST-403: the clock kept in RTC_NOINIT across a warm restart
 #include "crash_report.h"
 #include "map.h"
 #include "mesh_link.h"
@@ -5038,10 +5039,19 @@ void setup() {
     om::parseBuildTimestamp(__DATE__, __TIME__, buildEpoch);
     g_buildEpoch = buildEpoch;
     const uint32_t savedFloor = g_prefs.getUInt("tfloor", 0);
-    om::timeKeeper().begin(savedFloor, buildEpoch, millis() / 1000);
+    // EST-403: every accepted real source refreshes the RTC_NOINIT record (clock_keep.cpp).
+    om::timeKeeper().begin(savedFloor, buildEpoch, millis() / 1000, &om::TimeKeeper::systemSet,
+                           &om::TimeKeeper::systemGet, &om::clockKeepStore);
     Serial.printf("[time] floor %lu s (saved %lu, build %lu), waiting for a real source\n",
                   (unsigned long)om::timeKeeper().floor(), (unsigned long)savedFloor,
                   (unsigned long)buildEpoch);
+    // EST-403: after a software/OTA/panic/watchdog restart the RTC counter survived, and so did
+    // the record. Restore the epoch from it at once (a fresh source still replaces it immediately).
+    // The reset-reason table is the GPS warm boot's own (gps_boot.h), so the two cannot drift.
+    const om::ClockKeepBoot kept = om::clockKeepBegin(om::timeKeeper().floor());
+    if (kept.kept && om::timeKeeper().setKept(kept.epoch, kept.source, millis() / 1000)) {
+      Serial.printf("[time] kept across restart (was %s)\n", om::timeSourceName(kept.source));
+    }
   }
   // EST-371: the sound events own their keys, defaults and the EST-359 -> EST-361 migration.
   om::sounds::begin(&g_prefs);

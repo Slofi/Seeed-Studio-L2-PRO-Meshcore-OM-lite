@@ -62,6 +62,8 @@ const char* timeSourceName(TimeSource s) {
     // EST-383: the one token `status` prints and the Settings Source row shows for an approximate
     // clock, i.e. time from RMC V or ZDA with no position fix.
     case TimeSource::GpsNoFix: return "gps-nofix";
+    // EST-403: `clock=kept` in `status` after a warm restart, never a fresh observation.
+    case TimeSource::Kept: return "kept";
     default: return "None";
   }
 }
@@ -73,6 +75,9 @@ int timeSourcePriority(TimeSource s) {
     case TimeSource::Phone: return 3;
     case TimeSource::Manual: return 2;
     case TimeSource::GpsNoFix: return 1;
+    // EST-403: a kept clock is a boot memory, not an observation. Rank 0 makes it lose to every
+    // fresh source at once (maySet has no higher rank to protect), with no 6-hour hold.
+    case TimeSource::Kept: return 0;
     default: return 0;
   }
 }
@@ -298,13 +303,15 @@ void TimeKeeper::systemSet(uint32_t epoch) {
 uint32_t TimeKeeper::systemGet() { return (uint32_t)time(nullptr); }
 
 void TimeKeeper::begin(uint32_t savedFloorUtc, uint32_t buildEpochUtc, uint32_t uptimeSec,
-                       SetEpochFn setFn, GetEpochFn getFn) {
+                       SetEpochFn setFn, GetEpochFn getFn, KeepFn keepFn) {
   set_ = setFn ? setFn : &TimeKeeper::systemSet;
   get_ = getFn ? getFn : &TimeKeeper::systemGet;
+  keep_ = keepFn;
   floor_ = bootEpoch(savedFloorUtc, buildEpochUtc);
   real_ = false;
   floorDirty_ = false;
   source_ = TimeSource::None;
+  keptFrom_ = TimeSource::None;
   for (int i = 0; i < kTimeSourceCount; ++i) {
     seen_[i] = false;
     seenAt_[i] = 0;
@@ -329,6 +336,8 @@ bool TimeKeeper::maySet(TimeSource source, uint32_t uptimeSec) const {
 
 bool TimeKeeper::setFromSource(uint32_t epochUtc, TimeSource source, uint32_t uptimeSec) {
   if (!begun_ || source == TimeSource::None) return false;
+  // EST-403: `kept` is a boot memory, never a source a caller may claim. Only setKept() sets it.
+  if (source == TimeSource::Kept) return false;
   if (!saneEpoch(epochUtc)) return false;
   if (!maySet(source, uptimeSec)) return false;
   // The floor is a one-way ratchet. A real source below it is not usable: applying it would move
@@ -340,8 +349,13 @@ bool TimeKeeper::setFromSource(uint32_t epochUtc, TimeSource source, uint32_t up
   seen_[(int)source] = true;
   seenAt_[(int)source] = uptimeSec;
   source_ = source;
+  keptFrom_ = TimeSource::None;
   if (epochUtc > floor_) floor_ = epochUtc;
   real_ = true;
+
+  // EST-403: refresh the RTC_NOINIT record on EVERY accepted source, including the same-second
+  // refreshes below that need no clock write: the record is the restart's only copy of the epoch.
+  if (keep_) keep_(epochUtc, source);
 
   const bool near = epochUtc <= current + 1U && current <= epochUtc + 1U;
   // A refresh within the same second does not need a write, but the FIRST real source does: the
@@ -349,6 +363,29 @@ bool TimeKeeper::setFromSource(uint32_t epochUtc, TimeSource source, uint32_t up
   if (near && source != TimeSource::Manual && !firstReal) return false;
   if (epochUtc != current) set_(epochUtc);
   floorDirty_ = true;   // an applied sync is saved immediately by the caller
+  return true;
+}
+
+bool TimeKeeper::setKept(uint32_t epochUtc, TimeSource original, uint32_t uptimeSec) {
+  if (!begun_ || !saneEpoch(epochUtc)) return false;
+  // A record may only name a real observation, never `kept` itself, None or an unknown number.
+  if (!realTimeSource(original)) return false;
+  // The floor is max(saved NVS floor, build time); a restored clock below it would move MeshCore
+  // timestamps backwards. Stay at "no time" instead (the caller does not log the keep line).
+  if (epochUtc < floor_) return false;
+
+  const uint32_t current = now();
+  source_ = TimeSource::Kept;
+  keptFrom_ = original;
+  seen_[(int)TimeSource::Kept] = true;
+  seenAt_[(int)TimeSource::Kept] = uptimeSec;
+  if (epochUtc > floor_) floor_ = epochUtc;
+  real_ = true;
+  if (epochUtc != current) set_(epochUtc);
+  // Keep the record's RTC counter fresh for the next restart. Store the ORIGINAL source, so the
+  // next boot's log says "was Wi-Fi", not "was kept".
+  if (keep_) keep_(epochUtc, original);
+  floorDirty_ = true;
   return true;
 }
 

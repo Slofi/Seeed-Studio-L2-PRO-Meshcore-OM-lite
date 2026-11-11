@@ -23,17 +23,29 @@
 
 namespace om {
 
-enum class TimeSource : uint8_t { None = 0, Gps, Wifi, Phone, Manual, GpsNoFix };
+// Kept (EST-403) is a memory of a clock that was real before a software restart, not a fresh
+// observation. It is deliberately the LOWEST rank (0, below gps-nofix): any fresh GPS fix, Wi-Fi,
+// phone, manual or gps-nofix time replaces it immediately, with no 6-hour hold. The original source
+// is remembered separately (TimeKeeper::keptFrom()) for the log and the approximate flag.
+enum class TimeSource : uint8_t { None = 0, Gps, Wifi, Phone, Manual, GpsNoFix, Kept };
 
 // The number of TimeSource values, indexed 0..kTimeSourceCount-1 (the class below sizes its
 // bookkeeping from it).
-constexpr int kTimeSourceCount = 6;
+constexpr int kTimeSourceCount = 7;
 
 const char* timeSourceName(TimeSource s);
 // 0 = unknown, 1 = GPS without a fix (approximate), 2 = manual, 3 = phone, 4 = Wi-Fi, 5 = GPS fix.
 // Manual is ranked above the approximate GPS time but always applies when the user sets it. A
 // no-fix GPS time can never overwrite a fix, Wi-Fi, phone or manual source within the 6-hour hold.
+// Kept = 0 (EST-403): a boot memory never blocks a fresh source.
 int timeSourcePriority(TimeSource s);
+
+// EST-403: the sources that can set a real clock: every TimeSource except None and Kept. One list
+// for the boot record's validation and TimeKeeper::setKept(), so the two cannot disagree.
+constexpr bool realTimeSource(TimeSource s) {
+  return s == TimeSource::Gps || s == TimeSource::Wifi || s == TimeSource::Phone ||
+         s == TimeSource::Manual || s == TimeSource::GpsNoFix;
+}
 
 constexpr uint32_t kTimeSourceHoldSec = 6UL * 60UL * 60UL;   // 6 hours
 constexpr uint32_t kFloorSaveIntervalSec = 10UL * 60UL;      // 10 minutes
@@ -176,19 +188,30 @@ class TimeKeeper {
  public:
   using SetEpochFn = void (*)(uint32_t epoch);
   using GetEpochFn = uint32_t (*)();
+  // EST-403: called with every accepted real source, so the device can refresh its RTC_NOINIT
+  // record. Plain function pointer: the host tests pass a fake and timekeeper.cpp stays SDK-free.
+  using KeepFn = void (*)(uint32_t epochUtc, TimeSource source);
 
   static void systemSet(uint32_t epoch);
   static uint32_t systemGet();
 
   // Seeds the system clock at max(saved floor, build time). realSinceBoot() stays false. uptimeSec
-  // is the caller's monotonic seconds (millis()/1000 on the device).
+  // is the caller's monotonic seconds (millis()/1000 on the device). keepFn (optional) is called
+  // after every accepted real source, including the same-second refreshes that return false.
   void begin(uint32_t savedFloorUtc, uint32_t buildEpochUtc, uint32_t uptimeSec,
              SetEpochFn setFn = &TimeKeeper::systemSet,
-             GetEpochFn getFn = &TimeKeeper::systemGet);
+             GetEpochFn getFn = &TimeKeeper::systemGet,
+             KeepFn keepFn = nullptr);
 
   // Returns true when a write to the clock (and therefore an NVS floor save) is wanted. A source
   // that is within 1 s of the running clock still refreshes its 6-hour hold, but returns false.
   bool setFromSource(uint32_t epochUtc, TimeSource source, uint32_t uptimeSec);
+
+  // EST-403: the boot restore. Makes the clock real at once with source `kept`, remembering the
+  // source the record came from. Refused for an insane epoch, an invalid original source, or an
+  // epoch below the floor. Only the clock_keep boot decision may call this; a fresh source still
+  // goes through setFromSource() and replaces it immediately.
+  bool setKept(uint32_t epochUtc, TimeSource original, uint32_t uptimeSec);
 
   // MeshCore's RTCClock::setCurrentTime() path. It writes the system clock if the epoch is sane and
   // not below the floor, but it never marks a source: only setFromSource() may make the clock real.
@@ -196,12 +219,21 @@ class TimeKeeper {
 
   uint32_t now() const { return get_ ? get_() : 0; }
   uint32_t floor() const { return floor_; }
+  bool begun() const { return begun_; }
   bool realSinceBoot() const { return real_; }
   TimeSource source() const { return source_; }
   // EST-383: the clock was set from GPS without a position fix, so it is real enough to show but
   // approximate. Any fix, Wi-Fi, phone or manual source replaces it as soon as it arrives.
-  bool approximate() const { return source_ == TimeSource::GpsNoFix; }
+  // EST-403: a clock kept from a gps-nofix record is still approximate.
+  bool approximate() const {
+    return source_ == TimeSource::GpsNoFix ||
+           (source_ == TimeSource::Kept && keptFrom_ == TimeSource::GpsNoFix);
+  }
   uint32_t sourceAgeSec(uint32_t uptimeSec) const;
+
+  // EST-403: the source a `kept` clock was restored from; None when the clock is not kept. The log
+  // line and the record written before the next restart use this, never `kept` itself.
+  TimeSource keptFrom() const { return source_ == TimeSource::Kept ? keptFrom_ : TimeSource::None; }
 
   bool saveDue(uint32_t uptimeSec) const;
   void onFloorSaved(uint32_t uptimeSec);
@@ -214,12 +246,14 @@ class TimeKeeper {
   bool real_ = false;
   bool floorDirty_ = false;
   TimeSource source_ = TimeSource::None;
+  TimeSource keptFrom_ = TimeSource::None;   // EST-403: original source behind `kept`
   bool seen_[kTimeSourceCount] = {};
   uint32_t seenAt_[kTimeSourceCount] = {};
   uint32_t lastSavedUptime_ = 0;
   bool begun_ = false;
   SetEpochFn set_ = &TimeKeeper::systemSet;
   GetEpochFn get_ = &TimeKeeper::systemGet;
+  KeepFn keep_ = nullptr;                     // EST-403: RTC_NOINIT record refresh
 };
 
 TimeKeeper& timeKeeper();

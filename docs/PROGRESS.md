@@ -7946,3 +7946,119 @@ the boot failure is logged, as the ticket asks).
 
 Next step: Claude flashes over USB OTA and takes the screenshots; the device check above is the
 review. Nothing else is pending in this ticket.
+
+## 2026-11-11 20:25 (DS, EST-403): L2 Pro firmware, a real clock across a warm restart
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). Filip, 2026-11-11 ~19:40: "the time is not set on L2 again" after a
+flash. After a restart the timekeeper waits for a real source (GPS, Wi-Fi, phone, manual); indoors
+with Wi-Fi and Bluetooth off there may be none for a long time, and the battery log then runs about
+4 minutes behind. This ticket keeps the last REAL epoch in RTC_NOINIT memory and restores it after a
+software/OTA/panic/watchdog restart.
+
+### 1. First the framework question: does gettimeofday() survive esp_restart()?
+
+**No. The hardware RTC counter survives, the wall clock does not.** Checked in this tree's framework
+(`framework-arduinoespressif32` 3.20017.241212 = Arduino 2.0.17, `tools/sdk/versions.txt`: esp-idf
+v4.4.7 38eeba213a):
+
+- `libnewlib.a:esp_time_impl.c.obj` (disassembled) implements `esp_time_impl_init()` ->
+  `esp_set_time_from_rtc()`, and that function computes
+  `s_microseconds_offset = esp_rtc_get_time_us() - esp_system_get_time()`.
+  `esp_time_impl_get_time_since_boot()` is `esp_system_get_time() + s_microseconds_offset`.
+- `libnewlib.a:time.c.obj`: `_gettimeofday_r()` calls `adjust_boot_time()` and then
+  `esp_time_impl_get_time_since_boot()`, dividing the microseconds into `tv_sec`/`tv_usec`;
+  `settimeofday()` turns its `timeval` into `esp_time_impl_set_boot_time()`.
+- The epoch offset is ordinary DRAM BSS: `s_microseconds_offset` is at **0x3fcb5830 in
+  `.dram0.bss`** in the built `firmware.elf` (readelf). BSS is zeroed on every boot.
+- `esp_newlib_time_init()` (which calls `esp_time_impl_init()`) is called from `start_cpu0` on every
+  boot (the ELF's call at 0x42084b08, right after `esp_brownout_init()`). So every boot re-derives
+  the offset from the RTC counter.
+- The RTC counter state itself IS kept in RTC noinit: `s_rtc_last_ticks` and `s_esp_rtc_time_us` are
+  in `.rtc_noinit` (0x50000048 / 0x50000050 in this build) and `esp_rtc_get_time_us()` reads the
+  RTC_CNTL 48-bit counter. That is the one clock that keeps counting through a software restart and
+  stops at a real power-on/brown-out.
+
+Net effect after `esp_restart()`: `gettimeofday()` returns the RTC counter (time since the RTC
+domain powered up), not the UTC epoch. The clock is continuous but not real. **Path taken: keep the
+epoch + the RTC counter in RTC_NOINIT and reconstruct the epoch at boot** (the ticket's second
+option), never trusting `gettimeofday()` alone.
+
+### 2. The record and the boot decision
+
+- `src/clock_keep.h` (new, plain C++, host-tested): `ClockKeepRecord {magic, epoch, rtcUs, source,
+  real, reserved}` and the one `clockKeepDecide()`. The reset-reason input is EST-387's own table
+  (`gps_boot.h`, `gpsBootResetsReceiver()`), so the two cannot drift: Software/External/Panic/
+  IntWdt/TaskWdt/Wdt/Sdio may keep; PowerOn/Brownout/DeepSleep/Unknown never do. On KEEP with a valid
+  record the restored epoch is `record.epoch + (rtcNow - record.rtcUs) / 1e6`; it must be sane
+  (2025-01-01 .. INT32_MAX, the clock's one window) and >= the floor. A bad magic, `real != 1`, an
+  unknown source, an insane saved epoch, an RTC counter that went backwards, and a restored epoch
+  below the floor all stay at "no time" as today.
+- `src/clock_keep.cpp` (new): the record is `RTC_NOINIT_ATTR` at 0x50000000, 24 bytes in
+  `.rtc_noinit` (`.rtc_noinit` goes 0x40 -> 0x58; it does not overlap `s_ckpt` at +0x18 or the
+  framework's `s_esp_rtc_time_us` at +0x50). The magic is written LAST (fields first, compiler
+  barrier, magic last), so a panic/power cut mid-save leaves a refused record. `clockKeepBegin()`
+  reads `esp_reset_reason()` and the record; on a RESET reason it also clears the magic, so a later
+  crash restart in the same power session can never resurrect a pre-power-off record.
+- `src/timekeeper.h/.cpp`: new `TimeSource::Kept` (`timeSourceName()` = "kept", so `status` prints
+  `clock=kept`), `TimeKeeper::setKept()` (real at once, remembers the original source), `keptFrom()`,
+  and an optional `KeepFn` callback called on EVERY accepted source, including same-second refreshes
+  that need no clock write, so the record's RTC counter is fresh. `setFromSource(..., Kept)` is
+  refused: only the boot decision may set it.
+- `src/main.cpp`: `begin(..., &om::clockKeepStore)` and, right after the floor line,
+  `clockKeepBegin(floor)` -> `setKept()` -> `[time] kept across restart (was <source>)`.
+- Before each restart we control: `ota.cpp` (after `Update.end()`, before `ESP.restart()`),
+  `target.cpp` `OmBoard::reboot()`, and `mesh_link.cpp`'s crash-guard retry each call
+  `clockKeepStoreNow()`.
+
+**Priority, and a deliberate reading of the ticket.** `kept` has rank 0, below gps-nofix (1): every
+fresh GPS fix, Wi-Fi, phone, manual or gps-nofix time replaces it immediately. The ticket says
+"priority just below its original source (so any fresh GPS fix / Wi-Fi / phone time replaces it
+immediately)"; with the 6-hour hold in `maySet()`, a rank just below the original would still block
+a fresh PHONE time behind a kept Wi-Fi record for six hours, which contradicts the parenthetical.
+The original source is therefore remembered (`keptFrom()`) for the log and for `approximate()` (a
+clock kept from a gps-nofix record is still approximate), but it never outranks a fresh observation.
+
+### Files
+
+- `src/clock_keep.h`, `src/clock_keep.cpp` (new).
+- `src/timekeeper.h`, `src/timekeeper.cpp` (Kept, setKept, keptFrom, KeepFn, realTimeSource).
+- `src/main.cpp` (include, begin callback, restore + one log line).
+- `src/ota.cpp`, `src/target.cpp`, `src/mesh_link.cpp` (one `clockKeepStoreNow()` each).
+- `test/host/test_est403.cpp` (new), `test/host/run.sh` (BIN58).
+
+### Build and tests (real exit codes, this tree)
+
+- `pio run -e om_lite_l2`: **SUCCESS**, exit 0. **RAM 160,416 / 327,680 B (49.0 %; unchanged)**,
+  **Flash 2,991,529 / 6,553,600 B (45.6 %; before 2,990,593, +936 B)**, `firmware.bin`
+  2,991,888 B. No warning in our files (the two RadioLib `#warning`s are pre-existing).
+- `test/host/run.sh`: **exit 0**, every suite green. `test_est403.cpp` covers: every KEEP reason
+  keeps a good record and every RESET reason refuses it; unknown SDK numbers map to Unknown/RESET;
+  bad magic, `real` 0/2/255, source None/kept/200; saved epoch 0 / below 2025 / at INT32_MAX / above
+  it; a restored epoch crossing INT32_MAX; an RTC counter that went backwards; elapsed 0.999 s /
+  1 s / 3.9 s truncation; floor equal vs one second above; `kept` loses to all five fresh sources;
+  `setKept` refusals; `keptFrom` and the approximate rule; and the KeepFn calls (including the
+  same-second refresh) carry the ORIGINAL source, never "kept".
+- The existing timekeeper/NTP/GPS suites still pass with the new `TimeSource` value and the extra
+  optional `begin()` argument.
+
+### What I could not check, and the device test
+
+- **No device.** The RTC counter's continuity across `esp_restart()` is from the framework's own
+  time code and the linker placement above, not observed on the glass. The end-to-end check is
+  Claude's:
+  1. Set the time via Wi-Fi (`ntp now` or the switch), confirm `status` says `clock=Wi-Fi`.
+  2. Flash the same image over USB OTA (a SOFTWARE reset; an EN tap / power cycle is a reset that
+     must NOT keep).
+  3. Right after the boot, the log should say `[time] kept across restart (was Wi-Fi)` and `status`
+     should say `clock=kept` (the status bar shows HH:MM instead of `--:--`). A GPS fix or a fresh
+     NTP reply then takes over: `clock=GPS` / `clock=Wi-Fi`.
+  4. Power-cycle (or tap RESET): no kept line and `--:--` until a real source, as before.
+- A watchdog/panic restart is not forced here. The same record is used; the RTC counter advances by
+  the real elapsed time, so it should recover too, but that path was not seen on the device.
+- The RTC slow-clock drift between the last source and the restart is not measured. It is the same
+  counter the framework uses for `gettimeofday()`, and the window here is seconds to hours, not
+  months.
+
+Next step: Claude flashes over USB OTA and runs the four device checks above; the kept line and
+`clock=kept` are the review. Nothing else is pending in this ticket.

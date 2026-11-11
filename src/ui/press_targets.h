@@ -172,6 +172,17 @@ inline PressTarget pressTargetForSettings(const SettingsLayout& L, const Setting
   return t;
 }
 
+// EST-392: the Position row's open choice. Its two option rows are the only targets; a tap anywhere
+// else is the Cancel that closes it (consumed), so nothing behind it shows a pressed look.
+inline PressTarget pressTargetForPositionChoice(const SettingsChoiceLayout& c, int x, int y) {
+  PressTarget t;
+  const int i = settingsChoiceOptionAt(c, x, y);
+  if (i < 0) return t;
+  t.kind = PressKind::Row;
+  t.rect = c.option[i];
+  return t;
+}
+
 // A confirmation pop-up's two keys. A tap outside the box is Cancel and is consumed, so only the two
 // rectangles are targets.
 inline PressTarget pressTargetForModalKey(bool confirmSide, const Rect& cancel, const Rect& confirm,

@@ -22,6 +22,8 @@ void posBegin(Preferences* prefs);
 const PositionFix& posOwn();
 const PositionSource& posSource();
 const char* posStatusToken();   // "gps" | "fixed" | "none"
+// EST-392: the selected source as the one Position row shows it: "GPS" or "Fixed", no fix needed.
+const char* posSourceLabel();
 
 // Selected-source changes. Both persist and apply to MeshCore's sensors. selectFixed refuses an
 // invalid point and changes nothing then.

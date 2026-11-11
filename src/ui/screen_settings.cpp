@@ -360,6 +360,29 @@ void drawClearAsk(lgfx::LovyanGFX* d, const SettingsView& v) {
   drawKeyBox(d, m.confirm, kDangerBg, kDangerLine, "Clear", kDangerInk);
 }
 
+// EST-392: the Position row's choice. The same panel the chat selector drops (kPanel, a kLine edge,
+// a kSelBg highlight) with one plain row per option: the name on the left, the short description in
+// dim mono on the right, the Check row's green dot on the source in use. Every rectangle comes from
+// settings_layout.h, so this drawing and the hit test cannot drift apart.
+void drawPositionChoice(lgfx::LovyanGFX* d, const SettingsChoiceLayout& c, bool fixedNow) {
+  if (c.panel.empty()) return;
+  d->fillRect(c.panel.x, c.panel.y, c.panel.w, c.panel.h, kPanel);
+  d->drawRect(c.panel.x, c.panel.y, c.panel.w, c.panel.h, kLine);
+  for (int i = 0; i < kPosChoiceCount; ++i) {
+    const Rect& r = c.option[i];
+    const bool on = (i == kPosOptionFixed) == fixedNow;
+    const uint16_t bg = on ? kSelBg : kPanel;
+    if (on) d->fillRect(r.x, r.y, r.w, r.h, bg);
+    const int cy = r.y + r.h / 2;
+    drawTextEllipsis(d, FontRole::SansBody, on ? kAccInk : kInk, bg, r.x + kSetPadX, cy,
+                     r.w - 2 * kSetPadX - 20, posOptionLabel(i));
+    drawTextRight(d, FontRole::MonoMeta, kDim, bg, r.right() - kSetPadX - 14, cy,
+                  posOptionDesc(i));
+    if (on) d->fillSmoothCircle((int16_t)(r.right() - kSetPadX - 3), (int16_t)cy, 3, kGreen);
+    if (i + 1 < kPosChoiceCount) d->drawFastHLine(r.x, r.bottom() - 1, r.w, kRowLine);
+  }
+}
+
 }  // namespace
 
 void settingsScreenDraw(const SettingsView& v) {
@@ -391,6 +414,15 @@ void settingsScreenDraw(const SettingsView& v) {
     // EST-350: the dropdown over the rows under it, drawn with the Chat tab's own selector drawing
     // (ui/chat_selector.cpp) and the three rectangles the hit test uses.
     if (v.selector) drawChatSelector(d, v.sel, L.selPanel, L.selList, L.selManage);
+    // EST-392: the Position row's choice, over the rows under it and inside the body only, from the
+    // same rectangles settingsPositionChoiceHit() reads.
+    if (v.posChoice) {
+      d->setClipRect(L.body.x, L.body.y, L.body.w, L.body.h);
+      drawPositionChoice(d, settingsPositionChoiceFor(L, v.rows, v.rowCount, v.posChoiceRow,
+                                                      v.scroll),
+                         v.posFixed);
+      d->clearClipRect();
+    }
   } else {
     drawEmptyState(d, L.body, "No settings here", "Nothing on this tab yet.");
   }
@@ -474,6 +506,18 @@ SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y) {
   const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage,
                                              v.selector, v.titleAction[0] != 0);
   return selectorPress(v.sel, L.selPanel, L.selList, L.selManage, x, y);
+}
+
+// EST-392: the Position choice's rectangles, from the page the drawing used (same body, same row
+// rectangle, same scroll). Closed (or no rows) answers an empty layout, so nothing can be hit.
+SettingsChoiceLayout settingsPositionChoice(const SettingsView& v) {
+  if (!v.posChoice || v.rows == nullptr || v.rowCount <= 0) return SettingsChoiceLayout{};
+  const SettingsLayout L = settingsLayoutFor((int16_t)l2().width, (int16_t)l2().height, v.subPage);
+  return settingsPositionChoiceFor(L, v.rows, v.rowCount, v.posChoiceRow, v.scroll);
+}
+
+int settingsPositionChoiceHit(const SettingsView& v, int x, int y) {
+  return settingsChoiceOptionAt(settingsPositionChoice(v), x, y);
 }
 
 }  // namespace ui

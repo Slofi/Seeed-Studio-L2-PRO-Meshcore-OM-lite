@@ -171,6 +171,10 @@ static bool g_setSelOpen = false;    // the chat selector is dropped down over t
 static int g_setSelScroll = 0;       // the selector list's scroll, px
 static int g_setSelScroll0 = 0;      // its value when the finger went down
 static int g_setSelMaxScroll = 0;    // the last build's clamp
+// EST-392: the General page's ONE position control (the `Position` row) is open, and which row of
+// the last build it is. The choice itself lives in ui/settings_layout.h.
+static bool g_posChoice = false;
+static int g_posRowIndex = -1;
 // EST-354: the SSID whose password the sheet is asking for (never the password itself).
 static char g_wifiPassSsid[om::wifi::kSsidBytes + 1] = "";
 
@@ -3186,7 +3190,9 @@ enum SetAct : uint16_t {
   A_None = 0,
   A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_BtToggle, A_BtNewPin, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
-  A_PosPage, A_PosGps, A_PosFixed, A_PosChange,
+  // EST-392: ONE position source control (the General page's `Position` row); it opens the small
+  // GPS / Fixed choice, so EST-384's page and its three actions are gone.
+  A_PosSource,
   A_Apply, A_Cancel,
   A_MapRecentre, A_MapClear, A_RptrForget, A_RptrAuto,
   A_ChatPick, A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
@@ -3246,6 +3252,7 @@ static void setGo(SetPage p) {
   g_setSelOpen = false;
   g_deleteArmed = false;
   g_clearAsk = false;
+  g_posChoice = false;   // EST-392: leaving the page closes the Position choice
   // EST-352: every door into a text editor opens the shared sheet on the letters page with shift
   // off, exactly the chat sheet's rule; the accented-letter hold starts clean. EST-354: the Wi-Fi
   // password also starts hidden and empty.
@@ -3276,6 +3283,7 @@ static void setBack() {
   g_setSelOpen = false;
   g_deleteArmed = false;
   g_clearAsk = false;
+  g_posChoice = false;   // EST-392: the choice never survives a Back
 }
 
 static SetPage setRootForTab(om::ui::SettingsTab t) {
@@ -3358,6 +3366,8 @@ static void timeFieldText(om::ui::TimeField f, char* out, size_t cap) {
 
 static void buildSettingsRows() {
   setResetRows();
+  // EST-392: the Position row is only on General; every other page leaves the index unset.
+  g_posRowIndex = -1;
   g_setEditor = om::ui::SettingsEditor::None;
   g_setSubPage = !setRootPage(g_setPage);
   g_setOkLabel = "OK";
@@ -3401,14 +3411,20 @@ static void buildSettingsRows() {
       clockLine(v, sizeof(v));
       setAdd(om::ui::SetRowKind::Chevron, A_Time, "Time", v);
 
-      setSection("GPS");
+      // EST-392: the "GPS" section is renamed "POSITION" and the `Position` row in it is THE one
+      // source control (Filip, 2026-11-11: "There is only GPS in General ... rename GPS to Position,
+      // with GPS and fixed position there"). Its value is the source in use, never a coordinate
+      // (rule 9); a tap opens the small GPS / Fixed choice under the row. The row goes FIRST in its
+      // section, so the two-row choice drops DOWN (with Satellites/Fix under it, the panel would have
+      // been 10 px short of the page's floor at 320x240); the GPS details below it are unchanged.
+      setSection(om::ui::kPosSectionLabel);
+      g_posRowIndex = g_setRowCount;
+      setAdd(om::ui::SetRowKind::Chevron, A_PosSource, om::ui::kPosRowLabel,
+             om::posSourceLabel());
       snprintf(v, sizeof(v), "%u used, %u heard", (unsigned)g_gps.sats,
                (unsigned)g_gps.heardTotal);
       setAdd(om::ui::SetRowKind::Value, A_None, "Satellites", v);
       setAdd(om::ui::SetRowKind::Value, A_None, "Fix", g_gps.valid ? "3D" : "no fix");
-      // EST-384: the effective source, never a coordinate (rule 9). The raw fix is still visible in
-      // the Fix row and the satellite counters; what the node actually uses is the source token.
-      setAdd(om::ui::SetRowKind::Value, A_None, "Position", om::posStatusToken());
       setAdd(om::ui::SetRowKind::Toggle, A_AdvertPos, "Share position", "ON",
              om::meshAdvertPosPolicyGet());
 
@@ -3595,30 +3611,11 @@ static void buildSettingsRows() {
       key[0] = 0;
       om::meshPubKeyShort(key, sizeof(key));
       setAdd(om::ui::SetRowKind::Value, A_None, "Public key", key);
-      // EST-384: the node's own position source. The value is the source token (gps / fixed / none),
-      // never a coordinate; the page behind it has the two choices and the map picker.
-      setSection("POSITION");
-      setAdd(om::ui::SetRowKind::Chevron, A_PosPage, "Position", om::posStatusToken());
+      // EST-392: EST-384's second POSITION section and its source row are GONE from this page. The
+      // source is chosen in ONE place, Settings > General > Position. Share position is a different
+      // switch (what the advert carries) and stays where it was before EST-384, under IDENTITY.
       setAdd(om::ui::SetRowKind::Toggle, A_AdvertPos, "Share position", "ON",
              om::meshAdvertPosPolicyGet());
-      break;
-    }
-
-    case SetPage::Position: {
-      // EST-384: two choices. GPS is today's behaviour and the default; Fixed opens the SAME map
-      // picker the RPTR Position page uses. "Change fixed position" reopens it on the saved point.
-      snprintf(g_setTitle, sizeof(g_setTitle), "Position");
-      setSection("SOURCE");
-      setAdd(om::ui::SetRowKind::Check, A_PosGps, "GPS", "live fix",
-             om::posSource().source() == om::kPosSourceGps);
-      setAdd(om::ui::SetRowKind::Check, A_PosFixed, "Fixed", "picked on the map",
-             om::posSource().source() == om::kPosSourceFixed);
-      if (om::posSource().sourceFixed()) {
-        setSection("FIXED POINT");
-        setAdd(om::ui::SetRowKind::Button, A_PosChange, "Change fixed position");
-      }
-      setAdd(om::ui::SetRowKind::Warn, A_None,
-             "Fixed keeps the GPS running for the clock only. A new fix never moves the node.");
       break;
     }
 
@@ -3967,6 +3964,10 @@ static om::ui::SettingsView settingsView() {
   // EST-382: the Clear-messages confirmation owns every tap while it is open.
   v.clearAsk = g_clearAsk;
   v.clearText = g_clearText;
+  // EST-392: the General page's Position choice, hung under the row the last build recorded.
+  v.posChoice = g_posChoice && g_setPage == SetPage::GeneralRoot;
+  v.posChoiceRow = g_posRowIndex;
+  v.posFixed = om::posSource().sourceFixed();
   return v;
 }
 
@@ -4048,6 +4049,7 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
   g_setSelOpen = false;
   g_setSelScroll = 0;
   g_ownPick = false;      // EST-384: a fresh door into Settings never opens on the picker
+  g_posChoice = false;    // EST-392: and it never opens with the Position choice down
   g_advertMenu = false;   // EST-382: leaving the Chat page closes its advert dropdown
   // EST-350: the settings page starts on the chat that was open when the gear was pressed.
   g_setChat = g_chatSel;
@@ -4072,6 +4074,7 @@ static void settingsBack() {
     g_deleteArmed = false;
     g_clearAsk = false;
     g_setSelOpen = false;
+    g_posChoice = false;   // EST-392
     redrawMainTab();
     return;
   }
@@ -4203,20 +4206,15 @@ static void handleSettingsRow(uint16_t id) {
     // EST-350: the General row named "Node" opens the Node page (Name, Public key, Share position);
     // the rename is the Node page's own "Name" row (A_NodeName), which is what used to be here.
     case A_Node:     setGo(SetPage::Node); break;
-    // EST-384: the Node page's Position row, its two choices and the map picker.
-    case A_PosPage:  setGo(SetPage::Position); break;
-    case A_PosGps:
-      om::posSelectGps();
-      showToast("Position: GPS");
+    // EST-392: the ONE position source control. It is not a page: it opens the small GPS / Fixed
+    // choice under the row, lifted just enough for the whole panel to be on the glass.
+    case A_PosSource:
+      g_posChoice = true;
+      g_setSelOpen = false;
+      g_setScroll = om::ui::settingsChoiceScrollFor(
+          om::ui::settingsLayoutFor(om::ui::kScreenW, om::ui::kScreenH, g_setSubPage), g_setRows,
+          g_setRowCount, g_posRowIndex, g_setScroll);
       break;
-    case A_PosFixed:
-      // Choosing Fixed opens the SAME picker. Already fixed? Then this reopens on the saved point,
-      // exactly like the Change row.
-      ownPickOpen(om::posSource().sourceFixed());
-      return;   // ownPickOpen drew the picker
-    case A_PosChange:
-      ownPickOpen(true);
-      return;
     case A_NodeName:
       snprintf(g_editBuf, sizeof(g_editBuf), "%s", om::meshNodeName());
       s_setNameNode = true;
@@ -4757,6 +4755,28 @@ static void handleSettingsTap(int x, int y) {
     return;
   }
 
+  // EST-392: the Position choice owns every tap while it is down, Back and the row above it
+  // included. GPS switches the source; Fixed opens EST-384's map picker exactly as before; a tap
+  // anywhere else is Cancel and changes neither the source nor the saved point.
+  if (g_posChoice) {
+    const int option = om::ui::settingsPositionChoiceHit(v, x, y);
+    g_posChoice = false;
+    switch (om::ui::posChoiceAction(option)) {
+      case om::ui::PosChoiceAct::Gps:
+        if (om::posSelectGps()) showToast("Position: GPS");
+        break;
+      case om::ui::PosChoiceAct::OpenPicker:
+        // Already Fixed? Then the picker opens on the saved point, exactly like EST-384's Change row.
+        ownPickOpen(om::posSource().sourceFixed());
+        return;   // ownPickOpen drew the picker
+      case om::ui::PosChoiceAct::Keep:
+      default:
+        break;    // Cancel: nothing is written
+    }
+    drawSettings();
+    return;
+  }
+
   // EST-350: while the chat selector is open it owns the page, exactly like the Chat tab's dropdown:
   // a row picks that chat (the page below shows its settings without leaving Settings), the pinned
   // row opens the channel list, and a tap anywhere else — including Back — closes it and is CONSUMED,
@@ -4842,6 +4862,7 @@ static void handleSettingsTap(int x, int y) {
     g_setScroll = 0;
     g_setNav.reset();         // a tab is a new root: Back leaves Settings from it
     g_deleteArmed = false;
+    g_posChoice = false;      // EST-392: a tab is a new page, so no choice is left down
     drawSettings();
     return;
   }
@@ -5333,6 +5354,12 @@ static bool pressTargetAt(int x, int y, om::ui::PressTarget* out) {
     }
     buildSettingsRows();
     const om::ui::SettingsView v = settingsView();
+    // EST-392: the Position choice: only its two option rows are targets, and a press outside it
+    // only closes it (consumed), so nothing behind shows a pressed look.
+    if (g_posChoice) {
+      *out = om::ui::pressTargetForPositionChoice(om::ui::settingsPositionChoice(v), x, y);
+      return out->valid();
+    }
     // The chat dropdown: a row or the pinned Manage row. Outside it the press only closes it
     // (consumed), so there is no target behind it.
     if (g_setSelOpen) {
@@ -6600,7 +6627,10 @@ void loop() {
       handleTap(x, y, true);
     }
     if (g_drag && !g_spent) {
-      if (g_settings && g_setSelOpen) {
+      if (g_settings && g_posChoice) {
+        // EST-392: the Position choice owns the gesture. There is nothing to scroll inside a
+        // two-row panel, and the page must not slide under it either.
+      } else if (g_settings && g_setSelOpen) {
         // EST-350: the dropdown's list follows the fingertip with the chat selector's own sign and
         // give (selDragScroll), and the release path below snaps the stretch back.
         const int next = om::ui::selDragScroll(g_setSelScroll0, dy, g_setSelMaxScroll);

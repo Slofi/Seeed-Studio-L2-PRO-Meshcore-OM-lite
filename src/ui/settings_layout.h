@@ -68,9 +68,11 @@ constexpr bool settingsTabFits(SettingsTab t, int16_t width) {
 // EST-350: every Settings page, here rather than in the shell, so the history that Back walks and
 // the host test that proves it speak about the same thing. The five roots are the Settings tabs; the
 // rest are pages reached from a row.
+// EST-392: there is no Position PAGE any more. The one source control is the General page's Position
+// row and it opens a two-row choice, so this list holds no second place to choose the source.
 enum class SetPage : uint8_t {
   GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
-  Preset, PresetCustom, Hash, Node, NameEdit, Position, Channels, Channel, ChanAdd, ChanKey,
+  Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
   Sound, SoundPicker, Wifi, WifiSaved, WifiPass, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash,
   Count,
 };
@@ -361,6 +363,90 @@ constexpr int settingsSnapScroll(int v, int maxScroll) {
   if (v < 0) return 0;
   if (v > maxScroll) return maxScroll;
   return v;
+}
+
+// ------------------------------------------------------------------------------- position choice
+// EST-392: Settings > General has ONE position control, the `Position` row. Its value is the source
+// in use (Filip, 2026-11-11: "GPS and fixed position there ... clicking on it can then select GPS
+// position or fixed, picked on a map"). A tap drops a small two-row choice UNDER the row, in the
+// dropdown style the chat selector already uses: a panel, the current option highlighted, a dot on
+// it. It is not a second page. Fixed opens EST-384's map picker unchanged; a tap anywhere else
+// cancels and leaves the source exactly as it was.
+//
+// The labels, the rectangles and the meaning of a choice live here, so the drawing, the hit test,
+// the pressed look and the host test cannot disagree about any of them.
+enum class PosChoiceAct : uint8_t { Keep = 0, Gps, OpenPicker };
+
+constexpr int kPosOptionGps = 0;
+constexpr int kPosOptionFixed = 1;
+constexpr int kPosChoiceCount = 2;
+
+constexpr const char* kPosSectionLabel = "POSITION";  // the General section header (it read "GPS")
+constexpr const char* kPosRowLabel = "Position";      // the one source control
+constexpr const char* posOptionLabel(int i) { return i == kPosOptionFixed ? "Fixed" : "GPS"; }
+constexpr const char* posOptionDesc(int i) {
+  return i == kPosOptionFixed ? "picked on the map" : "live fix";
+}
+
+// What a choice means. -1 is Cancel: a tap outside the panel (or Back) changes nothing, so a node on
+// Fixed keeps its saved point and a node on GPS stays on GPS.
+constexpr PosChoiceAct posChoiceAction(int option) {
+  if (option == kPosOptionGps) return PosChoiceAct::Gps;
+  if (option == kPosOptionFixed) return PosChoiceAct::OpenPicker;
+  return PosChoiceAct::Keep;
+}
+
+struct SettingsChoiceLayout {
+  Rect panel;
+  Rect option[kPosChoiceCount];
+};
+
+// The panel hangs from the row's own bottom edge, inset like a row's text, so the row stays readable
+// above it (the selector dropdown's rule). A page whose floor still leaves no room below puts the
+// panel ABOVE the row instead, so the choice is never cut off. settingsChoiceScrollFor() lifts the
+// page first, so on a page with any content below the row the panel drops DOWN.
+constexpr SettingsChoiceLayout settingsChoiceLayoutFor(const SettingsLayout& L, const Rect& row) {
+  SettingsChoiceLayout c;
+  const int16_t x = (int16_t)(L.body.x + kSetPadX);
+  const int16_t w = (int16_t)(L.body.w - 2 * kSetPadX);
+  const int16_t h = (int16_t)(kPosChoiceCount * kRowH);
+  const int16_t top = (row.bottom() + h <= L.body.bottom()) ? row.bottom()
+                                                            : (int16_t)(row.y - h);
+  c.panel = Rect{x, top, w, h};
+  for (int i = 0; i < kPosChoiceCount; ++i) {
+    c.option[i] = Rect{x, (int16_t)(c.panel.y + i * kRowH), w, kRowH};
+  }
+  return c;
+}
+
+constexpr SettingsChoiceLayout settingsPositionChoiceFor(const SettingsLayout& L,
+                                                         const SettingRow* rows, int count,
+                                                         int rowIndex, int scroll) {
+  if (rows == nullptr || rowIndex < 0 || rowIndex >= count) return SettingsChoiceLayout{};
+  return settingsChoiceLayoutFor(L, settingsRowRect(L, rows, count, rowIndex, scroll));
+}
+
+// 0 (GPS) or 1 (Fixed) when the finger is on that option, -1 for anything else: the row above, Back,
+// the page around the panel. The panel is solid, so every pixel of it is one of the two options.
+constexpr int settingsChoiceOptionAt(const SettingsChoiceLayout& c, int x, int y) {
+  for (int i = 0; i < kPosChoiceCount; ++i) {
+    if (c.option[i].contains(x, y)) return i;
+  }
+  return -1;
+}
+
+// The scroll that keeps the whole panel inside the body: the row is lifted as little as needed and
+// never past the page's own floor. Without it a row near the bottom would open a clipped choice.
+constexpr int settingsChoiceScrollFor(const SettingsLayout& L, const SettingRow* rows, int count,
+                                      int rowIndex, int scroll) {
+  const int maxScroll = settingsMaxScroll(L, rows, count);
+  int s = scroll < 0 ? 0 : (scroll > maxScroll ? maxScroll : scroll);
+  if (rows == nullptr || rowIndex < 0 || rowIndex >= count) return s;
+  const int rowBottom =
+      settingsRowTop(rows, count, rowIndex) + settingsRowHeight(rows[rowIndex].kind);
+  const int need = rowBottom + kPosChoiceCount * kRowH - L.body.h;
+  if (need > s) s = need > maxScroll ? maxScroll : need;
+  return s;
 }
 
 // ---------------------------------------------------------------------------------- manual time

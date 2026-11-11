@@ -105,11 +105,16 @@ class PositionSource {
     return s;
   }
 
-  // "gps" | "fixed" | "none", for `status` and the Node page. Never a coordinate.
+  // "gps" | "fixed" | "none", for `status`. Never a coordinate.
   const char* statusToken() const {
     if (own_.fixed) return "fixed";
     return own_.valid ? "gps" : "none";
   }
+
+  // EST-392: the SELECTED source as the glass names it, which is what the one Position row shows.
+  // Unlike statusToken() it needs no fix: a node set to GPS with no sky still reads "GPS" (the
+  // source the user chose) and Fixed is the pinned point. Never a coordinate.
+  const char* sourceLabel() const { return source_ == kPosSourceFixed ? "Fixed" : "GPS"; }
 
  private:
   void recompute() {

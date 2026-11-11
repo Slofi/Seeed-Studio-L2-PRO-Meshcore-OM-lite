@@ -58,6 +58,7 @@ void posBegin(Preferences* prefs) {
 const PositionFix& posOwn() { return s_source.own(); }
 const PositionSource& posSource() { return s_source; }
 const char* posStatusToken() { return s_source.statusToken(); }
+const char* posSourceLabel() { return s_source.sourceLabel(); }
 
 void posApplyToNode() {
   const PositionFix& own = s_source.own();

@@ -74,11 +74,13 @@ def main():
         if token not in src:
             fail(f"position_source.h does not return {token}")
 
-    # And the settings strings never show a coordinate on the two new pages.
+    # And the settings strings never show a coordinate. EST-392 replaced the Node > Position page
+    # with Settings > General's ONE Position row and its GPS / Fixed choice, so the row's own strings
+    # now live in ui/settings_layout.h (test_est392 checks them); the rule here is the no-coordinate
+    # one, which EST-384 added and which still holds.
     main_cpp = read("src/main.cpp")
-    for needle in ("Position", "Change fixed position"):
-        if needle not in main_cpp:
-            fail(f"settings row {needle!r} missing")
+    if "Position" not in main_cpp:
+        fail("the settings no longer name a position row at all")
     if "%.4f, %.4f" in main_cpp:
         fail("main.cpp still formats a coordinate for display")
 

@@ -6594,3 +6594,133 @@ New `test/host/test_est391.cpp`, built and run by `test/host/run.sh` (BIN49):
 Claude reviews the diff and flashes, turns Wi-Fi on and watches the serial log for the three lines
 above; if `[ntp] reply captured: epoch accepted` appears and the clock sets, EST-391 is closed and the
 Wi-Fi time path can be checked on the glass (status bar time, then a reboot to see it survive).
+
+## 2026-11-11 (DS, EST-392): Settings > General: GPS becomes Position, with the GPS / Fixed choice in one place
+Status: in_review (not committed, not pushed).
+
+### A. What was there before (the ticket asks for both, so here they are)
+- **General**: a section header `GPS` with four rows: `Satellites` (used/heard), `Fix` (3D / no fix),
+  `Position` and `Share position`. The `Position` row was a READ-ONLY `Value` row and showed
+  `om::posStatusToken()`, i.e. the token `gps` / `fixed` / `none` (EST-384 changed it from the raw
+  fix to that token). It was not tappable at all.
+- **EST-384's GPS/Fixed row** lived on a SEPARATE page: General > `Node` > a second `POSITION`
+  section > a `Position` chevron row opened `SetPage::Position`, titled "Position", with two `Check`
+  rows (`GPS` "live fix" / `Fixed` "picked on the map"), a `Change fixed position` button while Fixed
+  was on, and a warning. Nothing else in the tree opened that page (`A_PosPage` had exactly one
+  call site, and no tab, status cell or shortcut reached it).
+- So Filip saw "only GPS in General" because the source control was two pages deep and the General
+  row that carried the answer was inert. One clarification for the ticket's wording: the `GPS` thing
+  on General is a SECTION HEADER (`setSection("GPS")`), not a row with a page, and there was no page
+  titled "GPS" anywhere (grep: no `SetPage::Gps`, no `setTitle("GPS")`). The only position page was
+  the one EST-384 added, and it was already titled "Position".
+
+### B. The change
+- **One control.** General's `POSITION` section (renamed from `GPS`) now starts with a `Position`
+  CHEVRON row whose value is the source in use, `om::posSourceLabel()`: `GPS` or `Fixed`. Unlike the
+  old token it does not need a fix: a node set to GPS indoors still reads `GPS`. A tap drops a small
+  **two-row choice under the row** (the app's existing dropdown style, the one the chat selector
+  uses: a panel with the app's own edge, the current option highlighted, the Check row's green dot
+  on it): `GPS` (live fix) and `Fixed` (picked on the map).
+- **GPS** selects the GPS source (same call and same toast as EST-384's Check row). **Fixed** opens
+  EST-384's map picker EXACTLY as before (`ownPickOpen(om::posSource().sourceFixed())`: the current
+  fix, else the map centre, else the saved point when it is already Fixed) and the picker's `Save`
+  is still the only place the shell stores a Fixed point. Its `Cancel` still changes nothing.
+- **Cancel**: a tap outside the panel (the row above it, Back, anywhere else) closes the choice and
+  writes NOTHING: a node on Fixed keeps its saved point and a node on GPS stays on GPS.
+- **The GPS details stay**: `Satellites`, `Fix` and `Share position` are unchanged under the row.
+  (There is no separate "signal" row in General today; the one signal number is the status bar's
+  `GPS n` cell, untouched, and the Map/diagnostics still read the GPS parser.)
+- **One place.** EST-384's duplicate is gone: the Node page's `POSITION` section and its `Position`
+  chevron row are removed and `Share position` is back where it was before EST-384 (under IDENTITY).
+  `SetPage::Position`, the `A_PosPage` / `A_PosGps` / `A_PosFixed` / `A_PosChange` actions, the
+  `Change fixed position` button and the warning paragraph are all deleted, so there is no second
+  page and no second row to reach the source. The one door (the General row) and every tap rect come
+  from `ui/settings_layout.h`.
+- **The row moved to the top of its section** (one deliberate deviation, layout only): with
+  `Satellites`/`Fix` above it, the page's floor at 320x240 left only 50 px under the row, so the
+  60 px panel would have been cut by 10 px. First in the section, it drops DOWN with the details
+  under it. `settingsChoiceLayoutFor()` also puts the panel ABOVE a row when a page's floor leaves no
+  room below at all, so a longer page can never cut the choice off.
+- **Every other door**: there was none (A, above). The status bar's GPS cell is not tappable (only
+  the gear and the fault mark are), the Map and the RPTR picker never opened the Settings page, so
+  nothing else needed rewiring. `g_posChoice` is cleared by `setGo`, `setBack`, `settingsBack`, a
+  settings tab tap and `openSettings`, so the choice can never be left hanging on another page.
+- Touches: while the choice is down it owns every tap (Back included), a drag does not scroll the
+  page under it, and the pressed look is drawn on the option's own rect
+  (`pressTargetForPositionChoice`); a tap outside is a consumed press with no look, like the chat
+  dropdown's close.
+
+### C. Files
+- `src/ui/settings_layout.h`: the choice's pure half, one place: `PosChoiceAct` / `posChoiceAction()`
+  (GPS -> Gps, Fixed -> OpenPicker, anything else -> Keep), the labels (`kPosSectionLabel`,
+  `kPosRowLabel`, `posOptionLabel()`, `posOptionDesc()`), `SettingsChoiceLayout` +
+  `settingsChoiceLayoutFor()` / `settingsPositionChoiceFor()` / `settingsChoiceOptionAt()` and
+  `settingsChoiceScrollFor()` (the least lift that puts the whole panel on the glass). `SetPage`
+  lost `Position`.
+- `src/ui/screen_settings.{h,cpp}`: the view carries `posChoice` / `posChoiceRow` / `posFixed`; the
+  drawing (`drawPositionChoice`, clipped to the body) and the hit test both call
+  `settingsPositionChoiceFor()`.
+- `src/ui/press_targets.h`: `pressTargetForPositionChoice()` (the option's rect, no target outside).
+- `src/position_source.h` + `src/position.{h,cpp}`: `sourceLabel()` / `posSourceLabel()` ("GPS" or
+  "Fixed", no coordinate).
+- `src/main.cpp`: the General rows, the Node page, the one action id `A_PosSource`, the choice
+  handler, the press target and the drag guard.
+
+### D. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` (the REBUILD.md command): **exit 0**, SUCCESS. Baseline build of this tree
+  before the change was RAM **160,168 B** of 327,680 and flash **2,985,721 B** of 6,553,600; after:
+  RAM **160,168 B** (unchanged, 48.9 %) and flash **2,986,733 B** (**+1,012 B**, 45.6 %);
+  `firmware.bin` **2,987,104 B**. Only the two known RadioLib `#warning`s; none from a changed file.
+- `test/host/run.sh`: **exit 0**, **50 C++ binaries + 16 Python checks** (one new binary, one new
+  Python check; `test_est384.py` updated, see E).
+- New `test/host/test_est392.cpp` (built and run by run.sh, BIN50), over the firmware's own headers:
+  the labels (POSITION / Position / GPS / Fixed and their descriptions, no digit, dot or em dash);
+  the choice's rectangles at 320x240 and 800x480 (panel from the row's own bottom edge, two rows
+  tiling it with no gap, on the glass at the scroll the shell opens it at, and the drop-up fallback
+  when there is no room below); the scroll rule (never back up, exact lift, clamped, unset row);
+  the hit test (both options at their corners and last pixel, one pixel below is the next option or
+  outside, the row above / Back / the far corner are -1, every pixel of the panel is an option);
+  the answers (`posChoiceAction`) plus a real `PositionSource`: Cancel after GPS keeps GPS and the
+  fix, Cancel after Fixed keeps Fixed and the saved point (and a later fix cannot move it), choosing
+  GPS switches, choosing Fixed stores the point, and `sourceLabel()` reads GPS/Fixed with no fix;
+  and the pressed rect == the drawn option rect with no target outside the panel.
+- New `test/host/test_est392.py` (the shell half): exactly one `POSITION` section and one
+  `A_PosSource` row built from the header labels, the value is `posSourceLabel()`, the section order
+  is Position then Satellites/Fix then Share position, the Node page has no source row, the removed
+  ids and `SetPage::Position` / `Change fixed position` are nowhere, `ownPickOpen()` has one call
+  site, `posSelectGps()` one and `posSelectFixed()` one (the picker's Save), the choice handler
+  stores no point itself and formats no float, the labels live once in the header, and the drawing,
+  the hit test and the pressed look all ask the one layout function.
+
+### E. One older test edited (why)
+- `test/host/test_est384.py` asserted the string `Change fixed position` was in `main.cpp`. EST-392
+  removes that button on purpose (the picker reopens by choosing Fixed again), so the check now
+  asserts the position row still exists and keeps EST-384's real rule (no coordinate, no
+  `%.4f, %.4f` display). It is a test of EST-384's own rule, not of the removed string.
+
+### F. Preview
+- `docs/shots/2026-11-11-est392-position-choice.png` (2x), generated by the new `tools/mkpos.py`: a
+  tiny C++ dumper builds the General page's real rows, asks `ui/settings_layout.h` for the real
+  rectangles (tabs, title/back, every visible row at the scroll the shell opens at, the choice
+  panel) and prints `ui/theme.h`'s real colours; Python only fills them. Left: the page with the
+  choice closed, `Position  GPS >`, `Satellites 9 used, 14 heard`, `Fix 3D`. Right: the same page
+  with the choice open, GPS highlighted with its dot, `Fixed  picked on the map` under it, the panel
+  ending exactly at the body's floor. Invented counts only, no coordinates anywhere.
+
+### G. Could not check (no device, no serial)
+- The taps on the glass: the row to open the choice, GPS, Fixed, and a tap outside for Cancel.
+  The preview is a layout drawing from the firmware's own rectangles, not a photo of the panel.
+- Whether the two-row panel over the Satellites/Fix rows reads clearly at 1x, and whether the row
+  first in the section is the order Filip wants (it is a layout choice, made so the panel drops
+  DOWN; easy to move back if he prefers the details first).
+- Switching to Fixed and back with a real sky (the host proves the source rule, not the GNSS).
+- The scroll lift in use: the host proves the arithmetic (347 px at the top of the General page),
+  the feel of the page moving by itself when the choice opens is unproven.
+
+### H. Next step
+Claude reviews the diff and the preview and flashes. On the glass: Settings > General > POSITION,
+`Position` reads `GPS`, tap it (the page lifts, the choice drops under the row with GPS dotted), tap
+Fixed (EST-384's picker on the fix or the map centre; Save -> the row reads `Fixed`, the Map shows
+the pin), tap Position again -> Fixed, pick GPS, tap an empty spot to Cancel (the row must not
+change), and check the Node page has no Position row and no second POSITION section. That is the
+whole ticket.

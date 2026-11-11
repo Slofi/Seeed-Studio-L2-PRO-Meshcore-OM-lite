@@ -77,7 +77,8 @@ BIN46="$(mktemp /tmp/om-lite-est387.XXXXXX)"
 BIN47="$(mktemp /tmp/om-lite-est388.XXXXXX)"
 BIN48="$(mktemp /tmp/om-lite-est390.XXXXXX)"
 BIN49="$(mktemp /tmp/om-lite-est391.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49"' EXIT
+BIN50="$(mktemp /tmp/om-lite-est392.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -462,3 +463,16 @@ python3 -B test_est390.py
 # ntp::replyEpochSane(), the firmware's own inline check, plus the window's four edges.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est391.cpp -o "$BIN49"
 "$BIN49"
+
+# EST-392: Settings > General's ONE position control. The labels (POSITION, Position, GPS / Fixed,
+# no digit or dot in any of them), the two-row choice hanging from the row's own rectangle (tiling it
+# exactly, on the glass at the scroll the shell opens it at, dropped above only when there is no room
+# below), its hit test (0 / 1 on an option, -1 = Cancel on the row above, Back and the page around
+# it), the answer (GPS selects GPS, Fixed opens EST-384's picker, Cancel keeps the source and the
+# saved point), the pressed rect being the drawn option rect, and ONE control (no Position page in
+# the page list). test_est392.py is the shell half: the General row is built from the header labels,
+# the value is the selected source, the Node duplicate and the page are gone, and draw / hit / press
+# all ask the one layout function.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est392.cpp -o "$BIN50"
+"$BIN50"
+python3 -B test_est392.py

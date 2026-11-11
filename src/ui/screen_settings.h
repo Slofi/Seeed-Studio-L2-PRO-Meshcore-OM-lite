@@ -61,6 +61,11 @@ struct SettingsView {
   // wrapped inside the box.
   bool clearAsk = false;
   const char* clearText = "";
+  // EST-392: the General page's ONE position control is open. The choice drops under the row at
+  // `posChoiceRow` (an index into `rows`); `posFixed` puts the dot on Fixed, else on GPS.
+  bool posChoice = false;
+  int posChoiceRow = -1;
+  bool posFixed = false;
 };
 
 void settingsScreenDraw(const SettingsView& v);
@@ -93,6 +98,11 @@ SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y);
 // EST-382: the confirmation pop-up's hit test, from the rectangles it was drawn with. It is read
 // only while v.clearAsk is true; Outside means Cancel (the default side) and is consumed.
 SettingsModalHit settingsClearAskHit(const SettingsView& v, int x, int y);
+
+// EST-392: the Position row's two-choice panel, from the rectangles the drawing uses. Empty when the
+// choice is closed. The hit test answers 0 (GPS), 1 (Fixed) or -1 (Cancel: a tap outside the panel).
+SettingsChoiceLayout settingsPositionChoice(const SettingsView& v);
+int settingsPositionChoiceHit(const SettingsView& v, int x, int y);
 
 }  // namespace ui
 }  // namespace om

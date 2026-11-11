@@ -28,22 +28,23 @@ static void testNamesKey() {
   const MapChrome c = mapChromeFor(L, false);
   CHECK(c.names.right() == c.zoomIn.right());
   CHECK(c.names.x == c.zoomOut.x);
-  // EST-373: 25 px wide (the widest icon, 17, plus 4 px each side), 32 px tall, up to the edge.
+  // EST-373/374: 25 px wide (the widest icon, 17, plus 4 px each side), 31 px tall: EST-374's chip
+  // puts a 26 px tap target above the top tab, which costs the column 1 px of its band.
   CHECK(c.names.w == kMapTabW && c.names.w == 25);
-  CHECK(c.names.h == 32);
+  CHECK(c.names.h == 31);
   CHECK(c.names.y == c.traces.y - c.traces.h - kMapTabGap);   // the top tab of the column
-  CHECK(c.names.y >= c.zoomLabel.bottom());                   // never under the z13 line
+  CHECK(c.names.y >= c.chipTap.bottom());                     // below the chip's target, never on it
   CHECK(!c.names.overlaps(c.traces));
   CHECK(!c.names.overlaps(c.lock));
   CHECK(!c.names.overlaps(c.zoomIn));
   CHECK(!c.names.overlaps(c.zoomOut));
   CHECK(!c.names.overlaps(c.zoomLabel));
 
-  // The 320x240 geometry quoted in PROGRESS.md: right edge 320, x 295, y 51..83.
+  // The 320x240 geometry quoted in PROGRESS.md: right edge 320, x 295, y 56..87.
   CHECK(c.names.x == 295);
   CHECK(c.names.right() == 320);
-  CHECK(c.names.y == 51);
-  CHECK(c.names.bottom() == 83);
+  CHECK(c.names.y == 56);
+  CHECK(c.names.bottom() == 87);
 
   // The one hit test: the centre of the tab is the Names tab, every pixel of it is.
   const int cx = c.names.x + c.names.w / 2;
@@ -74,16 +75,23 @@ static void testNamesKey() {
 static void testCentre() {
   const MapChrome c = mapChromeFor(l2(), false);
   const MapPoint p = mapCentreOf(c);
-  // The tile canvas is 320x214 and map.cpp puts the view's geographic centre at (160,107). The
-  // chrome derives the same point from its view rectangle even though the view runs to the tab bar.
+  // The tile canvas is 320x214 and, since EST-374, it starts on the status bar's bottom row, so the
+  // view's geographic centre is at (160, 133) on the screen. The chrome derives the same point from
+  // its view rectangle, which now IS the canvas.
   CHECK(kMapCanvasW == 320);
   CHECK(kMapCanvasH == 214);
+  CHECK(kMapCanvasTop == kStatusH);
   CHECK(kMapCentreX == 160);
-  CHECK(kMapCentreY == 107);
+  CHECK(kMapCentreY == 133);
   CHECK(p.x == kMapCentreX);
   CHECK(p.y == kMapCentreY);
   CHECK(p.x == c.view.x + c.view.w / 2);
   CHECK(p.y == c.view.y + c.view.h / 2);
+  // EST-374: the same centre in BOTH states: hiding the bars never moves the cross.
+  const MapChrome hid = mapChromeFor(l2(), false, true);
+  CHECK(mapCentreOf(hid).x == p.x && mapCentreOf(hid).y == p.y);
+  CHECK(mapCentreCrossRect(hid).x == mapCentreCrossRect(c).x);
+  CHECK(mapCentreCrossRect(hid).y == mapCentreCrossRect(c).y);
 
   // EST-373: two 1 px lines, 7 px long (arm 3), so the box is 7x7 and centred on the same point.
   const Rect d = mapCentreCrossRect(c);
@@ -107,10 +115,10 @@ static void testCentre() {
   CHECK(ps.x == p.x && ps.y == p.y);
   CHECK(mapCentreCrossRect(sel).x == d.x && mapCentreCrossRect(sel).y == d.y);
 
-  // The Position picker's crosshair (rptr_layout.cpp: 154,101 12x12) is centred on the same pixel,
-  // which is why the picker does not draw this cross: it already has a crosshair there.
+  // The Position picker's crosshair (rptr_layout.cpp, a 12x12 box at 154,127 since EST-374) is
+  // centred on the same pixel, which is why the picker does not draw this cross: it has its own.
   CHECK(154 + 12 / 2 == p.x);
-  CHECK(101 + 12 / 2 == p.y);
+  CHECK(127 + 12 / 2 == p.y);
 }
 
 // --- the trace colours and widths ----------------------------------------------------------------

@@ -3,8 +3,8 @@
 //   2. the edge tabs are 25 px (their widest icon plus 4 px each side) and every tab's tap rectangle
 //      IS the rectangle the screen draws: one list (mapTabRects) feeds both, and the test proves it
 //      at all four corners of every tab, with x + w == 320;
-//   3. the arrow beside the zN label hides the column down to 4 px slivers, its 28 x 22 target never
-//      overlaps the top tab, the label never moves, and the state is saved with the layer switches.
+//   3. the hide/show key saves its state with the layer switches (EST-374 moved the key into a chip
+//      and the hidden-state checks into test_est374.cpp).
 // Plain g++, no Arduino.
 #include <math.h>
 #include <stdio.h>
@@ -44,7 +44,7 @@ static void testTabWidth() {
   // Heights are the layout's: the same 32 px for all five, computed from the band, not baked in.
   CHECK(c.names.h == c.traces.h && c.traces.h == c.lock.h && c.lock.h == c.zoomIn.h &&
         c.zoomIn.h == c.zoomOut.h);
-  CHECK(c.names.h == 32);
+  CHECK(c.names.h == 31);   // EST-374: the chip target takes 1 px of the band
   CHECK(c.zoomOut.bottom() == l2().tabbar.y);
 }
 
@@ -102,84 +102,11 @@ static void testRectsAreTaps() {
   CHECK(mapHitAt(c, nullptr, 0, 295, c.zoomIn.y + 2).kind == MapHitKind::ZoomIn);
 }
 
-// --- 3. the hide/show arrow and the slivers -------------------------------------------------------
-static void testArrow() {
-  const Layout& L = l2();
-  const MapChrome shown = mapChromeFor(L, false, false);
-  const MapChrome hidden = mapChromeFor(L, false, true);
-
-  CHECK(!shown.tabsHidden);
-  CHECK(hidden.tabsHidden);
-
-  // The glyph: 5 x 7, on the label's centre line, inside the one target.
-  CHECK(kMapArrowW == 5 && kMapArrowH == 7);
-  CHECK(shown.zoomArrow.w == 5 && shown.zoomArrow.h == 7);
-  CHECK(shown.zoomArrow.x + shown.zoomArrow.w == 320);   // flush with the tabs' edge
-  CHECK(shown.zoomLabel.right() + kMapArrowGap == shown.zoomArrow.x);
-  CHECK(shown.zoomLabel.y + shown.zoomLabel.h / 2 == shown.zoomArrow.y + shown.zoomArrow.h / 2);
-
-  // The target: at least 28 x 22, the whole label line, above the top tab and never on it.
-  CHECK(kMapZoomTapW == 28 && kMapZoomTapH == 22);
-  CHECK(shown.zoomTap.w == 28 && shown.zoomTap.h == 22);
-  CHECK(shown.zoomTap.w >= 28 && shown.zoomTap.h >= 22);
-  CHECK(shown.zoomTap.right() == 320);
-  CHECK(shown.zoomTap.y == L.status.bottom());
-  CHECK(shown.zoomTap.bottom() <= shown.names.y);
-  CHECK(!shown.zoomTap.overlaps(shown.names));
-  CHECK(!hidden.zoomTap.overlaps(hidden.names));
-  // It covers the label and the arrow, so the finger can land anywhere on the line.
-  CHECK(shown.zoomTap.contains(shown.zoomLabel.x, shown.zoomLabel.y));
-  CHECK(shown.zoomTap.contains(shown.zoomLabel.right() - 1, shown.zoomLabel.bottom() - 1));
-  CHECK(shown.zoomTap.contains(shown.zoomArrow.x, shown.zoomArrow.y));
-  CHECK(shown.zoomTap.contains(shown.zoomArrow.right() - 1, shown.zoomArrow.bottom() - 1));
-  // A tap anywhere in it is the hide/show key, in both states.
-  CHECK(mapHitAt(shown, nullptr, 0, shown.zoomTap.x + 1, shown.zoomTap.y + 1).kind ==
-        MapHitKind::TabsToggle);
-  CHECK(mapHitAt(shown, nullptr, 0, shown.zoomTap.right() - 1, shown.zoomTap.bottom() - 1).kind ==
-        MapHitKind::TabsToggle);
-  CHECK(mapHitAt(hidden, nullptr, 0, hidden.zoomTap.x + 1, hidden.zoomTap.y + 1).kind ==
-        MapHitKind::TabsToggle);
-  // Just left of the target is the map, and just below it the top tab.
-  CHECK(mapHitAt(shown, nullptr, 0, shown.zoomTap.x - 1, shown.zoomTap.y + 1).kind ==
-        MapHitKind::Map);
-  CHECK(mapHitAt(shown, nullptr, 0, shown.zoomTap.right() - 1, shown.names.y).kind ==
-        MapHitKind::Names);
-
-  // The label never moves and never disappears: the same box in both states, inside the target.
-  CHECK(hidden.zoomLabel.x == shown.zoomLabel.x && hidden.zoomLabel.y == shown.zoomLabel.y);
-  CHECK(hidden.zoomLabel.w == shown.zoomLabel.w && hidden.zoomLabel.h == shown.zoomLabel.h);
-  CHECK(hidden.zoomArrow.x == shown.zoomArrow.x && hidden.zoomArrow.y == shown.zoomArrow.y);
-  CHECK(hidden.zoomArrow.w == shown.zoomArrow.w && hidden.zoomArrow.h == shown.zoomArrow.h);
-  CHECK(shown.zoomLabel.x >= shown.zoomTap.x);
-  CHECK(shown.zoomLabel.right() <= shown.zoomTap.right());
-
-  // Hidden: each tab is only its 4 px sliver at the same edge, at the same y and height.
-  CHECK(hidden.names.x == 316 && hidden.names.w == kMapTabSliverW);
-  CHECK(hidden.names.y == shown.names.y && hidden.names.h == shown.names.h);
-  CHECK(hidden.zoomIn.y == shown.zoomIn.y && hidden.zoomIn.h == shown.zoomIn.h);
-  CHECK(hidden.zoomOut.bottom() == shown.zoomOut.bottom());
-  MapTab hs[kMapTabCount];
-  mapTabRects(hidden, hs);
-  for (int i = 0; i < kMapTabCount; ++i) {
-    CHECK(hs[i].rect.w == 4 && hs[i].rect.right() == 320);
-  }
-
-  // A tap on a sliver brings the tabs back (the only tab pixels left), a tap on the freed map area
-  // is an ordinary map tap.
-  CHECK(mapHitAt(hidden, nullptr, 0, 318, hidden.names.y + 2).kind == MapHitKind::TabsToggle);
-  CHECK(mapHitAt(hidden, nullptr, 0, 316, hidden.zoomOut.y + 2).kind == MapHitKind::TabsToggle);
-  CHECK(mapHitAt(hidden, nullptr, 0, 315, hidden.zoomIn.y + 2).kind == MapHitKind::Map);
-  CHECK(mapHitAt(hidden, nullptr, 0, 300, hidden.names.y + 2).kind == MapHitKind::Map);
-  CHECK(mapHitAt(hidden, nullptr, 0, 276, hidden.zoomIn.y + 2).kind == MapHitKind::Map);
-
-  // A marker still wins over the sliver (the map's one rule for every piece of chrome).
-  MapMarker m;
-  m.x = 318;
-  m.y = (int16_t)(hidden.names.y + 2);
-  m.type = 2;
-  m.name = "R1";
-  CHECK(mapHitAt(hidden, &m, 1, 318, hidden.names.y + 2).kind == MapHitKind::Marker);
-}
+// --- 3. the hide/show key and the slivers ----------------------------------------------------------
+// EST-374 moved the hide/show key from the label line into a 22 px chip and narrowed the slivers to
+// 3 px, and it gives the hidden state its own tap semantics (the ghost + / -). Those checks live in
+// test_est374.cpp; this file keeps EST-373's own truths (a 25 px tab whose drawn rect IS its tap
+// rect, and the one dark cross).
 
 // --- 4. the centre cross in one dark ink ----------------------------------------------------------
 static double chan5(uint16_t v) { return ((v >> 11) & 0x1F) * 255.0 / 31.0; }
@@ -202,13 +129,13 @@ static double contrast(uint16_t a, uint16_t b) {
 }
 
 static void testCross() {
-  // Two 1 px lines, arm 3, so the box is 7x7, centred on the map's own centre.
+  // Two 1 px lines, arm 3, so the box is 7x7, centred on the map's own centre (EST-374: 160,133).
   CHECK(kMapCentreCrossArm == 3);
   const MapChrome c = mapChromeFor(l2(), false);
   const Rect d = mapCentreCrossRect(c);
   CHECK(d.w == 7 && d.h == 7);
-  CHECK(d.x == 157 && d.y == 104);
-  CHECK(d.x + d.w / 2 == 160 && d.y + d.h / 2 == 107);
+  CHECK(d.x == 157 && d.y == 130);   // EST-374: the canvas starts at y 26, so the centre is 133
+  CHECK(d.x + d.w / 2 == 160 && d.y + d.h / 2 == 133);
 
   // One dark ink, not the white kInk the outline used to carry.
   CHECK(kMapCrossInk == rgb565(0x202020));
@@ -323,13 +250,12 @@ static void testSavedHidden() {
 int main() {
   testTabWidth();
   testRectsAreTaps();
-  testArrow();
   testCross();
   testSavedHidden();
   if (g_fail) {
     printf("est373: %d failure(s)\n", g_fail);
     return 1;
   }
-  printf("est373: 25 px tabs, one drawn/tap list, hide/show arrow, 7 px dark cross, saved state ok\n");
+  printf("est373: 25 px tabs, one drawn/tap list, 7 px dark cross, saved state ok\n");
   return 0;
 }

@@ -25,9 +25,13 @@ def strip_comments(text: str) -> str:
 
 # 1. Every drawTabBar() call passes a model that lives on a view (`v.tabs`, `view.tabs`, ...).
 #    A literal count or an active tab as the third argument is the bug that came back once already.
+#    EST-374: the bar's drawing moved into drawTabBarAt(dy) and drawTabBar() is a one-line wrapper,
+#    so definitions are dropped before the search: a signature is not a call site, and the wrapper's
+#    body would otherwise be read as "drawTabBar(d, L, m) { drawTabBarAt(...)" and fail on its own.
 call_re = re.compile(r"drawTabBar\s*\(([^;]*?)\)\s*;", re.S)
+def_re = re.compile(r"\bvoid\s+drawTabBar\w*\s*\([^)]*\)\s*\{")
 for path in sorted(SRC.rglob("*.cpp")):
-    body = strip_comments(path.read_text(encoding="utf-8"))
+    body = def_re.sub("", strip_comments(path.read_text(encoding="utf-8")))
     for m in call_re.finditer(body):
         args = " ".join(m.group(1).split())
         if ".tabs" not in args and "tabBarModel" not in args:

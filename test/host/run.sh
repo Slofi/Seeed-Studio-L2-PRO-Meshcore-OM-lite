@@ -53,7 +53,8 @@ BIN32="$(mktemp /tmp/om-lite-est367.XXXXXX)"
 BIN33="$(mktemp /tmp/om-lite-est368.XXXXXX)"
 BIN34="$(mktemp /tmp/om-lite-est370.XXXXXX)"
 BIN35="$(mktemp /tmp/om-lite-est373.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35"' EXIT
+BIN36="$(mktemp /tmp/om-lite-est374.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -241,6 +242,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est364.cpp \
 # loop histogram with per-part attribution; the anonymous owner/name answer for an unnamed repeater;
 # and the `radio` / `rptr login` command surface, including that no log form carries the password.
 python3 -B test_tab_bar_calls.py
+# EST-374: every page switch goes through showTab -> map_tab::leave(), so leaving the Map always
+# draws the bottom bar on the next screen; no other screen reads the saved tabsHidden key.
+python3 -B test_est374.py
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est365.cpp \
   ../../src/radio_stats.cpp ../../src/rptr_model.cpp ../../src/usb_cmd_logic.cpp \
   ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN30"
@@ -296,3 +300,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est370.cpp \
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est373.cpp \
   ../../src/ui/map_chrome.cpp -o "$BIN35"
 "$BIN35"
+
+# EST-374: the rest of the Map's hide idea. The canvas is the full map area (320 x 214 at y 26) in
+# both states and the centre (160,133) never moves; the 22 px chip with its 2 px chevron and 30 x 26
+# target; the tucked bottom bar (a 3 px strip with no tap zone, every other screen keeps its bar);
+# the unread dot; the grey ghost + / - on the shown zoom rectangles (and 2 px left of one is a map
+# tap); the 3 px slivers; and the 4-frame slide's 31 ms per-frame estimate.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est374.cpp \
+  ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp -o "$BIN36"
+"$BIN36"

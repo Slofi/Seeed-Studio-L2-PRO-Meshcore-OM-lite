@@ -246,7 +246,10 @@ void build(ui::MapView& v) {
   const GpsState& g = fix();
   if (g.valid) {
     int x = 0, y = 0;
-    if (om::mapProject(g.lat, g.lon, x, y) && x >= 0 && x < 320 && y >= 0 && y < 214) {
+    // EST-374: mapProject() answers in screen coordinates (the canvas starts under the status bar),
+    // so the visible band is kMapCanvasTop..kMapCanvasTop + kMapCanvasH.
+    if (om::mapProject(g.lat, g.lon, x, y) && x >= 0 && x < ui::kMapCanvasW &&
+        y >= ui::kMapCanvasTop && y < ui::kMapCanvasTop + ui::kMapCanvasH) {
       ui::MapMarker& m = v.markers[v.markerCount++];
       m = ui::MapMarker();
       m.x = (int16_t)x;
@@ -267,7 +270,10 @@ void build(ui::MapView& v) {
     if (!list[i].has_pos) continue;
     int x = 0, y = 0;
     if (!om::mapProject((double)list[i].lat_e6 / 1e6, (double)list[i].lon_e6 / 1e6, x, y)) continue;
-    if (x < -4 || x >= 324 || y < -4 || y >= 218) continue;
+    if (x < -4 || x >= ui::kMapCanvasW + 4 || y < ui::kMapCanvasTop - 4 ||
+        y >= ui::kMapCanvasTop + ui::kMapCanvasH + 4) {
+      continue;
+    }
     ui::MapMarker& m = v.markers[v.markerCount++];
     m = ui::MapMarker();
     m.x = (int16_t)x;
@@ -298,6 +304,33 @@ void drawAnimFrame() {
   ui::MapView v;
   build(v);
   ui::mapScreenAnimate(v);
+}
+
+// EST-374: the hide/show slide. The map never moves (the canvas is full height in both states), so
+// every frame is a cached-canvas repaint with only the chrome moved: the five tabs ride right and
+// the bottom page bar drops, each by the same fraction of their 22 px. kMapSlideSteps - 1
+// interpolated frames plus the steady frame; from the EST-371 numbers a frame is a 19.8 ms canvas
+// repush plus an 11.5 ms panel push (31 ms, under the ticket's 35 ms limit), so 4 frames is about
+// 125 ms inside the 120-150 ms window. With no canvas to repush (a first entry after boot) the loop
+// is skipped: an empty map sliding would say nothing, and the one draw below is the whole change.
+void slideBars(bool hidden) {
+  ui::MapView v;
+  build(v);   // the view already carries the NEW state: chip, chevron and dot flip on the first frame
+  const uint32_t t0 = millis();
+  int frames = 0;
+  if (ui::kMapSlideSteps > 1 && om::mapCanvasReady()) {
+    for (int i = 1; i < ui::kMapSlideSteps; ++i) {
+      int off = (int)ui::kMapTabSlideDx * i / ui::kMapSlideSteps;
+      // Tucking moves the groups AWAY from home (off grows); restoring walks them back.
+      if (!hidden) off = (int)ui::kMapTabSlideDx - off;
+      ui::mapScreenSlide(v, (int16_t)off, (int16_t)off);
+      ++frames;
+    }
+  }
+  draw();   // the steady frame of the new state
+  Serial.printf("[map] bars %s: %d slide frame(s) + 1 in %lu ms%s\n", hidden ? "tuck" : "restore",
+                frames, (unsigned long)(millis() - t0),
+                frames == 0 ? " (instant: no canvas)" : "");
 }
 
 #if defined(OM_ENABLE_MESH)
@@ -388,6 +421,17 @@ void showPoint(double lat, double lon, const char* name) {
 void enter() {
   s_openFast = om::mapCanvasReady();
   s_refreshPending = false;
+}
+
+// EST-374: the Map is being left. The tucked bar is THIS screen's chrome: every other screen draws
+// its own full bar from drawTabBar(), whatever the saved tabsHidden key says, so the bar is on the
+// next screen by construction. This hook exists so the leaving side has one named place (showTab
+// calls it for every route: a pop-up action, a notification, a USB tap, a page switch from code)
+// and nothing transient can outlive the screen. The log line is the device-side evidence.
+void leave() {
+  s_openFast = false;
+  Serial.printf("[map] leave: the next screen draws its own full bar (tucked key=%d)\n",
+                s_layers.tabsHidden() ? 1 : 0);
 }
 
 void draw() {
@@ -511,13 +555,14 @@ bool tap(int x, int y) {
       return true;
     }
     case ui::MapHitKind::TabsToggle: {
-      // EST-373: the arrow beside the zN label hides the five tabs down to a 4 px sliver and brings
-      // them back; a tap on a sliver does the same (the only tab pixels left). Saved with the other
-      // two switches, so reopening the map keeps the column as it was left. No animation: one frame.
+      // EST-373/374: the chip (or a tap on a hidden sliver) hides BOTH groups at once, the five tabs
+      // to 3 px slivers and the whole bottom page bar to a 3 px strip, and brings them back. One
+      // saved key ("tabsHidden") drives both. Saved with the other two switches, so reopening the
+      // map keeps them as they were left. The slide is chrome over the cached canvas (slideBars).
       s_layers.toggleTabsHidden();     // the return is the write's, so read the state back below
       const bool hidden = s_layers.tabsHidden();
-      Serial.printf("[map] tabs %s\n", hidden ? "hidden" : "shown");
-      draw();
+      Serial.printf("[map] bars %s\n", hidden ? "hidden" : "shown");
+      slideBars(hidden);
       return true;
     }
     case ui::MapHitKind::Marker: {

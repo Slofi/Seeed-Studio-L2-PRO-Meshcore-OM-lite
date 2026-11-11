@@ -31,23 +31,29 @@ static int g_fail = 0;
 static void testMapChrome() {
   const Layout& L = l2();
   const MapChrome c = mapChromeFor(L, false);
-  CHECK(c.view.x == 0 && c.view.y == 0 && c.view.w == 320 && c.view.h == L.tabbar.y);
-  CHECK(c.view.bottom() == L.tabbar.y);
-  // EST-372: the zoom is plain text in the same right column, above the top tab. EST-373: the
-  // hide/show arrow sits to its right, so the label ends one arrow and one gap short of the edge.
+  // EST-374: the view IS the full canvas, from the status bar's bottom row to the screen floor, in
+  // both states. That is what makes the centre still and the hide a chrome-only repaint.
+  CHECK(c.view.x == 0 && c.view.y == kStatusH && c.view.w == 320 && c.view.h == 214);
+  CHECK(c.view.bottom() == L.height);
+  CHECK(c.view.y == L.status.bottom());
+  // EST-374: the hide/show chip at the top right, flush with the tabs' edge, with the plain zN label
+  // immediately to its left on the same line. The chevron lives inside the chip.
+  CHECK(c.chip.w == 22 && c.chip.h == 22);
+  CHECK(c.chip.right() == c.view.right());
+  CHECK(c.chip.y == L.status.bottom());
+  CHECK(c.zoomLabel.right() + kMapChipGap == c.chip.x);
   CHECK(c.zoomLabel.y >= L.status.bottom());
-  CHECK(c.zoomLabel.right() + kMapArrowGap + kMapArrowW == c.view.right());
-  CHECK(c.zoomArrow.right() == c.view.right());
-  CHECK(c.zoomArrow.x == c.zoomLabel.right() + kMapArrowGap);
   CHECK(c.zoomLabel.bottom() < c.names.y);
   CHECK(c.zoomLabel.h == kMapZoomLabelH);
+  CHECK(c.chevron.x >= c.chip.x && c.chevron.right() <= c.chip.right());
+  CHECK(c.chevron.y >= c.chip.y && c.chevron.bottom() <= c.chip.bottom());
   // EST-372: every tab's right edge IS the screen edge; no margin, no gap.
   CHECK(c.zoomIn.right() == c.view.right());
   CHECK(c.zoomOut.right() == c.zoomIn.right());
   CHECK(c.lock.right() == c.zoomIn.right());
   CHECK(c.traces.right() == c.zoomIn.right());
   CHECK(c.names.right() == c.zoomIn.right());
-  CHECK(c.zoomOut.bottom() == c.view.bottom());
+  CHECK(c.zoomOut.bottom() == L.tabbar.y);   // the column ends where the shown bar starts
   CHECK(c.zoomOut.y == c.zoomIn.bottom() + kMapTabGap);
   CHECK(c.zoomIn.y == c.lock.bottom() + kMapTabGap);
   CHECK(c.lock.y == c.traces.bottom() + kMapTabGap);
@@ -56,18 +62,18 @@ static void testMapChrome() {
   CHECK(!c.lock.overlaps(c.zoomIn));
   CHECK(!c.traces.overlaps(c.lock));
   CHECK(!c.names.overlaps(c.traces));
-  CHECK(c.names.y >= c.zoomLabel.bottom());
-  // EST-373: the tabs are 25 wide (the widest icon plus 4 px each side) and 32 tall, because the
-  // arrow's 22 px target above the top tab has to fit in the 189 px band.
+  CHECK(c.names.y >= c.chipTap.bottom());
+  // EST-373/374: the tabs are 25 wide (the widest icon plus 4 px each side). EST-374: 31 tall, not
+  // 32: the chip's 26 px target above the top tab is what takes the 1 px.
   CHECK(c.names.w == kMapTabW && c.names.w == 25);
   CHECK(c.names.w == kMapTabIconW + 2 * kMapTabIconPad);
-  CHECK(c.names.h == 32);
+  CHECK(c.names.h == 31);
   CHECK(c.names.h > 24 && c.names.w > 24);   // still bigger than the old 24x24 key
   CHECK(c.callout.empty());                   // nothing selected: no panel
 
   const MapChrome s = mapChromeFor(L, true);
   CHECK(!s.callout.empty());
-  CHECK(s.callout.bottom() == c.view.bottom() - 8);
+  CHECK(s.callout.bottom() == L.tabbar.y - 8);   // EST-374: the shown bar's top, not the view's
   CHECK(s.callout.x == 8 && s.callout.right() == 312);
 }
 
@@ -87,14 +93,13 @@ static void testMapHit() {
   // EST-372: the last pixel column is the tab; one pixel left of it is map.
   CHECK(mapHitAt(c, nullptr, 0, c.view.right() - 1, c.names.y + 1).kind == MapHitKind::Names);
   CHECK(mapHitAt(c, nullptr, 0, c.names.x - 1, c.names.y + 1).kind == MapHitKind::Map);
-  // EST-373: the z13 label line IS a key now: the whole 28 x 22 label strip hides/shows the tabs.
-  CHECK(mapHitAt(c, nullptr, 0, c.zoomLabel.x + 2, c.zoomLabel.y + 2).kind ==
-        MapHitKind::TabsToggle);
-  CHECK(mapHitAt(c, nullptr, 0, c.zoomArrow.x + 2, c.zoomArrow.y + 2).kind ==
-        MapHitKind::TabsToggle);
-  CHECK(mapHitAt(c, nullptr, 0, c.zoomTap.x, c.zoomTap.y).kind == MapHitKind::TabsToggle);
-  CHECK(mapHitAt(c, nullptr, 0, c.zoomTap.x - 1, c.zoomTap.y).kind == MapHitKind::Map);
-  CHECK(!c.zoomTap.overlaps(c.names));   // the target never sits on the top tab
+  // EST-374: the chip IS the hide/show key, in both states: the glyph, the chip and the whole
+  // 30 x 26 target answer it, and one pixel left of the target is the map.
+  CHECK(mapHitAt(c, nullptr, 0, c.chip.x + 2, c.chip.y + 2).kind == MapHitKind::TabsToggle);
+  CHECK(mapHitAt(c, nullptr, 0, c.chevron.x + 1, c.chevron.y + 1).kind == MapHitKind::TabsToggle);
+  CHECK(mapHitAt(c, nullptr, 0, c.chipTap.x, c.chipTap.y).kind == MapHitKind::TabsToggle);
+  CHECK(mapHitAt(c, nullptr, 0, c.chipTap.x - 1, c.chipTap.y + 1).kind == MapHitKind::Map);
+  CHECK(!c.chipTap.overlaps(c.names));   // the target never sits on the top tab
   CHECK(mapHitAt(c, nullptr, 0, c.callout.x + 4, c.callout.y + 4).kind == MapHitKind::Callout);
   CHECK(mapHitAt(c, nullptr, 0, 160, 90).kind == MapHitKind::Map);
   CHECK(mapHitAt(c, nullptr, 0, 0, 0).kind == MapHitKind::None);   // the status bar's pixels
@@ -205,13 +210,16 @@ static void testMapCredit() {
     const MapChrome c = mapChromeFor(l2(), false);
     const Rect cr = mapCreditRect(c, (int16_t)creditW);
     CHECK(!cr.empty());
-    // Bottom left, one margin in from the edge.
+    // Bottom left, one margin in from the lowest clear row.
+    // EST-374: that row is the shown bar's top (the tucked strip's when hidden), not the view's
+    // floor: the licence line must stay on the glass in both states.
     CHECK(cr.x == c.view.x + kMapMargin);
-    CHECK(cr.bottom() == c.view.bottom() - kMapMargin);
+    CHECK(cr.bottom() == c.creditBottom - kMapMargin);
     CHECK(cr.w == creditW);
-    // Inside the map area and off every tab and the z13 line.
+    // Inside the map area and off every tab and the zN line.
     CHECK(cr.right() <= c.view.right());
     CHECK(cr.y >= c.status.bottom());
+    CHECK(cr.bottom() <= c.view.bottom());
     CHECK(!cr.overlaps(c.zoomIn) && !cr.overlaps(c.zoomOut) && !cr.overlaps(c.lock) &&
           !cr.overlaps(c.traces) && !cr.overlaps(c.names));
     CHECK(!cr.overlaps(c.zoomLabel));

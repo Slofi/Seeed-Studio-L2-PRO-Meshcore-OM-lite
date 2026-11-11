@@ -443,13 +443,23 @@ void drawToastOverlay(lgfx::LovyanGFX* d, uint32_t nowMs) {
 }
 
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m) {
-  const Rect& bar = L.tabbar;
+  drawTabBarAt(d, L, m, 0);
+}
+
+// EST-374: the same bar, `dy` rows lower. The Map's hide animation moves the whole page bar down
+// (kMapBarSlideDy) and the frame clips what falls off the screen floor; the bar's own drawing is
+// untouched, so the last rows of the slide are the real bar's top rows (the kLine edge and the
+// active tab's gold segment), which is exactly what "tucked under" should leave behind.
+void drawTabBarAt(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m, int16_t dy) {
+  Rect bar = L.tabbar;
+  bar.y = (int16_t)(bar.y + dy);
   d->fillRect(bar.x, bar.y, bar.w, bar.h, kBar);
   d->drawFastHLine(bar.x, bar.y, bar.w, kLine);
 
   for (int i = 0; i < kTabCount; ++i) {
     const Tab t = (Tab)i;
-    const Rect r = L.tab(t);
+    Rect r = L.tab(t);
+    r.y = (int16_t)(r.y + dy);
     const bool on = (t == m.active);
     if (on) {
       d->fillRect(r.x, r.y, r.w, r.h, kSelBg);
@@ -473,7 +483,11 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m) {
   if (m.unread > 0) {
     char badgeChars[4];
     const int chars = badgeText(m.unread, badgeChars, (int)sizeof(badgeChars));
-    if (chars > 0) drawCountBadge(d, countBadgeRect(L.tab(Tab::Chat), chars), m.unread, kBar);
+    if (chars > 0) {
+      Rect b = countBadgeRect(L.tab(Tab::Chat), chars);
+      b.y = (int16_t)(b.y + dy);
+      drawCountBadge(d, b, m.unread, kBar);
+    }
   }
 
   // EST-342: a small gold dot on the Nodes tab while a contact added since the screen was last
@@ -482,7 +496,7 @@ void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m) {
   if (m.newNodeDot) {
     const Rect tab = L.tab(Tab::Nodes);
     const int cx = tab.x + tab.w / 2 + kBadgeCxOfs;
-    const int cy = tab.y + kBadgeTop + kBadgeD / 2;
+    const int cy = tab.y + kBadgeTop + kBadgeD / 2 + dy;
     d->fillSmoothCircle(cx, cy, kNewDotR + kBadgeRing, kBar);
     d->fillSmoothCircle(cx, cy, kNewDotR, kAcc);
   }

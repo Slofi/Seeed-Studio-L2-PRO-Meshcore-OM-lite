@@ -4576,3 +4576,231 @@ the callout, the attribution, the status and tab bars and the tile path are unto
 - On the glass (USB taps + screenshots): plain dark 7x7 cross; five 25 px tabs flush right; a tap on the arrow at (306,37) hides them to 4 px slivers, a second tap brings them back. Left as shown.
 - NOT in this build: the four EST-373 comments (the whole bottom bar hiding too, the 22 px chip with an unread dot, a full-height canvas so the cross does not move, the grey + / - left behind while hidden). DS worked from the ticket text only. They go into the next ticket.
 - This was the last flash of 2026-11-11 night; the device is switched off.
+
+## 2026-11-11 01:23 (DeepSeek): EST-374 full-screen map canvas, tucked bottom bar, 22 px chip, ghost zooms
+
+The rest of Filip's "hide" idea (2026-11-11 00:38-00:48), on top of EST-373. Seven parts, A to G;
+every one of them is in this build. Nothing was flashed, committed, pushed or deployed from the
+sandbox, and the device is off: this entry is the sandbox's evidence only.
+
+### A. The map canvas is the full map area, in both states
+
+- `ui/map_chrome.h`: `kMapCanvasTop = kStatusH` (26), `kMapCanvasH = 240 - 26 = 214`,
+  `kMapCentreX = 160`, `kMapCentreY = 26 + 107 = **133**` (was 107). The view rectangle IS the
+  canvas now: `Rect{0, 26, 320, 214}`, so `mapCentreOf()` and the cross follow it without a second
+  number.
+- `map.cpp`: new `kViewTop`; `mapRender()` and `mapRepush()` push at `kViewTop + yy` (thirteen 16-row
+  slices plus one of 6 rows; 320 x 16 x 2 = 10,240 B each, well under the 32,767 B SPI cap), `mapProject()` returns
+  SCREEN y (canvas y + 26) and `mapScreenToLatLon()` subtracts the same origin, so markers, the
+  cross, the trace points and the RPTR picker all speak one coordinate system.
+- `screens/map_tab.cpp`: the marker cull band is now 22..244 instead of -4..218.
+- `ui/rptr_layout.cpp`: the Position picker's map is `Rect{0, 26, 320, 214}` and its crosshair moved
+  from a 12x12 box at (154,101) to (154,**127**), i.e. the same (160,133) centre. It used to be the
+  same pixel as the cross only by the accident of the canvas starting at y 0.
+- `ui/map_chrome.cpp`: the attribution's floor is now the lowest clear row (`creditBottom`): the
+  shown bar's top (215) or the tucked strip's top (237), so the licence line stays on the glass in
+  both states. Shown it is still exactly x 6..144, y 199..209; hidden it is 221..231.
+- Hide/show draws the chrome over the canvas that is already in PSRAM (`mapScreenAnimate` /
+  `mapRepush`): no tile is decoded and no view moves, so the cross, the markers and the tiles hold
+  still. The EST-371 cached path can no longer push a shorter frame: the canvas covers every row
+  from 26 to 240, so a repush replaces all of the map area (before, rows 214 and the 26 rows under
+  the status bar were not part of the pushed frame at all).
+
+**RAM/PSRAM, before and after (the ticket asked):**
+- Static RAM: **156,800 B** before and **156,800 B** after (47.9 % of 327,680). The new numbers live
+  in `MapChrome`, which is a stack temporary, so `.bss`/`.data` did not move by a byte.
+- The tile canvas is PSRAM: **320 x 214 x 2 = 136,960 B before and 136,960 B after, so +0 B.** The
+  ticket's "the canvas grows by ~30 rows, ~19 KB" does not apply to this tree: the canvas was
+  ALREADY 214 rows tall, but it was pushed at y 0, so 26 of its rows sat under the status bar and
+  its last row (214) stopped one row short of the tab bar (215). What changed is where those rows
+  are, not how many. (If the canvas had been the visible band only, 320 x 189 x 2 = 120,960 B,
+  the growth would have been +16,000 B; that is where the estimate's order of magnitude comes
+  from.)
+- The frame buffer is unchanged (320 x 240 x 2 = 153,600 B PSRAM). `MapChrome` itself grew by 5
+  rectangles and one int16 (48 B) on the stack of the Map paths.
+
+### B. The arrow hides the whole bottom bar too
+
+- One tap hides BOTH groups: the five tabs to their slivers and the whole bottom page bar
+  (Nodes/Chat/Map/RPTR) to a 3 px strip. One saved key (`tabsHidden`, EST-373) drives both; no new
+  preference.
+- `ui/map_chrome.cpp`: `barStrip = Rect{0, 237, 320, 3}`, `creditBottom` follows it, and
+  `mapHitAt()` has **no rectangle for the strip**: those rows fall through to `Map`, so the strip
+  takes no taps and a drag that starts on it pans (the shell's drag path never reads chrome rects,
+  and the rows are inside `c.view`).
+- `ui/screen_map.cpp` `drawBarStrip()`: kPanel fill for the 3 rows plus the Map tab's gold segment
+  in its own x range (160..240) at the bar's own 2 px (`kTabTopLine`). That is what the real bar
+  leaves behind when it slides by 22 px, so the strip reads as the bar tucked under. The ticket said
+  "in kPanel": the fill is kPanel, the segment is the tab's gold, and the segment is 2 of the 3 rows.
+- `main.cpp`: while the Map's bars are tucked the shell does not read the tab bar at all
+  (`const bool tucked = mapBarsTucked(tabsHidden, true); const int tab = tucked ? -1 : L.tabAt(x,y)`).
+  Shown, the four zones are exactly as before (80 px each at y 215..240).
+- "Leaving the Map by any route shows the bar on the next screen": the tuck is the MAP's own chrome
+  (only `screen_map.cpp` can draw it), every other screen calls `drawTabBar()`, and `showTab()` is
+  the only writer of the page variable. `showTab()` now calls `om::map_tab::leave()` whenever it
+  goes from tab 2 to another tab, and `leave()` logs
+  `[map] leave: the next screen draws its own full bar (tucked key=N)`.
+  The page-switch routes, all of them through `showTab()` (`test_est374.py` lists them on every run):
+  1. `main.cpp:1242` `chatOpenDmFor()` (a DM opened from the Nodes sheet or a notification)
+  2. `main.cpp:1303` the message sheet's Info action, back to Nodes
+  3. `main.cpp:1314` the message sheet's ShowOnMap
+  4. `main.cpp:1426` the Chat tab's bar
+  5. `main.cpp:4913` the Nodes sheet's ShowOnMap
+  6. `main.cpp:4985` the Nodes sheet's LoginRptr
+  7. `main.cpp:5041` the Nodes tab's bar
+  8. `main.cpp:5073` the Map tab's bar (skipped while tucked)
+  9. `main.cpp:5089` the RPTR tab's bar
+  The USB `tap` command feeds the same touch samples into the same `handleTap()`, so it takes that
+  path too. Settings is the one screen with no bottom page bar at all (since EST-347 it is a full
+  page with its own header and Back returns to the tab it came from); nothing can leak into it and
+  Back returns to the Map with the user's saved state.
+
+### C. The toggle is a 22 px chip
+
+- `ui/map_chrome.h`: `chip = Rect{298, 26, 22, 22}` (kPanel fill, kLine edge, `kRadius` 4),
+  flush with the tabs' right edge (320) and starting on the status bar's bottom row.
+- `chevron = Rect{307, 33, 4, 7}`, a 2 px stroke (`kMapChevronStroke`), drawn by
+  `drawChevron()` from primitives: ">" while the bars are out, "<" while they are tucked, in kInk.
+- `chipTap = Rect{290, 26, 30, 26}`: at least 30 x 26, flush right, and it ends at y 52. The top tab
+  therefore starts at 56, so the five tabs are **31 px** each (was 32) and move 51..83 -> 56..87.
+  That 1 px per tab is the only number this ticket takes away from EST-373, and it is the price of
+  a 26 px target that never overlaps the top tab (26 + 26 + 2 = 54 for the column's top edge).
+- `zoomLabel` is now `Rect{275, 31, 21, 11}`: immediately left of the chip (right edge 296, one
+  `kMapChipGap` of 2 px), the same vertical centre as the chip, drawn in `kMapCrossInk` (#202020,
+  the cross's ink) instead of kDim. It never moves between states and it is not a key any more; the
+  chip is.
+
+### D. The unread hint while hidden
+
+- `mapChipShowsUnread(tabsHidden, unread)` = hidden AND unread > 0, and
+  `mapChipUnreadDotRect()` = `Rect{298, 26, 6, 6}`: a 6 px box on the chip's top-left corner, drawn
+  as a kAcc smooth circle (r = 3, so 7 px of ink with the anti-aliased edge, the same size family
+  as the bar's 5 px new-node dot). Its first row IS the map area's first row, so the status bar,
+  drawn last, cannot eat it. The count comes from `v.tabs.unread`, the shell's one
+  `currentTabBar()` model (no second unread source).
+
+### E. Zoom stays usable while hidden (Filip)
+
+- `ui/theme.h`: `kMapGhostInk = #707070`. `ui/screen_map.cpp`: ONE `drawZoomGlyph()` draws the "+"
+  and the "-" for both states (same SansTitle character, same datum, same centre); the shown tab
+  passes the kPanel plate and kInk, the hidden state passes no plate and the grey.
+- The ghost boxes are `zoomInShown` / `zoomOutShown` in `MapChrome`: the SHOWN-state tab rectangles
+  (295..320 x 152..183 and 184..215), so the glyphs sit on exactly the same centres (307,167) and
+  (307,199) as on the tab.
+- The tap zones are those same rectangles, active only while hidden: a tap in the ghost zone zooms,
+  a tap 2 px left of it is a map tap, and the 3 px sliver at 317..320 keeps its EST-373 meaning
+  (bring the bars back) because the sliver is checked first.
+- Measured contrast of #707070 on the real z13 tile: **4.34:1** on the #f0f0e0 ground (34.6 % of the
+  image), **3.78:1** on #e0e0e0, **3.23:1** on the #d0d0d0 road grey, **3.69:1** on the map canvas
+  itself (#191816), and 1.08:1 on the darkest 1 % (#6c6c6a): a grey glyph on a dark thin map line
+  blends in, which is the honest limit of a mid grey. The glyph is a 2 px stroke several pixels wide,
+  so on the light ground (where most of it lands) it reads.
+
+### F. Slivers
+
+- `kMapTabSliverW = 3` (was 4): the five slivers are at x 317..320, at their shown rows and height.
+  A tap on one still brings both groups back (nothing invisible fires), and a drag that starts on
+  one still pans: the sliver is inside the map's view and the shell's drag path reads no chrome
+  rectangle.
+
+### G. Motion
+
+- `kMapSlideSteps = 4`: three interpolated frames (5, 11 and 16 px of the 22) plus the steady frame.
+  The tabs ride right by `tabDx` (drawn from the shown geometry, so the icons ride out and are
+  clipped by the screen edge) and the bar drops by the same `barDy` through the new
+  `drawTabBarAt(d, L, m, dy)`, which is the one tab bar drawing moved by dy (so the last rows of the
+  slide are the real bar's top rows). `static_assert(kMapTabSlideDx == kMapBarSlideDy)` keeps the two
+  groups on one number.
+- Chrome only: every frame repushes the cached canvas and repaints the chrome, through the same
+  `omFrameBegin/omFrameEnd` frame buffer; no backlight dip, no tile decode. With no canvas yet (a
+  first Map entry after boot) the loop is skipped and the change is the one steady frame.
+- Cost estimate from EST-371's measured numbers, as the ticket asked: one frame is a 19,790 us
+  cached-canvas repush plus an 11,500 us panel push = **31.3 ms**, under the ticket's ~35 ms limit,
+  and 4 x 31.3 = **125 ms**, inside the 120-150 ms window. So the slide is implemented, not skipped.
+  The device measures it for real: the new log line is
+  `[map] bars tuck: 3 slide frame(s) + 1 in N ms` (and the same for `restore`). If that N/4 exceeds
+  35 ms on the glass, set `kMapSlideSteps = 1` in `ui/map_chrome.h` and the switch is instant again;
+  the log then says `0 slide frame(s) + 1 ... (instant: no canvas)`.
+- The chip, its chevron and the unread dot are drawn in every frame, so they flip with the first
+  frame and stay put; the ghost + / - appear only in the steady hidden frame (they are "hidden" as
+  soon as the slide starts).
+
+### Build and tests
+
+- `pio run -e om_lite_l2` **exit 0**: RAM **156,800 B** (47.9 %; EST-373 was the same), flash
+  **2,805,873 B** (42.8 %; EST-373 was 2,804,373, so **+1,500 B**), `firmware.bin` **2,806,240 B**
+  (+1,504 B).
+- `sh test/host/run.sh` **exit 0** (full suite). New:
+  - `test/host/test_est374.cpp` (BIN36): the canvas is 320x214 at y 26 and the centre (160,133) is
+    the same in both states; the chip 22x22 at 298,26 with its 4x7 2 px chevron; the 30x26 target
+    inside the map band and never on the top tab (the top tab starts 2 px below it); the tucked
+    strip 0,237,320,3 with no tap zone and inside the pan area; `mapBarsTucked()` false for every
+    non-Map tab; the unread dot's rule and box; the five 3 px slivers at 317..320 with a tap that
+    brings the bars back; the ghost zones EQUAL to the shown zoom rectangles (centre, size), a tap in
+    one zooms, 2 px left of one is a map tap, the sliver wins on its 3 px, a marker still wins over
+    everything; the attribution above the bar and above the strip; the picker's crosshair on the
+    same centre; and the slide's 5/11/16 px steps with the 31.3 ms / 125 ms estimate.
+  - `test/host/test_est374.py`: the page-switch funnel. Exactly ONE writer of the page variable (in
+    `showTab()`), 9 `showTab()` call sites (listed above, printed on every run), `showTab()` calls
+    `map_tab::leave()` when it leaves the Map, every other screen draws its own bar and does not
+    read `tabsHidden`, and `mapBarsTucked()` is only read by `main.cpp`.
+  - Updated to the new numbers: `test_est351.cpp` (view/chip/label/target, 31 px tabs, the
+    attribution's floor), `test_est366.cpp` (the picker's map and crosshair), `test_est370.cpp`
+    (Names 56..87, centre 160,133), `test_est373.cpp` (the arrow section moved to est374; 31 px,
+    cross at 157,130), `test_tab_bar_calls.py` (definitions are not call sites, so the new
+    `drawTabBarAt()` wrapper does not trip its own check).
+- **Preview** for Claude before flashing: `docs/shots/2026-11-11-map-fullscreen-preview.png`. It is
+  **964x301 = three 1:1 320x240 frames side by side** (bars out / tucked / tucked with an unread
+  dot) plus a 16 px title strip, a caption per frame and two footer lines. Every rectangle and
+  colour comes from the real `ui/map_chrome.h` + `theme.h` (a small host program prints them and the
+  renderer draws them, so no number is copied), the two tab icons are the masks parsed out of
+  `ui/icons.cpp`, the fonts are DejaVu stand-ins and the map is a crop of
+  `map-preview-ljubljana-z13-2026-11-09.png`. No node positions and no names are drawn. The gold
+  dotted box is an annotation: it is the 30x26 chip target, not something the firmware draws. The
+  renderer lives outside the repo (scratch), like the EST-372/373 ones; say if it should move into
+  `tools/`.
+
+### Could not check (no device, no serial, no glass)
+
+- The glass: whether the 3 px strip's 2 px gold segment really reads as "tucked under", whether the
+  grey ghosts are strong enough on a bright tile (4.1:1 says yes) and quiet enough on a busy one,
+  whether 22 px of chip is enough for a fingertip in practice (the target is 30x26), and whether the
+  31 px tabs still feel big enough.
+- The slide: the estimate is 31.3 ms per frame from EST-371's measured repush and push, not a
+  measurement of this build. The first flash's `[map] bars tuck ... in N ms` line is the number.
+- The device PSRAM figure before/after: the sandbox has no serial device. `status` prints
+  `psram=` and the boot line `[om] frame buffer`; the arithmetic above says +0 B for the canvas.
+- Touch on the new targets, and the "no tap on the strip" rule with a real finger (the host test
+  proves the rectangles, not the feel).
+- One thing the ticket did not ask about, left as it was: the callout still opens at 167..207 (above
+  where the shown bar starts) in both states, so with the bars tucked there is 30 px of empty map
+  under it.
+
+### Next step for Claude
+
+1. Review the diff and the preview, then flash `firmware.bin` (2,806,240 B). The boot line is still
+   `[map] layers traces=.. names=.. hidden=..`.
+2. Open the Map: the canvas should fill from under the status bar to the very bottom, the cross
+   should be at the middle of that area, `z13` immediately left of a 22 px chip with `>` at the top
+   right, and the five tabs below it (Names 56..87).
+3. Tap the chip: both groups should slide (about 125 ms) to the slivers and the strip, the chevron
+   should flip to `<`, and the log should say `[map] bars hidden` then `[map] bars tuck: 3 slide
+   frame(s) + 1 in N ms`. Write N in this file. Tap it again: `bars restore`, the same N.
+4. While tucked: tap the ghost `+` / `-` (307,167) and (307,199): the zoom changes and the ghost
+   moves to the right tab's centre. Tap 2 px left of a ghost zone: it must be a map tap (the callout
+   closes, no zoom line in the log). Tap a sliver: the bars come back.
+5. Leave the Map with the bars tucked, by the tab bar's own bar and by a Nodes sheet's Show on map,
+   then come back: the log line `[map] leave: the next screen draws its own full bar (tucked key=1)`
+   followed by the next screen's own bar, and the Map comes back tucked.
+6. With an unread message and the bars tucked, the chip's corner should carry a small gold dot; the
+   bottom bar's badge is not visible then by design.
+7. Quick regression: the Position picker (RPTR > a repeater > Position > pick on map) must show its
+   crosshair at the canvas centre (160,133), and `status` should print the same `psram=` as before
+   within a few KB.
+8. If the slide feels too slow or the ghosts too faint, the two knobs are `kMapSlideSteps` and
+   `kMapGhostInk` in `ui/map_chrome.h` / `ui/theme.h`.
+
+## 2026-11-11 01:30 (Claude): EST-374 reviewed and built, NOT on the device
+- DS's run ended on the 30-minute cap (exit 124) after the work and this log were written, so Paperclip marked it blocked; nothing was missing except item F's rounded slivers, which were added to the description after DS had started (still square, 3 px).
+- Review: projection and its inverse both shift by the same 26 px (`mapProject` +kViewTop, `mapScreenToLatLon` -kViewTop); every outside caller (traces, markers, cull band, the RPTR picker at kMapCentreX/Y) uses the screen form. Preview checked (three frames, no positions or names).
+- Sandbox build exit 0 (RAM 156,800 B, flash 2,805,873 B, firmware.bin 2,806,240 B), tests exit 0. Committed locally, **not pushed and not flashed**: the device is off for the night. First flash tomorrow, then push.

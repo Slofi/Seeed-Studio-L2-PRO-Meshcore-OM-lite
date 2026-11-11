@@ -37,8 +37,9 @@ struct MapView {
   bool tracesOn = false;
   // EST-370: the Names toggle. Off hides every marker label and leaves the markers themselves.
   bool namesOn = false;
-  // EST-373: the hide/show arrow beside the zN label. On, the five tabs are 4 px slivers at the
-  // screen edge and the map gets the freed area; the state comes from the saved layer store.
+  // EST-373/374: the hide/show chip. On, the five tabs are 3 px slivers at the screen edge, the
+  // bottom page bar is a 3 px strip on the floor, and the map gets the freed area (the canvas was
+  // full-height all along); the state comes from the saved layer store and drives both groups.
   bool tabsHidden = false;
   TraceFrame trace;
 };
@@ -54,6 +55,13 @@ void mapScreenDraw(const MapView& v);
 // (no decode, no SD read), and only the chrome and the trace are drawn. Used while a trace runs, at
 // the map's refresh rate and never when idle.
 void mapScreenAnimate(const MapView& v);
+
+// EST-374: one frame of the hide/show slide. The cached canvas is repushed and only the chrome is
+// painted: the five tabs ride right by `tabDx` (0 = the shown state, kMapTabSlideDx = tucked) and
+// the bottom page bar sits `barDy` rows lower (0 = the shown bar, kMapBarSlideDy = the strip's
+// position). Chrome only: no tile is decoded and no view moves, so the cross and the markers hold
+// still while the two groups move. Never call it before a canvas exists (map_tab checks).
+void mapScreenSlide(const MapView& v, int16_t tabDx, int16_t barDy);
 
 }  // namespace ui
 }  // namespace om

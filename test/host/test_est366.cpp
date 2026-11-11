@@ -18,6 +18,7 @@
 
 #include "rptr_model.h"
 #include "rptr_page.h"
+#include "ui/map_chrome.h"   // EST-374: the picker's canvas origin and centre come from here
 #include "ui/notify.h"
 #include "ui/rptr_layout.h"
 
@@ -323,13 +324,18 @@ static void testMapPicker() {
   const om::ui::Layout& L = om::ui::l2();
   const om::ui::RptrMapPickLayout clean = om::ui::rptrMapPickLayoutFor(L, false);
   CHECK(clean.apply.empty());
+  // EST-374: the picker's map IS the full-height canvas and its crosshair sits on the same centre
+  // the Map tab's cross marks (160, 133): the canvas moved down under the status bar by 26 px.
+  CHECK(clean.crosshair.x + clean.crosshair.w / 2 == om::ui::kMapCentreX);
+  CHECK(clean.crosshair.y + clean.crosshair.h / 2 == om::ui::kMapCentreY);
   CHECK(clean.crosshair.x + clean.crosshair.w / 2 == 160);
-  CHECK(clean.crosshair.y + clean.crosshair.h / 2 == 107);
+  CHECK(clean.crosshair.y + clean.crosshair.h / 2 == 133);
   CHECK(clean.back.right() <= L.width);
   CHECK(clean.zoomIn.right() <= L.width);
   CHECK(clean.useGps.right() <= L.width);
   CHECK(clean.panel.bottom() <= L.tabbar.y);
   CHECK(clean.map.h == 214);
+  CHECK(clean.map.y == L.status.bottom());
   CHECK(om::ui::rptrMapPickHitAt(clean, clean.back.x + 2, clean.back.y + 2) ==
         om::ui::RptrMapPickHit::Back);
   CHECK(om::ui::rptrMapPickHitAt(clean, clean.zoomIn.x + 2, clean.zoomIn.y + 2) ==

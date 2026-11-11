@@ -3,6 +3,10 @@
 
 #include <string.h>
 
+// EST-374: the map picker's canvas origin and crosshair are the Map chrome's own numbers, so the
+// picker cannot point anywhere the Map tab's cross does not.
+#include "ui/map_chrome.h"
+
 namespace om {
 namespace ui {
 
@@ -230,7 +234,11 @@ RptrHitResult rptrPageHitAt(const RptrPageLayout& a, const rptr::ScreenOut& scre
 // ---------------------------------------------------------------------------------- the map picker
 RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply) {
   RptrMapPickLayout m;
-  m.map = Rect{0, 0, 320, 214};   // exactly map.cpp's canvas; the status bar is drawn over it
+  // EST-374: exactly map.cpp's canvas, which now runs from the status bar's bottom row to the screen
+  // floor, and the crosshair sits on the chrome's own centre point (ui/map_chrome.h) so the picker,
+  // the Map tab's cross and the projection can never disagree. It used to be the 320x214 canvas at
+  // y 0 with its crosshair at 101 + 6; both follow the canvas down by the 26 px it gained on top.
+  m.map = Rect{0, kMapCanvasTop, kMapCanvasW, kMapCanvasH};
   const int16_t top = L.status.bottom();
   m.back = Rect{8, (int16_t)(top + 3), kRptrBackW, 20};
   m.zoomIn = Rect{(int16_t)(L.width - 8 - 24), (int16_t)(top + 30), 24, 24};
@@ -239,7 +247,7 @@ RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply) {
   m.coords = Rect{8, (int16_t)(m.panel.y + 3), (int16_t)(L.width - 16), 18};
   m.useGps = Rect{8, (int16_t)(m.panel.y + 20), 154, 20};
   if (apply) m.apply = Rect{(int16_t)(L.width - 8 - 150), (int16_t)(m.panel.y + 20), 150, 20};
-  m.crosshair = Rect{154, 101, 12, 12};
+  m.crosshair = Rect{(int16_t)(kMapCentreX - 6), (int16_t)(kMapCentreY - 6), 12, 12};
   return m;
 }
 

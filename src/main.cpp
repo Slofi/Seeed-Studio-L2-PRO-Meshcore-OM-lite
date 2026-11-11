@@ -4854,6 +4854,11 @@ static void showTab(int tab) {
   }
   const int fromTab = g_tab;
   g_tab = tab;
+  // EST-374: leaving the Map. The tucked bottom bar belongs to the MAP screen: every other screen
+  // draws its own full bar, so the bar is on the next screen whatever the saved key says. Stating it
+  // here covers every route off the tab at once (a pop-up action, a notification, a USB tap and a
+  // page switch from code all end up in this function; the test scans the file to prove it).
+  if (fromTab == 2 && tab != 2) om::map_tab::leave();
   g_bubMenuSeq = 0;
   g_replySeq = 0;
   g_replyName[0] = 0;
@@ -5061,7 +5066,10 @@ static void handleTap(int x, int y, bool longPress) {
 
   if (!g_settings && g_tab == 2) {
     const om::ui::Layout& L = om::ui::l2();
-    const int tab = L.tabAt(x, y);
+    // EST-374: while the bars are tucked the bottom strip is not a tab bar any more: those rows are
+    // map gestures (the strip "takes no taps"). Shown, the bar's own zones are exactly as before.
+    const bool tucked = om::ui::mapBarsTucked(om::map_tab::tabsHidden(), true);
+    const int tab = tucked ? -1 : L.tabAt(x, y);
     if (tab >= 0) { showTab(tab); return; }
     if (L.gear().contains(x, y)) { openSettings(2, om::ui::SettingsTab::Map); return; }
     if (L.radioFault().contains(x, y)) { showRadioFaultToast(); return; }

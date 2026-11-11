@@ -10,7 +10,12 @@
 // the screen edge, and the "offline · z13" chip is a plain zN line above them.
 // EST-373 (Filip 2026-11-11 ~00:38): the cross is 7 px in ONE dark ink with no outline, the tabs are
 // 25 px (their widest icon plus 4 px each side), and the arrow beside the zN line hides the column
-// down to a 4 px sliver and brings it back.
+// down to a sliver and brings it back.
+// EST-374 (Filip 2026-11-11, the rest of the "hide" idea): the canvas is the full map area in both
+// states (the bars are drawn OVER it, so hiding them costs a repaint of the chrome and no tile), the
+// hide key is a 22 px chip with a chevron, the BOTTOM bar tucks with the tabs (both down to a 3 px
+// strip), the zoom + / - stay behind as grey ghosts while hidden, an unread dot rides on the chip,
+// and the two groups slide together in a few frames of chrome-only repaint.
 #include "ui/screen_map.h"
 
 #include <Arduino.h>
@@ -32,9 +37,9 @@ void edgeTabBox(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line)
   d->drawRoundRect(r.x, r.y, (int16_t)(r.w + kRadius), r.h, kRadius, line);
 }
 
-// EST-373: hidden, the same tab is only the 4 px (kMapTabSliverW) that still fits at the screen
-// edge. It is drawn square: it is the middle of a tab, not a rounded left end, so a 4 px sliver does
-// not turn into a 4 px smear of the corner radius. One line on its left edge says "a tab is here".
+// EST-373: hidden, the same tab is only the 3 px (kMapTabSliverW) that still fits at the screen
+// edge. It is drawn square: it is the middle of a tab, not a rounded left end, so a 3 px sliver does
+// not turn into a 3 px smear of the corner radius. One line on its left edge says "a tab is here".
 void edgeTabSliver(lgfx::LovyanGFX* d, const Rect& r, uint16_t fill, uint16_t line) {
   d->fillRect(r.x, r.y, r.w, r.h, fill);
   d->drawFastVLine(r.x, r.y, r.h, line);
@@ -98,17 +103,32 @@ void drawCentreCross(lgfx::LovyanGFX* d, const MapChrome& c) {
   d->fillRect((int16_t)cx, (int16_t)(cy - arm), 1, (int16_t)span, kMapCrossInk);
 }
 
-// EST-373: the hide/show arrow next to the zoom label, a small filled triangle in the label's ink.
-// Right (">") while the tabs are out, left ("<") while they are hidden. The columns narrow from the
-// base to the point: 7, 5, 3, 1, 1 px, so the glyph's box is 5 x 7 and its widest column is 7 px.
-void drawArrow(lgfx::LovyanGFX* d, const Rect& r, bool left, uint16_t ink) {
-  const int cy = r.y + r.h / 2;
-  for (int i = 0; i < r.w; ++i) {
-    int hgt = r.h - 2 * i;
-    if (hgt < 1) hgt = 1;
+// EST-374: the chevron inside the hide/show chip. ">" while the bars are out, "<" while they are
+// tucked. A 4 x 7 glyph with a 2 px stroke, drawn from primitives: two diagonals of three 1 x 2 px
+// blocks each, meeting at the point. The columns narrow from the outside in, so the stroke stays
+// 2 px on the diagonal instead of the 1 px a 45 degree line of single pixels would give.
+void drawChevron(lgfx::LovyanGFX* d, const Rect& r, bool left, uint16_t ink) {
+  const int n = (r.w < (r.h + 1) / 2 ? r.w : (r.h + 1) / 2);   // number of 1 px columns
+  for (int i = 0; i < n; ++i) {
     const int x = left ? (r.x + r.w - 1 - i) : (r.x + i);
-    d->fillRect((int16_t)x, (int16_t)(cy - hgt / 2), 1, (int16_t)hgt, ink);
+    const int top = r.y + i;
+    const int bot = r.y + r.h - 2 - i;   // the lower arm's top row, 2 px tall
+    d->fillRect((int16_t)x, (int16_t)top, 1, kMapChevronStroke, ink);
+    d->fillRect((int16_t)x, (int16_t)bot, 1, kMapChevronStroke, ink);
   }
+}
+
+// One zoom glyph, drawn exactly once (EST-374): the shown tab paints it on its kPanel body in kInk,
+// and the hidden state paints the SAME character at the SAME centre in kMapGhostInk with no body
+// ("same shape, size, stroke, only the colours inverted"). `plate` is the tab's background; without
+// it LovyanGFX draws only the glyph's own pixels, so the topo shows through.
+void drawZoomGlyph(lgfx::LovyanGFX* d, const Rect& box, char glyph, uint16_t ink, bool plate) {
+  setRole(d, FontRole::SansTitle);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  if (plate) d->setTextColor(ink, kPanel);
+  else d->setTextColor(ink);
+  char s[2] = {glyph, 0};
+  d->drawString(s, box.x + box.w / 2, box.y + box.h / 2);
 }
 
 // A colour laid over whatever the frame already holds (the tiles) by a 0..255 alpha. omFramePixel
@@ -209,7 +229,115 @@ void drawTrace(lgfx::LovyanGFX* d, const TraceFrame& f, bool movingOnly) {
   }
 }
 
-void drawMapFrame(const MapView& v, bool freshTiles) {
+// EST-374: the hide/show chip. kPanel fill, kLine edge, rounded; inside it the chevron in kInk. On
+// the chip's top-left corner a 6 px gold dot while a chat has something unread AND the bars are
+// hidden (shown, the bottom bar's own badge says it). The dot's first row is the map area's first
+// row, so the status bar, which is drawn last, never covers it.
+void drawChip(lgfx::LovyanGFX* d, const MapChrome& c, int unread) {
+  d->fillRoundRect(c.chip.x, c.chip.y, c.chip.w, c.chip.h, kRadius, kPanel);
+  d->drawRoundRect(c.chip.x, c.chip.y, c.chip.w, c.chip.h, kRadius, kLine);
+  drawChevron(d, c.chevron, c.tabsHidden, kInk);
+  if (mapChipShowsUnread(c.tabsHidden, unread)) {
+    const Rect u = mapChipUnreadDotRect(c);
+    d->fillSmoothCircle((int16_t)(u.x + u.w / 2), (int16_t)(u.y + u.h / 2),
+                        (int16_t)(kMapUnreadDotD / 2), kAcc);
+  }
+}
+
+// EST-374: the tucked bottom bar. Three rows on the screen's floor in kPanel, with the active
+// (Map) tab's gold segment at their top: the same x range and the same 2 px (kTabTopLine) the bar
+// itself gives that tab, which is what a real bar slid down by kMapBarSlideDy leaves visible.
+// It takes no taps: mapHitAt has no rectangle of this strip, so the map gets those rows.
+void drawBarStrip(lgfx::LovyanGFX* d, const MapChrome& c, const TabBarModel& tabs) {
+  const Rect s = c.barStrip;
+  if (s.empty()) return;
+  d->fillRect(s.x, s.y, s.w, s.h, kPanel);
+  const Rect t = l2().tab(tabs.active);
+  d->fillRect(t.x, s.y, t.w, kTabTopLine, kAcc);
+}
+
+// The five tabs in their SHOWN geometry, shifted right by `dx` (0 = the steady shown state). Used
+// by the steady state and by the hide/show slide: the tab rides out of the screen edge with its
+// icon, and the frame clips what is past x 320. Est-373's rule stands: the tap list and this list
+// are built from the same mapChromeFor() call, so a drawn tab is a tappable tab.
+void drawTabFace(lgfx::LovyanGFX* d, const MapChrome& shown, const MapView& v, int16_t dx) {
+  MapTab tabs[kMapTabCount];
+  mapTabRects(shown, tabs);
+  for (int i = 0; i < kMapTabCount; ++i) {
+    Rect r = tabs[i].rect;
+    r.x = (int16_t)(r.x + dx);
+    bool on = false;
+    switch (tabs[i].kind) {
+      case MapHitKind::Lock: on = v.locked; break;
+      case MapHitKind::Traces: on = v.tracesOn; break;
+      case MapHitKind::Names: on = v.namesOn; break;
+      default: break;
+    }
+    edgeTabBox(d, r, on ? kSelBg2 : kPanel, on ? kAcc : kLine);
+  }
+  for (int i = 0; i < kMapTabCount; ++i) {
+    Rect r = tabs[i].rect;
+    r.x = (int16_t)(r.x + dx);
+    switch (tabs[i].kind) {
+      case MapHitKind::ZoomIn:
+        drawZoomGlyph(d, r, '+', kInk, true);
+        break;
+      case MapHitKind::ZoomOut:
+        drawZoomGlyph(d, r, '-', kInk, true);
+        break;
+      case MapHitKind::Lock:
+        drawLockIcon(d, r, v.locked);
+        break;
+      case MapHitKind::Traces: {
+        // The Traces icon (tools/mkicons.py): a route with its hop dots, gold while traces are on.
+        const int iconX = r.x + (r.w - (int)kIconTrace.w) / 2;
+        const int iconY = r.y + (r.h - (int)kIconTrace.h) / 2;
+        drawIcon(d, kIconTrace, iconX, iconY, v.tracesOn ? kAcc : kInk,
+                 v.tracesOn ? kSelBg2 : kPanel);
+        break;
+      }
+      case MapHitKind::Names: {
+        // The Names icon (tools/mkicons.py): a label tag, gold while names are on.
+        const int namesX = r.x + (r.w - (int)kIconNames.w) / 2;
+        const int namesY = r.y + (r.h - (int)kIconNames.h) / 2;
+        drawIcon(d, kIconNames, namesX, namesY, v.namesOn ? kAcc : kInk,
+                 v.namesOn ? kSelBg2 : kPanel);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
+
+// The steady hidden column: five 3 px slivers (a tap on one brings both groups back), and the two
+// zoom glyphs left behind at the SHOWN tab centres, in the grey ghost ink, with no tab body.
+void drawTabsHidden(lgfx::LovyanGFX* d, const MapChrome& c, const MapView& v) {
+  MapTab tabs[kMapTabCount];
+  mapTabRects(c, tabs);
+  for (int i = 0; i < kMapTabCount; ++i) {
+    bool on = false;
+    switch (tabs[i].kind) {
+      case MapHitKind::Lock: on = v.locked; break;
+      case MapHitKind::Traces: on = v.tracesOn; break;
+      case MapHitKind::Names: on = v.namesOn; break;
+      default: break;
+    }
+    edgeTabSliver(d, tabs[i].rect, on ? kSelBg2 : kPanel, on ? kAcc : kLine);
+  }
+  drawZoomGlyph(d, c.zoomInShown, '+', kMapGhostInk, false);
+  drawZoomGlyph(d, c.zoomOutShown, '-', kMapGhostInk, false);
+}
+
+// One frame. `freshTiles` picks mapRender() (decode + composite) or mapRepush() (the canvas that is
+// already in PSRAM). `slide` is null for the steady states; otherwise the tabs ride out by tabDx and
+// the whole bottom bar sits barDy rows lower (both from kMapSlideSteps, chrome only).
+struct MapSlideFrame {
+  int16_t tabDx = 0;
+  int16_t barDy = 0;
+};
+
+void drawMapFrame(const MapView& v, bool freshTiles, const MapSlideFrame* slide) {
   if (!omFrameBegin()) {
     omFrameEnd();
     return;
@@ -224,18 +352,19 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   if (freshTiles) {
     om::mapRender();   // the tiles only: this file draws the attribution, chrome and traces
   } else {
-    om::mapRepush();   // EST-368: an animation frame, the canvas already composited
+    om::mapRepush();   // EST-368/374: an animation frame, the full-height canvas already composited
   }
 
   if (!om::mapReady()) {
-    drawEmptyState(d, Rect{0, 0, l2().width, (int16_t)l2().tabbar.y}, "Map pack not open.",
+    drawEmptyState(d, Rect{0, kMapCanvasTop, l2().width, kMapCanvasH}, "Map pack not open.",
                    "The card needs /maps/slo/tiles.pack.");
   }
 
   const MapChrome c = mapScreenChrome(v);
 
   // EST-370 (Filip ~23:40): the tile attribution is PLAIN small dim text on the map: no outline, no
-  // plate, nothing around it.
+  // plate, nothing around it. EST-374: its floor follows the bar (shown) or the tucked strip, so the
+  // licence line stays on the glass in both states.
   if (om::mapReady()) {
     const int creditW =
         measureText(d, FontRole::MonoMeta, kMapCreditText, (int)strlen(kMapCreditText));
@@ -256,6 +385,7 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   if (!v.trace.direct) drawTrace(d, v.trace, false);
 
   // EST-372: the centre cross, above the tiles and the route, below the markers and the tabs.
+  // EST-374: it is the centre of the FULL canvas in both states, so it never jumps on a toggle.
   drawCentreCross(d, c);
 
   // Node markers over the tiles, our own position last so it is never hidden by a contact.
@@ -286,53 +416,40 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   if (v.trace.direct) drawTrace(d, v.trace, false);
   else drawTrace(d, v.trace, true);
 
-  // EST-372: the zoom is plain small text just above the top tab. EST-373: it keeps its line and
-  // stays visible in both states, next to the hide/show arrow; both are drawn in the one dim ink,
-  // inside the one 28 x 22 tap box, so the finger never has to find the 5 x 7 glyph. No plate, no
-  // border, no "offline": the map is always offline.
+  // EST-372/373: the zoom is plain small text on the label line above the top tab. EST-374: it sits
+  // immediately LEFT of the chip, on the chip's centre line, in the dark map ink (the cross's ink)
+  // so it reads on a light topo tile. It is drawn in both states and never moves.
   char zoom[8];
   snprintf(zoom, sizeof(zoom), "z%d", v.zoom);
   setRole(d, FontRole::MonoMeta);
   d->setTextDatum(lgfx::textdatum_t::middle_right);
-  d->setTextColor(kDim);
+  d->setTextColor(kMapCrossInk);
   d->drawString(zoom, c.zoomLabel.right(), c.zoomLabel.y + c.zoomLabel.h / 2);
-  drawArrow(d, c.zoomArrow, c.tabsHidden, kDim);
 
-  // EST-373: the five tabs, drawn from the SAME list the hit test reads (mapTabRects), so a tab's
-  // tap zone and its rectangle cannot drift apart. Shown: flush with the screen edge, rounded on the
-  // left only. Hidden: the 4 px sliver at that edge, and no icon.
-  MapTab tabs[kMapTabCount];
-  mapTabRects(c, tabs);
-  for (int i = 0; i < kMapTabCount; ++i) {
-    bool on = false;
-    switch (tabs[i].kind) {
-      case MapHitKind::Lock: on = v.locked; break;
-      case MapHitKind::Traces: on = v.tracesOn; break;
-      case MapHitKind::Names: on = v.namesOn; break;
-      default: break;
-    }
-    const uint16_t fill = on ? kSelBg2 : kPanel;
-    const uint16_t edge = on ? kAcc : kLine;
-    if (c.tabsHidden) edgeTabSliver(d, tabs[i].rect, fill, edge);
-    else edgeTabBox(d, tabs[i].rect, fill, edge);
+  // EST-374: the chip (always drawn: it is the one way back), with its chevron and the unread dot.
+  drawChip(d, c, v.tabs.unread);
+
+  // EST-373/374: drawn from the SAME list the hit test reads (mapTabRects), so a tab's tap zone and
+  // its rectangle cannot drift apart. Shown: flush with the screen edge, rounded on the left only.
+  // Hidden: the 3 px sliver and, at the shown centres, the grey ghost + / -. Sliding: the shown
+  // tabs shifted right by tabDx.
+  if (slide != nullptr) {
+    const MapChrome shown = mapChromeFor(l2(), v.callout, false);
+    drawTabFace(d, shown, v, slide->tabDx);
+  } else if (c.tabsHidden) {
+    drawTabsHidden(d, c, v);
+  } else {
+    drawTabFace(d, c, v, 0);
   }
-  if (!c.tabsHidden) {
-    setRole(d, FontRole::SansTitle);
-    d->setTextDatum(lgfx::textdatum_t::middle_center);
-    d->setTextColor(kInk, kPanel);
-    d->drawString("+", c.zoomIn.x + c.zoomIn.w / 2, c.zoomIn.y + c.zoomIn.h / 2);
-    d->drawString("-", c.zoomOut.x + c.zoomOut.w / 2, c.zoomOut.y + c.zoomOut.h / 2);
-    drawLockIcon(d, c.lock, v.locked);
-    // The Traces icon (tools/mkicons.py): a route with its hop dots, gold while traces are on.
-    const int iconX = c.traces.x + (c.traces.w - (int)kIconTrace.w) / 2;
-    const int iconY = c.traces.y + (c.traces.h - (int)kIconTrace.h) / 2;
-    drawIcon(d, kIconTrace, iconX, iconY, v.tracesOn ? kAcc : kInk,
-             v.tracesOn ? kSelBg2 : kPanel);
-    // The Names icon (tools/mkicons.py): a label tag, gold while names are on.
-    const int namesX = c.names.x + (c.names.w - (int)kIconNames.w) / 2;
-    const int namesY = c.names.y + (c.names.h - (int)kIconNames.h) / 2;
-    drawIcon(d, kIconNames, namesX, namesY, v.namesOn ? kAcc : kInk,
-             v.namesOn ? kSelBg2 : kPanel);
+
+  // EST-374: the bottom page bar. Shown it is the real bar; hidden it is the 3 px strip; mid-slide
+  // it is the real bar `barDy` rows lower, clipped by the screen floor.
+  if (slide != nullptr) {
+    drawTabBarAt(d, l2(), v.tabs, slide->barDy);
+  } else if (c.tabsHidden) {
+    drawBarStrip(d, c, v.tabs);
+  } else {
+    drawTabBar(d, l2(), v.tabs);
   }
 
   // The tapped marker's panel (mock .callout): dark gold, gold edge, the name then one mono line.
@@ -346,7 +463,6 @@ void drawMapFrame(const MapView& v, bool freshTiles) {
   }
 
   drawStatusBar(d, l2(), v.status);
-  drawTabBar(d, l2(), v.tabs);
   om::useAppFont(d);
   omFrameEnd();
 }
@@ -357,8 +473,15 @@ MapChrome mapScreenChrome(const MapView& v) {
   return mapChromeFor(l2(), v.callout, v.tabsHidden);
 }
 
-void mapScreenDraw(const MapView& v) { drawMapFrame(v, true); }
-void mapScreenAnimate(const MapView& v) { drawMapFrame(v, false); }
+void mapScreenDraw(const MapView& v) { drawMapFrame(v, true, nullptr); }
+void mapScreenAnimate(const MapView& v) { drawMapFrame(v, false, nullptr); }
+
+void mapScreenSlide(const MapView& v, int16_t tabDx, int16_t barDy) {
+  MapSlideFrame slide;
+  slide.tabDx = tabDx;
+  slide.barDy = barDy;
+  drawMapFrame(v, false, &slide);
+}
 
 }  // namespace ui
 }  // namespace om

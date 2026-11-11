@@ -3,9 +3,9 @@
 //
 // Index: sorted 24-byte records <B3xIIQI> (z, x, y, offset, length), loaded into PSRAM once and
 // binary-searched. Tiles are decoded by JPEGDEC into a small PSRAM cache (8 x 256x256 RGB565), so
-// panning composites from memory instead of decoding on every drag. The view is 320x200 (the tab
-// bar owns the rest), composited into a canvas and pushed in 16-row slices because one SPI
-// transfer cannot exceed 64 KB.
+// panning composites from memory instead of decoding on every drag. The view is 320x214, from the
+// status bar's bottom row to the screen's floor (EST-374), composited into a canvas and pushed in
+// 16-row slices because one SPI transfer cannot exceed 64 KB.
 #include "map.h"
 
 #include <JPEGDEC.h>
@@ -27,8 +27,12 @@ namespace {
 constexpr int kTile = 256;
 // EST-370: ui/map_chrome.h owns the canvas size and its centre point, so the tile renderer, the
 // chrome's dot, mapProject/mapScreenToLatLon and the position picker cannot drift apart.
-constexpr int kViewW = ui::kMapCanvasW;   // the map area above the tab bar
-constexpr int kViewH = ui::kMapCanvasH;
+// EST-374: the canvas is the FULL map area, from the status bar's bottom row to the screen floor, in
+// both states. kViewTop is where it is pushed; the chrome's view, the cross and the picker all use
+// the same origin, so hiding the bars never moves the centre and never re-renders a tile.
+constexpr int kViewW = ui::kMapCanvasW;   // 320
+constexpr int kViewH = ui::kMapCanvasH;   // 214
+constexpr int kViewTop = ui::kMapCanvasTop;   // 26: the status bar's bottom row
 constexpr size_t kMaxTile = 256 * 1024;
 constexpr uint32_t kRec = 24;
 constexpr int kCache = 8;
@@ -392,8 +396,10 @@ void mapScreenToLatLon(int x, int y, double& lat, double& lon) {
   const double scale = mag ? 2.0 : 1.0;
   const double cpx = lonToXf(s_cLon, rz) * kTile;
   const double cpy = latToYf(s_cLat, rz) * kTile;
+  // EST-374: screen coordinates in, canvas coordinates out. The canvas starts at kViewTop, so a
+  // point on the screen's y 133 is canvas y 107, the projected view centre.
   const double px = cpx + (x - kViewW / 2.0) / scale;
-  const double py = cpy + (y - kViewH / 2.0) / scale;
+  const double py = cpy + ((y - kViewTop) - kViewH / 2.0) / scale;
   lon = xfToLon(px / kTile, rz);
   lat = yfToLat(py / kTile, rz);
 }
@@ -408,7 +414,8 @@ void mapClearMarker() { s_marker = false; }
 
 // EST-351: the map chrome projects a contact or our own fix into the same 320x214 view the tiles
 // use. False only when the pack is not open; a point outside the view is still projected (the
-// caller decides whether it is worth drawing).
+// caller decides whether it is worth drawing). EST-374: the result is in SCREEN coordinates (the
+// canvas origin is kViewTop), so a marker's y and the chrome's y are the same number.
 bool mapProject(double lat, double lon, int& x, int& y) {
   if (!s_ready) return false;
   const bool mag = (s_z == 18);
@@ -417,7 +424,7 @@ bool mapProject(double lat, double lon, int& x, int& y) {
   const double cpx = lonToXf(s_cLon, rz) * kTile;
   const double cpy = latToYf(s_cLat, rz) * kTile;
   x = (int)lround((lonToXf(lon, rz) * kTile - cpx) * scale + kViewW / 2.0);
-  y = (int)lround((latToYf(lat, rz) * kTile - cpy) * scale + kViewH / 2.0);
+  y = (int)lround((latToYf(lat, rz) * kTile - cpy) * scale + kViewH / 2.0) + kViewTop;
   return true;
 }
 
@@ -437,7 +444,7 @@ void mapRender() {
   const uint32_t renderStartUs = micros();   // EST-365: the tile decode + composite, named in `radio`
   auto* d = om_display();
   if (!s_ready) {
-    d->fillRect(0, 0, kViewW, kViewH, kMapBg);
+    d->fillRect(0, kViewTop, kViewW, kViewH, kMapBg);
     return;
   }
 
@@ -489,9 +496,11 @@ void mapRender() {
   // One pushImage is capped by the 16-bit SPI transfer length (~64 KB, ~100 rows at 320 px).
   // EST-352: the canvas holds native RGB565 words; omPushRgb565 is the one rule that makes the
   // frame store them correctly (pushing the words raw every pixel landed byte-swapped).
+  // EST-374: the canvas is pushed at kViewTop and covers every row down to the screen floor, so a
+  // repush never leaves a shorter stale strip behind the bars.
   for (int yy = 0; yy < kViewH; yy += 16) {
     const int h = (yy + 16 <= kViewH) ? 16 : (kViewH - yy);
-    omPushRgb565(d, 0, yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
+    omPushRgb565(d, 0, kViewTop + yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
   }
 
   // The tile attribution is NOT drawn here: it is the map's licence line and ui/screen_map.cpp
@@ -511,12 +520,14 @@ void mapRender() {
 // EST-368: one animation frame's worth of tiles. The canvas was composited by the last mapRender();
 // this only pushes it again, so a moving trace dot never costs a JPEG decode or an SD read. Safe on
 // a screen that was never rendered (mapScreenDraw always renders before an animation starts).
+// EST-374: the full-height canvas covers kViewTop..the screen floor, so a chrome-only repaint (the
+// bars sliding, the chip, the ghosts) can never leave a stale strip behind: one push, all of it.
 void mapRepush() {
   auto* d = om_display();
   if (!s_ready || d == nullptr || s_canvas == nullptr) return;
   for (int yy = 0; yy < kViewH; yy += 16) {
     const int h = (yy + 16 <= kViewH) ? 16 : (kViewH - yy);
-    omPushRgb565(d, 0, yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
+    omPushRgb565(d, 0, kViewTop + yy, kViewW, h, s_canvas + (size_t)yy * kViewW);
   }
 }
 

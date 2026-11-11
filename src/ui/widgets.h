@@ -48,6 +48,9 @@ struct RowModel {
 // Status bar and tab bar.
 void drawStatusBar(lgfx::LovyanGFX* d, const Layout& L, const StatusModel& m);
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m);
+// EST-374: the same bar `dy` rows lower, for the Map's tucked-bar slide. The frame clips whatever
+// falls past the screen floor, so no part of the bar is drawn somewhere the panel cannot show.
+void drawTabBarAt(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m, int16_t dy);
 
 // One-line toast above the tab bar (theme.h kToastH / kToastMargin). Used by a tap on the radio fault
 // mark to say which of the three things is wrong. The caller keeps the text and the time.

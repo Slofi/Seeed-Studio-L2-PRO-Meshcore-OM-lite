@@ -69,6 +69,16 @@ constexpr uint16_t kMapCredit = rgb565(0x9aa3b0);  // tile attribution, plain di
 // the #d0d0d0 road grey, 3.10:1 on its darkest 1 % (#6c6c6a). A dark TILE would swallow it (1.09:1 on
 // #181818): that is what one ink and no outline costs, and this tile pack has no dark tiles.
 constexpr uint16_t kMapCrossInk = rgb565(0x202020);
+// EST-374 (Filip 2026-11-11, the "hide" idea): while the bars are hidden the zoom tabs leave their
+// + and - glyphs behind at the same centre points, with no tab body. The glyph is the SAME SansTitle
+// character as on the tab (same size, same stroke); only its ink changes, because the tab's own kInk
+// on a kPanel background would be a white glyph floating on the topo with nothing around it. Measured
+// on the real z13 tile: 4.34:1 on the #f0f0e0 ground (34.6 % of the image), 3.78:1 on #e0e0e0 and
+// 3.23:1 on the #d0d0d0 road grey, 3.69:1 on the map canvas itself (#191816), and 1.08:1 on the
+// darkest 1 % (#6c6c6a): a grey glyph on a dark thin line blends in, which is the honest limit of a
+// mid grey and why the glyph box is several pixels wide. It stays well below the dark centre cross
+// (#202020) so it never competes with it.
+constexpr uint16_t kMapGhostInk = rgb565(0x707070);
 // EST-368: OM's Traces (OverMesh .trace CSS): a dashed route, a moving dot with a short fading
 // tail, and an expanding ring for a direct arrival.
 // EST-372 (Filip ~23:55: "make it a little bit more visible, also maybe change the trace colour to

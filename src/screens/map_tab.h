@@ -33,6 +33,10 @@ bool tabsHidden();
 
 // Tab entry: show the last composed canvas at once, then refresh its tiles only if the view changed.
 void enter();
+// EST-374: the Map is being left (showTab calls this on every route off the tab). The tucked bar is
+// this screen's chrome, so the next screen's own drawTabBar() shows the bar; this clears the Map's
+// transient state and logs the leave so the device log shows the rule.
+void leave();
 void draw();                 // the normal frame (cached on an open, full render otherwise)
 void pump(bool visible, bool uiDrawOk);
 

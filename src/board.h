@@ -107,6 +107,22 @@ void sdUnmount();
 // Cell voltage in mV: ADS1115 0x48 AIN0, x2 divider. 0 when the read fails.
 uint16_t batteryMilliVolts();
 
+// EST-376: one READ-ONLY 8-bit register read from the USB-C port controller at 0x22 (believed
+// AW35615, FUSB302-compatible). There is deliberately no write function here: a write to SWITCHES0
+// could drop the board's USB sink role and stop charging. Which registers are safe to read is
+// diag_logic.h's rule, not this function's.
+bool usbPdReadRegister(uint8_t reg, uint8_t* out);
+
+// EST-376: the ADS1115's four single-ended inputs in ADC mV at the pin (the cell's x2 divider is
+// applied only by batteryMilliVolts()). AIN1, AIN2 and AIN3 are read first and AIN0 LAST, so the
+// conversion register and the sense rail are left exactly as a battery read leaves them.
+struct AdcProbe {
+  bool ok[4] = {false, false, false, false};
+  uint16_t mv[4] = {0, 0, 0, 0};   // at the pin, the same scale the battery read uses
+  uint16_t raw[4] = {0, 0, 0, 0};  // the ADC's own counts, for a divider ratio later
+};
+void adcProbe(AdcProbe& out);
+
 // L76K GNSS: UART1, RX 18 / TX 17 at 9600. gpsPoll() chews whatever has arrived and returns the
 // latest GGA/GSV state; it never blocks. gpsBegin() only opens the UART; after the first
 // checksum-valid sentence gps_mode.h sends ONE `$PCAS04,7` (GPS + BeiDou + GLONASS), logged once as

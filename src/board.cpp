@@ -11,6 +11,7 @@
 #include <Wire.h>
 #include <lgfx/v1/panel/Panel_NV3031B.hpp>
 
+#include "diag_logic.h"   // EST-376: the FUSB302 register map `pmu probe` reads
 #include "fonts.h"
 #include "frame_metrics.h"   // the one luma rule (EST-355): the change dip's brightness numbers
 #include "gps_mode.h"
@@ -462,10 +463,13 @@ void i2cScan() {
 
 // EST-372: a READ-ONLY identity probe for the addresses the scan cannot name. It reads bytes and
 // prints them; it never writes, and nothing in the app uses the result yet. 0x34 is a common PMU
-// address (an AXP2101 answers 0x4A in register 0x03), 0x22 is probed as a possible second
-// expander (P0 input, config register), 0x14 as the remaining unknown. The point is that the next
-// boot log can answer "what is 0x34" instead of guessing it. No charge decision is made here: a
-// battery voltage trend is not a charge signal.
+// address (an AXP2101 answers 0x4A in register 0x03), 0x14 as the remaining unknown. The point is
+// that the next boot log can answer "what is 0x34" instead of guessing it. No charge decision is
+// made here: a battery voltage trend is not a charge signal.
+//
+// EST-376: 0x22 is NOT probed at boot any more. It is the USB-C port controller (AW35615,
+// FUSB302-compatible) and 0x00/0x06 are meaningless to it; the read-only `pmu probe` command reads
+// the FUSB302 map instead (diag_logic.h holds the registers that are safe to read).
 static bool readByteAt(uint8_t addr, uint8_t reg, uint8_t* out) {
   if (out == nullptr) return false;
   Wire.beginTransmission(addr);
@@ -486,10 +490,6 @@ static void pmuProbe() {
   uint8_t s0 = 0, s1 = 0;
   if (readByteAt(0x34, 0x00, &s0) && readByteAt(0x34, 0x01, &s1)) {
     Serial.printf("[pmu] 0x34 reg00=0x%02X reg01=0x%02X (raw, not interpreted)\n", s0, s1);
-  }
-  uint8_t in = 0, cfg = 0;
-  if (readByteAt(0x22, 0x00, &in) && readByteAt(0x22, 0x06, &cfg)) {
-    Serial.printf("[pmu] 0x22 in=0x%02X cfg=0x%02X\n", in, cfg);
   }
   uint8_t u14 = 0;
   if (readByteAt(0x14, 0x00, &u14)) Serial.printf("[pmu] 0x14 reg00=0x%02X\n", u14);
@@ -595,30 +595,83 @@ void sdUnmount() {
 
 // ---------------------------------------------------------------------------- battery
 
-// ADS1115 at 0x48, single-ended AIN0, +/-4.096 V, single shot. The board divides the cell voltage
-// by 2, so the cell is twice what the ADC sees. Sense is enabled on expander bit 15 per read.
-uint16_t batteryMilliVolts() {
-  if (!s_expanderReady) return 0;
-  if (!setOutput(kBitBatterySense, true)) return 0;
+// ADS1115 at 0x48, single-ended AIN0..AIN3, single shot, 128 SPS. The config byte is the one the
+// battery read has always sent (OS=1, PGA=000, MODE=1); only the MUX field changes with the
+// channel (AIN0-GND = 0xC3, AIN1 = 0xD3, AIN2 = 0xE3, AIN3 = 0xF3). The board divides the cell
+// voltage by 2, so the cell is twice what AIN0 sees; that doubling happens in batteryMilliVolts()
+// only, so every reading here is the ADC pin's own mV and the four are directly comparable.
+// Sense (expander bit 15) is switched per read, exactly as the battery read always did.
+static bool adsReadChannel(uint8_t channel, uint16_t* raw) {
+  if (raw == nullptr || channel > 3 || !s_expanderReady) return false;
+  if (!setOutput(kBitBatterySense, true)) return false;
   delay(5);
   Wire.beginTransmission(0x48);
-  Wire.write(0x01);              // config
-  Wire.write(0xC3);              // OS=1, MUX=AIN0-GND, PGA=+/-4.096V, single shot, 128 SPS
+  Wire.write(0x01);   // config
+  Wire.write((uint8_t)(0xC3 | (uint8_t)(channel << 4)));   // OS=1, MUX=AINn-GND, single shot
   Wire.write(0x83);
-  const bool ok = Wire.endTransmission() == 0;
-  uint16_t raw = 0;
+  bool ok = Wire.endTransmission() == 0;
+  uint16_t value = 0;
   if (ok) {
     delay(12);
     Wire.beginTransmission(0x48);
-    Wire.write(0x00);            // conversion
+    Wire.write(0x00);   // conversion
     if (Wire.endTransmission(false) == 0 && Wire.requestFrom(0x48, 2) == 2) {
-      raw = (uint16_t)((Wire.read() << 8) | Wire.read());
+      value = (uint16_t)((Wire.read() << 8) | Wire.read());
+    } else {
+      ok = false;
     }
   }
   (void)setOutput(kBitBatterySense, false);
+  if (!ok) return false;
+  *raw = value;
+  return true;
+}
+
+// The one scale the battery read has always used. Kept identical so `pmu probe`'s AIN0 is the
+// number the battery path sees (the config's PGA field is 000, i.e. +/-6.144 V; the divisor is the
+// existing 4.096 V one, deliberately not changed here: a battery percentage must not move).
+static uint16_t adsPinMilliVolts(uint16_t raw) {
+  const float volts = (float)(int16_t)raw * 4.096f / 32767.0f;
+  const float mv = volts * 1000.0f;
+  return mv <= 0.0f ? 0 : (uint16_t)mv;
+}
+
+uint16_t batteryMilliVolts() {
+  uint16_t raw = 0;
+  if (!adsReadChannel(0, &raw)) return 0;
   if (!raw) return 0;
   const float volts = (float)(int16_t)raw * 4.096f / 32767.0f;
   return (uint16_t)(volts * 2.0f * 1000.0f);
+}
+
+// EST-376: the four single-ended inputs once each, AIN1, AIN2, AIN3 and AIN0 LAST, so the chip is
+// left exactly as a battery read leaves it (AIN0's conversion in the register, sense rail off).
+void adcProbe(AdcProbe& out) {
+  out = AdcProbe();
+  const uint8_t order[4] = {1, 2, 3, 0};
+  for (int i = 0; i < 4; ++i) {
+    const uint8_t ch = order[i];
+    uint16_t raw = 0;
+    out.ok[ch] = adsReadChannel(ch, &raw);
+    out.raw[ch] = raw;
+    out.mv[ch] = out.ok[ch] ? adsPinMilliVolts(raw) : 0;
+  }
+}
+
+// ---------------------------------------------------------------------------- USB-C port controller
+
+// EST-376: READ ONLY. The register pointer is sent (that is how an I2C register read addresses a
+// byte) and exactly one byte is read back; no data byte is ever written. A write to SWITCHES0
+// (0x02) could drop the board's USB sink role and stop charging, which is why there is deliberately
+// no write function next to this one at all.
+bool usbPdReadRegister(uint8_t reg, uint8_t* out) {
+  if (out == nullptr) return false;
+  Wire.beginTransmission(diag::kUsbPdAddr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)diag::kUsbPdAddr, 1) != 1) return false;
+  *out = (uint8_t)Wire.read();
+  return true;
 }
 
 // ---------------------------------------------------------------------------- GNSS

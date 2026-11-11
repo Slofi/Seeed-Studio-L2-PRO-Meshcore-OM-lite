@@ -4873,3 +4873,159 @@ linked against the real `ui/map_chrome.cpp` + `theme.h`; the renderer is scratch
 
 ## 2026-11-11 01:43 (Claude): EST-375 reviewed and built, NOT on the device
 - One shape: the hidden tab is the same edgeTabBox through mapEdgeTabDrawRect (6 px on the glass, both 4 px corners), edgeTabSliver removed; the tab slide is 19 px, the bar 22 px. Preview checked. Sandbox build exit 0 (flash 2,805,865 B, firmware.bin 2,806,224 B), tests exit 0. Committed locally, not pushed, not flashed.
+
+## 2026-11-11 02:00 (DeepSeek): EST-376 radio A/B commands and the read-only charge probe, built and tested, NOT on the device
+
+**Ticket:** diagnostics only, for tomorrow's device session. Nothing the user sees changes, no default
+moves (TCXO stays 1.8 V, boosted gain stays off, no register is written to 0x22). Everything is a USB
+command in `tools/cmd.py` / `src/usb_commands.cpp`.
+
+**What changed**
+
+1. `radio tcxo 1.8|3.0` and `radio boost on|off` (RAM only; a reboot restores `target.h`'s 1.8 V and
+   the build's boosted-gain default).
+   - The command only RECORDS the request and answers at once (`pending=1`). The RadioLib work runs
+     in `rdiag::loop()` on the loop task: `SX1262::setTCXO` / `setRxBoostedGainMode`, then the RX
+     re-entry, then the noise restart. That is the EST-350 rule: no radio work on the USB command
+     stack. The status code is therefore in the loop's `[radio] apply tcxo=.. tcxo_status=..` line and
+     in the next `radio status` (see the how-to below).
+   - **`resetAGC()` is the one that really clears `_noise_floor`, not `triggerNoiseFloorCalibrate()`.**
+     Read in `RadioLibWrappers.cpp`: `resetAGC()` runs `doResetAGC()` (CustomSX1262Wrapper ->
+     `sx126xResetAGC`: warm sleep, standby, Calibrate(0x7F), image calibration), sets `state =
+     STATE_IDLE` so the next `recvRaw()` calls `startReceive()` (MeshCore's own path back into RX),
+     and sets `_noise_floor = 0`, `_num_floor_samples = 0`, `_floor_sample_sum = 0`.
+     `triggerNoiseFloorCalibrate(threshold)` only stores the threshold and, when 64 samples are
+     already in, clears the two counters; it leaves `_noise_floor` at its old value. The companion
+     build's `getAGCResetInterval()` is `_prefs.n * 4000` with `n = 0` by default, so MeshCore does
+     not reset the receiver by itself here; this command is the only reset.
+   - Ordering detail: `sx126xResetAGC()` re-applies the RX gain only under `#ifdef
+     SX126X_RX_BOOSTED_GAIN`, which this build does not define. So after the reset the chip is read
+     back and the boost is set again if the reset lost it; the log prints the read-back, not the
+     request.
+   - `resetAGC()` refuses mid-packet (and while a received packet is still unread). We check
+     `isReceiving()` first, print `[radio] apply waiting: rx busy` once, and keep the request queued.
+     If the reset still loses the race, a zero noise floor is `resetAGC`'s own mark: anything else
+     re-arms one retry (`[radio] agc reset done`).
+2. `radio sample <10..600>`: the command starts the sampler and answers; `rdiag::loop()` prints one
+   line every 5 s (`[rsamp] t=.. nf=.. tcxo=.. boost=..`), one line per received packet
+   (`[rsamp] pkt rssi=.. snr=.. hash=..`) and one summary at the end (samples, min/median/max/mean
+   noise floor, packet count, mean RSSI and SNR). No message text and no names: `hash=` is the first
+   PAYLOAD byte (two hex digits), the same byte `radio packets` calls `from=` (a sender prefix for an
+   advert/response, the channel hash for a group text). A second `radio sample` while one runs is
+   refused. `hash=` is parsed by the new `om::radio::payloadOffset()` so the ring and the sampler
+   cannot disagree about which byte it is.
+   - The packet line is written from `recvRaw()` (the loop task) and only while a sample runs.
+   - The 5 s grid is re-based on the actual print time, so a long loop pass makes the next line late
+     instead of printing a burst of duplicate samples. The noise-floor values are MeshCore's own
+     `_noise_floor`; a `0` means "reset, still converging (64 quiet samples)", not a reading.
+3. `radio status`: one data line `[radio] tcxo=.. boost=.. tcxo_status=.. boost_status=..` and then
+   the SAME answer line plain `radio` prints. `-` means no runtime apply yet (1.8 V / boot default).
+   `boost` is the chip's RX gain register read back by the loop (refreshed every 5 s and after an
+   apply), never the last request; no SPI read happens on the command stack.
+4. `pmu probe` (new verb): READ ONLY.
+   - Reads 0x01..0x10, 0x3C, 0x3D, 0x40 and 0x41 of the port controller at 0x22 and prints them as
+     hex. It never reads 0x3E, 0x3F, 0x42 (interrupt registers, clear on read) or 0x43 (the FIFO, a
+     read pops a byte): the list is `diag_logic.h`'s `kFusbReadRegs`, the rule is `fusbReadable()`,
+     and both are asserted in the host test (no duplicates, no forbidden register, all 20 present).
+     There is no write function for 0x22 anywhere in the tree; the only thing sent to the chip is the
+     register pointer of a read transaction.
+   - Prints the fields it can: DEVICE_ID 0x01 (version nibble 7:4, product nibble 3:0), POWER 0x0B
+     (PWR3..PWR0), STATUS0 0x40 (VBUSOK bit 7, BC_LVL bits 5:4 with the 100 mA / 500 mA / 1.5 A / 3 A
+     word, COMP bit 2). **Only VBUSOK's position is specified by the ticket; the BC_LVL 5:4 and COMP
+     bit 2 positions come from the FUSB302 datasheet and are not verified against a real read yet**
+     (the raw byte is printed next to them, so a mismatch is one constant away in `diag_logic.h`).
+   - Then the ADS1115 (0x48) single-ended AIN1, AIN2, AIN3 once each, and AIN0 LAST, all with the
+     battery read's own config byte and scale (only the MUX field changes: 0xC3/0xD3/0xE3/0xF3), so
+     the chip is left exactly as a battery read leaves it (AIN0 conversion, sense rail off). Printed
+     as `ain0=1234mV(9876)` (mV at the pin, plus the ADC's raw counts, which make a divider ratio
+     computable tomorrow). Cell voltage is 2 x AIN0, as before.
+   - The EST-372 boot probe of 0x22 (`in=0x00 cfg=0x24`, meaningless for this chip) is REMOVED; the
+     0x34 and 0x14 raw lines stay.
+5. New files: `src/diag_logic.{h,cpp}` (plain C++: summary maths + FUSB302 decode), `src/radio_diag.{h,cpp}`
+   (the loop-side A/B apply, sampler and packet line). `target.{h,cpp}` gained the two thin RadioLib
+   calls; `board.{h,cpp}` gained `usbPdReadRegister()`, `adcProbe()` and the shared per-channel ADC
+   read (the battery path now calls the same one, same numbers).
+
+**Build** (`docs/REBUILD.md` command, real exit code)
+- `pio run -e om_lite_l2` **exit 0**, SUCCESS. RAM **157,384 B** of 327,680 (48.0 %; EST-375 was
+  156,800, **+584 B**), flash **2,810,929 B** of 6,553,600 (42.9 %; EST-375 was 2,805,865,
+  **+5,064 B**), `firmware.bin` **2,811,296 B** (EST-375 was 2,806,224, **+5,072 B**). Only the two
+  pre-existing RadioLib `#warning`s (god mode, USB CDC), no warning from the new code.
+
+**Tests** (`sh test/host/run.sh` **exit 0**)
+- New `test_est376.cpp` (BIN37, plain g++ with `diag_logic.cpp` + `radio_stats.cpp` +
+  `usb_cmd_logic.cpp`):
+  - parsing/refusals: `radio tcxo 1.8` / `3.0` (also quoted) accepted, `1.7`, `2.4`, `0`, `3` are
+    `value`, a missing or extra word is `args`; `radio boost on|off` accepted, `1`/`true` `value`;
+    `radio sample 10|60|600` accepted, `9`/`601`/`0` `value`, `60s`/`-5` `number`, missing/extra
+    `args`; `radio status`/`packets`/plain `radio` still parse; `radio nope` and a misspelled
+    sub-command are `args`; `pmu probe` parses, `pmu`, `pmu read`, `pmu probe 1` are refused.
+  - summary maths: {-80,-90,-100,-110} -> min -110, max -80, median -95, mean -95, sorted in place;
+    odd {-1..} middle value; {-1,-2,-3,-4} -> median -2, mean -2 (negative truncation toward zero);
+    one value; the empty list is refused with a zeroed result; a full 120-value run (-60..59) ->
+    min -60, max 59, median 0, mean 0.
+  - FUSB302: 20 registers, no duplicate, every one readable; 0x3E/0x3F/0x42/0x43 all refused;
+    DEVICE_ID 0x88 -> version 0x8 / product 0x8; POWER 0x0F; STATUS0 0x92 -> VBUSOK 1, BC_LVL 1,
+    COMP 0; STATUS0 0x64 -> VBUSOK 0, BC_LVL 2, COMP 1; VBUSOK is bit 7 and no other single bit sets
+    it; missing registers are "no field", not a fabricated zero; the four BC_LVL words.
+  - payload offset: flood/direct/transport-coded routes, 1/2/3-byte path hashes, and the short-frame
+    -1.
+- The rest of the suite is unchanged and green (all 37 C++ binaries + 5 Python checks).
+
+**How to run tomorrow's test** (one reader on the port; `OM_PORT=/dev/ttyACM0`)
+1. Flash `firmware.bin` (2,811,296 B). Boot log: the `[i2c]` sweeps, `[pmu] 0x34 reg03=..`, the two
+   0x34 raw registers and `[pmu] 0x14 reg00=..`. There must be **no `[pmu] 0x22` line any more**.
+2. `tools/cmd.py radio status` -> a `[radio] tcxo=1.8 boost=0 tcxo_status=- boost_status=-` line
+   then the usual `[cmd] ok radio noise=..` line. That is the baseline; note both.
+3. `tools/cmd.py radio tcxo 3.0` -> `[cmd] ok radio tcxo volts=3.0 pending=1`. The loop then prints
+   `[radio] apply tcxo=3.0 tcxo_status=0(ok) boost=0 boost_status=-1(err) nf=<old>->0` (the `-1`
+   means that change did not ask RadioLib). `tools/cmd.py radio status` now shows `tcxo=3.0
+   tcxo_status=0`. A non-zero status is the honest answer; the chip keeps the last good value.
+4. **Watch the sample lines on a reader that stays open** (`pio device monitor -b 115200`, picocom,
+   `timeout 200 cat /dev/ttyACM0`): `cmd.py` stops at its answer line and closes the port, so the
+   5 s `[rsamp]` lines and the summary are only visible to a reader that is still reading. The
+   command can be typed into the monitor itself, because OMCMD1 is plain text: type
+   `OMCMD1 16` + Enter, then `radio sample 180` (that is exactly 16 bytes; the length must be
+   right). A CR/LF after the 16 bytes is harmless junk before the next magic. `cmd.py` and the
+   monitor must not both read the port.
+   Expected: `[rsamp] t=5 nf=.. tcxo=3.0 boost=0` ... one per 5 s, a `[rsamp] pkt ...` for each
+   packet heard, then `[rsamp] done secs=180 samples=36 nf_min=.. nf_med=.. nf_max=.. nf_mean=..
+   pkts=.. rssi_mean=.. snr_mean=..`. Wait ~5 s after a TCXO/boost change before starting the sample,
+   otherwise the first line can be the reset's `nf=0` (still converging, 64 quiet samples).
+5. A/B, same spot, 3 minutes each: (1.8/off) -> (3.0/off) -> (1.8/on) -> (3.0/on), one `radio tcxo`
+   / `radio boost` then `radio sample 180` per step. Compare `nf_mean`, `nf_min` and the packet
+   count at the same spot.
+6. `tools/cmd.py pmu probe`, once on USB and once on battery: three `[pmu]` data lines (raw register
+   dump, the FUSB302 fields, the four ADC inputs) then `[cmd] ok pmu probe usb=0x22 regs=20/20
+   vbusok=<0|1> adc=4/4`. On USB, VBUSOK should be 1 and BC_LVL should name the charger's level; on
+   battery VBUSOK should be 0. If 0x22 does not answer at all, the fields line is all `-` and
+   `regs=0/20`: that is a finding, not an error.
+7. Regression: nothing on the glass changes. `status` and `radio` print the same lines as before
+   (`radio` is untouched; only the new `radio status` adds the tcxo/boost line). `radio sample` never
+   writes SD.
+
+**Could not check (no device, no radio, no USB-C charger, no glass)**
+- The real RadioLib status of `setTCXO(3.0f)` on this chip, whether the TCXO restarts at 3.0 V after
+  the warm sleep, and whether Wio-SX1262 really wants 3.0 V (the research note's Meshtastic PR).
+- The actual noise floor at each combination: that is the point of tomorrow's run.
+- The FUSB302's identity and the BC_LVL/COMP bit positions: first real read decides. VBUSOK = bit 7
+  is the ticket's own rule.
+- Whether AIN1/AIN2/AIN3 are a VBUS or solar divider (the mV numbers tomorrow say if any moves).
+- The ADS1115's scale: the config byte sets PGA = 000 (+/-6.144 V) while every read scales with the
+  existing 4.096 V divisor, so the printed mV (and today's battery mV) are 2/3 of the true pin volts.
+  **Not changed here** (it would move the battery percentage); worth a separate ticket.
+- The wire timing of `pmu probe` (about 20 register reads plus four ADC conversions at 5 + 12 ms each:
+  roughly 80-100 ms on the command stack, no radio and no SD).
+
+**Next step for Claude**
+1. Review the diff. The decisions to check: `resetAGC()` over `triggerNoiseFloorCalibrate()`, the
+   apply-on-the-loop split (and therefore `radio status` as the place the status code is read), and
+   the four forbidden registers being absent by construction.
+2. Flash, run the how-to above, and write the A/B table (nf mean/min, packet count) here.
+3. If VBUSOK works, the next ticket is the charge bolt in the status bar (research section 2, step 3);
+   the chip-id read is the go/no-go.
+
+## 2026-11-11 02:06 (Claude): EST-376 reviewed and built, NOT on the device
+- Checked: the 0x22 read sends only the register pointer (no data write anywhere), the forbidden FUSB302 registers are excluded by a list + rule with a test, all radio work runs from the loop, setTCXO/setRxBoostedGainMode are plain RadioLib calls followed by MeshCore's own resetAGC.
+- One gap, fixed in EST-377: a later TCXO-only change runs resetAGC, which can drop a boost set earlier at runtime (status then shows boost=0, honest but it would mix the A/B). Until then, after every tcxo change run `radio boost on|off` again and check `radio status`.
+- Sandbox build exit 0 (RAM 157,384 B, flash 2,810,929 B, firmware.bin 2,811,296 B), tests exit 0. Committed locally, not pushed, not flashed.

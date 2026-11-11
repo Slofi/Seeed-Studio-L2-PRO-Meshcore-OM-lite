@@ -35,6 +35,7 @@
 #include "touch_gate.h"
 #include "msg_order.h"
 #include "radio_stats.h"
+#include "radio_diag.h"
 #include "usb_cmd.h"
 #include "usb_cmd_logic.h"
 #include "usb_frames.h"
@@ -5473,6 +5474,11 @@ void loop() {
       if (om::meshRadioStats(&c)) om::radio::noteNoise(c.noiseFloor, millis());
     }
   }
+  // EST-376: the diagnostics' loop half. A queued `radio tcxo` / `radio boost` is applied HERE (the
+  // warm sleep, calibrate and RX re-entry are radio work, so they never run on the USB command
+  // stack: EST-350), and `radio sample` prints its one line every 5 s and the summary. With nothing
+  // queued and no sample running this is two bool tests and one SPI register read per 5 s.
+  om::rdiag::loop(millis());
 
   // EST-356: the phone changed a store through MyMesh (channels, radio, name). One toast says so and
   // the redraw rebuilds the screen from the same stores, so the change is visible at once.

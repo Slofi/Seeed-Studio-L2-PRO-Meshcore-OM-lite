@@ -140,6 +140,14 @@ void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
 void radio_set_tx_power(int8_t dbm);
 mesh::LocalIdentity radio_new_identity();
 
+namespace om {
+// EST-376: the two runtime A/B knobs, RAM only (a reboot restores target.h's 1.8 V TCXO and the
+// build's boosted-gain default). These touch the radio over SPI, so the LOOP calls them, never the
+// USB command stack (EST-350). They return RadioLib's own status code (0 = RADIOLIB_ERR_NONE).
+int radioDiagSetTcxo(float volts);   // -> SX1262::setTCXO, DIO3 voltage
+int radioDiagSetBoost(bool on);      // -> SX1262::setRxBoostedGainMode
+}  // namespace om
+
 // Board glue -> mesh sensors. Called by the GPS poll with the latest fix.
 namespace om {
 void targetSetGpsFix(double lat, double lon, bool valid);

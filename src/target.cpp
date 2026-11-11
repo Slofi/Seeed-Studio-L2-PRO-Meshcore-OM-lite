@@ -12,6 +12,7 @@
 #include "board.h"
 #include "radio_stats.h"
 #include "radio_fault.h"
+#include "radio_diag.h"
 #include "timekeeper.h"
 
 // Set by the facade once the_mesh.begin() has returned. Before that, MeshCore's
@@ -64,9 +65,13 @@ int OmSX1262Wrapper::recvRaw(uint8_t* bytes, int sz) {
     // The RSSI/SNR are the chip's values for the packet just read (the same ones upstream's
     // logRxRaw() reports). The wall clock and its "real" flag come from the one timekeeper, so a
     // packet heard before a clock sync is not dated 2024.
-    om::radio::noteRawPacket(bytes, len, (int)lroundf(getLastRSSI()),
-                             (int)lroundf(getLastSNR() * 4.0f), om::timeKeeper().now(),
+    const int rssi = (int)lroundf(getLastRSSI());
+    const int snr4 = (int)lroundf(getLastSNR() * 4.0f);
+    om::radio::noteRawPacket(bytes, len, rssi, snr4, om::timeKeeper().now(),
                              om::timeKeeper().realSinceBoot(), millis());
+    // EST-376: the `radio sample` packet line (a no-op unless a sample is running). It reuses the
+    // same two numbers and the same first payload byte as the ring above.
+    om::rdiag::notePacket(bytes, len, rssi, snr4);
   }
   return len;
 }
@@ -179,4 +184,9 @@ bool OmSensors::setSettingValue(const char* name, const char* value) {
 
 namespace om {
 void targetSetGpsFix(double lat, double lon, bool valid) { sensors.setGpsFix(lat, lon, valid); }
-}
+
+// EST-376: the runtime A/B knobs. Called from rdiag::loop() (the loop task), never from the USB
+// command stack: setTCXO writes DIO3 and setRxBoostedGainMode writes the RX gain register over SPI.
+int radioDiagSetTcxo(float volts) { return s_radio.setTCXO(volts); }
+int radioDiagSetBoost(bool on) { return s_radio.setRxBoostedGainMode(on); }
+}  // namespace om

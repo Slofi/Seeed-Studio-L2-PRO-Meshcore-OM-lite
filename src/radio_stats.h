@@ -95,6 +95,12 @@ void noteNoise(int dbm, uint32_t nowMs);   // keeps one sample per kNoisePeriodM
 void noteRawPacket(const uint8_t* raw, int len, int rssi, int snr4, uint32_t wall, bool wallReal,
                    uint32_t nowMs);
 
+// EST-376: the offset of the first PAYLOAD byte in MeshCore's raw frame (header, the two transport
+// codes when the route carries them, then path length + path bytes). -1 when the frame ends before
+// its payload. The sampler's `hash=` is this byte, the same one the ring above calls hash[0].
+int payloadOffset(const uint8_t* raw, int len, uint8_t* pathCount = nullptr,
+                  uint8_t* pathHashSize = nullptr);
+
 void beginPass(uint32_t nowUs);
 void addPart(Part p, uint32_t us);
 void endPass(uint32_t nowUs, uint32_t nowMs);

@@ -17,12 +17,14 @@
 #include "fade.h"
 #include "frame_metrics.h"
 #include "history_store.h"
+#include "diag_logic.h"
 #include "map.h"
 #include "mem_stats.h"
 #include "msg_order.h"
 #include "mesh_link.h"
 #include "ota.h"
 #include "radio.h"
+#include "radio_diag.h"
 #include "radio_stats.h"
 #include "rptr_link.h"
 #include "rptr_model.h"
@@ -745,6 +747,50 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
     // model's noise window and reception ring; the loop histogram names the slowest block. One
     // answer line terminates the data lines for cmd.py, exactly like `nodes`.
     case om::usb::Kind::Radio: {
+      // EST-376: the three A/B forms only RECORD the request here. The RadioLib calls, the warm
+      // sleep + calibrate RX re-entry and the noise restart are radio work, so rdiag::loop() runs
+      // them on the loop task (EST-350); their status codes are logged by that loop line and kept
+      // for `radio status`.
+      if (cmd.target != nullptr && strcmp(cmd.target, "tcxo") == 0) {
+        if (cmd.text == nullptr ||
+            (strcmp(cmd.text, "1.8") != 0 && strcmp(cmd.text, "3.0") != 0)) {
+          cmdError(reply, cap, "value");
+          return;
+        }
+        const float volts = strcmp(cmd.text, "3.0") == 0 ? 3.0f : 1.8f;
+        if (!om::rdiag::requestTcxo(volts)) {
+          cmdError(reply, cap, "value");
+          return;
+        }
+        snprintf(reply, cap, "[cmd] ok radio tcxo volts=%.1f pending=1", volts);
+        return;
+      }
+      if (cmd.target != nullptr && strcmp(cmd.target, "boost") == 0) {
+        if (cmd.text == nullptr ||
+            (strcmp(cmd.text, "on") != 0 && strcmp(cmd.text, "off") != 0)) {
+          cmdError(reply, cap, "value");
+          return;
+        }
+        const bool on = strcmp(cmd.text, "on") == 0;
+        om::rdiag::requestBoost(on);
+        snprintf(reply, cap, "[cmd] ok radio boost on=%d pending=1", on ? 1 : 0);
+        return;
+      }
+      if (cmd.target != nullptr && strcmp(cmd.target, "sample") == 0) {
+        const uint32_t now = millis();
+        if (om::rdiag::sampleActive()) {
+          snprintf(reply, cap, "[cmd] error sample busy (%d s left)",
+                   om::rdiag::sampleSecondsLeft(now));
+          return;
+        }
+        if (!om::rdiag::sampleStart(cmd.count, now)) {
+          cmdError(reply, cap, "value");
+          return;
+        }
+        snprintf(reply, cap, "[cmd] ok radio sample secs=%d every=5s", cmd.count);
+        return;
+      }
+
       om::radio::UpstreamCounters c;
       const bool up = om::meshRadioStats(&c);
       const om::radio::Snapshot snap = om::radio::snapshot();
@@ -770,8 +816,23 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
         snprintf(reply, cap, "[cmd] ok radio packets %d", n);
         return;
       }
+      // EST-376: `radio status` names the two diagnostics next to the line `radio` prints. The
+      // values come from the loop's own state (the TCXO voltage last sent, the RX gain register
+      // last read back), so this command does no radio work either.
+      if (cmd.target != nullptr && strcmp(cmd.target, "status") == 0) {
+        char tcxoStatus[12], boostStatus[12];
+        int st = om::rdiag::lastTcxoStatus();
+        if (st == om::rdiag::kStatusNone) snprintf(tcxoStatus, sizeof(tcxoStatus), "-");
+        else snprintf(tcxoStatus, sizeof(tcxoStatus), "%d", st);
+        st = om::rdiag::lastBoostStatus();
+        if (st == om::rdiag::kStatusNone) snprintf(boostStatus, sizeof(boostStatus), "-");
+        else snprintf(boostStatus, sizeof(boostStatus), "%d", st);
+        Serial.printf("[radio] tcxo=%.1f boost=%d tcxo_status=%s boost_status=%s\n",
+                      om::rdiag::tcxoVolts(), om::rdiag::boostOn() ? 1 : 0, tcxoStatus,
+                      boostStatus);
+      }
       const int noise = snap.noise.samples > 0 ? snap.noise.last : c.noiseFloor;
-      // The USB reply buffer is 384 B, so the line is compact; the bucket boundaries are the
+      // The USB reply buffer is 512 B, so the line is compact; the bucket boundaries are the
       // kHistogramBoundsUs list in radio_stats.h (1,2,5,10,20,50,100,200,500 ms, then "lots").
       char hist[128];
       int at = 0;
@@ -798,6 +859,89 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
                (unsigned long)snap.worstUs, om::radio::partName(snap.worstPart),
                (unsigned long)snap.worstMinuteUs, om::radio::partName(snap.worstMinutePart),
                (unsigned long)snap.lastPassUs, hist);
+      return;
+    }
+
+    // EST-376: the read-only charge probe. Reads 0x01..0x10, 0x3C, 0x3D, 0x40 and 0x41 of the
+    // USB-C port controller at 0x22 and the ADS1115's four single-ended inputs. NOTHING is written
+    // to 0x22; 0x3E/0x3F/0x42 (interrupt, clear on read) and 0x43 (FIFO, a read pops a byte) are
+    // not in the list, so the probe cannot change the chip's state.
+    case om::usb::Kind::Pmu: {
+      om::diag::RegisterSet regs;
+      int read = 0;
+      for (int i = 0; i < om::diag::kFusbReadCount; ++i) {
+        const uint8_t reg = om::diag::kFusbReadRegs[i];
+        if (!om::diag::fusbReadable(reg)) continue;   // the rule is diag_logic.h's, re-checked here
+        regs.valid[reg] = om::usbPdReadRegister(reg, &regs.value[reg]);
+        if (regs.valid[reg]) ++read;
+      }
+      const om::diag::Fusb302 f = om::diag::fusb302Fields(regs);
+
+      // Data line 1: every register byte, in the order the list names them.
+      char dump[192];
+      int at = 0;
+      dump[0] = 0;
+      for (int i = 0; i < om::diag::kFusbReadCount && at < (int)sizeof(dump); ++i) {
+        const uint8_t reg = om::diag::kFusbReadRegs[i];
+        if (regs.valid[reg]) {
+          at += snprintf(dump + at, sizeof(dump) - (size_t)at, "%s%02X=%02X", i == 0 ? "" : " ",
+                         reg, regs.value[reg]);
+        } else {
+          at += snprintf(dump + at, sizeof(dump) - (size_t)at, "%s%02X=--", i == 0 ? "" : " ",
+                         reg);
+        }
+      }
+      Serial.printf("[pmu] 0x22 regs %s\n", dump);
+
+      // Data line 2: the FUSB302 fields that can be named, or "-" when a register did not answer.
+      char id[8] = "-";
+      char ver[8] = "-";
+      char product[8] = "-";
+      char power[8] = "-";
+      char pwr[8] = "-";
+      char status0[8] = "-";
+      char vbus[4] = "-";
+      char bc[24] = "-";
+      char comp[4] = "-";
+      if (f.haveId) {
+        snprintf(id, sizeof(id), "0x%02X", f.deviceId);
+        snprintf(ver, sizeof(ver), "0x%X", f.versionId);
+        snprintf(product, sizeof(product), "0x%X", f.productId);
+      }
+      if (f.havePower) {
+        snprintf(power, sizeof(power), "0x%02X", f.power);
+        snprintf(pwr, sizeof(pwr), "%d%d%d%d", (f.power >> 3) & 1, (f.power >> 2) & 1,
+                 (f.power >> 1) & 1, f.power & 1);
+      }
+      if (f.haveStatus0) {
+        snprintf(status0, sizeof(status0), "0x%02X", f.status0);
+        snprintf(vbus, sizeof(vbus), "%d", f.vbusOk ? 1 : 0);
+        snprintf(bc, sizeof(bc), "%d(%s)", (int)f.bcLvl, om::diag::bcLevelName(f.bcLvl));
+        snprintf(comp, sizeof(comp), "%d", f.comp ? 1 : 0);
+      }
+      Serial.printf(
+          "[pmu] 0x22 id=%s version=%s product=%s power=%s pwr=%s status0=%s vbusok=%s "
+          "bc_lvl=%s comp=%s\n",
+          id, ver, product, power, pwr, status0, vbus, bc, comp);
+
+      // Data line 3: AIN0..AIN3 at the pin, AIN0 read LAST so the chip is left exactly as a battery
+      // read leaves it. The numbers are the ADC's mV (batteryMilliVolts doubles AIN0: x2 divider).
+      om::AdcProbe adc;
+      om::adcProbe(adc);
+      char a[4][24];
+      int adcOk = 0;
+      for (int ch = 0; ch < 4; ++ch) {
+        if (adc.ok[ch]) {
+          snprintf(a[ch], sizeof(a[ch]), "%umV(%u)", (unsigned)adc.mv[ch], (unsigned)adc.raw[ch]);
+          ++adcOk;
+        } else {
+          snprintf(a[ch], sizeof(a[ch]), "-");
+        }
+      }
+      Serial.printf("[pmu] adc ain0=%s ain1=%s ain2=%s ain3=%s\n", a[0], a[1], a[2], a[3]);
+      snprintf(reply, cap,
+               "[cmd] ok pmu probe usb=0x22 regs=%d/%d vbusok=%s adc=%d/4",
+               read, om::diag::kFusbReadCount, vbus, adcOk);
       return;
     }
 

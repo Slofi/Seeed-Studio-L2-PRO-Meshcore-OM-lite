@@ -139,6 +139,26 @@ void noteNoise(int dbm, uint32_t nowMs) {
   s_noiseEver = true;
 }
 
+int payloadOffset(const uint8_t* raw, int len, uint8_t* pathCount, uint8_t* pathHashSize) {
+  if (pathCount) *pathCount = 0;
+  if (pathHashSize) *pathHashSize = 1;
+  if (raw == nullptr || len <= 0) return -1;
+  // MeshCore's raw packet: header, [transport codes x2 when the route says so], path_len byte,
+  // path bytes, payload.
+  const uint8_t route = (uint8_t)(raw[0] & 0x03);
+  int at = 1;
+  if (route == 0x00 || route == 0x03) at += 4;
+  if (at < len) {
+    const uint8_t pathByte = raw[at++];
+    const uint8_t count = (uint8_t)(pathByte & 63);
+    const uint8_t size = (uint8_t)((pathByte >> 6) + 1);
+    if (pathCount) *pathCount = count;
+    if (pathHashSize) *pathHashSize = size;
+    at += (int)count * (int)size;
+  }
+  return at < len ? at : -1;
+}
+
 void noteRawPacket(const uint8_t* raw, int len, int rssi, int snr4, uint32_t wall, bool wallReal,
                    uint32_t nowMs) {
   if (raw == nullptr || len <= 0) return;
@@ -151,19 +171,11 @@ void noteRawPacket(const uint8_t* raw, int len, int rssi, int snr4, uint32_t wal
   p.rssi = (int8_t)rssi;
   p.snr4 = (int8_t)snr4;
   p.len = (uint16_t)(len > 0xFFFF ? 0xFFFF : len);
-  // MeshCore's raw packet: header, [transport codes x2 when the route says so], path_len byte,
-  // path bytes, payload. A short or malformed frame keeps what could be read and no hash.
   p.type = (uint8_t)((raw[0] >> 2) & 0x0F);
   p.route = (uint8_t)(raw[0] & 0x03);
-  int at = 1;
-  if (p.route == 0x00 || p.route == 0x03) at += 4;
-  if (at < len) {
-    const uint8_t pathByte = raw[at++];
-    p.pathCount = (uint8_t)(pathByte & 63);
-    p.pathHashSize = (uint8_t)((pathByte >> 6) + 1);
-    at += (int)p.pathCount * (int)p.pathHashSize;
-  }
-  if (at + kHashBytes <= len) {
+  // A short or malformed frame keeps what could be read and no hash.
+  const int at = payloadOffset(raw, len, &p.pathCount, &p.pathHashSize);
+  if (at >= 0 && at + kHashBytes <= len) {
     memcpy(p.hash, &raw[at], kHashBytes);
     p.hashValid = true;
   }

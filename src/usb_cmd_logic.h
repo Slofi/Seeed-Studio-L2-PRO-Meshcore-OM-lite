@@ -30,7 +30,10 @@ enum class Kind : uint8_t {
   Wifi,     // wifi status | scan | on | off   (EST-354; never a password)
   Ble,      // ble status | on | off   (EST-356; never the pairing PIN)
   Rptr,     // rptr scan | rptr status <name> | rptr regions [name] | rptr login <name> <pw>
-  Radio,    // radio | radio packets   (EST-365: what the L2 hears, and the loop histogram)
+  Radio,    // radio | radio packets | radio status
+            // radio tcxo 1.8|3.0 | radio boost on|off | radio sample <10..600>
+            // (EST-365: what the L2 hears and the loop histogram; EST-376: the diagnostics)
+  Pmu,      // pmu probe   (EST-376: read-only FUSB302 at 0x22 + the four ADS1115 inputs)
   Play,     // play <event> [sound-id]   (EST-359/361: hear the device's shared library)
 };
 

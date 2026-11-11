@@ -222,10 +222,85 @@ Command parseCommand(char* line) {
   }
   // EST-365: `radio` or `radio packets`. The data line(s) are printed first and the one answer
   // line terminates them, exactly like `nodes` and `msgs`.
+  //
+  // EST-376 adds the diagnostic forms. Their argument lists are closed so nothing but the named
+  // values can reach the radio: `tcxo` takes exactly 1.8 or 3.0 (RadioLib's allowed DIO3 values,
+  // and the two the ticket A/B tests), `boost` exactly on or off, `sample` a whole number of
+  // seconds in 10..600. A wrong value is "value"; a missing or extra word is "args".
   if (strcmp(verb, "radio") == 0) {
     c.kind = Kind::Radio;
     const char* sub = cur.next();
-    if (sub != nullptr && strcmp(sub, "packets") != 0) {
+    if (sub == nullptr) {
+      if (cur.bad()) c.error = "quote";
+      return c;   // plain `radio`: today's full status line
+    }
+    if (strcmp(sub, "packets") == 0 || strcmp(sub, "status") == 0) {
+      c.target = sub;
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "tcxo") == 0) {
+      c.target = sub;
+      const char* word = cur.next();
+      if (word == nullptr) {
+        c.error = cur.bad() ? "quote" : "args";
+        return c;
+      }
+      if (strcmp(word, "1.8") != 0 && strcmp(word, "3.0") != 0) {
+        c.error = "value";
+        return c;
+      }
+      c.text = word;
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "boost") == 0) {
+      c.target = sub;
+      const char* word = cur.next();
+      if (word == nullptr) {
+        c.error = cur.bad() ? "quote" : "args";
+        return c;
+      }
+      if (strcmp(word, "on") != 0 && strcmp(word, "off") != 0) {
+        c.error = "value";
+        return c;
+      }
+      c.text = word;
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "sample") == 0) {
+      c.target = sub;
+      const char* word = cur.next();
+      if (word == nullptr) {
+        c.error = cur.bad() ? "quote" : "args";
+        return c;
+      }
+      int seconds = 0;
+      if (!toInt(word, &seconds)) {
+        c.error = "number";
+        return c;
+      }
+      if (seconds < 10 || seconds > 600) {
+        c.error = "value";
+        return c;
+      }
+      c.count = seconds;
+      if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.error = cur.bad() ? "quote" : "args";   // an unknown sub-command
+    return c;
+  }
+  // EST-376: the read-only charge probe. One form only: `pmu probe`.
+  if (strcmp(verb, "pmu") == 0) {
+    c.kind = Kind::Pmu;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "probe") != 0) {
       c.error = cur.bad() ? "quote" : "args";
       return c;
     }

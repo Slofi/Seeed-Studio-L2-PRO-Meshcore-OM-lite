@@ -601,7 +601,8 @@ bool tap(int x, int y) {
         return true;
       }
       select(m.name);
-      Serial.printf("[map] select %s\n", s_selName);
+      // EST-399: the marker's index, not the node's name (rule 9).
+      Serial.printf("[map] select marker %d\n", hit.marker);
       draw();
       return true;
     }

@@ -175,20 +175,19 @@ RptrHitResult rptrPageHitAt(const RptrPageLayout& a, const rptr::ScreenOut& scre
     return out;
   }
   // EST-366 (rule 2): the refresh icon and the banner button scroll with the column, so their finger
+  // EST-366 (rule 2): the refresh icon and the banner button scroll with the column, so their finger
   // targets move by -scroll too and only exist while their visible part is inside the viewport.
+  // EST-399: both go through rptrPageScrolledRect(), the same helper the pressed look uses, so the
+  // rectangle that answers a tap and the rectangle that lights up are one calculation.
   if (!a.refreshTap.empty()) {
-    Rect rt = a.refreshTap;
-    rt.y = (int16_t)(rt.y - scroll);
-    const Rect vis = rt.intersect(a.body);
+    const Rect vis = rptrPageScrolledRect(a.refreshTap, scroll, a.body);
     if (!vis.empty() && vis.contains(x, y)) {
       out.kind = RptrHit::Refresh;
       return out;
     }
   }
   if (!a.bannerButton.empty()) {
-    Rect rt = a.bannerButton;
-    rt.y = (int16_t)(rt.y - scroll);
-    const Rect vis = rt.intersect(a.body);
+    const Rect vis = rptrPageScrolledRect(a.bannerButton, scroll, a.body);
     if (!vis.empty() && vis.contains(x, y)) {
       out.kind = RptrHit::BannerButton;
       return out;

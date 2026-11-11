@@ -81,7 +81,8 @@ BIN50="$(mktemp /tmp/om-lite-est392.XXXXXX)"
 BIN51="$(mktemp /tmp/om-lite-est393.XXXXXX)"
 BIN52="$(mktemp /tmp/om-lite-est394.XXXXXX)"
 BIN53="$(mktemp /tmp/om-lite-est397.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52"' EXIT
+BIN54="$(mktemp /tmp/om-lite-est399.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -510,7 +511,23 @@ python3 -B test_est394.py
 # EST-397: the core sweep fixes. The clock bound at INT32_MAX (the first epoch a 32-bit time_t turns
 # negative is refused) and the 5 s fix expiry, both against the device headers; then the source half:
 # every Serial statement in src/ is grepped for a position, an SSID, a LAN address, a message text or a
-# name, with the 12 look-alikes whitelisted and each reason stated.
+# name, with the look-alikes whitelisted and each reason stated. EST-399 TIGHTENED it: any `%s` fed by
+# a name (name, m.name, ->name, .name) or a message text (text, m.text, ->text) fails, and the scan
+# proves itself on 12 known-bad lines before it reads the tree.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est397.cpp ../../src/timekeeper.cpp -o "$BIN53"
 "$BIN53"
 python3 -B test_est397.py
+
+# EST-399: the serious UI sweep findings. One "tap again" arm PER ROW (arm A, tap B -> B is armed and
+# not forgotten; the window; the wrap; the label and the tap ask the same function), the pressed plate
+# of the RPTR page's card key and banner button at EVERY scroll (the same helper the hit test uses,
+# with the old scroll-0 plate proven to miss the finger), the same pressed-rect-contains-the-finger
+# sweep over the other scrolling lists, and the emoji Recent row's batched NVS write (leave the page or
+# 30 s, failure counted, 5 s retry, the wrap). test_est399.py is the shell half: the single
+# g_deleteArmed flag is gone, each row family has its own arm, the destructive calls sit behind
+# Tap::Confirmed, every page-leave path clears them, the pick no longer writes NVS, one writer checks
+# putBytes' result, and the guard's whitelist stays minimal.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est399.cpp \
+  ../../src/ui/rptr_layout.cpp ../../src/ui/chat_layout.cpp -o "$BIN54"
+"$BIN54"
+python3 -B test_est399.py

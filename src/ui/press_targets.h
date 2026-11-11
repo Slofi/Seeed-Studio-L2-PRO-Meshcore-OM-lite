@@ -259,8 +259,17 @@ inline PressTarget pressTargetForRptrPage(const RptrPageLayout& a, const rptr::S
   const RptrHitResult hit = rptrPageHitAt(a, screen, scroll, x, y);
   switch (hit.kind) {
     case RptrHit::Back:    t.kind = PressKind::Button; t.rect = a.back; break;
-    case RptrHit::Refresh: t.kind = PressKind::Button; t.rect = a.refreshTap; break;   // inside body
-    case RptrHit::BannerButton: t.kind = PressKind::Button; t.rect = a.bannerButton; break;
+    // EST-399: the card's refresh key and the banner's button are CONTENT: they scroll with the
+    // column. The pressed plate is the SAME scrolled slice rptrPageHitAt() accepted (EST-398 #2: it
+    // used to paint the scroll-0 rectangle, so a scrolled page lit a gold plate lower down).
+    case RptrHit::Refresh:
+      t.kind = PressKind::Button;
+      t.rect = rptrPageScrolledRect(a.refreshTap, scroll, a.body);
+      break;
+    case RptrHit::BannerButton:
+      t.kind = PressKind::Button;
+      t.rect = rptrPageScrolledRect(a.bannerButton, scroll, a.body);
+      break;
     case RptrHit::Apply:   t.kind = PressKind::Button; t.rect = a.apply; break;
     case RptrHit::BigButton: t.kind = PressKind::Button; t.rect = a.big; break;
     case RptrHit::Input:   t.kind = PressKind::Row; t.rect = a.input; break;

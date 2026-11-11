@@ -7592,3 +7592,73 @@ comparisons); finding 3 belongs with the EST-396 #1/#2 UI log fix and needs the 
 `g_replyName` and a bare `name`. #4 (NVS per emoji), #5 (the duplicated time apply) and #6 (the 2038 bound in the
 year steppers) are small and independent. A third sweep should read `map_trace.cpp` and `screens/map_tab.cpp`, which
 are the two files in this scope nobody has read yet.
+
+## 2026-11-11 (DS, EST-399): the serious UI sweep findings fixed (Forget confirmation, scrolled pressed look, log privacy, emoji NVS)
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). Fixes the EST-398 #1/#2/#3/#4 findings and the EST-396 #1/#2 privacy lines, and tightens
+the EST-397 log guard as Claude's review note asked. The S5 polish stays for the next ticket.
+
+### Finding -> fix -> test
+
+| Finding | Fix | Test |
+|---|---|---|
+| EST-398 #1 S2: one `g_deleteArmed` for every Wi-Fi Forget row, so Forget on B after arming A forgot B on its first tap (main.cpp:4515-4524) | New `src/ui/delete_arm.h`: a `DeleteArm` holds the ARMED ROW INDEX plus its millis() stamp. Three separate arms replace the one flag: `g_wifiForgetArm` (index = the saved network's row), `g_chatDeleteArm` (the channel the Chat page shows) and `g_chanDeleteArm` (the channel the Channel page shows). A second tap on the SAME row is the only confirmation, a tap on any other row re-arms THAT row, `handleSettingsRow()` clears the other row families on any other row action, every page-leave path (`setGo`, `setBack`, `openSettings`, `settingsBack`, the tab switch, the selector pick, the A_ChatPick toggle) calls `clearDeleteArms()`, and `kDeleteArmMs` = 6000 ms expires it. Every label now comes from `armedRow()` (the Wi-Fi row says **"Tap again to forget"**, the two channel rows keep "Tap again to delete"), and `deleteArmTick()` in the loop clears an expired arm and repaints the page once, so the label can never outlive the window a tap honours | `test_est399.cpp` `testDeleteArm()`: arm A then tap B -> **B is armed and NOT confirmed**, arming B disarms A, the second tap on B confirms and disarms, a third tap arms again; the window at 5999 ms confirms and at 6000 ms does not (a late tap only re-arms); `clear()`; two arms are independent; the millis() wrap. `test_est399.py`: `g_deleteArmed` gone, three arms declared, each `om::mcChannelRemove(...)`/`om::wifiForget(...)` behind its own `Tap::Confirmed`, both labels from `armedRow()`, >= 7 leave-path clears, the timeout tick called from the loop |
+| EST-398 #2 S2: the RPTR card's refresh key and banner button lit their scroll-0 rectangle (ui/press_targets.h:262-263) while the hit test moved them by -scroll | One helper, `rptrPageScrolledRect(r, scroll, body)` in `ui/rptr_layout.h` (scroll the y, cut to the viewport). `rptrPageHitAt()` and `pressTargetForRptrPage()` both ask it, so the plate and the tap are one calculation. Audit of every other scrolled list (Nodes rows, the selector, the Settings rows and their stepper keys, the RPTR list, the RPTR page rows, the chat message band) found no second set of coordinates: they already used the layout's own scrolled rect | `test_est399.cpp` `testRptrPageScrolled()`: at every scroll 0..max the refresh key and the banner button answer their hit test, the pressed rect **contains the finger** and IS the scrolled slice; Back stays put; a moved scroll really moves the plate. The old behaviour is reproduced in the same test: the scroll-0 rect does NOT contain the finger at 13 of those taps (a counter fails the run if that proof ever goes vacuous). `testOtherScrolledLists()` runs the same "the pressed rect contains the finger" sweep on the Nodes list, the RPTR list, the Settings rows and stepper keys, and the selector. `test_est399.py`: the helper is defined once, the hit test calls it twice, `t.rect = a.refreshTap` is gone |
+| EST-396 #1 S3: a node's exact position and name in the log (`map` lines) | `[chat] map:` / `[nodes] map:` now say only that the node's position is being opened. EST-397 had already removed the degrees; this removes the name | `test_est397.py` (tightened): the two new shapes are asserted, and the old lines are in the negative controls |
+| EST-396 #2 S3: the message text on send and resend (1172, 1372, 1375) plus 1187 (`[mc] UI send: '%s'`, `wire`) | Verdict + length: `[mc] UI DM send: ok, 12 B`, `[mc] UI send: ok, 34 B, reply`, `[chat] DM resend ok, 12 B`, `[chat] resend ok, 12 B` | `test_est397.py`: the four new shapes asserted; `g_kbText`/`wire`/`tag` added to the message-text matcher (they were the three shapes the first guard could not see), with a negative control each |
+| EST-398 #3 S3: three more node names (1279, 1313, 1334) plus 1361 | `[chat] DM refused: unknown contact`, `[chat] reply opened: seq %lu`, `[chat] mention prepended: %u B`, `[chat] map: opening the node's position` | `test_est397.py` shapes + negative controls; the `name` matcher now also catches `g_replyName`/`s_currentName` (identifiers ending in `Name`, but not a call such as `timeSourceName(`) |
+| #4 TIGHTEN the EST-397 guard | The scan now fails on a `%s` fed by ANY `name`/`.name`/`->name` (plus our own `...Name` stores) or by ANY `text`/`.text`/`->text`/`body`/`g_kbText`/`wire`/`tag`, and on a float beside a coordinate name (`lat`, `lon`, `latitude`, `longitude`, `lat_e6`, `lon_e6`, `.lat`, `.lon`). The argument expression is taken with its STRING LITERALS stripped (a format that explains itself, "name and address not printed", is not a false hit) and with `strlen()`/`sizeof()` stripped (a length is the fix). 15 NEGATIVE CONTROLS re-run the matchers on the exact shapes this repo has shipped, so a broken regex fails the run; a whitelist entry that no longer matches anything also fails (no silent blanket). `python3 test_est397.py <tree>` runs the scan alone against another tree. Whitelist: 16 entries, one reason each (the USB `msg`/`msgs`, `history`, `nodes`, `chats`, `rptr scan`, `rptr status` answers Claude approved, the app's own toasts, a repeater's own CLI answer, our font asset names, the public NTP server's name), plus TWO argument-level exemptions (the public NTP server's `srv.text`, the toast's own `.text`) that exempt one expression instead of a whole line | **The guard fails on the old lines.** Old `test_est397.py` against the pre-fix tree (a copy in /tmp): **exit 0**, "437 Serial statements in 180 files carry no position ... message text or name", i.e. it missed all of it. New guard against the SAME pre-fix tree: **exit 1, 50 findings**, 14 of them in `main.cpp` (567, 601, 838, 1172, 1187, 1279, 1313, 1334, 1361, 1374, 1377, 4794, 5249, 5610) = every line this ticket names. New guard on this tree: exit 0, 439 statements in 180 files. `test_est399.py` also fails if the whitelist grows past 20 entries |
+| EST-398 #4 S4: every emoji tap wrote NVS and dropped the result (main.cpp:1213 with 396-407) | New `src/ui/emoji_persist.h`: a pick only marks the list dirty (`g_emojiSave.changed(now)`). One `emojiPersistStep(pageShowing, now)` in the loop writes it when the emoji page is no longer showing (however it was left: the abc key, Send, a tap away, a tab change, the gear) or after 30 s with no pick; `saveEmojiRecent()` now RETURNS `putBytes(...) == sizeof(buf)` (0 = failed), the gate counts writes and failures, a failure keeps the list dirty and retries no sooner than 5 s, and one log line per attempt says `[emoji] recent saved: N pick(s), write N` or `[emoji] recent NOT saved: the NVS write failed (N of N writes so far)` | `test_est399.cpp` `testEmojiGate()`: nothing dirty writes nothing; a pick is not due while the page shows; 29999 ms is not enough and 30000 is; six picks in a row are one write and the quiet window restarts on each; leaving writes at once; a success clears the count; a failure keeps it dirty, counts, waits 4999 ms and retries at 5000; a later success keeps both counts; the millis() wrap. `test_est399.py`: the pick path no longer calls the writer, exactly ONE call site, the result is checked, the loop calls the step with the page state, the failure line exists |
+| every other user of the old shared flag (the ticket asked) | `g_nodeMenuRemoveArmed` (the Nodes long-press Remove) and `g_clearAsk` (Clear messages) were checked: the node arm is cleared when the sheet opens and closes and the sheet is modal on one node, and the Clear-messages pop-up names its channel when it opens, so neither can be armed for the wrong row. They are left as they are and NOT folded into `DeleteArm` (they are not a "tap again" pair) | reasoning recorded here; the pop-up/sheet tests already in `test_est362`/`test_est382` still pass |
+
+### The extra lines the tightened guard found (fixed in this ticket, all rule 9)
+
+The ticket's list was the UI half. The tightened scan then failed on 36 more lines that no sweep had reported,
+because they print a CONTACT's name or a chat's name on a NORMAL path (not a USB answer): `[mc] new node`, `[mc] DM
+open`, `[mc] DM to`, `[mc] ping` (x3), `[mc] trace` (x2), `[mc] path to ... reset`, `[mc] ... favourite`, `[mc]
+contact ... removed`, `[mc] channel slot N renamed/added` (mesh_link.cpp); the repeater's name on the RPTR session
+lines and `regions`/`name <-` answers (rptr_link.cpp); `[nodes] menu/info/select`, `[hist] open`, `[hist] no older
+messages`, `[set] chat picked`, `[rptr] open/auto-login` (main.cpp); `[map] select` (screens/map_tab.cpp). Each now
+prints an ID or a length instead of the name: a contact is `id %08lx` (the FNV-1a hash of its public key, the same
+hash `KnownKeySet` already uses), a repeater is its 6-byte path-hash prefix (already on most of those lines), a
+channel is its slot and a byte count, a chat is its index. Nothing was deleted: every line still says what happened.
+
+### Build and tests (real exit codes, this tree)
+
+- `pio run -e om_lite_l2`: **SUCCESS**, exit 0. **RAM 160,360 / 327,680 B (48.9 %; before this ticket 160,328,
+  +32 B)**, **Flash 2,988,245 / 6,553,600 B (45.6 %; before 2,987,473, +772 B)**, `firmware.bin` 2,988,608 B.
+  No compiler warning.
+- `test/host/run.sh`: **exit 0**, every suite green, including the two new halves: `test_est399.cpp` (the arm, the
+  scrolled pressed rects, the emoji gate) and `test_est399.py` (the shell wiring), and the tightened `test_est397.py`
+  (439 statements, 16 whitelisted, 15 negative controls).
+- No existing test had to change its expectation: the log formats this ticket rewrote are not asserted by
+  `test_est365.py`/`test_est385.py` (they read the USB answers, which are untouched).
+
+### What I could not check
+
+- **No device.** Nothing here was seen on the glass. On the panel, please check: (a) saved networks, tap Forget on
+  A, then Forget on B -> B's row says "Tap again to forget" and only a second tap deletes it; (b) wait 6 s after
+  arming -> the label goes back to "Forget" by itself; (c) on RPTR, scroll a repeater page and hold the refresh
+  ring -> the gold plate lands on the ring, not 20 px lower; (d) type three emoji and leave the page -> one
+  `[emoji] recent saved` line in the log, not three commits.
+- The `[emoji]` line's counts are only visible on the serial console.
+- The delete-arm timeout repaints the Settings page from the loop; on a page with the keyboard sheet open the tick
+  does not repaint (it waits), so a label can stay stale for as long as the sheet is up. No delete row lives on a
+  page that has a sheet, so this cannot show today.
+- A tap consumed by a pop-up or a sheet does not disarm an arm (they cannot coexist with an armed delete row on the
+  same page); every row action, page change and tab switch does.
+- The guard's `name`/`text` rules still cannot see a store with a different spelling (e.g. `s_selName` was caught,
+  `s_currentName` was caught by the `...Name` rule, but a future `s_who` would not be). The SHAPES assertions and the
+  negative controls are what keep the fixed lines from regressing.
+
+### Next step
+
+Claude reviews the diff and commits as Slofi. Then the S5 polish ticket: the EST-398 #5-#12 list (the duplicated
+manual-time apply, the 2038 year steppers, the Warn box, the two unellipsised row kinds, the private RPTR wrapper,
+the duplicated drawing helpers, the hard-coded picker rect, the node-info overflow) plus the EST-396 #3-#8
+constants, and the third sweep of `map_trace.cpp` and `screens/map_tab.cpp`.
+
+
+## 2026-11-11 18:34 (Claude): EST-399 reviewed
+- Guard proof re-run by Claude: the NEW test_est397.py against the OLD source exits 1 with 65 failures; against the fixed source exits 0. (A first check with git stash was invalid: it restored the old test too.) The tightened guard found 36 more log lines no sweep reported; all fixed.

@@ -268,7 +268,10 @@ bool regionsStartOne(int idx) {
     ci.type = ADV_TYPE_NONE;      // the transient/anon kind
     ci.lastmod = rptrMesh().getRTCClock()->getCurrentTime();
     if (!rptrMesh().addContact(ci)) {
-      Serial.printf("[rptr] regions: no contact slot for %s\n", f.name[0] ? f.name : "?");
+      // EST-399: the repeater's ID, never its name (rule 9).
+      char id[16];
+      hexPrefix(f.prefix, 6, id, sizeof(id));
+      Serial.printf("[rptr] regions: no contact slot (id %s)\n", id);
       return false;
     }
     ci.out_path_len = 0;
@@ -285,7 +288,9 @@ bool regionsStartOne(int idx) {
   uint32_t est = 0;
   const int rc = rptrMesh().sendAnonReq(ci, data, sizeof(data), tag, est);
   if (rc == MSG_SEND_FAILED) {
-    Serial.printf("[rptr] regions: send failed to %s\n", f.name[0] ? f.name : "?");
+    char id[16];
+    hexPrefix(f.prefix, 6, id, sizeof(id));
+    Serial.printf("[rptr] regions: send failed (id %s)\n", id);
     return false;
   }
   memcpy(s_regionsKey, f.key, PUB_KEY_SIZE);
@@ -297,8 +302,8 @@ bool regionsStartOne(int idx) {
   ++s_found.serial;
   char hex[16];
   hexPrefix(f.prefix, 6, hex, sizeof(hex));
-  Serial.printf("[rptr] regions -> %s (%s): 0-hop anon request sent, deadline %lu ms\n",
-                f.name[0] ? f.name : hex, hex, (unsigned long)(est + kRegionsExtraMs));
+  Serial.printf("[rptr] regions -> %s: 0-hop anon request sent, deadline %lu ms\n", hex,
+                (unsigned long)(est + kRegionsExtraMs));
   return true;
 }
 
@@ -419,7 +424,7 @@ void rptrLinkLoop() {
     nameNext();
   }
   if (s_login.tick(now)) {
-    Serial.printf("[rptr] login to %s: no answer within %lu ms\n", s_currentName,
+    Serial.printf("[rptr] login: no answer within %lu ms\n",
                   (unsigned long)(now - s_login.sentMs));
     queueReply((uint8_t)RptrReplyKind::Error, "login",
                "no answer (wrong password, or out of range)", now);
@@ -437,15 +442,15 @@ void rptrLinkLoop() {
       if (rptrStatusRequest()) {
         s_statusRetried = true;
         retried = true;
-        Serial.printf("[rptr] status from %s: no answer in %lu ms, asked once more (deadline %lu ms)\n",
-                      s_currentName, (unsigned long)waitedMs,
-                      (unsigned long)rptrStatusDeadlineMs());
+        // EST-399: the session is the one repeater the page was opened on; its name stays off the
+        // wire (rule 9). The reply lines carry its ID.
+        Serial.printf("[rptr] status: no answer in %lu ms, asked once more (deadline %lu ms)\n",
+                      (unsigned long)waitedMs, (unsigned long)rptrStatusDeadlineMs());
       }
     }
     if (!retried) {
       queueReply((uint8_t)RptrReplyKind::StatusWait, "status", "no answer yet", now);
-      Serial.printf("[rptr] status from %s: no answer yet after %lu ms\n", s_currentName,
-                    (unsigned long)waitedMs);
+      Serial.printf("[rptr] status: no answer yet after %lu ms\n", (unsigned long)waitedMs);
     }
   }
   if (s_regionsPending && (int32_t)(now - s_regionsDeadlineMs) >= 0) {
@@ -455,8 +460,7 @@ void rptrLinkLoop() {
     if (idx >= 0 && idx < s_found.count) {
       char hex[16];
       hexPrefix(s_found.rows[idx].prefix, 6, hex, sizeof(hex));
-      Serial.printf("[rptr] regions <- %s (%s): no answer within %lu ms\n",
-                    s_found.rows[idx].name[0] ? s_found.rows[idx].name : hex, hex,
+      Serial.printf("[rptr] regions <- %s: no answer within %lu ms\n", hex,
                     (unsigned long)(now - s_regionsSentMs));
     }
     ++s_found.serial;   // the "Reading" chip goes back to "Regions" on the glass
@@ -561,11 +565,10 @@ bool rptrOnControlData(const mesh::Packet* pkt) {
   char hex[16];
   hexPrefix(key, usable, hex, sizeof(hex));
   if (at >= 0) {
-    Serial.printf("[rptr] answer %s (%s): snr in %d/4 out %d/4, key %u B, %d found\n",
-                  name[0] ? name : hex, hex, (int)snrIn4, (int)snrOut4, (unsigned)keyLen,
-                  s_found.count);
+    Serial.printf("[rptr] answer %s: snr in %d/4 out %d/4, key %u B, %d found\n", hex,
+                  (int)snrIn4, (int)snrOut4, (unsigned)keyLen, s_found.count);
   } else {
-    Serial.printf("[rptr] answer %s dropped: the list is full\n", name[0] ? name : hex);
+    Serial.printf("[rptr] answer %s dropped: the list is full\n", hex);
   }
   return true;
 }
@@ -604,7 +607,7 @@ bool rptrLoginStart(const char* name, const char* password) {
   s_statusRetried = false;
   s_pendingHead = 0;
   s_pendingCount = 0;
-  Serial.printf("[rptr] login sent to %s (%s), deadline %lu ms\n", s_currentName,
+  Serial.printf("[rptr] login sent (%s), deadline %lu ms\n",
                 rc == MSG_SEND_SENT_FLOOD ? "flood" : "direct", (unsigned long)est);
   return true;
 }
@@ -675,8 +678,8 @@ bool rptrStatusRequest() {
   const uint32_t deadline = rptr::requestDeadlineMs(est, kLoginExtraMs, rptr::kStatusMinMs);
   s_statusDeadlineMs = s_statusSentMs + deadline;
   s_statusRetried = false;   // a fresh request (or the one retry) starts its own count
-  Serial.printf("[rptr] status request to %s, est %lu ms, deadline %lu ms\n", s_currentName,
-                (unsigned long)est, (unsigned long)deadline);
+  Serial.printf("[rptr] status request, est %lu ms, deadline %lu ms\n", (unsigned long)est,
+                (unsigned long)deadline);
   return true;
 }
 
@@ -702,7 +705,7 @@ bool rptrCliSend(const char* line, uint8_t tag) {
   s_cliEstMs = est;
   pushPending(line);
   (void)tag;   // the CLI frame carries no tag; the pending ring above is how a reply names it
-  Serial.printf("[rptr] cli -> %s: %s (est %lu ms)\n", s_currentName, line, (unsigned long)est);
+  Serial.printf("[rptr] cli -> %s (est %lu ms)\n", line, (unsigned long)est);
   return true;
 }
 
@@ -751,7 +754,9 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
     if (ok && idx >= 0 && idx < s_found.count) {
       snprintf(s_found.rows[idx].name, sizeof(s_found.rows[idx].name), "%s", name);
       ++s_found.serial;
-      Serial.printf("[rptr] name <- \"%s\"%s%s\n", name, owner[0] ? " owner " : "", owner);
+      // EST-399: the LENGTHS of the answer's two strings, not the repeater's own labels (rule 9).
+      Serial.printf("[rptr] name answer: %u B name, %u B owner\n", (unsigned)strlen(name),
+                    (unsigned)strlen(owner));
     } else {
       Serial.printf("[rptr] name answer did not parse (%d bytes), keeping the hex name\n", (int)len);
       ++s_found.serial;
@@ -770,7 +775,7 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
       a.clock = tag;
       a.clockValid = a.clock >= kClockRealSince;   // 2024 is the MeshCore restart clock, not real
       s_login.succeed(a, millis());
-      Serial.printf("[rptr] login %s: %s (%lu ms), fw level %u, permissions %u\n", s_currentName,
+      Serial.printf("[rptr] login: %s (%lu ms), fw level %u, permissions %u\n",
                     loginStateText(s_login.state), (unsigned long)s_login.rttMs,
                     (unsigned)a.fwLevel, (unsigned)a.permissions);
       queueReply((uint8_t)RptrReplyKind::Login, "login", loginStateText(s_login.state), millis());
@@ -792,7 +797,7 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
         snprintf(s_mem[slot].name, sizeof(s_mem[slot].name), "%s", s_currentName);
         snprintf(s_mem[slot].password, sizeof(s_mem[slot].password), "%s", s_pendingPassword);
         saveRemembered(slot);
-        Serial.printf("[rptr] remembered %s (password saved, never printed)\n", s_currentName);
+        Serial.printf("[rptr] remembered (password saved, never printed)\n");
       }
       s_pendingPassword[0] = 0;
       return;
@@ -829,8 +834,8 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
       batteryVoltsText(volts, sizeof(volts), st.battMv);
       snprintf(text, sizeof(text), "up %lu s, %s", (unsigned long)st.uptimeSec, volts);
       queueReply((uint8_t)RptrReplyKind::Status, "status", text, st.atMs);
-      Serial.printf("[rptr] status %s: up %lu s, batt %u mV, air %lu s, rx %lu tx %lu, noise %d\n",
-                    s_currentName, (unsigned long)st.uptimeSec, (unsigned)st.battMv,
+      Serial.printf("[rptr] status: up %lu s, batt %u mV, air %lu s, rx %lu tx %lu, noise %d\n",
+                    (unsigned long)st.uptimeSec, (unsigned)st.battMv,
                     (unsigned long)st.airtimeSec, (unsigned long)st.rxPackets,
                     (unsigned long)st.txPackets, (int)st.noiseFloor);
       if (handled) *handled = true;
@@ -857,10 +862,10 @@ void rptrOnResponse(const ContactInfo& from, uint32_t tag, const uint8_t* data, 
         char clk[24];
         if (ar.clockValid) snprintf(clk, sizeof(clk), "real");
         else clockText(clk, sizeof(clk), ar.clock);   // "not set" / "not set (2024)"
+        // EST-399: the counts and the clock, never the repeater's name or its region list (rule 9).
         Serial.printf(
-            "[rptr] regions <- %s (%s): clock=%lu (%s) regions=\"%s\" count=%d clean=%d\n",
-            s_found.rows[idx].name[0] ? s_found.rows[idx].name : hex, hex,
-            (unsigned long)ar.clock, clk, ar.text, ar.count, ar.clean ? 1 : 0);
+            "[rptr] regions <- %s: clock=%lu (%s) regions=%d chars, count=%d clean=%d\n", hex,
+            (unsigned long)ar.clock, clk, (int)strlen(ar.text), ar.count, ar.clean ? 1 : 0);
       }
       s_regionsPending = false;
       s_regionsRow = -1;
@@ -929,7 +934,8 @@ bool rptrForget(const char* name) {
     char key[4] = {'e', (char)('0' + at), 0, 0};
     s_prefs.remove(key);
   }
-  Serial.printf("[rptr] forgot %s\n", name);
+  // EST-399: the stored slot's index, not the repeater's name (rule 9).
+  Serial.printf("[rptr] forgot index %d\n", at);
   return true;
 }
 

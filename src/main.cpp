@@ -47,8 +47,10 @@
 #include "fonts.h"
 #include "ui/age.h"
 #include "ui/compose_text.h"
+#include "ui/delete_arm.h"        // EST-399: one "tap again" arm PER row, never one for all
 #include "ui/dm_delivery.h"
 #include "ui/emoji.h"
+#include "ui/emoji_persist.h"     // EST-399: the Recent row's batched NVS write
 #include "ui/emoji_picker.h"
 #include "ui/emoji_recent.h"
 #include "ui/fonts.h"
@@ -140,7 +142,20 @@ static int g_setAccentCol = -1;
 static uint32_t g_setAccentCp = 0;
 static bool g_setAccentPreview = false;
 static int g_chanPage = 0;           // the channel whose page is open
-static bool g_deleteArmed = false;   // Delete needs a second tap, as today
+// EST-399: "tap again" is armed PER ROW AND PER PAGE, never one flag for every delete in the shell
+// (EST-398 #1: one shared flag let Forget on network B delete B while network A was the armed row).
+// Each arm remembers its own row index and expires on its own; only a second tap on that same row
+// inside kDeleteArmMs is a confirmation.
+static om::ui::DeleteArm g_wifiForgetArm;   // index = the saved network's row
+static om::ui::DeleteArm g_chatDeleteArm;   // index = the channel shown on the Chat page
+static om::ui::DeleteArm g_chanDeleteArm;   // index = the channel the Channel page is showing
+// EST-399: leaving a page (or a tab, or Settings) disarms every delete row, so a button armed on one
+// page can never be the armed row on another.
+static void clearDeleteArms() {
+  g_wifiForgetArm.clear();
+  g_chatDeleteArm.clear();
+  g_chanDeleteArm.clear();
+}
 // EST-382: "Clear messages" asks first, in a pop-up (Filip's rule). Cancel is the default side and a
 // tap anywhere outside is a Cancel; the question names the channel and is built when it opens.
 static bool g_clearAsk = false;
@@ -393,7 +408,9 @@ static bool mapLayerPrefWrite(void*, const char* key, bool value) {
 
 // The emoji Recent row: 16 little-endian u32 then the valid count, 65 bytes in NVS "omlite".
 // Unknown trailing bytes are ignored by restore(), so an older/longer blob is safe.
-static void saveEmojiRecent() {
+// EST-399: the ONE write of this blob, and it ANSWERS whether it landed. The pick path does not call
+// it any more (that was one flash commit per emoji, with the result dropped: EST-398 #4).
+static bool saveEmojiRecent() {
   uint8_t buf[4 * om::ui::kEmojiRecentMax + 1];
   for (int i = 0; i < om::ui::kEmojiRecentMax; ++i) {
     const uint32_t cp = g_emojiRecent.cps[i];
@@ -403,7 +420,26 @@ static void saveEmojiRecent() {
     buf[i * 4 + 3] = (uint8_t)((cp >> 24) & 0xFF);
   }
   buf[4 * om::ui::kEmojiRecentMax] = g_emojiRecent.count;
-  g_prefs.putBytes("erec", buf, sizeof(buf));
+  // Preferences returns the bytes written, so a refused or short write is visible here (0).
+  return g_prefs.putBytes("erec", buf, sizeof(buf)) == sizeof(buf);
+}
+
+// EST-399: the batched write's one place of truth. `pageShowing` is the emoji page being on the glass
+// right now; the gate decides (leave the page, or 30 s with no pick) and this reports the outcome and
+// counts a failure. One log line per attempt, so a broken NVS is visible instead of silent.
+static om::ui::EmojiSaveGate g_emojiSave;
+
+static void emojiPersistStep(bool pageShowing, uint32_t now) {
+  if (!g_emojiSave.due(pageShowing, now)) return;
+  const bool ok = saveEmojiRecent();
+  g_emojiSave.result(ok, now);
+  if (ok) {
+    Serial.printf("[emoji] recent saved: %u pick(s), write %u\n",
+                  (unsigned)g_emojiRecent.count, (unsigned)g_emojiSave.writes);
+  } else {
+    Serial.printf("[emoji] recent NOT saved: the NVS write failed (%u of %u writes so far)\n",
+                  (unsigned)g_emojiSave.fails, (unsigned)g_emojiSave.writes);
+  }
 }
 
 static void loadEmojiRecent() {
@@ -564,8 +600,8 @@ static void openNodeMenu(int node) {
   g_nodeMenu = node;
   g_nodeSel = node;   // the gold row behind the sheet is the cue that the hold registered
   buildNodeMenu(node);
-  Serial.printf("[nodes] menu %d (%s), %d row(s)\n", node,
-                node >= 0 && node < g_nodeCount ? g_nodes[node].name : "?", g_nodeMenuCount);
+  // EST-399: the row index and the sheet's size, never the node's name (REBUILD.md rule 9).
+  Serial.printf("[nodes] menu %d, %d row(s)\n", node, g_nodeMenuCount);
   drawHome();
 }
 
@@ -598,7 +634,8 @@ static void openNodeInfo(int node) {
   if (!buildNodeInfoModel(node, &g_nodeInfoModel)) return;
   g_nodeInfo = node;
   closeNodeSheets();
-  Serial.printf("[nodes] info %s\n", g_nodeInfoModel.name);
+  // EST-399: the row, not the name the sheet is showing (rule 9).
+  Serial.printf("[nodes] info %d\n", node);
   drawHome();
 }
 
@@ -833,10 +870,9 @@ static void chatViewStep() {
   cs.openUs = dt;
   cs.windows = rs.windows;
   cs.bytes = rs.bytes;
-  char name[64];
-  snprintf(name, sizeof(name), "%s", g_chats[g_chatSel].name);
-  Serial.printf("[hist] open \"%s\": %d msg(s) from %s in %lu.%03lu ms (%lu window(s), %lu B)\n",
-                name, g_viewCount, thread >= 0 ? "the DM log" : "the card",
+  // EST-399: the chat's index and what was read, never its name (a DM chat's name is a person).
+  Serial.printf("[hist] open chat %d (%s): %d msg(s) in %lu.%03lu ms (%lu window(s), %lu B)\n",
+                g_chatSel, thread >= 0 ? "the DM log" : "the card", g_viewCount,
                 (unsigned long)(dt / 1000u), (unsigned long)(dt % 1000u),
                 (unsigned long)rs.windows, (unsigned long)rs.bytes);
 }
@@ -870,7 +906,9 @@ static void loadOlderChatPage() {
   if (n <= 0) {
     memmove(g_viewMsgs, g_viewMsgs + want, (size_t)g_viewCount * sizeof(g_viewMsgs[0]));
     g_viewMore = false;
-    Serial.printf("[hist] %s: no older messages\n", thread >= 0 ? "DM" : om::mcChannelName(chan));
+    // EST-399: no channel name (rule 9); the index and the log kind say which log ran out.
+    Serial.printf("[hist] no older messages (chat %d, %s)\n", g_chatSel,
+                  thread >= 0 ? "DM log" : "card");
     return;
   }
   if (n < want) {
@@ -1169,7 +1207,9 @@ static bool chatSend() {
     const bool sent = om::meshDmSend(thread, g_kbText);
     if (sent) om::sounds::playEvent(SoundEvent::Sent);
     else om::sounds::playEvent(SoundEvent::Error);
-    Serial.printf("[mc] UI DM send: %s '%s'\n", sent ? "ok" : "failed", g_kbText);
+    // EST-399: the verdict and the length, never the draft (rule 9; EST-396 #2).
+    Serial.printf("[mc] UI DM send: %s, %u B\n", sent ? "ok" : "failed",
+                  (unsigned)strlen(g_kbText));
     return sent;
   }
   const int chan = chatChannel(g_chatSel);
@@ -1184,7 +1224,9 @@ static bool chatSend() {
   const bool sent = om::meshLinkSend(chan, wire);
   if (sent) om::sounds::playEvent(SoundEvent::Sent);
   else om::sounds::playEvent(SoundEvent::Error);
-  Serial.printf("[mc] UI send: %s '%s'\n", sent ? "ok" : "failed", wire);
+  // EST-399: same rule for the channel send (this one also carries the reply mention).
+  Serial.printf("[mc] UI send: %s, %u B%s\n", sent ? "ok" : "failed", (unsigned)strlen(wire),
+                replying ? ", reply" : "");
   return sent;
 }
 
@@ -1210,8 +1252,11 @@ static void chatEmojiPick(uint32_t cp) {
     return;
   }
   g_emojiRecent.use(cp);
-  saveEmojiRecent();
-  Serial.printf("[chat] emoji U+%04lX -> recent %u\n", (unsigned long)cp,
+  // EST-399: RAM only. The one NVS write for the Recent row goes out when the emoji page is left, or
+  // after 30 s without another pick (emojiPersistStep from the loop). Six emoji used to be six flash
+  // commits, and the write's result was never looked at (EST-398 #4).
+  g_emojiSave.changed(millis());
+  Serial.printf("[chat] emoji U+%04lX -> recent %u (save pending)\n", (unsigned long)cp,
                 (unsigned)g_emojiRecent.count);
 }
 
@@ -1276,7 +1321,8 @@ static void drawSettings();   // the Chat header's gear opens it (defined below)
 static bool chatOpenDmFor(const char* name) {
   int thread = -1;
   if (!om::meshDmOpenByName(name, &thread)) {
-    Serial.printf("[chat] no contact named %s, no DM\n", name ? name : "?");
+    // EST-399: no name (rule 9: it is the contact the user typed or tapped).
+    Serial.printf("[chat] DM refused: unknown contact\n");
     return false;
   }
   refreshChats();
@@ -1310,7 +1356,8 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       g_bubMenuSeq = 0;
       g_kbText[0] = 0;
       g_kb.openSheet();
-      Serial.printf("[chat] reply to %s\n", g_replyName);
+      // EST-399: the sequence number being answered, not the sender's name (rule 9).
+      Serial.printf("[chat] reply opened: seq %lu\n", (unsigned long)g_replySeq);
       break;
     case om::ui::SheetAction::CopyText:
       // COPY takes the whole text, cut only by the composer's own byte budget: on a code point
@@ -1331,7 +1378,8 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       g_replyName[0] = 0;
       g_bubMenuSeq = 0;
       g_kb.openSheet();
-      Serial.printf("[chat] mention %s\n", tag);
+      // EST-399: that a mention went in, not the name it names (rule 9).
+      Serial.printf("[chat] mention prepended: %u B\n", (unsigned)strlen(tag));
       break;
     }
     case om::ui::SheetAction::NodeDetails: {
@@ -1358,7 +1406,7 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
         om::map_tab::showPoint(lat, lon, m.name);
         // EST-397: the name only. The contact's exact point is rule 9's first "no", and this line put
         // it in the log on every map open from a chat.
-        Serial.printf("[chat] map %s\n", m.name);
+        Serial.printf("[chat] map: opening the node's position\n");
         showTab(2);
         return;
       }
@@ -1371,10 +1419,13 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       const int chan = chatChannel(g_chatSel);
       if (thread >= 0) {
         const bool sent = om::meshDmSend(thread, m.text);
-        Serial.printf("[chat] DM resend %s '%s'\n", sent ? "ok" : "failed", m.text);
+        // EST-399: the verdict and the length, never the body (rule 9; EST-396 #2).
+        Serial.printf("[chat] DM resend %s, %u B\n", sent ? "ok" : "failed",
+                      (unsigned)strlen(m.text));
       } else if (chan >= 0) {
         const bool sent = om::meshLinkSend(chan, m.text);
-        Serial.printf("[chat] resend %s '%s'\n", sent ? "ok" : "failed", m.text);
+        Serial.printf("[chat] resend %s, %u B\n", sent ? "ok" : "failed",
+                      (unsigned)strlen(m.text));
       }
       g_bubMenuSeq = 0;
       break;
@@ -1846,11 +1897,11 @@ static void rptrOpenAt(const char* name, uint8_t index) {
     char pw[om::rptr::kPasswordMax + 1] = "";
     if (om::rptrPasswordFor(g_rptrNode, pw, sizeof(pw)) && om::rptrLoginStart(g_rptrNode, pw)) {
       g_rptrLoginWait = millis();
-      Serial.printf("[rptr] auto-login %s\n", g_rptrNode);
+      Serial.printf("[rptr] auto-login started (found %d)\n", (int)g_rptrFoundIndex);
     }
     memset(pw, 0, sizeof(pw));
   }
-  Serial.printf("[rptr] open %s\n", g_rptrNode);
+  Serial.printf("[rptr] open (found %d)\n", (int)g_rptrFoundIndex);
 }
 
 static void rptrOpen(const char* name) { rptrOpenAt(name, 255); }
@@ -3252,7 +3303,7 @@ static void setGo(SetPage p) {
   g_setPage = p;
   g_setScroll = 0;
   g_setSelOpen = false;
-  g_deleteArmed = false;
+  clearDeleteArms();
   g_clearAsk = false;
   g_posChoice = false;   // EST-392: leaving the page closes the Position choice
   // EST-352: every door into a text editor opens the shared sheet on the letters page with shift
@@ -3283,7 +3334,7 @@ static void setBack() {
     g_setScroll = scroll;
   }
   g_setSelOpen = false;
-  g_deleteArmed = false;
+  clearDeleteArms();
   g_clearAsk = false;
   g_posChoice = false;   // EST-392: the choice never survives a Back
 }
@@ -3499,9 +3550,11 @@ static void buildSettingsRows() {
         setAdd(om::ui::SetRowKind::Chevron, A_ChatRename, "Rename", om::mcChannelName(ch));
         om::mcChannelKeyB64(ch, k, sizeof(k));
         setAdd(om::ui::SetRowKind::Value, A_None, "Key", k);
-        if (g_deleteArmed) setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Tap again to delete",
-                                  "", false, true);
-        else setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Delete channel", "", false, true);
+        // EST-399: the label asks for the second tap only while THIS channel's arm is live, from the
+        // same DeleteArm the tap handler asks, so the label and the tap can never disagree.
+        const bool chatDeleteArmed = g_chatDeleteArm.armedRow(millis()) == ch;
+        setAdd(om::ui::SetRowKind::Button, A_ChatDelete,
+               chatDeleteArmed ? "Tap again to delete" : "Delete channel", "", false, true);
       } else if (g_chatCount > 0 && g_chats[g_setChat].dm) {
         setAdd(om::ui::SetRowKind::Note, A_None, "Direct message settings are not built yet.");
       } else {
@@ -3671,9 +3724,10 @@ static void buildSettingsRows() {
              om::meshUnread(g_chanPage) ? "new, clear below" : "none");
       setAdd(om::ui::SetRowKind::Button, A_ChanClear, "Clear messages");
       setAdd(om::ui::SetRowKind::Value, A_None, "Key", key);
-      if (g_deleteArmed) setAdd(om::ui::SetRowKind::Button, A_ChanDelete, "Tap again to delete",
-                                "", false, true);
-      else setAdd(om::ui::SetRowKind::Button, A_ChanDelete, "Delete channel", "", false, true);
+      // EST-399: the arm of the channel page's own delete row, keyed to the channel this page shows.
+      const bool chanDeleteArmed = g_chanDeleteArm.armedRow(millis()) == (int)g_chanPage;
+      setAdd(om::ui::SetRowKind::Button, A_ChanDelete,
+             chanDeleteArmed ? "Tap again to delete" : "Delete channel", "", false, true);
       break;
     }
 
@@ -3831,8 +3885,11 @@ static void buildSettingsRows() {
           const om::wifi::SavedNetwork* n = om::wifiSavedAt(i);
           if (n == nullptr) continue;
           setAdd(om::ui::SetRowKind::Value, A_None, n->ssid, "saved");
-          setAdd(om::ui::SetRowKind::Button, (uint16_t)(A_WifiForgetBase + i), "Forget", "",
-                 false, true);
+          // EST-399: each saved network's Forget row carries its OWN arm, and the row that is armed
+          // says so on the glass (the channel page's delete has done this all along).
+          const bool forgetArmed = g_wifiForgetArm.armedRow(millis()) == i;
+          setAdd(om::ui::SetRowKind::Button, (uint16_t)(A_WifiForgetBase + i),
+                 forgetArmed ? "Tap again to forget" : "Forget", "", false, true);
         }
         snprintf(v, sizeof(v), "%d of %d", om::wifiSavedCount(), om::wifi::kMaxSaved);
         setAdd(om::ui::SetRowKind::Note, A_None, v);
@@ -4046,7 +4103,7 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
   g_setScroll = 0;
   g_setNav.reset();                 // a fresh door into Settings has no history behind it
   g_setEditor = om::ui::SettingsEditor::None;
-  g_deleteArmed = false;
+  clearDeleteArms();
   g_clearAsk = false;
   g_setSelOpen = false;
   g_setSelScroll = 0;
@@ -4073,7 +4130,7 @@ static void settingsBack() {
   if (g_setNav.empty()) {
     g_settings = false;
     g_setEditor = om::ui::SettingsEditor::None;
-    g_deleteArmed = false;
+    clearDeleteArms();
     g_clearAsk = false;
     g_setSelOpen = false;
     g_posChoice = false;   // EST-392
@@ -4200,6 +4257,12 @@ static void openSoundPicker(SoundEvent ev) {
 
 // One row's action. The id is the only thing the shell needs to know about a row.
 static void handleSettingsRow(uint16_t id) {
+  // EST-399: a "tap again" arm belongs to ONE row and survives nothing else. Any other action on the
+  // page (a toggle, Back's own row, another page's key) disarms it, so a stale armed button can never
+  // be waiting behind the next tap. The row's own id is exempt: that is the confirmation itself.
+  if (id < A_WifiForgetBase || id >= A_WifiForgetBase + om::wifi::kMaxSaved) g_wifiForgetArm.clear();
+  if (id != A_ChatDelete) g_chatDeleteArm.clear();
+  if (id != A_ChanDelete) g_chanDeleteArm.clear();
   if (g_setTab == om::ui::SettingsTab::Chat) refreshChats();
   const int ch = settingsChatChannel();
   switch (id) {
@@ -4230,7 +4293,7 @@ static void handleSettingsRow(uint16_t id) {
       g_setSelOpen = !g_setSelOpen;
       g_setSelScroll = 0;
       g_setScroll = 0;
-      g_deleteArmed = false;
+      clearDeleteArms();
       break;
     case A_Channels: setGo(SetPage::Channels); break;
     case A_Wifi:     setGo(SetPage::Wifi); break;
@@ -4330,10 +4393,11 @@ static void handleSettingsRow(uint16_t id) {
       break;
     case A_ChatDelete:
       if (ch >= 0) {
-        if (!g_deleteArmed) {
-          g_deleteArmed = true;
-        } else {
-          g_deleteArmed = false;
+        // EST-399: this row's OWN arm, keyed to the channel the page shows. Only a second tap on the
+        // same channel confirms; picking another chat in the selector, leaving the page or the arm's
+        // timeout disarms it. The label above comes from the same call, so it cannot say "tap again"
+        // for a row a tap would only arm.
+        if (g_chatDeleteArm.tap(ch, millis()) == om::ui::DeleteArm::Tap::Confirmed) {
           om::mcChannelRemove(ch);
           om::meshLinkReloadChannels();
           refreshChats();
@@ -4434,10 +4498,8 @@ static void handleSettingsRow(uint16_t id) {
       g_clearAsk = true;
       break;
     case A_ChanDelete:
-      if (!g_deleteArmed) {
-        g_deleteArmed = true;
-      } else {
-        g_deleteArmed = false;
+      // EST-399: the arm belongs to THIS page's channel, never to "a delete row somewhere".
+      if (g_chanDeleteArm.tap((int)g_chanPage, millis()) == om::ui::DeleteArm::Tap::Confirmed) {
         om::mcChannelRemove(g_chanPage);
         om::meshLinkReloadChannels();
         refreshChats();
@@ -4514,13 +4576,14 @@ static void handleSettingsRow(uint16_t id) {
         }
       } else if (id >= A_WifiForgetBase && id < A_WifiForgetBase + om::wifi::kMaxSaved) {
         const int at = (int)(id - A_WifiForgetBase);
-        if (!g_deleteArmed) {
-          g_deleteArmed = true;
-          showToast("Tap Forget again");
-        } else {
-          g_deleteArmed = false;
+        // EST-399: the arm belongs to THIS row (EST-398 #1: one shared flag forgot network B on its
+        // first tap while network A was the armed row). A tap on another row only arms that row, and
+        // the row's own label changes so the second tap is asked for on the glass.
+        if (g_wifiForgetArm.tap(at, millis()) == om::ui::DeleteArm::Tap::Confirmed) {
           om::wifiForget(at);
           showToast("Network forgotten");
+        } else {
+          showToast("Tap Forget again");
         }
       } else if (id >= A_PresetBase && id < A_PresetBase + om::ui::kRadioPresetCount) {
         g_setPresetPending = (int)(id - A_PresetBase);
@@ -4790,9 +4853,9 @@ static void handleSettingsTap(int x, int y) {
       om::ui::selectorPickShown(press, &g_setChat);   // g_chatSel is deliberately untouched
       g_setSelOpen = false;
       g_setScroll = 0;
-      g_deleteArmed = false;
-      Serial.printf("[set] chat picked: %s (chat screen still on %d)\n",
-                    (g_setChat >= 0 && g_setChat < g_chatCount) ? g_chats[g_setChat].name : "?",
+      clearDeleteArms();
+      // EST-399: which chat was picked (its index), never its name (rule 9).
+      Serial.printf("[set] chat picked: %d of %d (chat screen still on %d)\n", g_setChat, g_chatCount,
                     wasOpen);
       drawSettings();
       return;
@@ -4863,7 +4926,7 @@ static void handleSettingsTap(int x, int y) {
     g_setPage = setRootForTab(g_setTab);
     g_setScroll = 0;
     g_setNav.reset();         // a tab is a new root: Back leaves Settings from it
-    g_deleteArmed = false;
+    clearDeleteArms();
     g_posChoice = false;      // EST-392: a tab is a new page, so no choice is left down
     drawSettings();
     return;
@@ -5245,8 +5308,8 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
         const double lon = (double)contact.lon_e6 / 1e6;
         closeNodeSheets();
         om::map_tab::showPoint(lat, lon, name);
-        // EST-397: the node's name only, never its exact point (rule 9).
-        Serial.printf("[nodes] map %s\n", name);
+        // EST-397 removed the point; EST-399 removes the name too (rule 9: index/length only).
+        Serial.printf("[nodes] map: opening the node's position\n");
         showTab(2);
       }
       return;
@@ -5607,7 +5670,7 @@ static void handleTap(int x, int y, bool longPress) {
         openNodeMenu(row);   // EST-342: a plain tap still just selects (Filip's rule)
       } else {
         g_nodeSel = row;
-        Serial.printf("[nodes] select %d (%s)\n", row, g_nodes[row].name);
+        Serial.printf("[nodes] select %d\n", row);   // EST-399: the row, not the node's name
         drawHome();
       }
     }
@@ -5673,6 +5736,22 @@ static bool redrawCurrentScreen() {
   else if (g_tab == 2) om::map_tab::draw();
   else drawRptrTab();
   return true;
+}
+
+// EST-399: the delete arms' own timeout, applied to the glass. Each arm is checked once per pass (two
+// comparisons); a page is redrawn only on the pass an arm actually ran out, so the "Tap again" label
+// can never outlive the window a tap honours. The editor sheet is left alone: it redraws on its own
+// keys, and a repaint under a finger is the one thing this must not do.
+static void deleteArmTick(uint32_t now) {
+  om::ui::DeleteArm* arms[3] = {&g_wifiForgetArm, &g_chatDeleteArm, &g_chanDeleteArm};
+  bool expired = false;
+  for (int i = 0; i < 3; ++i) {
+    if (arms[i]->expired(now)) {
+      arms[i]->clear();
+      expired = true;
+    }
+  }
+  if (expired && g_settings && g_setEditor == om::ui::SettingsEditor::None) drawSettings();
 }
 
 void loop() {
@@ -6800,6 +6879,11 @@ void loop() {
                     (unsigned long)(worstUs / 1000UL), (unsigned long)presses);
     }
   }
+  // EST-399: the two deferred-write rules, both on this one pass and both event-free: a "tap again"
+  // arm that ran out stops saying so, and the emoji Recent row's one NVS write goes out when the
+  // emoji page is gone (however it was left) or after 30 s without a pick.
+  deleteArmTick(millis());
+  emojiPersistStep(g_tab == 1 && !g_settings && g_kb.open && g_kb.emoji(), millis());
   om::radio::endPass(micros(), millis());
   // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels over the 300 ms
   // fade-in (150 ms out); otherwise keep the old 20 ms loop (mesh, touch, draw). EST-355: a screen

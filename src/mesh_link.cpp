@@ -679,6 +679,13 @@ bool textMentionsUs(const char* body) {
   return false;
 }
 
+// EST-399: the ID a log may print for a contact, and the only one. It is the same FNV-1a hash of the
+// public key the known-key set already uses, so two lines about one node can still be matched up.
+// Rule 9 (REBUILD.md, the repo is public): a log names a node by an ID, never by its name.
+static unsigned long contactLogId(const ContactInfo& ci) {
+  return (unsigned long)om::ui::KnownKeySet::keyHash(ci.id.pub_key, PUB_KEY_SIZE);
+}
+
 void queueNewNode(const ContactInfo& c) {
   NewNodeEvent& e = s_newNodeEvents[(s_newNodeHead + s_newNodeCount) % kNewNodeEvents];
   snprintf(e.name, sizeof(e.name), "%s", c.name);
@@ -686,7 +693,7 @@ void queueNewNode(const ContactInfo& c) {
   if (s_newNodeCount < kNewNodeEvents) ++s_newNodeCount;
   else s_newNodeHead = (s_newNodeHead + 1) % kNewNodeEvents;   // drop the oldest
   ++s_newNodeSerial;
-  Serial.printf("[mc] new node: %s (%u)\n", e.name, (unsigned)e.type);
+  Serial.printf("[mc] new node: id %08lx (%u)\n", contactLogId(c), (unsigned)c.type);
 }
 
 // --- ping (status request) ----------------------------------------------------------------------
@@ -756,7 +763,10 @@ class OmListener : public MyMesh::Listener {
       s_pingState = MeshPingState::Replied;
       s_pingRttMs = millis() - s_pingSentMs;
       snprintf(s_pingName, sizeof(s_pingName), "%s", from.name);
-      Serial.printf("[mc] ping %s: reply in %lu ms\n", s_pingName, (unsigned long)s_pingRttMs);
+      // EST-399: the ping's node ID, never the name it answers with (rule 9).
+      Serial.printf("[mc] ping id %08lx: reply in %lu ms\n",
+                    (unsigned long)om::ui::KnownKeySet::keyHash(s_pingKey, PUB_KEY_SIZE),
+                    (unsigned long)s_pingRttMs);
       return true;   // handled here; no need for a phone frame
     }
     // EST-358: the repeater session's own answers (the login result and the status card). Only our
@@ -1560,7 +1570,8 @@ void meshLinkLoop() {
   // A ping has the same one-shot deadline; a trace waits for its packet to walk the hops back.
   if (s_pingState == MeshPingState::Sent && (int32_t)(now - s_pingDeadlineMs) >= 0) {
     s_pingState = MeshPingState::Timeout;
-    Serial.printf("[mc] ping %s: no reply\n", s_pingName);
+    Serial.printf("[mc] ping id %08lx: no reply\n",
+                  (unsigned long)om::ui::KnownKeySet::keyHash(s_pingKey, PUB_KEY_SIZE));
   }
   if (s_tracePending && (int32_t)(now - s_traceDeadlineMs) >= 0) {
     s_tracePending = false;
@@ -1795,7 +1806,7 @@ bool meshDmOpenByName(const char* name, int* threadOut) {
     const int t = ensureDmThread(ci);
     if (t < 0) return false;   // thread table full
     if (threadOut) *threadOut = t;
-    Serial.printf("[mc] DM open with %s (thread %d)\n", ci.name, t);
+    Serial.printf("[mc] DM open (id %08lx, thread %d)\n", contactLogId(ci), t);
     return true;
   }
   return false;
@@ -1842,8 +1853,8 @@ bool meshDmSend(int thread, const char* text) {
   m.logId = history::store().appendMsg(histDmSlot(thread), histFromDm(m), 0);
   s_dmDelivery.begin(seq, ack, est, millis());
   s_dmRing->clearUnread(thread);
-  Serial.printf("[mc] DM to %s (%d B) -> %s, ack %08lx, timeout %lu ms\n", ci.name, len,
-                rc == MSG_SEND_SENT_FLOOD ? "flood" : "direct", (unsigned long)ack,
+  Serial.printf("[mc] DM to id %08lx (%d B) -> %s, ack %08lx, timeout %lu ms\n", contactLogId(ci),
+                len, rc == MSG_SEND_SENT_FLOOD ? "flood" : "direct", (unsigned long)ack,
                 (unsigned long)est);
   return true;
 }
@@ -2251,7 +2262,7 @@ bool meshNodePing(const char* name) {
   const int rc = the_mesh.sendRequest(ci, REQ_TYPE_GET_STATUS, tag, est);
   if (rc == MSG_SEND_FAILED) {
     s_pingState = MeshPingState::Failed;
-    Serial.printf("[mc] ping %s: sendRequest failed\n", ci.name);
+    Serial.printf("[mc] ping id %08lx: sendRequest failed\n", contactLogId(ci));
     return false;
   }
   s_pingState = MeshPingState::Sent;
@@ -2260,8 +2271,8 @@ bool meshNodePing(const char* name) {
   s_pingRttMs = 0;
   memcpy(s_pingKey, ci.id.pub_key, PUB_KEY_SIZE);
   snprintf(s_pingName, sizeof(s_pingName), "%s", ci.name);
-  Serial.printf("[mc] ping %s: status request sent (tag %08lx, timeout %lu ms)\n", ci.name,
-                (unsigned long)tag, (unsigned long)est);
+  Serial.printf("[mc] ping id %08lx: status request sent (tag %08lx, timeout %lu ms)\n",
+                contactLogId(ci), (unsigned long)tag, (unsigned long)est);
   return true;
 }
 
@@ -2281,7 +2292,7 @@ bool meshNodeTrace(const char* name) {
   if (!spec.known) {
     // A trace is a directed packet; upstream's CMD_SEND_TRACE_PATH also takes an explicit path, so
     // there is nothing to aim at until a path is known.
-    Serial.printf("[mc] trace %s: no path known\n", ci.name);
+    Serial.printf("[mc] trace id %08lx: no path known\n", contactLogId(ci));
     return false;
   }
   const uint32_t tag = the_mesh.getRTCClock()->getCurrentTimeUnique();
@@ -2299,8 +2310,8 @@ bool meshNodeTrace(const char* name) {
   ++s_traceSerial;
   const uint8_t pathBytes = (uint8_t)(spec.count * spec.hashSize);
   the_mesh.sendDirect(pkt, ci.out_path, pathBytes);
-  Serial.printf("[mc] trace %s: %u byte(s), %u hop(s), tag %08lx\n", ci.name, (unsigned)pathBytes,
-                (unsigned)spec.count, (unsigned long)tag);
+  Serial.printf("[mc] trace id %08lx: %u byte(s), %u hop(s), tag %08lx\n", contactLogId(ci),
+                (unsigned)pathBytes, (unsigned)spec.count, (unsigned long)tag);
   return true;
 }
 
@@ -2321,7 +2332,7 @@ bool meshNodeResetPath(const char* name) {
   if (live == nullptr) return false;
   the_mesh.resetPathTo(*live);
   store.saveContacts(&the_mesh);
-  Serial.printf("[mc] path to %s reset (will flood next time)\n", ci.name);
+  Serial.printf("[mc] path to id %08lx reset (will flood next time)\n", contactLogId(ci));
   return true;
 }
 
@@ -2329,7 +2340,7 @@ bool meshNodeFavourite(const char* name, bool on) {
   ContactInfo ci;
   if (!findContactByName(name, &ci)) return false;
   if (!favouriteSet(ci.id.pub_key, on)) return false;
-  Serial.printf("[mc] %s %s favourite\n", ci.name, on ? "is" : "is not");
+  Serial.printf("[mc] id %08lx %s favourite\n", contactLogId(ci), on ? "is" : "is not");
   return true;
 }
 
@@ -2348,7 +2359,7 @@ bool meshNodeRemove(const char* name) {
   store.saveContacts(&the_mesh);
   favouriteSet(ci.id.pub_key, false);
   s_knownKeys.remove(om::ui::KnownKeySet::keyHash(ci.id.pub_key, PUB_KEY_SIZE));
-  Serial.printf("[mc] contact %s removed\n", ci.name);
+  Serial.printf("[mc] contact id %08lx removed\n", contactLogId(ci));
   return true;
 }
 
@@ -2410,7 +2421,9 @@ bool meshChannelSetName(int idx, const char* name) {
   if (!the_mesh.getChannel(slot, cd)) return false;
   StrHelper::strncpy(cd.name, name, sizeof(cd.name));
   if (!writeChannelSlot(slot, cd)) return false;
-  Serial.printf("[mc] channel slot %d renamed to \"%s\" (saved to /channels2)\n", slot, name);
+  // EST-399: the slot and the length, never the user's channel name (rule 9).
+  Serial.printf("[mc] channel slot %d renamed (%u B, saved to /channels2)\n", slot,
+                (unsigned)strlen(name));
   return true;
 }
 
@@ -2441,7 +2454,8 @@ int meshChannelAdd(const char* name, const uint8_t secret[16]) {
   memcpy(cd.channel.secret, secret, 16);
   if (!writeChannelSlot(slot, cd)) return -1;
   const int ui = uiIndexForSlot(slot);
-  Serial.printf("[mc] channel added at slot %d: \"%s\" (saved to /channels2)\n", slot, name);
+  Serial.printf("[mc] channel added at slot %d (%u B, saved to /channels2)\n", slot,
+                (unsigned)strlen(name));
   return ui;
 }
 

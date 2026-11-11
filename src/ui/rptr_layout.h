@@ -103,6 +103,17 @@ struct RptrPageLayout {
   int contentTop() const { return body.y; }
 };
 
+// EST-399: a CONTENT rectangle (the card's refresh key, the banner's button) at this scroll, cut to
+// the viewport. The page is one scrolling column, so the scroll-0 rectangles above are only the
+// content positions; both the hit test and the pressed look must come through here. They did not:
+// ui/press_targets.h painted the scroll-0 rectangle while rptrPageHitAt() tested the scrolled one, so
+// a scrolled page lit a gold plate over a settings row lower down (EST-398 #2).
+constexpr Rect rptrPageScrolledRect(const Rect& r, int scroll, const Rect& body) {
+  Rect out = r;
+  out.y = (int16_t)(out.y - scroll);
+  return out.intersect(body);
+}
+
 // `hasCard` / `hasBanner` / `hasApply` / `big` / `console` say which pieces the page uses; the shell
 // passes what buildScreen() produced.
 RptrPageLayout rptrPageLayoutFor(const Layout& L, bool hasCard, bool hasBanner, bool hasApply,

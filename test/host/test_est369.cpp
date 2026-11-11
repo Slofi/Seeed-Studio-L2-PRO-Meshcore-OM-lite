@@ -220,7 +220,8 @@ static void testKeptSounds() {
   CHECK(strcmp(soundName(defaultSound(Event::Mention)), "Chime Bright") == 0);
   CHECK(strcmp(soundName(defaultSound(Event::Sent)), "Soft Tick") == 0);
   CHECK(strcmp(soundName(defaultSound(Event::Error)), "Bell Fall") == 0);
-  CHECK(strcmp(soundName(defaultSound(Event::Touch)), "Beep Clean") == 0);
+  // EST-390: the touch default is the quietest short sound (80 ms soft tick), not the 110 ms beep.
+  CHECK(strcmp(soundName(defaultSound(Event::Touch)), "Soft Tick") == 0);
 
   // Message still sits clearly above new node (a fourth/fifth apart, not a timbre change).
   NoteInfo m0;

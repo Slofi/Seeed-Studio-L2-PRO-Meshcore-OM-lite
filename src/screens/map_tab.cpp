@@ -14,6 +14,7 @@
 #include "timekeeper.h"
 #include "ui/age.h"
 #include "ui/map_chrome.h"
+#include "ui/press_targets.h"   // EST-390: the pressed rectangle comes from the same hit test
 
 namespace om {
 namespace map_tab {
@@ -519,6 +520,15 @@ void pump(bool visible, bool uiDrawOk) {
   ++s_traceFrames;
   s_traceFrameUs += took;
   if (took > s_traceWorstUs) s_traceWorstUs = took;
+}
+
+// EST-390: the pressed look goes on the rectangle tap() would use. build() and mapScreenChrome() are
+// the same two calls tap() makes, so the tint can never sit off the element the tap lands on.
+om::ui::PressTarget pressTarget(int x, int y) {
+  ui::MapView v;
+  build(v);
+  const ui::MapChrome c = ui::mapScreenChrome(v);
+  return ui::pressTargetForMap(c, v.markers, v.markerCount, x, y);
 }
 
 bool tap(int x, int y) {

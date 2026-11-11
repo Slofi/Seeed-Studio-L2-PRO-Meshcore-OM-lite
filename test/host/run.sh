@@ -75,7 +75,8 @@ BIN44="$(mktemp /tmp/om-lite-ntp.XXXXXX)"
 BIN45="$(mktemp /tmp/om-lite-est386.XXXXXX)"
 BIN46="$(mktemp /tmp/om-lite-est387.XXXXXX)"
 BIN47="$(mktemp /tmp/om-lite-est388.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47"' EXIT
+BIN48="$(mktemp /tmp/om-lite-est390.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -437,3 +438,20 @@ python3 -B test_est388.py
 # game server's chain now ends at ISRG Root X2, not X1). Two separate constants, a third PEM, a
 # stale comment or an altered base64 line fails the run.
 python3 -B test_est389.py
+
+# EST-390: touch feedback. The pressed state machine (arm, stay, slide off, clear; an invalid target
+# arms nothing), the one blend arithmetic, and pressed-rect == hit-rect for a sample of elements on
+# every screen (tab bar + status keys, Nodes rows and its sheet, selector rows, Settings rows/steps/
+# tabs/back/action/modals, the shared keyboard keys, emoji cells, Map tabs/chip/ghosts/markers/callout,
+# RPTR list/page/picker keys). Plus: the key preview bubble for every key of the sheet is centred,
+# above the finger, on screen and never over the composer draft line; the latency log once-a-minute
+# window (millis wrap included); and the touch sound is the quietest short library sound (Soft Tick).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est390.cpp \
+  ../../src/ui/chat_layout.cpp ../../src/ui/text_wrap.cpp ../../src/ui/map_chrome.cpp \
+  ../../src/ui/rptr_layout.cpp ../../src/ui/node_menu.cpp ../../src/rptr_model.cpp \
+  ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN48"
+"$BIN48"
+# The source-level half: one theme constant and one owner for the pressed look, no screen draws its
+# own, the look is a frame overlay under the toast, the preview exists only for character keys, the
+# touch sound stored default is OFF and plays only on a tap, and the latency line exists.
+python3 -B test_est390.py

@@ -6411,3 +6411,127 @@ changes is which root the probe accepts.
 ### D. Next step
 Claude reviews the diff, flashes, and runs the ticket's five `https probe` runs (BLE off, then on).
 The two headlines: does it say `result=ok` now, and what `internal_min` reaches with both roots pinned.
+
+## 2026-11-11 (DS, EST-390): touch feedback, the pressed look on every element and a key preview
+Status: in_review (not committed, not pushed).
+
+### A. The one rule, and why it is an overlay
+The L2 has no vibration motor, so the pressed look IS the feedback. It is implemented once:
+- `src/ui/theme.h` gains ONE look: `kPressedTint` (the OM gold accent) and `kPressedAlpha` = 56 (about
+  22 %). On the darkest plate (`kKeyBg` #232220) that lifts a pressed key to about #4a3c28 while its
+  white glyph keeps its contrast.
+- `src/ui/press.h` (plain C++, host-tested) holds the whole rule: `PressTarget` (the rectangle + the
+  key's character), `PressTracker` (arm on the press edge, keep while the finger is on the rect, clear
+  on slide-off or release), `pressBlend()` (the one mix), `pressBubbleRect()` (the key preview's
+  placement) and `PressLatencyLog` (the once-a-minute worst case).
+- `src/ui/press_targets.h` (plain C++) maps a point to that rectangle PER SCREEN, and every function
+  asks the screen's EXISTING hit test first and then returns the rectangle that hit test just used:
+  the tab bar / gear / fault mark, the Nodes rows and its sheet, the shared dropdown rows (Chat and
+  Settings), the Settings tabs / rows / stepper keys / Back / title action / confirmation keys, the
+  keyboard keys (`keyHit`, the tap target), the emoji cells, the Map tabs / chip / hidden ghosts /
+  markers / callout, and the RPTR list, page and map-picker keys.
+- `src/ui/press_feedback.{h,cpp}` owns the one instance and draws it as a FRAME OVERLAY
+  (`omFrameBlendRect()` in board.cpp mixes the accent into the frame's own pixels). The overlay is
+  registered before the toast, so the pressed look is on the finished frame, on exactly that
+  rectangle, and every redraw path carries it. No screen draws a pressed plate of its own.
+- The shell (main.cpp) arms it on the press edge with `pressArmAt()`, only when the gesture is NOT
+  spent and not a pan continuation (so a tap that only dismissed a toast or closed a pop-up draws
+  nothing on what is under it), clears it before the release action runs, and clears it on a screen
+  change or when the finger slides off the rect.
+
+What a tap DOES is unchanged, and this is deliberate: the ticket's own item 4 says "Nothing changes in
+what a tap DOES", so a slide-off clears the LOOK but the release still runs the same action it always
+did (the shell's press/drag/release logic was not touched). The ticket's "then no action, as today"
+would have been a behaviour change to the tap path, so it is called out here for Filip/Claude to
+decide; if he wants slide-off to cancel the action too, that is a one-line change in the release path
+and not a feedback change.
+
+Latency: `pressArmAt()` composes the frame at the press edge (no waiting for the next 20 ms pass) and
+samples the time to the END of that frame's push; `[press] latency worst=N ms over M presses in 60 s`
+is printed once a minute. The number is NOT measured here (no device): it is the one number the
+device test reads.
+
+### B. The keyboard
+- Every key gets the pressed look on `keyHit` (the tap target: the outer keys reach the screen edges
+  and the bottom row reaches the floor), so the tint can spill a few px into the sheet's 4 px side pad
+  on the outer keys. That is the ticket's own rule ("exactly the rect the hit test uses") and is the
+  one place where the drawn cap is smaller than its pressed rect.
+- The preview bubble reuses the long-press accent drawing: `drawAccentBubble()` now delegates to a new
+  `drawPreviewBubble(d, at, cp)` (same panel2 plate, gold rim, `SansTitle` face, 26x24 box), so the two
+  bubbles cannot drift apart. It exists only for keys that type a character (space, backspace, shift,
+  the page keys, Send and the smiley get the pressed look only), and with shift it previews the capital
+  that will actually be typed.
+- Placement is `pressBubbleRect()`: centred on the DRAWN key, its bottom 2 px above the key's top,
+  clamped inside the screen and below the status bar, AND clamped so its bottom never goes below the
+  composer's draft line minus 2 px. For a lower row that changes nothing (the accent bubble already
+  sits in the gap between the draft and row 0); for a TOP-row key it lifts the bubble above the draft
+  line instead of covering the text being typed. The host test walks every key of both pages (with and
+  without a reply bar) and proves no bubble overlaps `g.draft`.
+- When the s/c/z long-press accent preview appears at that same spot, `pressDropPreview()` drops the
+  key's character bubble and keeps the pressed tint, so one bubble is shown, the accent's.
+
+### C. The optional click sound
+It already existed as "Touch clicks" (EST-359), OFF by default, played from `handleTap()` (so never on
+a drag). This ticket:
+- renames the Settings row to "Touch sound" (Settings > General > Sound; the NVS key `tsnd` and the
+  OFF default are unchanged),
+- and changes the Touch event's default library sound from "Beep Clean" (110 ms, beep at level 200) to
+  **"Soft Tick"** (library id 56): 80 ms, ONE 1175 Hz soft-voice note at level 70, the quietest short
+  sound in the library. The host test renders every sound of 120 ms or less and proves none is quieter.
+  The picker still offers every sound; only the default changed.
+
+### D. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` (the REBUILD.md command): **exit 0**, SUCCESS.
+- RAM **160,168 B** of 327,680 (48.9 %; 160,120 before, **+48 B**); flash **2,985,501 B** of 6,553,600
+  (45.6 %; 2,977,905 before, **+7,596 B**); `firmware.bin` **2,985,872 B** (+7,600 B). Only the two
+  known RadioLib `#warning`s; none from a changed file.
+- `test/host/run.sh`: **exit 0**, **48 C++ binaries + 15 Python checks** (one new binary, one new
+  Python check).
+- New `test_est390.cpp`: the state machine (arm, stay, a slide-off clears and does NOT re-arm on
+  re-entry, the half-open edge, an invalid/empty target arms nothing, clear forgets the target); the
+  blend's two ends and monotone ramp; and pressed-rect == hit-rect for a sample of elements on EVERY
+  screen: the 4 tabs pixel-covering the whole bar, the gear and the fault mark, every visible Nodes row
+  at three scrolls, every sheet row, every chat row of the dropdown and the Manage row, every Settings
+  row at two scrolls, the stepper's -/+ (and its label/value being the row), the settings tabs / Back /
+  title action / both confirmation keys, EVERY key of both keyboard pages (pressed rect == keyHit,
+  bubble == the accent box, centred, above the key, on screen, never over the draft, and only for
+  character keys), the emoji cells (with the hit test's own index round trip), the Map's five tabs (and
+  their hidden slivers), the chip's 30x26 target, the hidden zoom ghosts, a marker's box and the
+  callout, the RPTR list rows at four scrolls and the Scan chip, the page's Back / Apply / row / row
+  key, the picker's keys, the latency log's 60 s window and its millis() wrap, and the touch sound's
+  default (id 56, 80 ms, 1175 Hz, the quietest short one).
+- New `test_est390.py`: one theme constant and one owner, no screen draws its own pressed plate, the
+  shell arms only for an unspent non-drag press from the shared maps, the overlay order is press then
+  toast, `drawAccentBubble` draws through `drawPreviewBubble`, the preview exists only for character
+  keys, the touch sound's stored default is OFF, `playClick()` is called from the tap path only, the
+  "Touch sound" label, and the latency line's format.
+
+### E. Preview
+`docs/shots/2026-11-11-est390-touch-feedback.png`, generated by the new `tools/mkpress.py`: its C++
+dumper compiles the firmware's own `ui/chat_layout.h` / `ui/layout.h` / `ui/theme.h` and prints the
+real rectangles and colours, and the pressed fills are `pressBlend()`'s own output. Left panel: the
+keyboard sheet with "k" held, the pressed key and its bubble above the draft line ("helo|" stays
+readable). Right panel: the Nodes list with the second row held. Invented names and texts only
+("Alice", "Bob", "Rptr Hill", "Sensor 4").
+
+### F. Could not check (no device, no serial)
+- The real press-to-pixels latency: only the device's `[press] latency worst=...` lines measure it.
+  The ticket's ~30 ms target depends on the compose + push of the frame that is redrawn at the press
+  edge (a full screen compose, then the ~4 ms SPI push). If the worst case is too high, the levers are
+  a partial push of the pressed rectangle (a second drawing path, which rule 4 dislikes) or drawing the
+  tint straight to the panel for the press edge only.
+- How the tint reads on the glass in daylight, on the Map's light tiles (the overlay tints them too:
+  the marker box and the callout), and whether the outer-key spill on the keyboard looks right.
+- Whether the redraw at every press edge is acceptable in use on the Map (a cached canvas repaint per
+  press) and on the Chat page: the ticket's own cost, measured by the `[press]` line.
+- The click sound's real loudness at 60 % volume: the host only proves the render's peak is the
+  quietest of the short sounds.
+- One deliberate deviation is written in A: a slide-off clears the look but does not cancel the
+  action, because item 4 says nothing about what a tap DOES may change.
+
+### G. Next step
+Claude reviews the diff, flashes, and checks on the glass: a tab, a Nodes row, a settings row, a
+keyboard key (pressed + bubble, top row and a lower row), a selector row, a sheet row, the Map's tabs
+and chip, and an RPTR row. Then watch one minute of `[press] latency worst=...` on the Chat page with
+the keyboard open (the worst screen: a full chat + sheet compose). If Filip wants the slide-off to
+cancel the action as well, that is his call and a one-line change.

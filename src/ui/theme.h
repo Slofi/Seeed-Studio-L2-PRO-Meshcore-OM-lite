@@ -43,6 +43,16 @@ constexpr uint16_t kAccInk    = rgb565(0xf6e3b8);  // selected text
 constexpr uint16_t kSelBg     = rgb565(0x1f1a10);  // selected row / tab
 constexpr uint16_t kSelBg2    = rgb565(0x3a2c12);  // strong selected chip / button
 
+// EST-390 (Filip, 2026-11-11): the L2 has no vibration motor, so the pressed look IS the touch
+// feedback. ONE constant for the whole app: the accent (OM gold) mixed into whatever the element has
+// already drawn, on EXACTLY the rectangle the hit test uses. It is a tint, not a second plate, so a
+// key, a tab, a row and a sheet button all read as "the app saw the finger" without redrawing their
+// own content, and the text under it stays readable. 56/255 is about 22 % gold: on the darkest
+// surfaces (kKeyBg #232220) that lifts the plate to about #4a3c28, clearly above the resting key,
+// while the key's white glyph keeps its contrast. ui/press.h holds pressBlend() and the rule.
+constexpr uint8_t kPressedAlpha = 56;
+constexpr uint16_t kPressedTint = kAcc;
+
 // Node types and status
 constexpr uint16_t kClient    = rgb565(0x4aa3ff);  // client dot (blue, never used as selection)
 constexpr uint16_t kGreen     = rgb565(0x39d98a);  // repeater dot, online / good

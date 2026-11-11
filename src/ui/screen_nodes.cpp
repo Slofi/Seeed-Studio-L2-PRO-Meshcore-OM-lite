@@ -144,5 +144,11 @@ int nodeSheetRowAt(const NodesView& view, int x, int y) {
   return nodeSheetRowAt(g, x, y);
 }
 
+Rect nodeSheetRowRect(const NodesView& view, int row) {
+  const int rows = sheetRowCount(view);
+  if (rows <= 0 || row < 0 || row >= rows) return Rect{};
+  return nodeSheetLayout(l2(), rows).rows[row];
+}
+
 }  // namespace ui
 }  // namespace om

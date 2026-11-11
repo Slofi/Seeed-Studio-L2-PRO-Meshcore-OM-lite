@@ -51,5 +51,9 @@ Rect nodeSheetPanel(const NodesView& view);
 // outside. The row index is the one nodeMenuRows() returned.
 int nodeSheetRowAt(const NodesView& view, int x, int y);
 
+// EST-390: the row's own rectangle, from the same layout nodeSheetRowAt() tested. The pressed look
+// goes on exactly this rect.
+Rect nodeSheetRowRect(const NodesView& view, int row);
+
 }  // namespace ui
 }  // namespace om

@@ -9,6 +9,7 @@
 #include "board.h"
 #include "position_source.h"
 #include "ui/map_layers.h"
+#include "ui/press.h"
 #include "ui/screen_map.h"
 
 namespace om {
@@ -46,6 +47,10 @@ void pump(bool visible, bool uiDrawOk);
 // The Map's chrome hit test: true when the tap did something the Map owns. The tab bar, the gear and
 // the radio mark are the shell's and are handled before this call.
 bool tap(int x, int y);
+
+// EST-390: the rectangle the pressed look goes on. Same chrome and same hit test as tap(), so the
+// pressed tint and the tap can never cover different pixels.
+om::ui::PressTarget pressTarget(int x, int y);
 
 // Selection and follow state, used by the shell and by the Nodes sheet.
 void clearSelection();

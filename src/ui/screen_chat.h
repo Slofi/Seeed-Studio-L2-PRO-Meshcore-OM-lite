@@ -16,6 +16,7 @@
 #include "ui/chat_model.h"
 #include "ui/chat_view.h"   // EST-367: kChatViewMsgs, the size of one chat's own view
 #include "ui/message_sheet.h"
+#include "ui/press.h"
 #include "ui/widgets.h"
 
 namespace om {
@@ -103,6 +104,12 @@ struct ChatHitResult {
 
 // What a tap at (x, y) would hit. Pure read: it measures text but changes nothing.
 ChatHitResult chatScreenHit(const ChatView& v, int x, int y);
+
+// EST-390: the rectangle the pressed look goes on, from chatScreenHit()'s own answer. Same
+// precedence, same rectangles: a key uses keyHit (its tap target), a selector row its row rect, the
+// header its head rect, a message its drawn block. A consumed area (a sheet header, a tap outside the
+// keyboard) answers an invalid target, so nothing is drawn pressed there.
+PressTarget chatPressTarget(const ChatView& v, int x, int y);
 
 // The rectangle of one message's sender name, as drawn on the first line. The tap on a name opens
 // that sender's DM (EST-342), so the same pixels that the eye reads are the ones that answer.

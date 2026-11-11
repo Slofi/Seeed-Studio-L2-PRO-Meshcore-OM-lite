@@ -241,7 +241,11 @@ const EventDef kEvents[kEventCount] = {
     {"error", "Error", "ERR", kBellFall, true},
     {"newnode", "New node", "NODE", kSoftLo, false},
     {"battery", "Low battery", "BATT", kBatteryLow, true},
-    {"touch", "Touch click", "TAP", kBeepClean, false},
+    // EST-390 (Filip, 2026-11-11): the optional touch sound is a very short SOFT tick. Soft Tick is
+    // the quietest short sound in the library: 80 ms, one 1175 Hz soft-voice note at level 70, where
+    // the old Beep Clean was 110 ms at level 200. It is a default, not a lock: the picker still
+    // offers every sound. OFF stays the stored default (sounds::touchClicks() defaults false).
+    {"touch", "Touch sound", "TAP", kSoftTick, false},
 };
 
 // EST-359 stored 0..2 per event (3 or 17 = Off). Map each old index to the EST-361 sound it picked;

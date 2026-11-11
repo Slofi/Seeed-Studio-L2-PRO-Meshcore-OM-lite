@@ -58,6 +58,8 @@
 #include "ui/node_info.h"
 #include "ui/map_chrome.h"
 #include "ui/map_layers.h"
+#include "ui/press_feedback.h"   // EST-390: the ONE pressed-look owner
+#include "ui/press_targets.h"    // EST-390: the hit test -> pressed rectangle maps
 #include "ui/map_pick.h"   // EST-384: the one picker, shared with the RPTR Position page
 #include "ui/rptr_layout.h"
 #include "ui/screen_chat.h"
@@ -271,6 +273,18 @@ static bool g_spent = false;
 // the non-blocking ramp loop() ticks, one I2C write per tick. The level is reset to kScreenBrightness
 // after boardBegin().
 static om::FadeRamp g_fade;
+
+// EST-390: the pressed look's worst case, printed once a minute like the other timings. One
+// sample per armed press: from the press edge being seen to the end of that frame's push.
+static om::ui::PressLatencyLog g_pressLatency;
+
+// EST-390: the two frame overlays and their one order. The pressed tint goes on the finished frame
+// (so it is on exactly the hit rectangle and no screen can draw over it), and the toast goes on top
+// of that, exactly as it did before this ticket.
+static void drawFrameOverlays(lgfx::LovyanGFX* d, uint32_t nowMs) {
+  om::ui::drawPressOverlay(d, nowMs);
+  om::ui::drawToastOverlay(d, nowMs);
+}
 
 // EST-355: a full screen change (a tab, or any path that replaces the whole screen) either pushes at
 // once or takes the light down for the push, when the old and new frames differ strongly in
@@ -3707,7 +3721,9 @@ static void buildSettingsRows() {
              om::sounds::choiceName(SoundEvent::NewNode, om::sounds::choice(SoundEvent::NewNode)));
       setAdd(om::ui::SetRowKind::Chevron, A_SoundBatt, "Low battery",
              om::sounds::choiceName(SoundEvent::LowBattery, om::sounds::choice(SoundEvent::LowBattery)));
-      setAdd(om::ui::SetRowKind::Toggle, A_SoundTouch, "Touch clicks", "ON", om::sounds::touchClicks());
+      // EST-390: the ticket's name for it; the stored key and the OFF default are EST-359's.
+      setAdd(om::ui::SetRowKind::Toggle, A_SoundTouch, "Touch sound", "ON",
+             om::sounds::touchClicks());
       setAdd(om::ui::SetRowKind::Chevron, A_SoundClick, "Click tone",
              om::sounds::choiceName(SoundEvent::Touch, om::sounds::choice(SoundEvent::Touch)));
       setAdd(om::ui::SetRowKind::Toggle, A_SoundDnd, "Do not disturb", "ON", om::sounds::dnd());
@@ -4891,7 +4907,7 @@ void setup() {
   om::radio::begin(millis());   // EST-365: the noise window and the loop histogram start clean
   // The toast is a frame overlay, not a second push: omFrameEnd() draws it last on every redraw
   // (EST-344). Register it once, before any screen can be drawn.
-  om::omFrameSetOverlay(om::ui::drawToastOverlay);
+  om::omFrameSetOverlay(&drawFrameOverlays);   // EST-390: press, then toast on top
   om::toasts::begin(redrawCurrentScreen);
   // EST-371: the Map tab module gets the four shell services it needs, once, before any draw.
   {
@@ -5288,6 +5304,213 @@ static void handleNodeAction(om::ui::NodeAction action, int node) {
       drawHome();
       return;
   }
+}
+
+// EST-390: what the pressed look goes on, screen by screen. Every branch asks the SAME hit test the
+// tap path asks (through ui/press_targets.h) and then returns the rectangle that hit test used, so
+// the tint can never sit off the element the tap lands on. A consumed press (a tap that only closed a
+// pop-up or a keyboard) answers no target at all, and then nothing is drawn pressed.
+static bool pressTargetAt(int x, int y, om::ui::PressTarget* out) {
+  if (out == nullptr) return false;
+  *out = om::ui::PressTarget{};
+  const om::ui::Layout& L = om::ui::l2();
+
+  if (g_settings) {
+    // The own-position picker owns every tap while it is up.
+    if (g_ownPick) {
+      *out = om::ui::pressTargetForRptrMapPick(om::ui::rptrMapPickLayoutFor(L, true), x, y);
+      return out->valid();
+    }
+    // The confirmation pop-up is the highest layer: only its two keys are targets, and a press
+    // outside the box is the consumed Cancel.
+    if (g_clearAsk) {
+      const om::ui::SettingsView v = settingsView();
+      const om::ui::SettingsModalLayout m = om::ui::settingsModalLayoutFor(L.width, L.height);
+      const bool confirm =
+          om::ui::settingsClearAskHit(v, x, y) == om::ui::SettingsModalHit::Confirm;
+      *out = om::ui::pressTargetForModalKey(confirm, m.cancel, m.confirm, x, y);
+      return out->valid();
+    }
+    buildSettingsRows();
+    const om::ui::SettingsView v = settingsView();
+    // The chat dropdown: a row or the pinned Manage row. Outside it the press only closes it
+    // (consumed), so there is no target behind it.
+    if (g_setSelOpen) {
+      const om::ui::SettingsLayout sl = om::ui::settingsLayoutFor(
+          L.width, L.height, v.subPage, true, v.titleAction[0] != 0);
+      *out = om::ui::pressTargetForSelectorRow(sl.selList, v.sel.channelCount, v.sel.dmCount,
+                                               v.sel.scroll, sl.selManage, x, y);
+      return out->valid();
+    }
+    // A text editor's sheet owns the page.
+    if (g_setEditor != om::ui::SettingsEditor::None) {
+      const om::ui::KeyboardField field = settingsEditField();
+      const om::ui::ChatLayout g =
+          om::ui::chatLayoutFor(L, true, false, g_setEditNums, false, field);
+      *out = om::ui::pressTargetForKeypad(g, g_setEditNums, x, y, field, g_setEditShift);
+      return out->valid();
+    }
+    const om::ui::SettingsLayout sl =
+        om::ui::settingsLayoutFor(L.width, L.height, v.subPage, false, v.titleAction[0] != 0);
+    *out = om::ui::pressTargetForSettings(sl, v.rows, v.rowCount, v.scroll, x, y);
+    return out->valid();
+  }
+
+  if (g_tab == 0) {
+    // The full Info page has one door: its header row.
+    if (g_nodeInfo >= 0) {
+      if (om::ui::nodeInfoBackRect().contains(x, y)) {
+        out->kind = om::ui::PressKind::Button;
+        out->rect = om::ui::nodeInfoBackRect();
+      }
+      return out->valid();
+    }
+    // A Nodes sheet is over the list: a row is its action, the header closes it (consumed).
+    if (g_nodeMenu >= 0 || g_nodeTraceOpen) {
+      om::ui::NodesView sheet;
+      buildNodesView(sheet);
+      const int row = om::ui::nodeSheetRowAt(sheet, x, y);
+      if (row >= 0) {
+        out->kind = om::ui::PressKind::Row;
+        out->rect = om::ui::nodeSheetRowRect(sheet, row);
+        return true;
+      }
+      // The sheet's header or a gap: it only closes (consumed), so nothing is pressed.
+      *out = om::ui::PressTarget{};
+      return false;
+    }
+    *out = om::ui::pressTargetForChrome(L, x, y);
+    if (out->valid()) return true;
+    *out = om::ui::pressTargetForNodesRow(L, g_nodeScroll, g_nodeCount, x, y);
+    return out->valid();
+  }
+
+  if (g_tab == 1) {
+    om::ui::ChatView v;
+    buildChatView(v);
+    *out = om::ui::chatPressTarget(v, x, y);
+    if (out->valid()) return true;
+    // ChatHit::None with an action behind it: the tab bar (hidden while the keyboard sheet is up),
+    // the radio fault mark and the gear, exactly where handleChatTap would act.
+    if (!g_kb.open) {
+      const int tab = L.tabAt(x, y);
+      if (tab >= 0) {
+        out->kind = om::ui::PressKind::Tab;
+        out->rect = L.tab((om::ui::Tab)tab);
+        return true;
+      }
+    }
+    if (L.radioFault().contains(x, y)) {
+      out->kind = om::ui::PressKind::Button;
+      out->rect = L.radioFault();
+      return true;
+    }
+    if (L.gear().contains(x, y)) {
+      out->kind = om::ui::PressKind::Button;
+      out->rect = L.gear();
+      return true;
+    }
+    return false;
+  }
+
+  if (g_tab == 2) {
+    // EST-374: while the bars are tucked the bottom strip is not a tab bar, so it is no target.
+    const bool tucked = om::ui::mapBarsTucked(om::map_tab::tabsHidden(), true);
+    if (!tucked) {
+      out->kind = om::ui::PressKind::Tab;
+      const int tab = L.tabAt(x, y);
+      if (tab >= 0) {
+        out->rect = L.tab((om::ui::Tab)tab);
+        return true;
+      }
+      out->kind = om::ui::PressKind::None;
+    }
+    if (L.radioFault().contains(x, y)) {
+      out->kind = om::ui::PressKind::Button;
+      out->rect = L.radioFault();
+      return true;
+    }
+    if (L.gear().contains(x, y)) {
+      out->kind = om::ui::PressKind::Button;
+      out->rect = L.gear();
+      return true;
+    }
+    *out = om::map_tab::pressTarget(x, y);
+    return out->valid();
+  }
+
+  // RPTR: same order as handleRptrTap (picker, confirmation, sheet, list, page).
+  if (g_tab == 3) {
+    if (!g_rptrOsk) {
+      const int tab = L.tabAt(x, y);
+      if (tab >= 0) {
+        out->kind = om::ui::PressKind::Tab;
+        out->rect = L.tab((om::ui::Tab)tab);
+        return true;
+      }
+      if (L.radioFault().contains(x, y)) {
+        out->kind = om::ui::PressKind::Button;
+        out->rect = L.radioFault();
+        return true;
+      }
+      if (L.gear().contains(x, y)) {
+        out->kind = om::ui::PressKind::Button;
+        out->rect = L.gear();
+        return true;
+      }
+    }
+    buildRptrView(g_rptrViewStore);
+    if (g_rptrMapPick) {
+      *out = om::ui::pressTargetForRptrMapPick(
+          om::ui::rptrMapPickLayoutFor(L, rptrMapDirty()), x, y);
+      return out->valid();
+    }
+    if (g_rptrAskOpen) {
+      const om::ui::RptrModalLayout m = om::ui::rptrModalLayoutFor(L, g_rptrAsk.verb);
+      const bool confirm = om::ui::rptrModalHitAt(m, x, y) == om::ui::RptrModalHit::Confirm;
+      *out = om::ui::pressTargetForModalKey(confirm, m.cancel, m.confirm, x, y);
+      return out->valid();
+    }
+    if (g_rptrOsk) {
+      const om::ui::RptrKeyHit key = om::ui::rptrEditorKeyAt(g_rptrViewStore, x, y);
+      if (key.pressed) {
+        const om::ui::KeyboardField field = om::ui::rptrEditorField(g_rptrViewStore);
+        const om::ui::ChatLayout g =
+            om::ui::chatLayoutFor(L, true, false, g_rptrNums, false, field);
+        *out = om::ui::pressTargetForKeypad(g, g_rptrNums, x, y, field, false);
+      }
+      return out->valid();
+    }
+    if (g_rptrList) {
+      *out = om::ui::pressTargetForRptrList(om::ui::rptrListLayoutFor(L), g_rptrViewStore.count,
+                                            g_rptrScroll, x, y);
+      return out->valid();
+    }
+    const om::ui::RptrPageLayout a = om::ui::rptrPageLayoutFor(
+        L, g_rptrViewStore.screen.cellCount > 0, g_rptrViewStore.screen.banner[0] != 0,
+        g_rptrViewStore.screen.hasApply, g_rptrViewStore.screen.bigButton,
+        g_rptrViewStore.screen.hasConsole);
+    *out = om::ui::pressTargetForRptrPage(a, g_rptrViewStore.screen, g_rptrPageScroll, x, y);
+    return out->valid();
+  }
+
+  return false;
+}
+
+// EST-390: the press edge. Composing the frame here (instead of waiting for the next loop pass) is
+// what keeps the look inside the ticket's ~30 ms target; the sample is taken to the END of that
+// frame's push, so the printed number is the press-to-pixels time, not just the draw.
+static void pressArmAt(int x, int y) {
+  om::ui::PressTarget t;
+  if (!pressTargetAt(x, y, &t) || !t.valid()) {
+    om::ui::pressClear();   // nothing actionable under the finger: no look, and no stale one
+    return;
+  }
+  om::ui::pressArm(t, millis());
+  const uint32_t t0 = micros();
+  const uint16_t push0 = om::omFramePushCount();
+  redrawCurrentScreen();
+  if (om::omFramePushCount() != push0) g_pressLatency.sample(micros() - t0);
 }
 
 static void handleTap(int x, int y, bool longPress) {
@@ -6047,6 +6270,7 @@ void loop() {
   bool injectedDown = false;
   const bool changing = g_change.active();
   if (changing) {
+    om::ui::pressClear();   // EST-390: a change owns the frame; no stale tint survives it
     g_touchGate.accept(millis(), false);   // fed "no finger": no edge is recorded for the gate
   } else if (om::usbTouchSample(millis(), &injectedX, &injectedY, &injectedDown)) {
     x = injectedX;
@@ -6059,6 +6283,12 @@ void loop() {
   if (!isDown) {
     if (g_down) {
       g_down = false;
+      // EST-390: the look goes away BEFORE the action draws, so the action's own frame is never
+      // pressed. If the action drew nothing (a row that only logs), one repaint takes the tint off
+      // the glass.
+      const bool hadPress = om::ui::pressActive();
+      om::ui::pressClear();
+      const uint16_t pressPush0 = om::omFramePushCount();
       g_upX = g_sx;
       g_upY = g_sy;
       g_upMs = millis();
@@ -6184,6 +6414,7 @@ void loop() {
           if (g_drag || changed || selChanged) drawSettings();
         }
       }
+      if (hadPress && om::omFramePushCount() == pressPush0) redrawCurrentScreen();
     }
   } else if (!g_down) {
     g_down = true;
@@ -6323,6 +6554,9 @@ void loop() {
       om::mapPan(g_lastX - (int)x, g_lastY - (int)y);
       if (millis() - g_lastRender > 60) { g_lastRender = millis(); om::map_tab::draw(); }
     }
+    // EST-390: the press look. A spent gesture (a toast dismissed, an overlay closed by this
+    // press) and a pan continuation get nothing: the consumed-press rule is unchanged.
+    if (!g_spent && !g_drag) pressArmAt((int)x, (int)y);
     g_lastX = x;
     g_lastY = y;
   } else {
@@ -6342,10 +6576,12 @@ void loop() {
         accentFired = true;
         if (g_settings) {       // EST-352: the Settings editor's sheet
           g_setAccentPreview = true;
+          om::ui::pressDropPreview();   // EST-390: one bubble here, the accent letter
           Serial.printf("[set] accent preview U+%04lX\n", (unsigned long)g_setAccentCp);
           drawSettings();
         } else {                // the chat composer's sheet
           g_accentPreview = true;
+          om::ui::pressDropPreview();   // EST-390: one bubble here, the accent letter
           Serial.printf("[chat] accent preview U+%04lX\n", (unsigned long)g_accentCp);
           drawChat();           // the bubble, above the held key
         }
@@ -6501,6 +6737,9 @@ void loop() {
         }
       }
     }
+    // EST-390: the look stays only while the finger is on the element. Sliding off clears it (one
+    // repaint); the ACTION rule is untouched, so the release does exactly what it did before.
+    if (om::ui::pressMove((int)x, (int)y)) redrawCurrentScreen();
   }
   // EST-365: charge the frame (compose then SPI push) to the pass it happened in. A frame composes
   // inside the block that drew it, so the tile decode is taken out of Draw to keep the parts from
@@ -6512,6 +6751,14 @@ void loop() {
     const uint32_t mapUs = om::radio::passPartUs(om::radio::Part::MapDecode);
     const uint32_t drawUs = composeUs > mapUs ? composeUs - mapUs : 0;
     om::radio::addPart(om::radio::Part::Draw, drawUs);
+  }
+  // EST-390: the pressed look's worst case, once a minute, like the other timings.
+  {
+    uint32_t worstUs = 0, presses = 0;
+    if (g_pressLatency.tick(millis(), &worstUs, &presses)) {
+      Serial.printf("[press] latency worst=%lu ms over %lu presses in 60 s\n",
+                    (unsigned long)(worstUs / 1000UL), (unsigned long)presses);
+    }
   }
   om::radio::endPass(micros(), millis());
   // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels over the 300 ms

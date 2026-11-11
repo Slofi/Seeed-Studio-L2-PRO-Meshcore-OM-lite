@@ -655,6 +655,23 @@ void drawKeyCap(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& k, bool shift) 
   d->drawString(label, cx, cy);
 }
 
+// EST-390: the bubble's LOOK, at a rectangle the caller placed. The accent preview (EST-346/352) and
+// the new key preview are the same drawing: one panel2 rounded plate, one gold rim, one character in
+// the title face. Keeping both on this one function is why the two bubbles cannot drift apart.
+void drawPreviewBubble(lgfx::LovyanGFX* d, const Rect& box, uint32_t cp) {
+  if (d == nullptr || cp == 0 || box.empty()) return;
+  char letter[5] = {0};
+  const int n = utf8Encode(cp, letter);
+  if (n <= 0) return;
+  letter[n] = 0;
+  d->fillRoundRect(box.x, box.y, box.w, box.h, kOskRadius, kPanel2);
+  d->drawRoundRect(box.x, box.y, box.w, box.h, kOskRadius, kAcc);
+  setRole(d, FontRole::SansTitle);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(kInk, kPanel2);
+  d->drawString(letter, box.x + box.w / 2, box.y + box.h / 2);
+}
+
 void drawAccentBubble(lgfx::LovyanGFX* d, const Rect& key, uint32_t cp) {
   if (d == nullptr || cp == 0) return;
   int16_t x = (int16_t)(key.x + key.w / 2 - kAccentBubbleW / 2);
@@ -662,17 +679,7 @@ void drawAccentBubble(lgfx::LovyanGFX* d, const Rect& key, uint32_t cp) {
   if (x < 2) x = 2;
   if (x > kScreenW - 2 - kAccentBubbleW) x = (int16_t)(kScreenW - 2 - kAccentBubbleW);
   if (y < kStatusH + 2) y = (int16_t)(kStatusH + 2);
-
-  char letter[5] = {0};
-  const int n = utf8Encode(cp, letter);
-  if (n <= 0) return;
-  letter[n] = 0;
-  d->fillRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kPanel2);
-  d->drawRoundRect(x, y, kAccentBubbleW, kAccentBubbleH, kOskRadius, kAcc);
-  setRole(d, FontRole::SansTitle);
-  d->setTextDatum(lgfx::textdatum_t::middle_center);
-  d->setTextColor(kInk, kPanel2);
-  d->drawString(letter, x + kAccentBubbleW / 2, y + kAccentBubbleH / 2);
+  drawPreviewBubble(d, Rect{x, y, kAccentBubbleW, kAccentBubbleH}, cp);
 }
 
 }  // namespace ui

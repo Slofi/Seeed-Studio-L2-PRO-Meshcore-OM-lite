@@ -20,5 +20,10 @@ void drawKeyCap(lgfx::LovyanGFX* d, const Rect& r, const KeyDef& key, bool shift
 // caller passes the drawn key's rectangle, so the bubble sits over the finger's key.
 void drawAccentBubble(lgfx::LovyanGFX* d, const Rect& key, uint32_t cp);
 
+// EST-390: the same bubble at a rectangle the caller placed (ui/press.h pressBubbleRect()), used for
+// the key preview while a key is down. drawAccentBubble() itself draws through this, so the two
+// bubbles are one look and one font.
+void drawPreviewBubble(lgfx::LovyanGFX* d, const Rect& box, uint32_t cp);
+
 }  // namespace ui
 }  // namespace om

@@ -218,6 +218,13 @@ bool omTouch(uint16_t& x, uint16_t& y);
 bool omFrameSize(int& width, int& height);
 uint16_t omFramePixel(int x, int y);
 
+// EST-390: mix ONE native colour into every pixel of a rectangle of the frame that is being composed
+// (a 0..255 alpha, the ui::pressBlend() arithmetic), clamping to the frame. This is what the pressed
+// look is made of: the accent is laid over the element's own pixels, so a key, a tab, a row and a
+// button do not need a second drawing path and their text keeps its contrast. Outside a frame (a
+// direct draw to the panel) it does nothing, like every frame-only path.
+void omFrameBlendRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t native, uint8_t alpha);
+
 // --- native RGB565 images (EST-352) -------------------------------------------------------------
 // ONE rule for every native RGB565 buffer pushed into a drawing surface (map tiles today, anything
 // else that decodes an image later): the buffer holds native little-endian words, while the frame

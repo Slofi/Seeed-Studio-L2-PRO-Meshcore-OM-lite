@@ -290,6 +290,17 @@ struct EmojiPadHit {
 };
 EmojiPadHit emojiPadHit(const EmojiPadLayout& e, int x, int y);
 
+// EST-390: one grid cell's rectangle, the inverse of emojiPadHit()'s index arithmetic. `index` is a
+// group entry (0..count-1) as the drawing walks it, so the pressed rectangle for a cell is the same
+// pixels the glyph sits on. Empty for an index outside the group.
+inline Rect emojiCellRect(const EmojiPadLayout& e, int index) {
+  if (e.grid.empty() || e.cols <= 0 || index < 0 || index >= e.count) return Rect{};
+  const int row = index / e.cols;
+  const int col = index % e.cols;
+  return Rect{(int16_t)(e.grid.x + col * kEmojiCell),
+              (int16_t)(e.grid.y + row * kEmojiCell - e.scroll), kEmojiCell, kEmojiCell};
+}
+
 // Content height and the scroll clamp for one group.
 int emojiPadContentHeight(const EmojiPadLayout& e, int count);
 int emojiPadMaxScroll(const EmojiPadLayout& e, int count);

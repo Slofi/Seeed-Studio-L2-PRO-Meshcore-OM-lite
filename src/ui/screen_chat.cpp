@@ -17,6 +17,7 @@
 #include "ui/emoji_picker.h"
 #include "ui/fonts.h"
 #include "ui/keyboard_draw.h"   // the one key-cap / accent-bubble drawing (EST-352)
+#include "ui/press_targets.h"   // EST-390: the pressed rectangle IS the hit test's rectangle
 #include "ui/text_wrap.h"
 #include "ui/theme.h"
 
@@ -725,6 +726,116 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
     }
   }
   return r;
+}
+
+// EST-390: the pressed look's rectangle. It asks chatScreenHit() for the answer (so the precedence
+// is the tap's own: the message sheet, the ADVERT dropdown, the selector, the keyboard sheet, then
+// the page) and then returns the layout rectangle that answer stands for. Nothing here decides what
+// is on top a second time.
+PressTarget chatPressTarget(const ChatView& v, int x, int y) {
+  PressTarget t;
+  const ChatHitResult h = chatScreenHit(v, x, y);
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
+  switch (h.hit) {
+    case ChatHit::Key:
+      // keyHit is the tap target (the outer keys reach the screen edges); the bubble is centred on
+      // the drawn key and knows the draft line so it never covers it.
+      return pressTargetForKeypad(g, v.nums, x, y, KeyboardField::Chat, v.shift);
+
+    case ChatHit::EmojiCell: {
+      const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
+      const EmojiPadLayout e = emojiPadLayout(l2(), g, v.emojiRecentCount, v.emojiGroup,
+                                             v.emojiScroll, group ? group->count : 0);
+      const EmojiPadHit eh = emojiPadHit(e, x, y);
+      if (eh.recent >= 0 && v.emojiRecent != nullptr && eh.recent < v.emojiRecentCount) {
+        return pressTargetForEmojiCell(e.recent[eh.recent], v.emojiRecent[eh.recent]);
+      }
+      if (eh.cell >= 0) return pressTargetForEmojiCell(emojiCellRect(e, eh.cell), h.emojiCp);
+      return t;
+    }
+    case ChatHit::EmojiCat: {
+      const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
+      const EmojiPadLayout e = emojiPadLayout(l2(), g, v.emojiRecentCount, v.emojiGroup,
+                                             v.emojiScroll, group ? group->count : 0);
+      if (h.emojiGroup < 0 || h.emojiGroup >= kEmojiGroupCount) return t;
+      return pressTargetForEmojiCell(e.cat[h.emojiGroup], 0);
+    }
+    case ChatHit::EmojiBack:
+    case ChatHit::EmojiSend: {
+      const EmojiGroup* group = emojiGroupAt(v.emojiGroup);
+      const EmojiPadLayout e = emojiPadLayout(l2(), g, v.emojiRecentCount, v.emojiGroup,
+                                             v.emojiScroll, group ? group->count : 0);
+      t.kind = PressKind::Button;
+      t.rect = (h.hit == ChatHit::EmojiBack) ? e.abc : e.send;
+      return t;
+    }
+
+    case ChatHit::Advert:
+      t.kind = PressKind::Button;
+      t.rect = g.advert;
+      return t;
+    case ChatHit::AdvertFlood:
+    case ChatHit::AdvertLocal:
+      t.kind = PressKind::Row;
+      t.rect = g.advertOpt[h.hit == ChatHit::AdvertFlood ? 0 : 1];
+      return t;
+    case ChatHit::SelRow:
+      return pressTargetForSelectorRow(g.selList, v.channelCount, v.dmCount, v.selScroll,
+                                       g.selManage, x, y);
+    case ChatHit::SelManage:
+      t.kind = PressKind::Row;
+      t.rect = g.selManage;
+      return t;
+
+    case ChatHit::Head:
+      t.kind = PressKind::Button;
+      t.rect = g.head;
+      return t;
+    case ChatHit::Field:
+      t.kind = PressKind::Row;
+      t.rect = g.osk ? g.draft : g.field;
+      return t;
+
+    case ChatHit::SheetRow: {
+      char path[96];
+      formatSheetPath(v, path, sizeof(path));
+      SheetRow rows[kMaxSheetRows];
+      const int n = buildSheetRows(v, path, rows);
+      const MessageSheetLayout m = messageSheetLayout(l2(), n);
+      const int row = messageSheetRowAt(m, x, y);
+      if (row < 0) return t;
+      t.kind = PressKind::Row;
+      t.rect = m.rows[row];
+      return t;
+    }
+
+    case ChatHit::Msg:
+    case ChatHit::SenderName: {
+      // The block the eye sees: the same heights and tops chatMsgHeights()/msgSpans() give the draw.
+      // A tap on the sender's name is a smaller rect inside that block, and it gets that rect.
+      if (h.hit == ChatHit::SenderName) {
+        Rect name;
+        if (chatSenderNameRect(v, h.index, &name)) {
+          t.kind = PressKind::Button;
+          t.rect = name;
+        }
+        return t;
+      }
+      int16_t heights[kChatViewMsgs];
+      int16_t tops[kChatViewMsgs];
+      const int n = chatMsgHeights(v, heights, kChatViewMsgs);
+      if (h.index < 0 || h.index >= n) return t;
+      msgSpans(g.msgs, heights, n, v.scroll, tops);
+      t.kind = PressKind::Row;
+      t.rect = Rect{g.msgs.x, tops[h.index], g.msgs.w, heights[h.index]};
+      return t;
+    }
+
+    default:
+      // SheetClose, SelClose, AdvertClose, Outside and None: a consumed press or an inert area.
+      // Nothing is drawn pressed, exactly as nothing behind them is acted on.
+      return t;
+  }
 }
 
 bool chatSenderNameRect(const ChatView& v, int msgIndex, Rect* out) {

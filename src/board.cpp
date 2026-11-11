@@ -23,6 +23,7 @@
 #include "sd_budget.h"   // EST-380: the SD open-file budget the mount limit is checked against
 #include "timekeeper.h"
 #include "ui/layout.h"   // clampTouchToScreen: the same edge rule the hit tests use
+#include "ui/press.h"     // EST-390: the one pressed-look blend for omFrameBlendRect
 #include "ui/rgb565.h"   // the one byte-order rule for native image pushes (EST-352)
 
 namespace om {
@@ -502,6 +503,32 @@ uint16_t omFramePixel(int x, int y) {
   // the host wants the native value (low byte first). Undo the sprite's order here, once, so the
   // screenshot tool never has to know which way this panel happens to store colour.
   return s_frameNeedsSwap ? ui::rgb565FrameRead(stored) : stored;
+}
+
+// EST-390: the pressed look's one primitive. Same order rule as omFramePixel(): read the stored word
+// as native, blend with ui::pressBlend (the host-tested arithmetic), store it back the way this panel
+// keeps it. Clamped to the frame, so a rectangle at an edge (a tab key, the bottom keyboard row) can
+// never write outside the buffer.
+void omFrameBlendRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t native, uint8_t alpha) {
+  if (s_frame.getBuffer() == nullptr || w <= 0 || h <= 0) return;
+  const int16_t fw = (int16_t)s_frame.width();
+  const int16_t fh = (int16_t)s_frame.height();
+  if (x < 0) { w = (int16_t)(w + x); x = 0; }
+  if (y < 0) { h = (int16_t)(h + y); y = 0; }
+  if (x >= fw || y >= fh) return;
+  if ((int)x + w > fw) w = (int16_t)(fw - x);
+  if ((int)y + h > fh) h = (int16_t)(fh - y);
+  if (w <= 0 || h <= 0) return;
+  uint16_t* px = (uint16_t*)s_frame.getBuffer();
+  for (int row = 0; row < h; ++row) {
+    uint16_t* line = px + (size_t)(y + row) * (size_t)fw + (size_t)x;
+    for (int col = 0; col < w; ++col) {
+      const uint16_t stored = line[col];
+      const uint16_t bg = s_frameNeedsSwap ? ui::rgb565FrameRead(stored) : stored;
+      const uint16_t out = ui::pressBlend(native, bg, alpha);
+      line[col] = s_frameNeedsSwap ? ui::rgb565FrameStore(out) : out;
+    }
+  }
 }
 
 // A plain I2C sweep. Its output is the first thing to read when a rail or a device is silent:

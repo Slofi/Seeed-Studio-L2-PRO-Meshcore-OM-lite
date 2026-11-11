@@ -1243,6 +1243,44 @@ bool meshAdvertPosPolicySet(bool share) {
   return true;
 }
 
+// EST-382: adverts are MANUAL ONLY. One function builds the packet exactly as the boot advert did
+// (position per advert_loc_policy and only when one is known), sends it zero-hop or flood, and keeps
+// the 30 s per-kind guard. The Chat page's ADVERT key and `advert local|flood` both come here.
+namespace {
+uint32_t s_advertSentAt[2] = {0, 0};
+bool s_advertSent[2] = {false, false};
+}  // namespace
+
+int meshSendAdvert(bool flood) {
+  if (!s_ready) return -1;
+  const int kind = flood ? 1 : 0;
+  const uint32_t now = millis();
+  if (s_advertSent[kind]) {
+    const uint32_t dt = now - s_advertSentAt[kind];
+    if (dt < 30000u) {
+      int left = (int)((30000u - dt + 999u) / 1000u);
+      if (left < 1) left = 1;
+      return left;
+    }
+  }
+  const NodePrefs* prefs = the_mesh.getNodePrefs();
+  const bool withPos = prefs->advert_loc_policy != 0 &&
+                       (sensors.node_lat != 0 || sensors.node_lon != 0);
+  mesh::Packet* pkt = withPos
+      ? the_mesh.createSelfAdvert(the_mesh.getNodeName(), sensors.node_lat, sensors.node_lon)
+      : the_mesh.createSelfAdvert(the_mesh.getNodeName());
+  if (pkt == nullptr) return -1;
+  if (flood) {
+    the_mesh.sendFlood(pkt, 0, meshPathHashBytes());
+  } else {
+    the_mesh.sendZeroHop(pkt);
+  }
+  s_advertSent[kind] = true;
+  s_advertSentAt[kind] = now;
+  Serial.printf("[mc] advert %s pos=%d\n", flood ? "flood" : "local", withPos ? 1 : 0);
+  return 0;
+}
+
 bool meshPubKeyShort(char* out, size_t cap) {
   if (out == nullptr || cap < 9) return false;
   snprintf(out, cap, "%02X%02X%02X%02X", the_mesh.self_id.pub_key[0], the_mesh.self_id.pub_key[1],
@@ -1450,24 +1488,16 @@ bool meshLinkBegin() {
   logFileSize("/contacts3");
   logFileSize("/contacts");   // old EST-329 file, kept for one release
 
-  // The chip answered and the mesh is built: a startup mark is resolved here, before the advert,
-  // so an advert TX failure after this still sets the mark.
+  // The chip answered and the mesh is built: a startup mark is resolved here.
   if (radioFaultState().onRadioReinit()) Serial.println("[radio] fault cleared");
 
   s_ready = true;
   rptrLinkBegin();   // EST-358: the remembered repeaters and the auto-login switch (NVS)
 
-  // One flood advert at boot (the old firmware did this; upstream's companion UI sends it from
-  // its own advert action). The path hash size is whatever the prefs hold, so SLO stays on 2B.
-  crashCheckpoint("[mc] 6 advert");
-  mesh::Packet* pkt = nullptr;
-  if (the_mesh.getNodePrefs()->advert_loc_policy != 0 &&
-      (sensors.node_lat != 0 || sensors.node_lon != 0)) {
-    pkt = the_mesh.createSelfAdvert(the_mesh.getNodeName(), sensors.node_lat, sensors.node_lon);
-  } else {
-    pkt = the_mesh.createSelfAdvert(the_mesh.getNodeName());
-  }
-  if (pkt) the_mesh.sendFlood(pkt, 0, meshPathHashBytes());
+  // EST-382: NO advert at boot. Adverts are manual only (the Chat page's ADVERT key or the USB
+  // `advert local|flood`), both through meshSendAdvert(). After a boot or a flash this node sends
+  // nothing by itself; everything else in this readiness block is unchanged.
+  crashCheckpoint("[mc] 6 ready");
 
   s_netPrefs.putBool("crashed", false);
   s_netPrefs.putUChar("fails", 0);
@@ -1635,6 +1665,55 @@ void meshClearUnread(int channelIdx) {
   if (at >= 0) s_unread[at].count = 0;
   // EST-348: the seen point moves with it, so a reboot does not resurrect the badge.
   history::store().markSeen(histChannelSlot(channelIdx));
+}
+
+// EST-382: mark this channel's entries in the shared 32-message arrival ring dead. The ring is
+// sequence-numbered (seq % 32), so entries cannot simply be removed without renumbering live
+// messages; writing ch = 0xFF makes every reader skip them (buildChatView matches by channel, the
+// refresh skips an out-of-range channel, and `msgs` was taught to skip it too) while the slot is
+// recycled by the next 32 arrivals. Applies to OUR OWN sends and received messages alike: "clear all
+// messages in this channel" means both.
+int clearRingForChannel(int ch) {
+  if (s_msgs == nullptr || s_msgRing.count() <= 0) return 0;
+  const uint32_t first = s_msgRing.firstSeq();
+  const uint32_t newest = s_msgRing.newest();
+  int cleared = 0;
+  for (uint32_t seq = first; seq <= newest; ++seq) {
+    Msg& m = s_msgs[SeqRing<kMsgRing>::slotOf(seq)];
+    if ((int)m.ch != ch) continue;
+    memset(&m, 0, sizeof(m));
+    m.ch = 0xFF;   // dead: no channel index can match it
+    ++cleared;
+  }
+  return cleared;
+}
+
+int meshChatClear(int channelIdx) {
+  if (channelIdx < 0 || channelIdx >= mcChannelCount()) return -1;
+  const uint8_t hash = mcChannel(channelIdx).hash;
+  const int slot = histChannelSlot(channelIdx);
+  history::ClearResult r;
+  if (slot >= 0) r = history::store().clearChat(slot);
+  if (r.fileFailed) {
+    // The card still holds the chat's messages: leave unread and the arrival ring alone, so the
+    // screen keeps matching the card. The caller's pop-up says the card copy could not be cleared.
+    if (slot >= 0) {
+      Serial.printf("[hist] clear FAILED %s: the card copy stayed\n", history::store().slotId(slot));
+    }
+    return 2;
+  }
+  clearRingForChannel(channelIdx);
+  const int at = unreadEntryFor(hash, false);
+  if (at >= 0) s_unread[at].count = 0;
+  char id[32];
+  if (slot >= 0) {
+    snprintf(id, sizeof(id), "%s", history::store().slotId(slot));
+  } else {
+    history::channelId(hash, mcChannelName(channelIdx), id, sizeof(id));
+  }
+  Serial.printf("[hist] cleared %s records=%d file=%s\n", id, r.records,
+                r.fileGone ? "deleted" : "missing");
+  return r.fileGone ? 0 : 1;
 }
 
 // --- direct messages -----------------------------------------------------------------------------

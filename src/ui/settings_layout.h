@@ -228,6 +228,39 @@ constexpr SettingsLayout settingsLayoutFor(int16_t w, int16_t h, bool subPage,
   return L;
 }
 
+// EST-382: the one confirmation pop-up (Filip's rule: confirmations are pop-ups, not a second page).
+// Used by "Clear messages" on a channel's own page: a scrim, the question, then Cancel on the left
+// (the DEFAULT side: it is drawn as the primary key) and the destructive Clear on the right. A tap
+// outside the box is Cancel and is consumed, exactly like the RPTR confirmation.
+struct SettingsModalLayout {
+  Rect box;
+  Rect text;
+  Rect cancel;
+  Rect confirm;
+};
+
+constexpr SettingsModalLayout settingsModalLayoutFor(int16_t w, int16_t h) {
+  SettingsModalLayout m;
+  const int16_t boxW = w > 32 ? (int16_t)(w - 24) : w;
+  const int16_t boxH = 112;
+  m.box = Rect{(int16_t)((w - boxW) / 2), (int16_t)((h - boxH) / 2), boxW, boxH};
+  m.text = Rect{(int16_t)(m.box.x + 12), (int16_t)(m.box.y + 10), (int16_t)(boxW - 24),
+                (int16_t)(boxH - 58)};
+  const int16_t bw = 100;
+  const int16_t bh = 26;
+  m.cancel = Rect{(int16_t)(m.box.x + 12), (int16_t)(m.box.bottom() - bh - 12), bw, bh};
+  m.confirm = Rect{(int16_t)(m.box.right() - 12 - bw), (int16_t)(m.box.bottom() - bh - 12), bw, bh};
+  return m;
+}
+
+enum class SettingsModalHit : uint8_t { None = 0, Cancel, Confirm, Outside };
+
+constexpr SettingsModalHit settingsModalHitAt(const SettingsModalLayout& m, int x, int y) {
+  if (m.cancel.contains(x, y)) return SettingsModalHit::Cancel;
+  if (m.confirm.contains(x, y)) return SettingsModalHit::Confirm;
+  return SettingsModalHit::Outside;
+}
+
 constexpr int settingsTabAtIn(const SettingsLayout& L, int x, int y) {
   if (L.tabrow.empty() || !L.tabrow.contains(x, y)) return -1;
   for (int i = 0; i < kSettingsTabCount; ++i) {

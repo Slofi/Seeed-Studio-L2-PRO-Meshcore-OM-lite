@@ -61,7 +61,8 @@ BIN37="$(mktemp /tmp/om-lite-est376.XXXXXX)"
 BIN38="$(mktemp /tmp/om-lite-est377.XXXXXX)"
 BIN39="$(mktemp /tmp/om-lite-est380.XXXXXX)"
 BIN40="$(mktemp /tmp/om-lite-est381.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40"' EXIT
+BIN41="$(mktemp /tmp/om-lite-est382.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -360,3 +361,13 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est381.cpp \
   ../../src/ui/map_chrome.cpp ../../src/ui/notice_panel.cpp ../../src/ui/text_wrap.cpp \
   ../../src/usb_cmd_logic.cpp ../../src/sound_synth.cpp -o "$BIN40"
 "$BIN40"
+
+# EST-382: the chat list's dots mean unread (selected+0 -> highlight only, any unread -> dot AND the
+# EST-364 number, a DM row the same), one row layout for drawing and hit tests, the ADVERT key's
+# 62 x 26 rect and its 36 px Flood / Local rows with their hit test, the `advert local|flood` parser,
+# and Clear messages one channel at a time over the real HistoryStore (exactly that chat's queue
+# records and files go; another chat's records, file, unread and preview stay; a refused delete
+# changes nothing).
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est382.cpp \
+  ../../src/ui/chat_layout.cpp ../../src/usb_cmd_logic.cpp ../../src/sound_synth.cpp -o "$BIN41"
+"$BIN41"

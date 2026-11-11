@@ -79,6 +79,12 @@ uint32_t meshMsgSeq(int idx);
 uint32_t meshMsgLogId(int idx);
 int meshUnread(int channelIdx);
 void meshClearUnread(int channelIdx);
+// EST-382 Clear messages, one channel at a time: drops that chat's records from the history write
+// queue, deletes its .log and .old, resets its history ids/summary and unread, and marks its entries
+// in the shared RAM arrival ring dead. Other chats (their files, queue records and counters) are not
+// touched. Returns 0 = card copy deleted, 1 = there was no card copy, 2 = the card copy could not be
+// deleted (then RAM is left as the card is: unread and the ring survive), -1 = no such channel.
+int meshChatClear(int channelIdx);
 
 // Direct messages, now fed by upstream's companion code: one thread per contact, with the same
 // seq / wall / real / hops / SNR rules as channel messages and an unread count. A thread exists as
@@ -186,6 +192,14 @@ bool meshTxPowerSet(int8_t dbm);          // -9..MAX_LORA_TX_POWER, saved and ap
 bool meshNodeNameSet(const char* name);   // the CMD_SET_ADVERT_NAME path, saved in NodePrefs
 bool meshAdvertPosPolicyGet();            // NodePrefs::advert_loc_policy (CMD_SET_OTHER_PARAMS)
 bool meshAdvertPosPolicySet(bool share);
+// EST-382: the ONE manual advert path, used by the Chat page's ADVERT key and by `advert local|flood`.
+// `flood` true sends with sendFlood(pkt, 0, meshPathHashBytes()); false sends through Mesh's own
+// zero-hop send (neighbours only). The packet is createSelfAdvert(name) with lat/lon only when
+// advert_loc_policy is not NONE and a position is known, exactly what the old boot advert built.
+// Returns 0 when sent, a positive number of seconds still to wait (a 30 s guard PER KIND), and -1
+// when the radio is not ready or the packet could not be built. Logs `[mc] advert <local|flood>
+// pos=<0|1>` on success only, never a coordinate.
+int meshSendAdvert(bool flood);
 // The first 8 hex characters of this node's public key, for Settings > Node.
 bool meshPubKeyShort(char* out, size_t cap);
 

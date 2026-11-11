@@ -221,13 +221,15 @@ static void testHeadAndSelector() {
 
   // --- the header replaces the chip strip in the same row --------------------
   CHECK(c.head.x == L.content.x && c.head.y == L.content.y && c.head.w == L.content.w);
-  CHECK(c.head.h == kHeadH);
+  // EST-382: the Chat header is 26 px because the ADVERT key (drawn = tapped) must be 30 x 26; the
+  // Nodes/Info header keeps kHeadH.
+  CHECK(c.head.h == kChatHeadH);
   CHECK(c.msgs.y == c.head.bottom());
   CHECK(c.msgs.bottom() == c.compose.y);
   CHECK(!c.msgs.overlaps(c.head));
 
-  // the gold dot sits at the right edge, inside the row, and the name stops before it
-  CHECK(c.headDot.x + c.headDot.w == c.head.right() - kHeadPadX);
+  // the gold dot sits left of the ADVERT key, inside the row, and the name stops before it
+  CHECK(c.headDot.x + c.headDot.w == c.advert.x - kAdvertGap);
   CHECK(c.headDot.y >= c.head.y && c.headDot.bottom() <= c.head.bottom() - 1);
   CHECK(c.headDot.w == kElsewhereDot && c.headDot.h == kElsewhereDot);
   CHECK(c.headTitle.x == c.head.x + kHeadPadX);
@@ -302,7 +304,7 @@ static void testHeadAndSelector() {
 
   // --- the sheet's rectangles are unchanged by the header --------------------
   const ChatLayout o = chatLayoutFor(L, true, false, false, false);
-  CHECK(o.head.y == L.content.y && o.head.h == kHeadH);
+  CHECK(o.head.y == L.content.y && o.head.h == kChatHeadH);
   CHECK(o.msgs.y == o.head.bottom());
   CHECK(o.msgs.bottom() == o.sheet.y);
   CHECK(o.sheet.bottom() == L.height);

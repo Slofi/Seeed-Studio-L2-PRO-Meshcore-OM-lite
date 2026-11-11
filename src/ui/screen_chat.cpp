@@ -135,8 +135,9 @@ const ChatEntry* openChat(const ChatView& v) {
   return &v.chats[v.selChat];
 }
 
-// The header row: the open chat's name with a down chevron, and the gold dot counting unread in the
-// other chats on the right.
+// The header row: the open chat's name with a down chevron, the gold dot counting unread in the
+// other chats on the right, and EST-382's ADVERT key in the freed space at the far right. The key is
+// drawn from the same ChatLayout rect the hit test reads, so the 62 x 26 target cannot drift.
 void drawHead(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
   const uint16_t bg = v.selector ? kSelBg : kScreen;
   d->fillRect(g.head.x, g.head.y, g.head.w, g.head.h, bg);
@@ -161,6 +162,31 @@ void drawHead(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
     countText(b, sizeof(b), elsewhere);
     drawTextRight(d, FontRole::MonoMeta, kAcc, bg, g.headDot.x - kElsewhereGap, cy, b);
     d->fillCircle(g.headDot.x + kElsewhereDot / 2, cy, kElsewhereDot / 2, kAcc);
+  }
+
+  // THE ADVERT key: a bordered chip in the selector's style family, gold while its menu is open.
+  const uint16_t keyBg = v.advertMenu ? kSelBg : kPanel2;
+  d->fillRoundRect(g.advert.x, g.advert.y, g.advert.w, g.advert.h, kRadiusSm, keyBg);
+  d->drawRoundRect(g.advert.x, g.advert.y, g.advert.w, g.advert.h, kRadiusSm,
+                   v.advertMenu ? kAcc : kLine);
+  setRole(d, FontRole::MonoMeta);
+  d->setTextDatum(lgfx::textdatum_t::middle_center);
+  d->setTextColor(v.advertMenu ? kAccInk : kAcc, keyBg);
+  d->drawString("ADVERT", g.advert.x + g.advert.w / 2, g.advert.y + g.advert.h / 2 + 1);
+}
+
+// EST-382: the small dropdown under the ADVERT key. Two 36 px rows, a 1 px panel edge and one row line
+// between them; Flood sends a flood advert, Local a zero-hop one. The rectangles are the ones
+// chatAdvertHitAt() answers with, so a tap sends exactly the row it lands on.
+void drawAdvertMenu(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
+  if (!v.advertMenu || g.advertMenu.empty()) return;
+  d->fillRoundRect(g.advertMenu.x, g.advertMenu.y, g.advertMenu.w, g.advertMenu.h, kRadius, kPanel);
+  d->drawRoundRect(g.advertMenu.x, g.advertMenu.y, g.advertMenu.w, g.advertMenu.h, kRadius, kLine);
+  static const char* const kLabels[2] = {"Flood", "Local"};
+  for (int i = 0; i < 2; ++i) {
+    const Rect& r = g.advertOpt[i];
+    if (i > 0) d->drawFastHLine(r.x, r.y, r.w, kRowLine);
+    drawTextLeft(d, FontRole::SansBody, kInk, kPanel, r.x + 10, r.y + r.h / 2, kLabels[i]);
   }
 }
 
@@ -529,6 +555,9 @@ void chatScreenDraw(const ChatView& v) {
     // EST-350: the SAME drawing the Settings > Chat selector uses (ui/chat_selector.cpp).
     drawChatSelector(d, selectorModelOf(v), g.selPanel, g.selList, g.selManage);
   }
+  // EST-382: the ADVERT dropdown hangs under the header, over the message band. It is drawn after the
+  // messages so nothing shows through it, and before the keyboard (the two are never open together).
+  if (v.advertMenu) drawAdvertMenu(d, v, g);
   if (v.osk) drawSheet(d, v, g);
   else drawCompose(d, v, g);
   // The sheet covers the bottom edge, so the tab bar is not drawn while it is open (mock .kb-open).
@@ -564,6 +593,24 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
       return r;
     }
     r.hit = ChatHit::SheetClose;
+    return r;
+  }
+
+  // EST-382: the ADVERT dropdown owns the screen while it is open. Two option rows send, any other
+  // point inside the panel only closes it, and a stray tap that reaches here (the shell normally
+  // closes it on the press outside and spends the gesture) also only closes: nothing behind it acts.
+  if (v.advertMenu) {
+    const ChatAdvertLayout a = chatAdvertLayoutFor(l2());
+    const ChatAdvertHit h = chatAdvertHitAt(a, true, x, y);
+    if (h == ChatAdvertHit::Flood) {
+      r.hit = ChatHit::AdvertFlood;
+      return r;
+    }
+    if (h == ChatAdvertHit::Local) {
+      r.hit = ChatHit::AdvertLocal;
+      return r;
+    }
+    r.hit = ChatHit::AdvertClose;
     return r;
   }
 
@@ -645,6 +692,11 @@ ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
     return r;
   }
 
+  // EST-382: the ADVERT key wins over the header row it sits in. Its rect is the drawn key's rect.
+  if (chatAdvertHitAt(chatAdvertLayoutFor(l2()), false, x, y) == ChatAdvertHit::Button) {
+    r.hit = ChatHit::Advert;
+    return r;
+  }
   if (g.head.contains(x, y)) {
     r.hit = ChatHit::Head;
     return r;

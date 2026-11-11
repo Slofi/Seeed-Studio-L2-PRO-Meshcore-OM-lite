@@ -128,6 +128,10 @@ static uint32_t g_setAccentCp = 0;
 static bool g_setAccentPreview = false;
 static int g_chanPage = 0;           // the channel whose page is open
 static bool g_deleteArmed = false;   // Delete needs a second tap, as today
+// EST-382: "Clear messages" asks first, in a pop-up (Filip's rule). Cancel is the default side and a
+// tap anywhere outside is a Cancel; the question names the channel and is built when it opens.
+static bool g_clearAsk = false;
+static char g_clearText[160];
 // The shared editor buffer: a MeshCore name is 31 bytes, a Wi-Fi passphrase 63 (EST-354).
 static char g_editBuf[64];
 static bool g_editNew = false;       // the name editor is naming a NEW channel
@@ -167,6 +171,9 @@ static void setBack();
 // hit test, and these are only the state it draws.
 static int g_chatSel = 0;         // the open chat: an index into g_chats (channels first, then DMs)
 static bool g_selector = false;   // the chat/DM selector is dropped down
+// EST-382: the ADVERT key's Flood / Local dropdown. It is exclusive with g_selector (opening one
+// closes the other) and its press-away rule is the keyboard's own overlay rule.
+static bool g_advertMenu = false;
 static int g_selScroll = 0;       // the selector list's scroll, px
 static int g_selScroll0 = 0;      // its value when the finger went down
 static int g_selMaxScroll = 0;    // the last draw's clamp
@@ -982,6 +989,7 @@ static void buildChatView(om::ui::ChatView& v) {
   v.selChat = g_chatSel;
   v.selScroll = g_selScroll;
   v.selector = g_selector;
+  v.advertMenu = g_advertMenu;
   v.msgs = g_chatMsgs;
   v.msgCount = g_chatMsgCount;
   v.loading = g_viewLoading;
@@ -1096,6 +1104,7 @@ static void chatSelectChat(int chat) {
   g_viewLoading = true;
   g_viewMore = true;
   g_selector = false;
+  g_advertMenu = false;   // EST-382: the two dropdowns are exclusive and both belong to the old chat
   g_kb.showLetters();   // leaving a page does not follow the next open (which resets anyway)
   g_emojiScroll = 0;
   g_bubMenuSeq = 0;
@@ -1353,6 +1362,25 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
   }
 }
 
+// EST-382: one advert, from the button or (via the USB command) the same facade call. The 30 s guard
+// per kind lives in mesh_link, so the key and `advert local|flood` can never disagree. `r` is 0 when
+// sent, a positive number of seconds still to wait, and negative when the radio refused.
+static void showToast(const char* text);
+
+static void chatAdvertSend(bool flood) {
+  g_advertMenu = false;   // a tap on an option sends and closes
+  const int r = om::meshSendAdvert(flood);
+  char msg[48];
+  if (r == 0) {
+    snprintf(msg, sizeof(msg), "%s", flood ? "Advert sent (flood)" : "Advert sent (nearby)");
+  } else if (r > 0) {
+    snprintf(msg, sizeof(msg), "Advert already sent, wait %ds", r);
+  } else {
+    snprintf(msg, sizeof(msg), "Advert not sent");
+  }
+  showToast(msg);
+}
+
 // One tap on the Chat tab. The screen says what was hit with the same rectangles it drew.
 static void handleChatTap(int x, int y) {
   const om::ui::Layout& L = om::ui::l2();
@@ -1361,11 +1389,29 @@ static void handleChatTap(int x, int y) {
   const om::ui::ChatHitResult hit = om::ui::chatScreenHit(v, x, y);
   switch (hit.hit) {
     case om::ui::ChatHit::Head:
-      // The header is the selector's own door: it opens the dropdown and closes it again.
+      // The header is the selector's own door: it opens the dropdown and closes it again. EST-382:
+      // the two dropdowns are exclusive, so opening the selector closes the ADVERT menu.
       g_selector = !g_selector;
+      g_advertMenu = false;
       g_kb.close();
       g_bubMenuSeq = 0;
       if (g_selector) g_selScroll = 0;
+      break;
+    case om::ui::ChatHit::Advert:
+      // The key toggles its own small dropdown; the chat selector is the other one and must close.
+      g_advertMenu = !g_advertMenu;
+      g_selector = false;
+      g_kb.close();
+      g_bubMenuSeq = 0;
+      break;
+    case om::ui::ChatHit::AdvertFlood:
+      chatAdvertSend(true);
+      break;
+    case om::ui::ChatHit::AdvertLocal:
+      chatAdvertSend(false);
+      break;
+    case om::ui::ChatHit::AdvertClose:
+      g_advertMenu = false;   // a tap on the panel but not an option: close only, never act behind
       break;
     case om::ui::ChatHit::SelRow:
       chatSelectChat(hit.index);
@@ -1454,7 +1500,8 @@ static om::ui::ChatOverlayPress chatOverlayPressAt(int x, int y) {
   buildChatView(v);
   const om::ui::ChatLayout g =
       om::ui::chatLayoutFor(om::ui::l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
-  return om::ui::chatOverlayPress(g, v.menuMsg >= 0, om::ui::chatSheetPanel(v), x, y);
+  return om::ui::chatOverlayPress(g, v.menuMsg >= 0, om::ui::chatSheetPanel(v), x, y,
+                                  v.advertMenu, g.advertMenu);
 }
 
 // Close one overlay because a press landed outside it. Returns true when something was open.
@@ -1467,6 +1514,10 @@ static bool closeChatOverlay(om::ui::ChatOverlay which) {
     case om::ui::ChatOverlay::Selector:
       if (!g_selector) return false;
       g_selector = false;
+      return true;
+    case om::ui::ChatOverlay::AdvertMenu:
+      if (!g_advertMenu) return false;
+      g_advertMenu = false;
       return true;
     case om::ui::ChatOverlay::Keyboard:
       if (!g_kb.open) return false;
@@ -1482,6 +1533,7 @@ static const char* chatOverlayName(om::ui::ChatOverlay which) {
   switch (which) {
     case om::ui::ChatOverlay::MessageSheet: return "the message sheet";
     case om::ui::ChatOverlay::Selector: return "the selector";
+    case om::ui::ChatOverlay::AdvertMenu: return "the advert menu";
     case om::ui::ChatOverlay::Keyboard: return "the keyboard";
     case om::ui::ChatOverlay::None:
     default: return "no overlay";
@@ -3162,6 +3214,7 @@ static void setGo(SetPage p) {
   g_setScroll = 0;
   g_setSelOpen = false;
   g_deleteArmed = false;
+  g_clearAsk = false;
   // EST-352: every door into a text editor opens the shared sheet on the letters page with shift
   // off, exactly the chat sheet's rule; the accented-letter hold starts clean. EST-354: the Wi-Fi
   // password also starts hidden and empty.
@@ -3191,6 +3244,7 @@ static void setBack() {
   }
   g_setSelOpen = false;
   g_deleteArmed = false;
+  g_clearAsk = false;
 }
 
 static SetPage setRootForTab(om::ui::SettingsTab t) {
@@ -3563,7 +3617,7 @@ static void buildSettingsRows() {
              !om::mcChannelMuted(g_chanPage));
       setAdd(om::ui::SetRowKind::Value, A_None, "Unread",
              om::meshUnread(g_chanPage) ? "new, clear below" : "none");
-      setAdd(om::ui::SetRowKind::Button, A_ChanClear, "Clear unread");
+      setAdd(om::ui::SetRowKind::Button, A_ChanClear, "Clear messages");
       setAdd(om::ui::SetRowKind::Value, A_None, "Key", key);
       if (g_deleteArmed) setAdd(om::ui::SetRowKind::Button, A_ChanDelete, "Tap again to delete",
                                 "", false, true);
@@ -3855,6 +3909,9 @@ static om::ui::SettingsView settingsView() {
   v.sel.nowSec = millis() / 1000;
   v.sel.nowWall = om::timeKeeper().now();
   v.sel.nowReal = om::timeKeeper().realSinceBoot();
+  // EST-382: the Clear-messages confirmation owns every tap while it is open.
+  v.clearAsk = g_clearAsk;
+  v.clearText = g_clearText;
   return v;
 }
 
@@ -3926,8 +3983,10 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
   g_setNav.reset();                 // a fresh door into Settings has no history behind it
   g_setEditor = om::ui::SettingsEditor::None;
   g_deleteArmed = false;
+  g_clearAsk = false;
   g_setSelOpen = false;
   g_setSelScroll = 0;
+  g_advertMenu = false;   // EST-382: leaving the Chat page closes its advert dropdown
   // EST-350: the settings page starts on the chat that was open when the gear was pressed.
   g_setChat = g_chatSel;
   if (tab == om::ui::SettingsTab::Chat) refreshChats();
@@ -3949,6 +4008,7 @@ static void settingsBack() {
     g_settings = false;
     g_setEditor = om::ui::SettingsEditor::None;
     g_deleteArmed = false;
+    g_clearAsk = false;
     g_setSelOpen = false;
     redrawMainTab();
     return;
@@ -4194,7 +4254,11 @@ static void handleSettingsRow(uint16_t id) {
       om::mcChannelSetMuted(g_chanPage, !om::mcChannelMuted(g_chanPage));
       break;
     case A_ChanClear:
-      om::meshClearUnread(g_chanPage);
+      // EST-382: a destructive action confirms first, in a pop-up. Cancel is the default side; only
+      // the pop-up's Clear calls meshChatClear(). The name in the question is the channel's own.
+      snprintf(g_clearText, sizeof(g_clearText),
+               "Clear all messages in %s? This cannot be undone.", om::mcChannelName(g_chanPage));
+      g_clearAsk = true;
       break;
     case A_ChanDelete:
       if (!g_deleteArmed) {
@@ -4470,10 +4534,50 @@ static void settingsEditorOk() {
   }
 }
 
+// EST-382: what the pop-up's Clear does. The facade removes the chat's card copy, its queued records,
+// its arrival-ring entries and its unread count; this only drops the open chat's own view so the next
+// frame reloads an empty chat. On a card failure the facade has already left RAM as the card is, and
+// the pop-up result says so (no unread/ring reset here either).
+static void settingsClearChannelMessages() {
+  const int ch = g_chanPage;
+  if (ch < 0 || ch >= om::mcChannelCount()) return;
+  const int r = om::meshChatClear(ch);
+  if (r == 2) {
+    showToast("Could not clear the card copy");
+  } else if (r < 0) {
+    showToast("No such channel");
+  } else {
+    showToast("Messages cleared");
+    g_chatShown[ch] = ChatShown{};
+    if (g_viewChat == ch) {
+      g_viewCount = 0;
+      g_viewLoading = true;
+      g_viewMore = true;
+    }
+    if (g_chatSel == ch) {
+      g_chatScroll = 0;
+      g_replySeq = 0;
+      g_replyName[0] = 0;
+      g_bubMenuSeq = 0;
+    }
+  }
+  refreshChats();
+}
+
 // A tap on a settings page. All rectangles come from the view the drawing used.
 static void handleSettingsTap(int x, int y) {
   buildSettingsRows();
   const om::ui::SettingsView v = settingsView();
+
+  // EST-382: the confirmation pop-up is the highest layer and owns every tap, including Back and the
+  // selector row behind it. Outside the box is Cancel, the default side, and is consumed.
+  if (g_clearAsk) {
+    const om::ui::SettingsModalHit h = om::ui::settingsClearAskHit(v, x, y);
+    g_clearAsk = false;
+    if (h == om::ui::SettingsModalHit::Confirm) settingsClearChannelMessages();
+    drawSettings();
+    return;
+  }
 
   // EST-350: while the chat selector is open it owns the page, exactly like the Chat tab's dropdown:
   // a row picks that chat (the page below shows its settings without leaving Settings), the pinned
@@ -4884,6 +4988,7 @@ static void showTab(int tab) {
   g_replySeq = 0;
   g_replyName[0] = 0;
   g_selector = false;   // the dropdown belongs to the chat we are leaving
+  g_advertMenu = false; // EST-382: so does the advert dropdown
   om::map_tab::clearSelection();
   // EST-371: decide the Map's open mode before the screen change composes. A canvas from an earlier
   // visit is shown at once; a view that changed since then refreshes after the frame is visible.

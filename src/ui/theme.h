@@ -220,12 +220,25 @@ constexpr int16_t kGearSize   = 13;  // the vector gear mask (tools/mkicons.py),
 // Header row (replaces the chip strip, Filip 2026-11-10): the open chat's name and a down chevron on
 // the left, the gold dot counting unread in the OTHER chats on the right, 1 px bottom line.
 constexpr int16_t kHeadH        = 23;
+// EST-382: the Chat page's header carries the shortened chat selector AND the ADVERT key. The key's
+// tap target must be at least 30 x 26 (the ticket) and the drawn rectangle IS the tap target, so the
+// Chat header is 26 px. Nodes and the Info page keep kHeadH; only the chat geometry uses this one.
+constexpr int16_t kChatHeadH    = 26;
 constexpr int16_t kHeadPadX     = 8;
 constexpr int16_t kHeadChevronW = 7;   // the down chevron drawn after the name (two 4 px lines)
 constexpr int16_t kHeadChevronGap = 5;
 constexpr int16_t kElsewhereDot = 5;   // the gold dot: something is waiting in another chat
 constexpr int16_t kElsewhereGap = 4;
 constexpr int16_t kElsewhereW   = 20;  // room kept for its count ("99+"), so the name never jumps
+
+// EST-382: the ADVERT key in the Chat header and its small Flood / Local dropdown. The key is 62 x 26
+// (above the 30 x 26 minimum), the option rows are 36 px (about 1.3x the selector's 30 px rows).
+constexpr int16_t kAdvertW       = 62;
+constexpr int16_t kAdvertGap     = 6;   // selector -> key
+constexpr int16_t kAdvertOptW    = 76;  // wide enough for "Flood" + padding
+constexpr int16_t kAdvertOptH    = 36;
+constexpr int16_t kAdvertMenuPad = 1;   // the panel's border
+constexpr int16_t kSelMonoAdvance = 6;  // FontRole::MonoMeta: one advance per glyph (host-tested)
 
 // The chat selector (the dropdown over the message area). Section labels, two-line chat rows and the
 // pinned "Manage channels" row at the panel's floor.
@@ -239,6 +252,7 @@ constexpr int16_t kSelDotGap    = 6;   // dot -> name
 constexpr int16_t kSelGap       = 6;   // name -> age, preview -> unread count
 constexpr int16_t kSelLine1Cy   = 9;   // from the row's top: name / age
 constexpr int16_t kSelLine2Cy   = 21;  // from the row's top: sender and the start of the text
+constexpr int16_t kSelCountH    = 10;  // EST-382: the unread count's own rect on line 2
 constexpr int16_t kSelChevronW  = 5;   // the right chevron of the Manage row
 // A drag stretches the list this many px past either end and the release snaps it back (the same
 // fingertip of give the message band has). The list follows the finger: see selDragScroll().

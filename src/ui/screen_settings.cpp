@@ -333,6 +333,33 @@ void drawEditor(lgfx::LovyanGFX* d, const SettingsLayout& L, const SettingsView&
   }
 }
 
+// EST-382: the Clear-messages confirmation. A scrim (the page behind stays readable but dimmed),
+// the question wrapped by the shared wrapper, then Cancel on the left as the DEFAULT key (gold, like
+// a page's commit key) and the destructive Clear on the right. A tap outside the box is Cancel.
+void drawClearAsk(lgfx::LovyanGFX* d, const SettingsView& v) {
+  const SettingsModalLayout m = settingsModalLayoutFor(l2().width, l2().height);
+  d->fillRect(0, 0, l2().width, l2().height, kPanel2);
+  d->fillRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kPanel);
+  d->drawRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kLine);
+  // The shared UTF-8 wrapper, three lines at most, every line cut on a code-point boundary. The box
+  // is sized for a 31-character channel name plus the sentence.
+  const char* text = v.clearText ? v.clearText : "";
+  WrapLine lines[3];
+  const int n = wrapText(text, measureBody, d, m.text.w, m.text.w, lines, 3);
+  char buf[160];
+  for (int i = 0; i < n; ++i) {
+    int len = lines[i].len;
+    if (len < 0) len = 0;
+    if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+    memcpy(buf, text + lines[i].start, (size_t)len);
+    buf[len] = 0;
+    drawTextLeft(d, FontRole::SansBody, kInk, kPanel, m.text.x, m.text.y + 6 + i * 14, buf);
+  }
+
+  drawKeyBox(d, m.cancel, kSelBg2, kAcc, "Cancel", kAccInk);
+  drawKeyBox(d, m.confirm, kDangerBg, kDangerLine, "Clear", kDangerInk);
+}
+
 }  // namespace
 
 void settingsScreenDraw(const SettingsView& v) {
@@ -369,6 +396,10 @@ void settingsScreenDraw(const SettingsView& v) {
   }
 
   drawStatusBar(d, l2(), v.status);
+
+  // EST-382: the confirmation is the highest layer, over the status bar too: while it is up, nothing
+  // behind it can be read as a tap target.
+  if (v.clearAsk) drawClearAsk(d, v);
 
   // The old direct-draw screens share the panel and set their own font; leave them the default.
   om::useAppFont(d);
@@ -428,6 +459,12 @@ SettingsKeyHit settingsEditorKeyAt(const SettingsView& v, int x, int y) {
     out.ch = (char)(out.ch - 32);
   }
   return out;
+}
+
+SettingsModalHit settingsClearAskHit(const SettingsView& v, int x, int y) {
+  const SettingsModalLayout m = settingsModalLayoutFor(l2().width, l2().height);
+  (void)v;
+  return settingsModalHitAt(m, x, y);
 }
 
 SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y) {

@@ -507,6 +507,20 @@ Command parseCommand(char* line) {
     return c;
   }
 
+  // EST-382: the manual advert. Exactly two words: `advert local` (zero-hop) or `advert flood`.
+  // Anything else is an argument error, so no word can be guessed into a packet on the air.
+  if (strcmp(verb, "advert") == 0) {
+    c.kind = Kind::Advert;
+    const char* word = cur.next();
+    if (word == nullptr || (strcmp(word, "local") != 0 && strcmp(word, "flood") != 0)) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = word;
+    if (cur.bad() || cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
+
   // EST-381: the pop-up without radio traffic. `notify test "<title>" "<body>"` goes through the
   // SAME door a real channel message takes (toasts::notifyNotice, kind Channel, never the open
   // chat), so the glass can be tested on any screen with no packet in the air. The title becomes the

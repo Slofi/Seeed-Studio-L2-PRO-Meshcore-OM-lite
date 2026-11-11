@@ -5487,3 +5487,102 @@ zoom + (295..320, 152..183), the pop-up's own box about (8..312, 123..207).
 
 ## 2026-11-11 08:58 (Claude): EST-381 built, NOT reviewed in detail, NOT on the device
 - Sandbox build + tests green. Committed locally so the next ticket starts from a clean tree; detailed review and the device test (`notify test` on the Map, bars shown and tucked) are still owed. Not pushed.
+
+## 2026-11-11 (DeepSeek): EST-382 chat list dots, Clear messages, manual adverts
+Built in the sandbox, not flashed. This entry is the build/test record; the glass and the air are still
+Claude's to check.
+
+### A. Chat list dots now mean UNREAD (part one)
+- `ui/chat_layout.h` has ONE row layout, `selRowLayoutFor(list, channelCount, dmCount, entry, scroll,
+  unread, selected)`: the row rect, the left dot rect, the right count rect, the count text and the name's
+  left edge. `chat_selector.cpp` draws from it and `selRowAt()` (the selector's hit test) now takes the
+  row from the same function, so drawing and taps cannot drift.
+- The dot is `entry.unread > 0`, the number is `badgeText(entry.unread)` (1..99 then "99+", the EST-364
+  rule) in the same MonoMeta font and at the same right edge as before. One field, so they cannot
+  disagree. Selected = the highlight only; selected + unread shows all three; no unread shows neither.
+  Muted chats keep the same number rule (no second mute rule was added).
+- This is the shared selector, so the Settings > Chat selector gets the same rule as the Chat tab.
+- New `test/host/test_est382.cpp` covers selected+0, not selected+3, selected+5, 150 -> "99+", a DM row
+  against a channel row, and a tap on the dot/count resolving to that row.
+
+### B. Clear messages, one channel (part two)
+- Settings > Chat > Manage channels > a channel's page: "Clear unread" is now **Clear messages**. It
+  opens a confirmation POP-UP (`settingsModalLayoutFor`): "Clear all messages in <channel>? This cannot
+  be undone.", Cancel on the left drawn as the default key, Clear on the right in the danger colours; a
+  tap outside is Cancel and is consumed.
+- `history::HistoryStore::clearChat(slot)` deletes that chat's `.log` and `.old`, resets its ids / seen /
+  unread / preview, and drops exactly that slot's records from the EST-380 write queue. It never touches
+  another slot: the host test writes two chats, clears one, and proves the other's file, queued records,
+  unread and preview survive, then flush.
+- `meshChatClear(channel)` also marks that channel's entries in the shared 32-message arrival ring dead
+  (ch = 0xFF; every reader already filters by channel, and `msgs` was taught to skip them). The channel,
+  key, name, sound and switches stay.
+- Log: `[hist] cleared <ch-id> records=N file=deleted|missing`. N is the number of THIS chat's queued
+  history records dropped (message + Meta are separate records). A failed delete logs
+  `[hist] clear FAILED <id>: the card copy stayed`, resets nothing and shows "Could not clear the card
+  copy" in the toast, so RAM keeps what the card keeps. No message text is logged.
+- A DM "clear" is not built (Manage channels lists channels). Where it would fit: the same button on a
+  future DM settings page (ChatRoot has no DM page yet), calling a `meshDmChatClear(thread)` that mirrors
+  this one for the DM ring and the `dm-...log` slot; the store method is already per slot.
+
+### C. Adverts are manual only (part three)
+- Removed the boot flood advert. The readiness block still runs; the checkpoint is now `[mc] 6 ready`.
+  Nothing goes on the air by itself after a boot or a flash.
+- ONE function, `meshSendAdvert(bool flood)`, used by the Chat page key and by USB `advert local|flood`:
+  createSelfAdvert with lat/lon only when `advert_loc_policy` is not NONE and a position is known (the
+  exact boot rule), zero-hop via `Mesh::sendZeroHop`, flood via `sendFlood(pkt, 0, meshPathHashBytes())`.
+  It keeps a 30 s guard PER KIND and returns 0 / seconds left / -1. Log on send only:
+  `[mc] advert <local|flood> pos=<0|1>`, never a coordinate.
+- Chat header: the selector title is shortened and a 62 x 26 ADVERT key sits in the freed right. The
+  Chat header is now 26 px (`kChatHeadH`) because the ticket requires a >= 30 x 26 tap target and the DRAWN
+  rect IS the target; Nodes/Info keep the 23 px `kHeadH`. The title room is 207 px minus the chevron
+  (about 195 px), so a 31-character channel name ellipsises cleanly.
+- The key opens a 76 px wide dropdown under it with **Flood** and **Local**, two 36 px rows, right-aligned
+  with the key. A tap on an option sends and closes; a tap on the panel elsewhere only closes; a tap
+  anywhere else closes it on the PRESS and the gesture is CONSUMED (the keyboard's rule). The selector and
+  this menu are exclusive: opening either closes the other. UI pop-up after a send: "Advert sent (flood)"
+  / "Advert sent (nearby)"; the guard says "Advert already sent, wait Ns".
+- USB: `advert local|flood` (exactly one word, anything else is an argument error) answers
+  `[cmd] ok advert <kind> sent=1`, `sent=0 wait=N`, or `[cmd] error advert radio not ready`.
+- Preview: `docs/shots/2026-11-11-chat-list-dots-preview.png` (four row cases, Channel A / DM B, and the
+  advert dropdown; 1:1 layout drawn 2x, not a device shot).
+
+### D. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` **exit 0**, SUCCESS, `build_id: OM_BUILD_ID = 96173e3-dirty`; only RadioLib's
+  two known `#warning`s in the log, no warning from a changed file.
+- RAM **158,648 B** of 327,680 (48.4 %; 158,480 before, **+168 B**); flash **2,821,573 B** of 6,553,600
+  (43.1 %; 2,817,253 before, **+4,320 B**); `firmware.bin` **2,821,936 B** (was 2,817,616, **+4,320 B**).
+- `test/host/run.sh` **exit 0**: **41 C++ binaries + 9 Python checks**. The new binary is the 41st
+  (`test_est382.cpp`); `test_chat.cpp`'s three header expectations moved to `kChatHeadH` / the key's left
+  edge because the Chat header intentionally grew 3 px.
+- `strings firmware.elf` carries `[mc] advert %s pos=%d`, `[hist] cleared %s records=%d file=%s`,
+  `[mc] 6 ready`, `ADVERT`, `Advert sent (flood)` / `(nearby)` and both `[cmd] ok advert ...` forms.
+
+### E. Device test steps (after the flash)
+1. Boot: no `[mc] advert` line. `advert local` once -> `[mc] advert local pos=<0|1>` and
+   `[cmd] ok advert local sent=1`; immediately again -> `sent=0 wait=<30..1>` and no second `[mc]` line.
+   `advert flood` is independent of the local guard.
+2. Chat page header: the name is shorter, the ADVERT key is on the right. Tap it -> Flood / Local menu
+   under it; tap Flood -> the toast, the menu closes; tap the key again and tap away in the message band
+   -> the menu closes and nothing behind it is tapped.
+3. Open the channel/DM selector: the open chat has the highlight only; give another chat unread and check
+   the dot on its left plus the number on the right; a selected chat that receives a message must show
+   highlight + dot + number.
+4. Settings > Chat > Manage channels > a channel: Clear messages -> the pop-up (Cancel default, outside =
+   Cancel). Cancel keeps everything. Clear removes that chat's messages and unread; another channel's
+   `history <name>` count and `chats` card count must be unchanged.
+5. Watch the serial: `[hist] cleared <id> records=N file=deleted|missing`, and on a forced card failure
+   (or a write-protected card) the "Could not clear the card copy" toast with the chat's messages still
+   readable.
+
+### F. Could not check (no device, no glass, no serial, no card)
+- Whether the advert really leaves the radio: the two copies above have not been sent on the air here.
+- The look of the 26 px Chat header, the ADVERT key, and the 36 px option rows on
+  the glass; the preview is a layout drawing, not a device screenshot.
+- The Clear pop-up's wrapping on the glass with the longest real channel name (the host only proves the
+  geometry and the 3-line wrapper), and the actual SD delete on the card.
+- The two dropdowns' exclusive state under real taps (the model proves one overlay at a time; the shell's
+  open/close order is source-checked, not device-run).
+
+## 2026-11-11 09:18 (Claude): EST-382 built, NOT reviewed in detail, NOT on the device
+- Sandbox build + tests green (RAM 158,648 B, flash 2,821,573 B). The boot-time advert comment and send are gone from the boot block (checked by grep; the device boot log is the real proof). Committed locally; detailed review and device tests owed. Not pushed.

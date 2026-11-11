@@ -9,6 +9,7 @@
 
 #include "layout.h"
 #include "theme.h"
+#include "ui/badge_font.h"   // EST-382: the unread count's one number rule (badgeText)
 #include "ui/emoji_picker.h"
 #include "ui/emoji_recent.h"
 
@@ -121,6 +122,11 @@ struct ChatLayout {
   Rect selPanel;           // the dropdown: the message band, header bottom to compose top
   Rect selList;            // the scrolling part (section labels and chat rows)
   Rect selManage;          // the pinned last row: "Manage channels"
+  // EST-382: the ADVERT key and its Flood / Local dropdown. The rectangles are always laid out; the
+  // menu is drawn and hit only while ChatView::advertMenu is true.
+  Rect advert;             // the key in the freed right of the header (>= 30 x 26)
+  Rect advertMenu;         // the small panel under the key
+  Rect advertOpt[2];       // Flood, Local
 };
 
 // A key under a point. keyAt() uses keyHit, never the drawn rectangles.
@@ -147,11 +153,13 @@ inline bool chatSheetClosesAt(const ChatLayout& g, int x, int y) {
 
 // --- overlays: one press, one answer (EST-339) ---------------------------------------------------
 // Every overlay in the chat is a bottom-anchored panel, drawn in this order: the keyboard sheet,
-// then the chat selector over it, then the message sheet. A press that lands OUTSIDE the one on top
-// closes it and is CONSUMED: that press's release and any drag that follows it must not press what
-// was behind (Filip, 2026-11-10: "I pressed away, in the chat area, and it opened a chat menu"). Only
-// the next new press may act on what is behind.
-enum class ChatOverlay : uint8_t { None = 0, Keyboard, Selector, MessageSheet };
+// then the chat selector over it, then the message sheet. EST-382 adds the small ADVERT dropdown under
+// the header; it is the only one of the two dropdowns that can be open at a time (the shell closes the
+// other when one opens). A press that lands OUTSIDE the one on top closes it and is CONSUMED: that
+// press's release and any drag that follows it must not press what was behind (Filip, 2026-11-10: "I
+// pressed away, in the chat area, and it opened a chat menu"). Only the next new press may act on what
+// is behind.
+enum class ChatOverlay : uint8_t { None = 0, Keyboard, Selector, AdvertMenu, MessageSheet };
 
 struct ChatOverlayPress {
   ChatOverlay overlay = ChatOverlay::None;
@@ -159,9 +167,12 @@ struct ChatOverlayPress {
 };
 
 // The overlay on top at a press and whether (x, y) is inside it. `menuPanel` is the open message
-// sheet's panel (messageSheetLayout().panel) and is read only when `menuOpen` is true.
+// sheet's panel (messageSheetLayout().panel) and is read only when `menuOpen` is true;
+// `advertMenu` is the ADVERT dropdown's panel and is read only when `advertOpen` is true. The two
+// new trailing parameters default to closed/empty, so existing callers keep their meaning.
 ChatOverlayPress chatOverlayPress(const ChatLayout& g, bool menuOpen, const Rect& menuPanel,
-                                  int x, int y);
+                                  int x, int y, bool advertOpen = false,
+                                  const Rect& advertMenu = Rect{});
 
 // --- the chat selector arithmetic ---------------------------------------------------------------
 // The list holds a "Channels" label, one row per channel, a "Direct messages" label and either one
@@ -172,6 +183,67 @@ int selMaxScroll(const Rect& list, int channelCount, int dmCount);
 int selRowTop(const Rect& list, int channelCount, int dmCount, int entry, int scroll);
 // The entry under py, or -1 (labels, the empty-DM line, the pads and the gaps answer -1).
 int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py);
+
+// EST-382: one row's whole layout, from the SAME arithmetic that hit-tests it. The highlight follows
+// `selected`; the left dot and the right count follow the chat's unread only (one source: the chat
+// model's `unread`), so they can never disagree. `countText` is badgeText()'s own string (1..99, then
+// "99+"), drawn in FontRole::MonoMeta whose advance is kSelMonoAdvance for every glyph.
+// `dot` and `count` are empty when the chat has no unread; `nameX` keeps the dot's slot reserved so a
+// name never jumps when the dot appears.
+struct SelRowLayout {
+  Rect row;
+  Rect dot;        // empty when hasDot is false
+  Rect count;      // empty when hasCount is false
+  char countText[4] = "";
+  int nameX = 0;   // the name's left edge (after the reserved dot slot)
+  int line1Cy = 0;
+  int line2Cy = 0;
+  bool highlight = false;
+  bool hasDot = false;
+  bool hasCount = false;
+};
+
+inline SelRowLayout selRowLayoutFor(const Rect& list, int channelCount, int dmCount, int entry,
+                                    int scroll, uint16_t unread, bool selected) {
+  SelRowLayout o;
+  const int top = selRowTop(list, channelCount, dmCount, entry, scroll);
+  o.row = Rect{list.x, (int16_t)top, list.w, kSelRowH};
+  o.line1Cy = top + kSelLine1Cy;
+  o.line2Cy = top + kSelLine2Cy;
+  o.highlight = selected;
+  const int dotX = list.x + kSelPadX;
+  o.nameX = dotX + kSelDot + kSelDotGap;
+  if (unread == 0) return o;
+  o.hasDot = true;
+  o.dot = Rect{(int16_t)dotX, (int16_t)(o.line1Cy - kSelDot / 2), kSelDot, kSelDot};
+  const int chars = badgeText((int)unread, o.countText, (int)sizeof(o.countText));
+  o.hasCount = chars > 0;
+  if (o.hasCount) {
+    const int w = chars * kSelMonoAdvance;
+    o.count = Rect{(int16_t)(o.row.right() - kSelPadX - w),
+                   (int16_t)(o.line2Cy - kSelCountH / 2), (int16_t)w, kSelCountH};
+  }
+  return o;
+}
+
+// --- EST-382: the ADVERT key and its Flood / Local dropdown -------------------------------------
+// The key sits in the header's freed right, exactly as tall as the Chat header (26 px), so its tap
+// target and its drawing are the same rectangle. The dropdown hangs under it, right-aligned, with two
+// 36 px rows (about 1.3x the selector's 30 px rows).
+struct ChatAdvertLayout {
+  Rect button;
+  Rect menu;       // the panel's border box
+  Rect opt[2];     // 0 = Flood, 1 = Local
+};
+
+ChatAdvertLayout chatAdvertLayoutFor(const Layout& L);
+
+enum class ChatAdvertHit : uint8_t { None = 0, Button, Flood, Local, MenuOther };
+
+// Only meaningful while the dropdown is open (`open`): an option row sends and closes, any other
+// point in the panel only closes, and a point outside answers None (the shell's overlay rule closes
+// it and spends the gesture). Closed, only the button answers.
+ChatAdvertHit chatAdvertHitAt(const ChatAdvertLayout& a, bool open, int x, int y);
 // The scroll for a drag that began at `base` while the finger has moved `dyUp` px UP the glass
 // (screen y decreases, so dyUp is startY - nowY). The list follows the finger: dyUp px up moves the
 // rows dyUp px up, and the scroll grows by dyUp. kSelGive px of stretch is allowed past either end;

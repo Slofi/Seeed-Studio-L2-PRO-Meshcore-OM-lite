@@ -56,6 +56,11 @@ struct SettingsView {
   // the page is showing — in Settings that is NOT the chat open on the Chat tab, on purpose.
   bool selector = false;
   SelectorModel sel;
+  // EST-382: the "Clear messages" confirmation pop-up. When `clearAsk` is true it owns every tap
+  // (Cancel, Clear, or anywhere outside = Cancel and consumed); `clearText` is the whole question,
+  // wrapped inside the box.
+  bool clearAsk = false;
+  const char* clearText = "";
 };
 
 void settingsScreenDraw(const SettingsView& v);
@@ -84,6 +89,10 @@ SettingsKeyHit settingsEditorKeyAt(const SettingsView& v, int x, int y);
 // else closes it and is spent), from the same rectangles it was drawn in. It is the Chat tab's own
 // rule (chat_selector.h selectorPress): while the dropdown is open nothing behind it can be hit.
 SelectorPress settingsSelectorPress(const SettingsView& v, int x, int y);
+
+// EST-382: the confirmation pop-up's hit test, from the rectangles it was drawn with. It is read
+// only while v.clearAsk is true; Outside means Cancel (the default side) and is consumed.
+SettingsModalHit settingsClearAskHit(const SettingsView& v, int x, int y);
 
 }  // namespace ui
 }  // namespace om

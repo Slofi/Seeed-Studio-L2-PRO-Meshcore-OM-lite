@@ -602,6 +602,16 @@ enum class WriteNotice : uint8_t {
 // volume refused it: the record is still there, untouched, and the next pass retries it.
 enum class FlushOutcome : uint8_t { Written = 0, Dropped = 1, Failed = 2 };
 
+// EST-382: what clearChat() found and did. `fileGone` means at least one of the chat's files existed
+// and is now deleted; `fileFailed` means a delete was refused (then nothing was reset and the queue
+// was left alone, so RAM still matches the card copy that remains); `records` is how many of THIS
+// chat's records were dropped from the write queue (other chats' records are never touched).
+struct ClearResult {
+  bool fileGone = false;
+  bool fileFailed = false;
+  int records = 0;
+};
+
 using NowFn = uint32_t (*)();      // microseconds, wrapping
 using LogFn = void (*)(const char*);
 
@@ -929,6 +939,58 @@ class HistoryStore {
     const int n = countFile(slots_[slot], false, &done) + countFile(slots_[slot], true, &done);
     if (complete != nullptr) *complete = done;
     return n;
+  }
+
+  // EST-382: delete one chat's card copy and its queued records. The .log and the .old (a rotation
+  // holds the same chat's older messages) are both removed; on success the slot's ids, seen point,
+  // unread and preview are reset, so the store recreates the file with a Chat header on the next
+  // message and the chat looks empty. On a refused delete nothing is reset and no queue record is
+  // dropped: the card still holds the messages, and RAM must not claim otherwise. Runs on the loop
+  // task (the caller is the UI/USB shell), never from a packet callback.
+  ClearResult clearChat(int slot) {
+    ClearResult r;
+    if (!ready_ || slot < 0 || slot >= kMaxChatSlots || !slots_[slot].used) return r;
+    Slot& s = slots_[slot];
+    if (vol_ == nullptr) return r;
+    char logPath[64], oldPath[64];
+    buildPath(s, ".log", logPath, sizeof(logPath));
+    buildPath(s, ".old", oldPath, sizeof(oldPath));
+    const bool hadLog = vol_->exists(logPath);
+    const bool hadOld = vol_->exists(oldPath);
+    bool logOk = true, oldOk = true;
+    if (hadLog) logOk = vol_->remove(logPath);
+    if (hadOld) oldOk = vol_->remove(oldPath);
+    const uint32_t logNow = vol_->size(logPath);
+    const uint32_t oldNow = vol_->size(oldPath);
+    if (!logOk || !oldOk) {
+      // Re-read the sizes so the store's accounting follows what is really on the card. Ids, seen,
+      // unread and the summary stay: the messages that remain are still readable.
+      const uint32_t before = s.fileBytes + s.oldBytes;
+      totalBytes_ = totalBytes_ >= before ? totalBytes_ - before : 0;
+      s.fileBytes = logNow;
+      s.oldBytes = oldNow;
+      totalBytes_ += logNow + oldNow;
+      s.headerWritten = s.fileBytes > 0;
+      s.needsRepair = false;
+      s.repairBytes = 0;
+      r.fileFailed = true;
+      return r;
+    }
+    r.fileGone = hadLog || hadOld;
+    const uint32_t before = s.fileBytes + s.oldBytes;
+    totalBytes_ = totalBytes_ >= before ? totalBytes_ - before : 0;
+    s.fileBytes = 0;
+    s.oldBytes = 0;
+    s.maxLogId = 0;
+    s.seenLogId = 0;
+    s.unread = 0;
+    s.headerWritten = false;
+    s.needsRepair = false;
+    s.repairBytes = 0;
+    s.scanned = true;
+    if (summaries_ != nullptr) summaries_[slot] = ChatSummary{};
+    r.records = dropQueuedForSlot(slot);
+    return r;
   }
 
   // --- flushing -----------------------------------------------------------------------------------
@@ -1663,6 +1725,27 @@ class HistoryStore {
       logLine(line);
     }
     return FlushOutcome::Failed;
+  }
+
+  // EST-382: removes exactly this slot's records from the RAM queue, keeping the order of everyone
+  // else's. The head is re-based to 0 when the queue empties; no volume access happens here.
+  int dropQueuedForSlot(int slot) {
+    if (queue_ == nullptr || queueSlots_ <= 0 || queueCount_ <= 0) return 0;
+    int kept = 0;
+    int dropped = 0;
+    for (int i = 0; i < queueCount_; ++i) {
+      const int at = (queueHead_ + i) % queueSlots_;
+      if ((int)queue_[at].slot == slot) {
+        ++dropped;
+        continue;
+      }
+      if (kept != i) queue_[(queueHead_ + kept) % queueSlots_] = queue_[at];
+      ++kept;
+    }
+    queueCount_ = kept;
+    if (kept == 0) queueHead_ = 0;
+    if (queueCount_ < queueSlots_) queueFullNoticed_ = false;
+    return dropped;
   }
 
   void popQueue() {

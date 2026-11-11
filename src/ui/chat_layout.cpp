@@ -247,8 +247,15 @@ ChatLayout chatLayoutFor(const Layout& L, bool osk, bool replying, bool nums, bo
   g.selector = selector;
 
   // The header replaces the old chip strip in the same row, so the message band keeps its top edge.
-  g.head = Rect{L.content.x, L.content.y, L.content.w, kHeadH};
-  g.headDot = Rect{(int16_t)(g.head.right() - kHeadPadX - kElsewhereDot),
+  // EST-382: the header is 26 px (kChatHeadH) and holds THREE things on its right: the elsewhere dot,
+  // the shortened selector's title (left) and the ADVERT key (far right). The key's rect is also its
+  // tap target, so the 30 x 26 minimum is met by the drawing itself.
+  g.head = Rect{L.content.x, L.content.y, L.content.w, kChatHeadH};
+  const ChatAdvertLayout advert = chatAdvertLayoutFor(L);
+  g.advert = advert.button;
+  g.advertMenu = advert.menu;
+  for (int i = 0; i < 2; ++i) g.advertOpt[i] = advert.opt[i];
+  g.headDot = Rect{(int16_t)(g.advert.x - kAdvertGap - kElsewhereDot),
                    (int16_t)(g.head.y + (g.head.h - 1 - kElsewhereDot) / 2), kElsewhereDot,
                    kElsewhereDot};
   // The title stops before the reserved unread-count room, so a count appearing beside the dot never
@@ -439,13 +446,18 @@ EmojiPadHit emojiPadHit(const EmojiPadLayout& e, int x, int y) {
 }
 
 ChatOverlayPress chatOverlayPress(const ChatLayout& g, bool menuOpen, const Rect& menuPanel,
-                                  int x, int y) {
+                                  int x, int y, bool advertOpen, const Rect& advertMenu) {
   ChatOverlayPress p;
   // The order is the drawing order: the message sheet sits over everything (screen_chat draws it
-  // last), then the selector over the message band, then the keyboard sheet.
+  // last), then the ADVERT dropdown, then the selector over the message band, then the keyboard.
   if (menuOpen) {
     p.overlay = ChatOverlay::MessageSheet;
     p.inside = menuPanel.contains(x, y);
+    return p;
+  }
+  if (advertOpen) {
+    p.overlay = ChatOverlay::AdvertMenu;
+    p.inside = advertMenu.contains(x, y);
     return p;
   }
   if (g.selector) {
@@ -496,8 +508,10 @@ int selRowTop(const Rect& list, int channelCount, int dmCount, int entry, int sc
 int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py) {
   if (py < list.y || py >= list.bottom()) return -1;
   for (int i = 0; i < channelCount + dmCount; ++i) {
-    const int top = selRowTop(list, channelCount, dmCount, i, scroll);
-    if (py >= top && py < top + kSelRowH) return i;
+    // EST-382: ask the SAME row layout the drawing uses, so the row that is drawn is the row a tap
+    // selects (the dot and count rects hang off this one; unread does not change the row's extent).
+    const SelRowLayout o = selRowLayoutFor(list, channelCount, dmCount, i, scroll, 0, false);
+    if (o.row.contains(list.x, py)) return i;   // x is inside by the list guard above
   }
   return -1;
 }
@@ -564,6 +578,39 @@ int rowKeyRects(const Rect& row, const uint8_t* units, int n, int gap, Rect* out
     out[i] = Rect{(int16_t)left, row.y, (int16_t)w, row.h};
   }
   return n;
+}
+
+// --- EST-382: the ADVERT key and its small dropdown --------------------------------------------
+ChatAdvertLayout chatAdvertLayoutFor(const Layout& L) {
+  ChatAdvertLayout a;
+  const int16_t headY = L.content.y;
+  const int16_t h = kChatHeadH;
+  // Right-aligned in the header with the same side padding the other header pieces use; the height is
+  // the header's, so the drawn key IS the 62 x 26 tap target.
+  a.button = Rect{(int16_t)(L.content.right() - kHeadPadX - kAdvertW), headY, kAdvertW, h};
+  // The panel hangs under the key, right edges aligned, two rows and a 1 px border. It never leaves
+  // the screen on the left and is drawn over the message band.
+  const int16_t menuW = kAdvertOptW;
+  int16_t menuX = (int16_t)(a.button.right() - menuW);
+  if (menuX < 2) menuX = 2;
+  const int16_t menuH = (int16_t)(2 * kAdvertOptH + 2 * kAdvertMenuPad);
+  a.menu = Rect{menuX, (int16_t)(headY + h), menuW, menuH};
+  for (int i = 0; i < 2; ++i) {
+    a.opt[i] = Rect{(int16_t)(a.menu.x + kAdvertMenuPad),
+                    (int16_t)(a.menu.y + kAdvertMenuPad + i * kAdvertOptH),
+                    (int16_t)(a.menu.w - 2 * kAdvertMenuPad), kAdvertOptH};
+  }
+  return a;
+}
+
+ChatAdvertHit chatAdvertHitAt(const ChatAdvertLayout& a, bool open, int x, int y) {
+  if (open) {
+    if (a.opt[0].contains(x, y)) return ChatAdvertHit::Flood;
+    if (a.opt[1].contains(x, y)) return ChatAdvertHit::Local;
+    if (a.menu.contains(x, y)) return ChatAdvertHit::MenuOther;
+    return ChatAdvertHit::None;
+  }
+  return a.button.contains(x, y) ? ChatAdvertHit::Button : ChatAdvertHit::None;
 }
 
 }  // namespace ui

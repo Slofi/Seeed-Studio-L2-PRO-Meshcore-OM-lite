@@ -32,6 +32,9 @@ struct ChatView {
   int selChat = 0;                    // the open chat (an index into chats)
   int selScroll = 0;                  // the selector list's scroll, px
   bool selector = false;              // the dropdown is open
+  // EST-382: the ADVERT key's small Flood / Local dropdown is open. The shell keeps it exclusive with
+  // `selector`: opening one closes the other.
+  bool advertMenu = false;
   const ChatMsgView* msgs = nullptr;
   int msgCount = 0;
   // EST-367: the chat's own newest page is being read from the card (the deferred open). The first
@@ -80,6 +83,9 @@ void chatScreenDraw(const ChatView& v);
 enum class ChatHit : uint8_t {
   None, Head, SelRow, SelManage, SelClose, Msg, SenderName, SheetRow, SheetClose, Field, Key, Outside,
   EmojiCell, EmojiCat, EmojiBack, EmojiSend,
+  // EST-382: the ADVERT key and its two options. AdvertClose is a point in the menu that is not an
+  // option (or a stray tap while it is open): it only closes the menu, never acts behind it.
+  Advert, AdvertFlood, AdvertLocal, AdvertClose,
 };
 
 struct ChatHitResult {

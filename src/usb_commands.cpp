@@ -260,6 +260,10 @@ int cmdPrintMsgs(int want) {
   CmdMsgRef refs[64];
   int n = 0;
   for (int i = 0; i < om::meshMsgCount() && n < 64; ++i) {
+    // EST-382: a cleared channel's ring slots are marked dead (ch = 0xFF). They are not messages
+    // any more, so the dump skips them like the screens do.
+    const int ch = om::meshMsgChannel(i);
+    if (ch < 0 || ch >= om::mcChannelCount()) continue;
     CmdMsgRef& r = refs[n++];
     r.wall = om::meshMsgWallTs(i);
     r.seq = om::meshMsgSeq(i);
@@ -1034,6 +1038,21 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       snprintf(reply, cap,
                "[cmd] ok notify test kind=channel title=\"%s\" bytes=%d result=%s dnd=%d",
                title, (int)strlen(n.body), result, om::sounds::dnd() ? 1 : 0);
+      return;
+    }
+
+    // EST-382: the same manual advert the Chat page's key sends, through the same facade function
+    // and the same 30 s per-kind guard. The reply repeats the outcome so a host tool can assert it.
+    case om::usb::Kind::Advert: {
+      const bool flood = cmd.target != nullptr && strcmp(cmd.target, "flood") == 0;
+      const int r = om::meshSendAdvert(flood);
+      if (r == 0) {
+        snprintf(reply, cap, "[cmd] ok advert %s sent=1", flood ? "flood" : "local");
+      } else if (r > 0) {
+        snprintf(reply, cap, "[cmd] ok advert %s sent=0 wait=%d", flood ? "flood" : "local", r);
+      } else {
+        snprintf(reply, cap, "[cmd] error advert radio not ready");
+      }
       return;
     }
 

@@ -27,10 +27,6 @@ void entryStamp(char* out, size_t cap, const SelectorModel& m, const ChatEntry& 
   stampText(out, cap, s, m.nowWall, m.nowSec, m.nowReal, StampForm::Clock);
 }
 
-// An unread count as the screens show it: one digit, or "9+" above nine (ui/badge_font.h holds the
-// one rule, so the red badge and the gold text can never disagree).
-void countText(char* out, size_t cap, int n) { badgeText(n, out, (int)cap); }
-
 // The header's and the Manage row's chevrons: vectors, because the faces carry no arrows.
 void drawChevron(lgfx::LovyanGFX* d, int x, int cy, uint16_t col, bool right) {
   if (right) {
@@ -43,50 +39,52 @@ void drawChevron(lgfx::LovyanGFX* d, int x, int cy, uint16_t col, bool right) {
 }
 
 // One row of the dropdown: the chat's name and the last message's age on the first line, its sender
-// and the start of its text on the second, the unread count at the right. The selected chat carries
-// the gold dot.
+// and the start of its text on the second, the unread count at the right.
+//
+// EST-382: the dot now means UNREAD, not "selected". The selected chat keeps only its highlight. The
+// dot's and the number's rectangles come from selRowLayoutFor(), the same function the hit test uses,
+// and both are driven by the ONE field ChatEntry::unread, so they cannot disagree. A chat with no
+// unread draws neither, and a muted chat keeps whatever the count does (no new muted rule here).
 void drawSelRow(lgfx::LovyanGFX* d, const SelectorModel& m, const ChatEntry& e, int entry,
                 const Rect& list) {
-  const int top = selRowTop(list, m.channelCount, m.dmCount, entry, m.scroll);
-  const Rect row{list.x, (int16_t)top, list.w, kSelRowH};
-  if (!row.overlaps(list)) return;
-  const bool on = (entry == m.selected);
+  const SelRowLayout o = selRowLayoutFor(list, m.channelCount, m.dmCount, entry, m.scroll, e.unread,
+                                         entry == m.selected);
+  if (!o.row.overlaps(list)) return;
+  const Rect& row = o.row;
+  const bool on = o.highlight;
+  const uint16_t bg = on ? kSelBg : kPanel;
   if (on) d->fillRect(row.x, row.y, row.w, row.h, kSelBg);
 
-  const int cy1 = row.y + kSelLine1Cy;
-  const int cy2 = row.y + kSelLine2Cy;
-  const int dotX = row.x + kSelPadX;
-  if (on) d->fillCircle(dotX + kSelDot / 2, cy1, kSelDot / 2, kAcc);
-  const int nameX = dotX + kSelDot + kSelDotGap;
+  if (o.hasDot) {
+    d->fillCircle((int16_t)(o.dot.x + o.dot.w / 2), (int16_t)(o.dot.y + o.dot.h / 2),
+                  (int16_t)(o.dot.w / 2), kAcc);
+  }
+  const int nameX = o.nameX;
 
   int right = row.right() - kSelPadX;
   char age[16];
   if (e.hasLast) {
     entryStamp(age, sizeof(age), m, e);
-    drawTextRight(d, FontRole::MonoMeta, kDimmer, on ? kSelBg : kPanel, right, cy1, age);
+    drawTextRight(d, FontRole::MonoMeta, kDimmer, bg, right, o.line1Cy, age);
     right -= textWidth(d, FontRole::MonoMeta, age) + kSelGap;
   }
-  drawTextEllipsis(d, FontRole::SansBody, on ? kAccInk : kInk, on ? kSelBg : kPanel, nameX, cy1,
-                   right - nameX, e.name);
+  drawTextEllipsis(d, FontRole::SansBody, on ? kAccInk : kInk, bg, nameX, o.line1Cy, right - nameX,
+                   e.name);
 
   int textRight = row.right() - kSelPadX;
-  if (e.unread > 0) {
-    char b[4];
-    countText(b, sizeof(b), e.unread);
-    drawTextRight(d, FontRole::MonoMeta, kAcc, on ? kSelBg : kPanel, textRight, cy2, b);
-    textRight -= textWidth(d, FontRole::MonoMeta, b) + kSelGap;
+  if (o.hasCount) {
+    drawTextRight(d, FontRole::MonoMeta, kAcc, bg, o.count.right(), o.line2Cy, o.countText);
+    textRight -= textWidth(d, FontRole::MonoMeta, o.countText) + kSelGap;
   }
   char line[kMeshNameCap + 2 + kMeshTextCap];   // "from: text", both at MeshCore's own limits
   if (e.hasLast) {
     snprintf(line, sizeof(line), "%s: %s", e.lastFrom, e.lastText);
     // A preview line may still be too wide: drawTextEllipsis cuts on a code point boundary and ends
     // the line with "...", never mid-sequence and never without saying so.
-    drawTextEllipsis(d, FontRole::MonoMeta, kDim, on ? kSelBg : kPanel, nameX, cy2,
-                     textRight - nameX, line);
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, bg, nameX, o.line2Cy, textRight - nameX, line);
   } else {
     snprintf(line, sizeof(line), "no messages yet");
-    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, on ? kSelBg : kPanel, nameX, cy2,
-                     textRight - nameX, line);
+    drawTextEllipsis(d, FontRole::MonoMeta, kDimmer, bg, nameX, o.line2Cy, textRight - nameX, line);
   }
 
   const int lineY = row.bottom() - 1;

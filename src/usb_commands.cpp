@@ -31,6 +31,7 @@
 #include "rptr_link.h"
 #include "rptr_model.h"
 #include "screens/sound_events.h"
+#include "screens/toasts.h"   // EST-381: `notify test` enters the real notification door
 #include "sound_synth.h"
 #include "target.h"
 #include "timekeeper.h"
@@ -1009,6 +1010,32 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       om::usbWakePress();
       snprintf(reply, cap, "[cmd] ok key wake");
       return;
+
+    // EST-381: the message pop-up, with no radio traffic. It enters at toasts::notifyNotice() with
+    // kind Channel and chatOpen=false, i.e. the exact call a received channel message makes on every
+    // screen except its own chat, so this hook cannot test a path a real message does not take. The
+    // decision, its `[notice] ...` line and the redraw are the module's; the reply repeats what it
+    // answered so the host tool can assert it (a DND or a screen-off refusal is visible here).
+    case om::usb::Kind::Notify: {
+      om::ui::Notice n;
+      om::ui::noticeCopy(n.title, sizeof(n.title), cmd.target);
+      om::ui::noticeCopy(n.body, sizeof(n.body), cmd.text);
+      const char* reason = nullptr;
+      const om::ui::NoticeDelivery out =
+          om::toasts::notifyNotice(om::ui::NoticeKind::Channel, n, false, om::sounds::dnd(), &reason);
+      char title[96];
+      cmdSafe(title, sizeof(title), n.title);
+      char result[48];
+      if (out == om::ui::NoticeDelivery::Skipped) {
+        snprintf(result, sizeof(result), "skip(%s)", reason != nullptr ? reason : "?");
+      } else {
+        snprintf(result, sizeof(result), "%s", om::ui::noticeDeliveryToken(out));
+      }
+      snprintf(reply, cap,
+               "[cmd] ok notify test kind=channel title=\"%s\" bytes=%d result=%s dnd=%d",
+               title, (int)strlen(n.body), result, om::sounds::dnd() ? 1 : 0);
+      return;
+    }
 
     case om::usb::Kind::Unknown:
     default:

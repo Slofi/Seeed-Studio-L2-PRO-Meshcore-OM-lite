@@ -507,6 +507,30 @@ Command parseCommand(char* line) {
     return c;
   }
 
+  // EST-381: the pop-up without radio traffic. `notify test "<title>" "<body>"` goes through the
+  // SAME door a real channel message takes (toasts::notifyNotice, kind Channel, never the open
+  // chat), so the glass can be tested on any screen with no packet in the air. The title becomes the
+  // pop-up's first line and the body is the message, exactly as a channel notice builds them. Both
+  // words are required: nothing is invented from a missing one, and the body may be quoted or be the
+  // rest of the line.
+  if (strcmp(verb, "notify") == 0) {
+    c.kind = Kind::Notify;
+    const char* sub = cur.next();
+    if (sub == nullptr || strcmp(sub, "test") != 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = cur.next();   // the title line
+    if (cur.bad() || c.target == nullptr || c.target[0] == 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    const char* error = nullptr;
+    c.text = textAfterTarget(cur, &error);
+    c.error = error;
+    return c;
+  }
+
   // Everything else, including anything that tries to read a key or a secret, is refused here and
   // never reaches a handler.
   c.error = "unknown";

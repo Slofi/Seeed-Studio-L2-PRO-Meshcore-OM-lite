@@ -33,6 +33,11 @@ struct ToastState {
   char body[kNoticeBodyCap] = {0};
   uint32_t until = 0;   // millis() deadline, wrap-safe via int32 difference
   uint32_t serial = 0;  // changes on show and on expiry (a future animator can watch it)
+  // EST-381: how many frames have actually PAINTED this toast (ui/widgets.cpp's overlay bumps it
+  // after it draws). The notification module logs one line when it goes up, so the device's serial
+  // says whether the toast reached a composed, pushed frame at all. That is the one fact the Map
+  // bug could not be read out of the source.
+  uint32_t paints = 0;
 
   // A toast exists until it is expired or replaced; the title is the whole "active" test.
   bool active() const { return text[0] != 0; }

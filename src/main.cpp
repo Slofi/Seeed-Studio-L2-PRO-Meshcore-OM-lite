@@ -413,8 +413,9 @@ static const om::GpsState* appGps() { return &g_gps; }
 
 static void drawHome();
 // Defined far below; the toast paths need it now that showing a toast means "redraw the current
-// screen with the toast in the frame" (EST-344).
-static void redrawCurrentScreen();
+// screen with the toast in the frame" (EST-344). It answers whether it drew (EST-381), so a frame
+// refused by a running screen change can be asked for again instead of being lost.
+static bool redrawCurrentScreen();
 
 // ----------------------------------------------------------------------------- new UI: Nodes data
 // The UI layer is fed from the real MeshCore contact table. meshContactList() returns 0 when the
@@ -5125,19 +5126,24 @@ static void handleTap(int x, int y, bool longPress) {
 // arrive, which also made that touch a tap. Every screen the app can be showing must be in here.
 // The once-a-minute clock repaint uses it too, so a tab, a settings page, the picker, the keyboard
 // sheet and the chat selector all survive a wake with their own content.
-static void redrawCurrentScreen() {
+//
+// EST-381: it now ANSWERS whether it drew. The toast module needs that: a frame refused during a
+// screen change must be asked for again, not lost (that refusal is one of the ways a Map pop-up
+// could vanish while every drawing path looked correct).
+static bool redrawCurrentScreen() {
   // EST-355: a screen change owns the light and the frame until it finishes (screenChangeLoop draws
   // the target itself). An in-page redraw in the middle of it would push a frame into a light that is
-  // on its way down or up, so it is dropped here and happens on the next event instead.
-  if (g_change.active()) return;
+  // on its way down or up, so it is dropped here and the caller asks again after it.
+  if (g_change.active()) return false;
   if (g_settings) {
     drawSettings();
-    return;
+    return true;
   }
   if (g_tab == 0) drawHome();
   else if (g_tab == 1) drawChat();
   else if (g_tab == 2) om::map_tab::draw();
   else drawRptrTab();
+  return true;
 }
 
 void loop() {

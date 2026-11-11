@@ -60,7 +60,8 @@ BIN36="$(mktemp /tmp/om-lite-est374.XXXXXX)"
 BIN37="$(mktemp /tmp/om-lite-est376.XXXXXX)"
 BIN38="$(mktemp /tmp/om-lite-est377.XXXXXX)"
 BIN39="$(mktemp /tmp/om-lite-est380.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39"' EXIT
+BIN40="$(mktemp /tmp/om-lite-est381.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -251,6 +252,11 @@ python3 -B test_tab_bar_calls.py
 # EST-374: every page switch goes through showTab -> map_tab::leave(), so leaving the Map always
 # draws the bottom bar on the next screen; no other screen reads the saved tabsHidden key.
 python3 -B test_est374.py
+# EST-381: every map draw ends with the one overlay frame (steady, animation and slide), board.cpp
+# draws the toast before the push, the toast's press edge comes first and spends the gesture (no
+# marker, chip, pan or callout behind it), the notice door has no Map exception, and `notify test`
+# enters the same notifyNotice() with kind Channel.
+python3 -B test_est381.py
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est365.cpp \
   ../../src/radio_stats.cpp ../../src/rptr_model.cpp ../../src/usb_cmd_logic.cpp \
   ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN30"
@@ -343,3 +349,14 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est377.cpp \
 # notice is taken once.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est380.cpp -o "$BIN39"
 "$BIN39"
+
+# EST-381: the Map's message pop-up. The one decision (empty / screen-off / DND and its two
+# exemptions / the open-chat rule / "a toast is up -> queue") and its one log line, the burst queue
+# keeping the newest message's body AND kind, the toast's 5 s deadline and consumed-tap dismissal
+# with the paint counter the device line reads, the pop-up's box inside the map canvas above the bar
+# in BOTH bar states, the consumed tap on the map's own hit areas (marker, chip, zoom tab, plain map
+# with a callout open) with the no-toast control beside it, and the `notify test` command line.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est381.cpp \
+  ../../src/ui/map_chrome.cpp ../../src/ui/notice_panel.cpp ../../src/ui/text_wrap.cpp \
+  ../../src/usb_cmd_logic.cpp ../../src/sound_synth.cpp -o "$BIN40"
+"$BIN40"

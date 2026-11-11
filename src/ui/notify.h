@@ -97,16 +97,98 @@ inline bool noticeAllowed(NoticeKind kind, bool dnd) {
   return kind == NoticeKind::LowBattery || kind == NoticeKind::Error;
 }
 
+// The three notices that say "a message arrived" (the only ones with a chat rule).
+inline bool noticeMessageLike(NoticeKind kind) {
+  return kind == NoticeKind::Channel || kind == NoticeKind::Dm || kind == NoticeKind::Mention;
+}
+
 // `chatOpen` means the chat that received this message is the one drawn on screen right now. The
 // message line is already there, so no toast covers it. Only message-like notices have this rule.
 inline bool noticeWanted(NoticeKind kind, bool dnd, bool chatOpen) {
   if (!noticeAllowed(kind, dnd)) return false;
-  if (chatOpen) {
-    if (kind == NoticeKind::Channel || kind == NoticeKind::Dm || kind == NoticeKind::Mention) {
-      return false;
-    }
-  }
+  if (chatOpen && noticeMessageLike(kind)) return false;
   return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// EST-381: ONE decision and ONE log line per notice. The Map's missing pop-up was invisible in the
+// code, so the ticket's test hook has to be able to say, on the device, what happened to a notice:
+//   [notice] show kind=channel
+//   [notice] queue kind=channel
+//   [notice] skip(dnd) kind=channel
+// The decision is plain C++ here; screens/toasts.cpp only acts on it and prints the line, so the
+// hook, a real channel message, a ping and a DM all go through the same rule and the same words.
+
+enum class NoticeDelivery : uint8_t {
+  Shown = 0,   // on screen now (the caller must draw one frame)
+  Queued,      // one newest pending is waiting for the current toast to end
+  Skipped,     // nothing on screen, and `reason` says why
+};
+
+inline const char* noticeKindToken(NoticeKind kind) {
+  switch (kind) {
+    case NoticeKind::Channel: return "channel";
+    case NoticeKind::Dm: return "dm";
+    case NoticeKind::Mention: return "mention";
+    case NoticeKind::NewNode: return "newnode";
+    case NoticeKind::LowBattery: return "lowbattery";
+    case NoticeKind::Error: return "error";
+    case NoticeKind::Rptr: return "rptr";
+    default: return "?";
+  }
+}
+
+inline const char* noticeDeliveryToken(NoticeDelivery d) {
+  switch (d) {
+    case NoticeDelivery::Shown: return "show";
+    case NoticeDelivery::Queued: return "queue";
+    default: return "skip";
+  }
+}
+
+struct NoticeDecision {
+  NoticeDelivery delivery = NoticeDelivery::Skipped;
+  const char* reason = "empty";   // only read when delivery == Skipped
+};
+
+// The whole rule, in one place: empty text is refused, a screen that is off is refused, DND keeps
+// its two exemptions, an open chat is not covered by a message about itself, and a toast that is
+// already up means this one waits (the newest one wins, see NoticeQueue).
+inline NoticeDecision noticeDecide(NoticeKind kind, const char* title, bool screenOn, bool dnd,
+                                   bool chatOpen, bool toastVisible) {
+  NoticeDecision d;
+  if (title == nullptr || title[0] == 0) {
+    d.reason = "empty";
+    return d;
+  }
+  if (!screenOn) {
+    d.reason = "screen-off";
+    return d;
+  }
+  if (!noticeAllowed(kind, dnd)) {
+    d.reason = "dnd";
+    return d;
+  }
+  if (chatOpen && noticeMessageLike(kind)) {
+    d.reason = "chat-open";
+    return d;
+  }
+  d.delivery = toastVisible ? NoticeDelivery::Queued : NoticeDelivery::Shown;
+  d.reason = nullptr;
+  return d;
+}
+
+// The one line. `kindToken` is the notice kind, or "text" for the shell's one-line toast door.
+inline int noticeLogLine(char* out, size_t cap, const char* kindToken, const NoticeDecision& d) {
+  if (out == nullptr || cap == 0) return 0;
+  const char* kind = (kindToken != nullptr && kindToken[0] != 0) ? kindToken : "?";
+  if (d.delivery == NoticeDelivery::Skipped) {
+    const char* reason = (d.reason != nullptr && d.reason[0] != 0) ? d.reason : "?";
+    snprintf(out, cap, "[notice] skip(%s) kind=%s", reason, kind);
+  } else {
+    snprintf(out, cap, "[notice] %s kind=%s", noticeDeliveryToken(d.delivery), kind);
+  }
+  return (int)strlen(out);
 }
 
 // Truncate at a UTF-8 boundary (never inside a continuation byte), then append "...". Returns the
@@ -221,6 +303,9 @@ struct NoticeQueue {
   // EST-368: a queued message keeps its whole text, so the pop-up that appears after the current
   // one is still readable, not a cut line.
   char pendingBody[kNoticeBodyCap] = "";
+  // EST-381: and its kind, so the `[notice] show kind=..` line names the notice that really waited
+  // instead of guessing Channel.
+  NoticeKind kind = NoticeKind::Channel;
   bool hasPending = false;
 
   // A bounded copy (never a truncated format warning, never a byte past the caller's buffer).
@@ -235,13 +320,16 @@ struct NoticeQueue {
     if (text == nullptr || text[0] == 0) return false;
     boundedCopy(pending, sizeof(pending), text);
     pendingBody[0] = 0;
+    kind = NoticeKind::Channel;
     hasPending = true;
     return true;
   }
-  bool pushNotice(const Notice& n) {
+  bool pushNotice(const Notice& n) { return pushNotice(NoticeKind::Channel, n); }
+  bool pushNotice(NoticeKind k, const Notice& n) {
     if (n.title[0] == 0) return false;
     boundedCopy(pending, sizeof(pending), n.title);
     boundedCopy(pendingBody, sizeof(pendingBody), n.body);
+    kind = k;
     hasPending = true;
     return true;
   }
@@ -250,21 +338,26 @@ struct NoticeQueue {
     boundedCopy(out, cap, pending);
     pending[0] = 0;
     pendingBody[0] = 0;
+    kind = NoticeKind::Channel;
     hasPending = false;
     return true;
   }
-  bool takeNotice(Notice* n) {
+  // EST-381: `kindOut` (optional) reports which kind the taken notice was, for its own log line.
+  bool takeNotice(Notice* n, NoticeKind* kindOut = nullptr) {
     if (!hasPending || n == nullptr) return false;
     boundedCopy(n->title, sizeof(n->title), pending);
     boundedCopy(n->body, sizeof(n->body), pendingBody);
+    if (kindOut != nullptr) *kindOut = kind;
     pending[0] = 0;
     pendingBody[0] = 0;
+    kind = NoticeKind::Channel;
     hasPending = false;
     return true;
   }
   void clear() {
     pending[0] = 0;
     pendingBody[0] = 0;
+    kind = NoticeKind::Channel;
     hasPending = false;
   }
 };

@@ -5314,3 +5314,176 @@ sandbox, so this run changes the code, the boot lines and the tests; the device 
 - Follow-up risk (not blocking): a record that fails forever at the queue head (one broken chat file) blocks every other chat behind it until the queue overflows. Per-chat skip-ahead after N failures of the same file is a later ticket.
 - The 80 KB slot table is claimed to be PSRAM (FATFS prefers external RAM); the new [mem] boot lines before/after the mount are the proof on the first flash. If internal drops by tens of KB, lower the slot count (true peak 11).
 - Correction (Claude): the DS entry above is stamped 08:32; the ticket went to in_review at 08:26 by the clock.
+
+## 2026-11-11 08:55 (DeepSeek): EST-381 the Map's message pop-up, the `notify test` hook and what the log will say
+
+Filip (~08:00): on the Map a new message plays its sound but no pop-up appears, bars shown or tucked;
+every other screen (the Chat tab's own chat excepted) shows it, and a touch dismisses it. This ticket
+adds the USB hook FIRST (`notify test "<title>" "<body>"`, the same `toasts::notifyNotice` door as a
+real channel message, kind Channel, never the open chat), one log line per notice, the fix, and host
+tests. Nothing was flashed, committed or pushed from the sandbox.
+
+### A. What I could and could not prove in the source
+
+Claude had already shown the door, the DND/open-chat rule and `redrawCurrentScreen` -> `map_tab::draw()`
+-> `drawMapFrame()` -> `omFrameBegin/End` (whose overlay paints the toast) are shared with the screens
+that DO show it. I went through the four suspects and this is the honest result:
+
+1. **A frame that bypasses the overlay: no.** `drawMapFrame()` is the only map drawing function and
+   its last act is one `omFrameEnd()`. The guard paths close their own frame (`omFrameBegin()` may
+   fail) and draw nothing. `screen_map.cpp` never touches the panel: the only writer of the panel in
+   the whole tree is `board.cpp`'s `pushFrame()`, and `omFrameEnd()` calls the overlay *before* it.
+   The 30 fps trace frames and the EST-374 slide frames are the same `drawMapFrame()`.
+2. **The redraw dropped and never repeated: REAL, and now fixed.** `redrawCurrentScreen()` answered
+   nothing, and it returns early while a screen change owns the frame (EST-355). A notice that landed
+   in that ~300 ms window was drawn by nobody: the toast state was visible for its 5 s with no frame
+   carrying it. The shell's callback now answers whether it drew (`bool redrawCurrentScreen()`), the
+   toasts module keeps `s_needFrame` and asks again on the next pass until a frame is really drawn,
+   and it logs `[notice] redraw deferred: the screen change owns the frame, retrying` once when that
+   happens. That is one way a Map pop-up (and any other screen's) could vanish with correct drawing
+   code, so it is fixed for every screen, not just the Map.
+3. **Drawn under the chrome on the map layout: no.** The overlay is drawn last on the frame, and the
+   pop-up's box comes from `noticeLayout()` (screen width, tab bar top, status bar bottom) which knows
+   nothing about the map's chrome: 304 x 84 px at (8,123) for a four-line message, inside the canvas,
+   above the bar and above the tucked 3 px strip. Pinned by a host test.
+4. **The consumed tap: already correct, now pinned.** The toast is consulted on the PRESS edge, before
+   the map's `cont` (pan continuation), every action is behind `!g_spent`, and the release is behind
+   `!spent && !g_drag && !g_acted`. A test proves it on the map's own hit areas, with the no-toast
+   case as the control.
+
+Two more real holes found while in there, both fixed:
+
+- a **queued** notice was taken in `pump()` even when the panel was off (`takeNotice` before the
+  `screenOn` test), i.e. silently thrown away in the dark; now it waits for the panel;
+- `toasts::text()` was the ONE door with no screen check and no log; it now goes through the same
+  decision (shown / skip(screen-off)) but keeps its old "replace the toast on screen" meaning, because
+  a shell line ("Your position", "Sound saved") means "say this now". `notify()`/`notifyNotice()` keep
+  the EST-366 rule 9 queue (newest pending wins).
+
+**So the cause is at run time and the device will name it.** Three new serial lines do it, one per
+notice, all from the one place that decides (ui/notify.h, host-tested):
+
+- `[notice] show kind=channel` / `[notice] queue kind=channel` / `[notice] skip(<reason>) kind=..`
+  with the reason `empty`, `screen-off`, `dnd` or `chat-open`, this says whether the notice even
+  reached the toast state;
+- `[notice] painted after N ms (M frame(s))`, the overlay counts paintings into a new `paints`
+  counter; this says the toast really reached a composed, pushed frame;
+- `[notice] redraw deferred ...`, the screen change refused the frame and it is being retried.
+
+If the log says `show` + `painted` and the glass is still empty, the fault is between the composed
+frame and the panel (not the notification path); if it says `skip(...)`, the reason is in the line; if
+neither line ever appears, the notice never reached the door. Whichever it is, the next run answers it
+in one line instead of another reading pass.
+
+### B. The hook and the log
+
+- `notify test "<title>" "<body>"` (`usb_cmd_logic.*`, `usb_commands.cpp`): both words required, the
+  body may be quoted or be the rest of the line, a missing one is `[cmd] error args` and an unclosed
+  quote `[cmd] error quote`. It builds a `ui::Notice` and calls
+  `toasts::notifyNotice(NoticeKind::Channel, n, /*chatOpen=*/false, dnd)`, the exact call the channel
+  arrival makes off the Chat tab. The reply repeats the outcome so a host tool can assert it:
+  `[cmd] ok notify test kind=channel title="..." bytes=N result=show|queue|skip(<reason>) dnd=0|1`.
+  It is not a diagnostic that bypasses the rules: DND and a dark panel refuse it with the reason,
+  because that is what a real message would get.
+- The decision moved into `ui/notify.h` (`noticeDecide`, `noticeLogLine`, `noticeKindToken`,
+  `noticeDeliveryToken`, `NoticeDelivery`), and `noticeWanted()` is now the same two rules, so the
+  old callers and the new door cannot drift. `NoticeQueue` keeps the queued notice's kind, so the
+  line printed when a queued notice finally takes the screen names its real kind.
+- Code size: the decision is a header (no new TU), the log line is one `char[96]` on the stack.
+
+### C. Tests
+
+- New `test/host/test_est381.cpp` (40th C++ binary, `run.sh` exit 0):
+  - **the decision**: `empty` / `screen-off` / `dnd` (with LowBattery and Error exempt, and every other
+    kind refused) / `chat-open` (only Channel, Dm and Mention) / a toast already up -> `queue`; every
+    combination also agrees with `noticeWanted()`, so the hook and a real message are judged alike;
+  - **the line**: the four exact forms, a null kind and null reason, and a 8-byte buffer that must
+    stay NUL-terminated inside itself;
+  - **the queue**: newest wins, the message keeps its body AND kind, taken once, the one-line form is
+    a channel notice, an empty title is refused, `clear()` drops it whole;
+  - **the toast**: `kToastMs == 5000`, visible at `until - 1` and gone at `until`, the press-edge
+    dismissal (and an expired toast does not eat the touch), and the paint counter the device line
+    reads;
+  - **the box on the Map**: inside the canvas, below the status bar, above the bar AND above the
+    tucked strip in both states; a 400-character message stays 4 lines with `...` and never grows off
+    the screen;
+  - **the consumed tap**: for a marker, the chip, a zoom tab and a plain map tap with a callout open,
+    in BOTH bar states: with a visible toast the press dismisses it and *nothing* on the map acts (no
+    select, no chip toggle, no zoom, no pan even when the gesture drags, no callout close), and the
+    same tap without a toast DOES act (the control); a toast whose 5 s ran out does not eat the tap.
+  - **the command**: the ticket's quoted form, a one-word title with the body as the rest, and the
+    refusals (no body, no title, no `test`, a wrong sub-command, a trailing word, an unclosed quote).
+- New `test/host/test_est381.py` (a source scan, like the EST-374 one, `run.sh` exit 0): every map
+  draw entry calls `drawMapFrame()`, the LAST statement of `drawMapFrame()` is its `omFrameEnd()`,
+  `screen_map.cpp` never pushes to the panel, `board.cpp` draws the overlay before the push and before
+  the hold, the press edge spends the gesture and every map act is behind `!g_spent`, the release tap
+  is inside `if (!spent)` with `!g_drag && !g_acted`, the two `notifyNotice()` calls in `main.cpp`
+  have no `g_tab == 2` special case, `notify test` goes through `notifyNotice(NoticeKind::Channel, ..,
+  false, ..)`, and `toasts.cpp` prints only the shared formatter.
+- The rest of the suite is unchanged and green: **40 C++ binaries + 9 Python checks**, `run.sh`
+  exit 0.
+
+### D. Build (`docs/REBUILD.md` command, real exit code)
+
+- `pio run -e om_lite_l2` **exit 0**, SUCCESS, and none of the changed files produced a warning
+  (the build recompiled the seven touched sources; RadioLib was not rebuilt, so its two known
+  `#warning`s are not in this log), `build_id: OM_BUILD_ID = a9cc5aa-dirty`.
+- RAM **158,480 B** of 327,680 (48.4 %; `a9cc5aa` was 158,448, **+32 B**), flash **2,817,253 B** of
+  6,553,600 (43.0 %; was 2,815,265, **+1,988 B**), `firmware.bin` **2,817,616 B** (was 2,815,632,
+  **+1,984 B**).
+- `strings firmware.elf` carries `[notice] %s kind=%s`, `[notice] skip(%s) kind=%s`,
+  `[notice] painted after %lu ms (%lu frame(s))`, both deferred lines and
+  `[cmd] ok notify test kind=channel ...`, so the flashed image can be checked by name.
+
+### E. Device test steps (this is the list to run after the flash)
+
+Coordinates are the L2's 320x240: tab bar y 215..240 (four 80 px tabs), chip (298..320, 26..48),
+zoom + (295..320, 152..183), the pop-up's own box about (8..312, 123..207).
+
+1. Boot: the log says `[om] build a9cc5aa-dirty` (or whatever id Claude's commit produces) and the
+   tick lines are as before. `tools/cmd.py status` -> `dnd=0` in the heartbeat. With DND on every
+   step below is expected to answer `skip(dnd)`; turn it off first.
+2. `tools/cmd.py tap 200 227` -> the Map opens (`[tab] Map`, `[map] open: cached canvas ...`).
+3. **The pop-up with the bars SHOWN:**
+   `tools/cmd.py notify test "TehiLL RAK - #slovenija" "hello from the map test"`.
+   Expect the reply `[cmd] ok notify test kind=channel title="..." bytes=<the body's length>
+   result=show dnd=0`; then `[notice] show kind=channel`; then
+   `[notice] painted after N ms (1 frame(s))` (N is tens of ms); and on the glass the two-part
+   pop-up (mono title, the text under it) for ~5 s, then gone with the next frame. No `[map]` line
+   is needed for it.
+4. **With the bars TUCKED:** `tools/cmd.py tap 305 37` -> `[map] bars hidden`, `[map] bars tuck: 4
+   slide frame(s) + 1 in ... ms`; repeat step 3. The pop-up must appear above the 3 px strip (its box
+   is y 123..207, the strip is y 237..240).
+5. **The consumed tap:** while the pop-up is up, `tools/cmd.py tap 160 160`. Expect exactly
+   `[tap] 160,160 dismissed the toast, gesture spent` and NO `[map] select ...`, NO `[map] bars ...`,
+   NO `[map] zoom`, no marker highlight and no pan. Tap again in the same place after it is gone: now
+   the map acts (that is the control).
+   In particular a tap on a marker under the pop-up must not select it, and a tap on the chip's area
+   must not tuck the bars.
+6. **It survives a trace:** with Traces ON, have another node send a channel message (real traffic).
+   Expect, in one pass: `[map] trace <name> N hop(s), ...`, `[notice] show kind=channel`,
+   `[notice] painted after ...`, the animation `[map] traces N frames in ... ms, avg ... us, worst ...`
+   and the pop-up still on the glass for its 5 s while the dot moves underneath it.
+7. **Two in a burst:** send two messages within a second (or two `notify test` commands). The second
+   is `[notice] queue kind=channel`, and 5 s later `[notice] show kind=channel` for it, once.
+8. **The screen-change case** (the fixed hole): the Map is opened and `notify test` is sent within the
+   ~300 ms transition (`tools/cmd.py tap 200 227` and the command in the same second). Expect
+   `[notice] redraw deferred: the screen change owns the frame, retrying` and then
+   `[notice] painted after ...`; the pop-up must be on the glass.
+9. Write the numbers from step 3 (N and the frame count) and from step 6 here, and say what the glass
+   did. If it does NOT appear, the three lines decide the next step:
+   `show` + `painted` and no pixels -> the fault is between the frame and the panel (say so and stop);
+   `skip(<reason>)` -> the door refused it for that reason; no `[notice]` line at all -> the notice
+   never reached the door.
+
+### F. Could not check (no device, no glass, no serial)
+
+- Whether the pop-up actually appears on the Map (that is the whole ticket, and it needs the flash).
+- Which of the mechanisms above the device hit: the log lines in E name it. This entry does not claim
+  a cause it could not see.
+- The panel's real behaviour during the 30 fps trace animation with a toast in the frame (the frame
+  content is right; whether the panel shows every pushed frame is a device fact).
+- The `[notice] painted` count on a slow map compose (the line prints the real number).
+
+## 2026-11-11 08:58 (Claude): EST-381 built, NOT reviewed in detail, NOT on the device
+- Sandbox build + tests green. Committed locally so the next ticket starts from a clean tree; detailed review and the device test (`notify test` on the Map, bars shown and tucked) are still owed. Not pushed.

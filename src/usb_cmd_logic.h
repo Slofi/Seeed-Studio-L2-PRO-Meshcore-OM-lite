@@ -36,6 +36,7 @@ enum class Kind : uint8_t {
   Pmu,      // pmu probe   (EST-376: read-only FUSB302 at 0x22 + the four ADS1115 inputs)
   Log,      // log power on|off|tail   (EST-377: the battery log on the card)
   Play,     // play <event> [sound-id]   (EST-359/361: hear the device's shared library)
+  Notify,   // notify test "<title>" "<body>"   (EST-381: the message pop-up without radio traffic)
 };
 
 // A parsed command. `target` and `text` point into the line given to parseCommand(), which is

@@ -437,9 +437,13 @@ void drawNoticePanel(lgfx::LovyanGFX* d, const Layout& L, const ToastState& t) {
 }  // namespace
 
 void drawToastOverlay(lgfx::LovyanGFX* d, uint32_t nowMs) {
-  const ToastState& t = toastState();
+  ToastState& t = toastState();
   if (!t.visible(nowMs)) return;
   drawNoticePanel(d, l2(), t);
+  // EST-381: the count the notification module logs, one line per toast. It only ever goes up when
+  // the toast was really painted into a frame, which is what tells a Map pop-up that was delivered
+  // and drawn apart from one that never got a frame at all.
+  ++t.paints;
 }
 
 void drawTabBar(lgfx::LovyanGFX* d, const Layout& L, const TabBarModel& m) {

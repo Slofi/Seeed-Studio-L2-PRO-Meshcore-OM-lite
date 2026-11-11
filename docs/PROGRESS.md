@@ -5176,3 +5176,4 @@ the id, so the same tree always produces the same one.
 - Note: a change of id changes every compile command line, so the first build after each commit is a full rebuild (~2 min). Fine.
 - Correction (Claude): the DS entry above is stamped 02:47; the ticket went to in_review at 02:39 by the clock, so that stamp is an estimate.
 - Committed, then rebuilt from the clean commit (see the next line for the id and size). Not pushed, not flashed.
+- 02:43 (Claude): rebuilt from `092542b`: build id `092542b` (no -dirty), RAM 158,440 B, flash 2,814,341 B, firmware.bin 2814704 B, the id string is in the image. Reviewed copy: `~/.cache/pio-om-lite/reviewed/est379.bin` (this is the tip to flash; it contains EST-374..379). Later notes-only commits do not change the image.

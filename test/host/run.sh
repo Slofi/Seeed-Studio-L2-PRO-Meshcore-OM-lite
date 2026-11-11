@@ -79,7 +79,8 @@ BIN48="$(mktemp /tmp/om-lite-est390.XXXXXX)"
 BIN49="$(mktemp /tmp/om-lite-est391.XXXXXX)"
 BIN50="$(mktemp /tmp/om-lite-est392.XXXXXX)"
 BIN51="$(mktemp /tmp/om-lite-est393.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51"' EXIT
+BIN52="$(mktemp /tmp/om-lite-est394.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -490,3 +491,17 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est393.cpp \
   ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp -o "$BIN51"
 "$BIN51"
 python3 -B test_est393.py
+
+# EST-394: a trace belongs to its repeaters, not to the screen. One route sampled in view A and then
+# in view B (the content panned by +40/-25 px, and a zoom level in) lands EXACTLY where mapProject()
+# puts the same lat/lon in view B: every route point, the dot, the tail and the direct-arrival ring.
+# A running route is re-projected by sampleActive() without restarting its clock; with the pack not
+# open the route stays live and draws nothing; the added cost of a 12-point sample is measured on
+# this host. test_est394.py is the source half: the Map tab queues micro-degrees (no projection at
+# arrival), build() re-samples every MapView, the 30 fps replay frames are skipped over a stale
+# canvas and a drag's release draws the final position, and the picker's zoom label is drawn from its
+# own rectangle UNDER the back key.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est394.cpp \
+  ../../src/ui/map_trace.cpp ../../src/ui/map_chrome.cpp ../../src/ui/rptr_layout.cpp -o "$BIN52"
+"$BIN52"
+python3 -B test_est394.py

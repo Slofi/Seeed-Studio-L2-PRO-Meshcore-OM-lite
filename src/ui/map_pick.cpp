@@ -53,10 +53,11 @@ void drawMapPick(lgfx::LovyanGFX* d, const MapPickView& v) {
   drawBack(d, m.back, v.backLabel);
   smallKey(d, m.zoomIn, "+", false);
   smallKey(d, m.zoomOut, "-", false);
+  // EST-394: the zoom label owns its own rectangle now, UNDER the back key (rptr_layout.cpp), so the
+  // wide "Cancel" of the Settings picker can never crowd it. Same MonoMeta face and kDim ink as before.
   if (v.hint[0]) {
-    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kMapBg, (int16_t)(m.back.right() + 8),
-                     (int16_t)(m.back.y + m.back.h / 2),
-                     (int16_t)(m.zoomIn.x - m.back.right() - 16), v.hint);
+    drawTextEllipsis(d, FontRole::MonoMeta, kDim, kMapBg, m.hint.x,
+                     (int16_t)(m.hint.y + m.hint.h / 2), m.hint.w, v.hint);
   }
   // EST-393: the Map's own centre cross, at the same 7x7 box and centre (160,133). The helper and
   // the constants are the Map screen's (ui/map_chrome.h), so there is no second cross to drift.

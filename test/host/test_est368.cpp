@@ -14,6 +14,7 @@
 // 5. RPTR: a late read-back never overwrites a field the finger moved, but does update a clean one;
 //    the Position page's Share position switch sends the repeater's own `gps advert none` (or lat/lon
 //    0), then one `advert`.
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -37,6 +38,14 @@ static int g_fail = 0;
       ++g_fail;                                                            \
     }                                                                      \
   } while (0)
+
+// EST-394: the model now samples a georeferenced route through a view. This flat view keeps the
+// EST-368 pixel expectations: a point held as (latE6 = y, lonE6 = x) lands on pixel (x, y).
+static bool flatProject(double lat, double lon, int& x, int& y) {
+  x = (int)lround(lon * 1e6);
+  y = (int)lround(lat * 1e6);
+  return true;
+}
 
 // --------------------------------------------------------------------------------- 1. hop mapping
 static void testHopMapping() {
@@ -174,39 +183,42 @@ static void testGeometry() {
 }
 
 static void testAnimation() {
+  // EST-394: the model takes a georeferenced route and samples it through the caller's view. These
+  // tests keep their old pixel expectations with a flat view: (latE6, lonE6) = (y, x), so a point
+  // {y, x} lands on pixel (x, y).
   // A 2-hop route: three points, 840 ms of travel (2 x 420), then 900 ms of fade.
   TraceAnim a;
-  const TracePt pts[3] = {{0, 0}, {100, 0}, {100, 100}};
+  const TraceGeoPt pts[3] = {{0, 0}, {0, 100}, {100, 100}};
   a.begin(pts, 3, false, 2, 1000);
   CHECK(a.active());
   CHECK(a.durationMs() == 2 * kTraceHopMs);
   TraceFrame f;
 
-  CHECK(a.sample(1000, &f));
+  CHECK(a.sample(1000, flatProject, &f));
   CHECK(f.live && !f.direct);
   CHECK(f.hasDot && f.dot.x == 0 && f.dot.y == 0);
   CHECK(f.tailCount >= 2);
   CHECK(f.routeCount == 3);
 
-  CHECK(a.sample(1000 + kTraceHopMs, &f));   // one hop later: the middle vertex
+  CHECK(a.sample(1000 + kTraceHopMs, flatProject, &f));   // one hop later: the middle vertex
   CHECK(f.dot.x == 100 && f.dot.y == 0);
   // The tail is 35 % of the route behind the dot: head .5, from .15 -> 30 px, not from 0.
   CHECK(f.tailCount >= 2);
   CHECK(f.tail[0].x == 30 && f.tail[0].y == 0);
 
-  CHECK(a.sample(1000 + 2 * kTraceHopMs - 1, &f));   // just before the arrival
+  CHECK(a.sample(1000 + 2 * kTraceHopMs - 1, flatProject, &f));   // just before the arrival
   CHECK(f.dot.y > 90);
 
   // Arrived: the tail holds the last 35 % and fades with the dot over 900 ms.
-  CHECK(a.sample(1000 + 2 * kTraceHopMs + kTraceFadeMs / 2, &f));
+  CHECK(a.sample(1000 + 2 * kTraceHopMs + kTraceFadeMs / 2, flatProject, &f));
   CHECK(f.live);
   CHECK(f.hasDot);    // the dot is still drawn during the fade, only dimmer
   CHECK(f.dotAlpha > 0 && f.tailAlpha > 0);
   const uint8_t midDot = f.dotAlpha;
-  CHECK(a.sample(1000 + 2 * kTraceHopMs + 3 * kTraceFadeMs / 4, &f));
+  CHECK(a.sample(1000 + 2 * kTraceHopMs + 3 * kTraceFadeMs / 4, flatProject, &f));
   CHECK(f.dotAlpha < midDot);
 
-  CHECK(!a.sample(1000 + 2 * kTraceHopMs + kTraceFadeMs, &f));
+  CHECK(!a.sample(1000 + 2 * kTraceHopMs + kTraceFadeMs, flatProject, &f));
   CHECK(!a.active());
 
   // The hop count, not the number of drawn points, sets the duration: a 3-hop path with one unknown
@@ -217,26 +229,26 @@ static void testAnimation() {
 
   // A direct arrival: a ring at our radio that grows and fades over 1400 ms.
   TraceAnim d;
-  const TracePt us[1] = {{160, 107}};
+  const TraceGeoPt us[1] = {{107, 160}};
   d.begin(us, 1, true, 0, 500);
   CHECK(d.durationMs() == kTraceDirectMs);
-  CHECK(d.sample(500, &f));
+  CHECK(d.sample(500, flatProject, &f));
   CHECK(f.direct && f.live);
   const int16_t r0 = f.ringR;
   const uint8_t a0 = f.ringAlpha;
   CHECK(f.ringX == 160 && f.ringY == 107);
-  CHECK(d.sample(500 + kTraceDirectMs / 2, &f));
+  CHECK(d.sample(500 + kTraceDirectMs / 2, flatProject, &f));
   CHECK(f.ringR > r0);
   CHECK(f.ringAlpha < a0);
-  CHECK(!d.sample(500 + kTraceDirectMs, &f));
+  CHECK(!d.sample(500 + kTraceDirectMs, flatProject, &f));
 }
 
 static void testQueue() {
   TraceQueue q;
   q.reset();
-  const TracePt a[3] = {{0, 0}, {50, 0}, {100, 0}};
-  const TracePt b[2] = {{0, 100}, {100, 100}};
-  const TracePt c[1] = {{160, 100}};
+  const TraceGeoPt a[3] = {{0, 0}, {0, 50}, {0, 100}};
+  const TraceGeoPt b[2] = {{100, 0}, {100, 100}};
+  const TraceGeoPt c[1] = {{100, 160}};
   CHECK(q.push(a, 3, false, 2, 1));
   CHECK(q.push(b, 2, false, 1, 2));
   CHECK(q.push(c, 1, true, 0, 3));
@@ -244,20 +256,20 @@ static void testQueue() {
   CHECK(q.busy());
 
   TraceFrame f;
-  CHECK(q.tick(0, &f));
+  CHECK(q.tick(0, flatProject, &f));
   CHECK(f.live && !f.direct);
   CHECK(f.dot.x == 0 && f.dot.y == 0);   // the FIRST route is the one playing
   CHECK(q.pending() == 2);
 
   // Halfway through the first route, still only that route is on the glass.
-  CHECK(q.tick(kTraceHopMs, &f));
+  CHECK(q.tick(kTraceHopMs, flatProject, &f));
   CHECK(f.routeCount == 3);
   CHECK(q.pending() == 2);
 
   // The first route ends after its travel + fade; the next one starts in the same tick at that
   // moment, never on top of it.
   const uint32_t done = 2 * kTraceHopMs + kTraceFadeMs;
-  CHECK(q.tick(done, &f));
+  CHECK(q.tick(done, flatProject, &f));
   CHECK(f.live && !f.direct);
   CHECK(f.routeCount == 2);              // route b: no two routes at once
   CHECK(f.dot.x == 0 && f.dot.y == 100);
@@ -265,12 +277,12 @@ static void testQueue() {
 
   // The direct route waits its turn too.
   const uint32_t done2 = done + kTraceHopMs + kTraceFadeMs;
-  CHECK(q.tick(done2, &f));
+  CHECK(q.tick(done2, flatProject, &f));
   CHECK(f.live && f.direct);
   CHECK(f.ringX == 160 && f.ringY == 100);
   CHECK(q.pending() == 0);
 
-  CHECK(!q.tick(done2 + kTraceDirectMs, &f));
+  CHECK(!q.tick(done2 + kTraceDirectMs, flatProject, &f));
   CHECK(!q.busy());
 
   // A newer route from the SAME sender replaces the pending one: three messages from one node can
@@ -279,7 +291,7 @@ static void testQueue() {
   CHECK(q2.push(a, 3, false, 2, 7));
   CHECK(q2.push(b, 2, false, 1, 7));
   CHECK(q2.pending() == 1);
-  CHECK(q2.tick(0, &f));
+  CHECK(q2.tick(0, flatProject, &f));
   CHECK(f.routeCount == 2);              // the newest one, not both
   // A route with no drawable point is refused.
   TraceQueue q3;

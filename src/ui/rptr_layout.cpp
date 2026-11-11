@@ -244,6 +244,10 @@ RptrMapPickLayout rptrMapPickLayoutFor(const Layout& L, bool apply) {
   m.map = Rect{0, kMapCanvasTop, kMapCanvasW, kMapCanvasH};
   const int16_t top = L.status.bottom();
   m.back = Rect{8, (int16_t)(top + 3), kRptrBackW, 20};
+  // EST-394 (Claude's EST-393 preview check): the zoom label sat on the back key's own line, hard
+  // against its right edge, so the wide "Cancel" of the Settings picker left it cramped. It now sits
+  // UNDER the key, left-aligned to it, with a 6 px gap: no label width can reach the button.
+  m.hint = Rect{8, (int16_t)(m.back.y + m.back.h + 6), 60, 14};
   m.zoomIn = Rect{(int16_t)(L.width - 8 - 24), (int16_t)(top + 30), 24, 24};
   m.zoomOut = Rect{(int16_t)(L.width - 8 - 24), (int16_t)(top + 58), 24, 24};
   m.panel = Rect{0, (int16_t)(L.height - kRptrPickPanelH), L.width, kRptrPickPanelH};

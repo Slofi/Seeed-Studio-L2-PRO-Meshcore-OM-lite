@@ -171,6 +171,7 @@ RptrModalHit rptrModalHitAt(const RptrModalLayout& m, int x, int y);
 struct RptrMapPickLayout {
   Rect map;        // the tile area (map.cpp's 320x214 view)
   Rect back;       // "< back" over the map, under the status bar
+  Rect hint;       // EST-394: the zoom label ("z15"), UNDER the back key, clear of its box
   Rect zoomIn;
   Rect zoomOut;
   Rect panel;      // EST-393: the coordinate banner, 42 px, FLUSH with the screen floor

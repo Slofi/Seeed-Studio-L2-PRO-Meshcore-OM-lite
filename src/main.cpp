@@ -6399,6 +6399,10 @@ void loop() {
           g_nodeScroll = clamped;
           if (g_drag || changed) drawHome();
         }
+        // EST-394: the last 60 ms of a map drag may not have been drawn. One full draw here leaves
+        // the final pan on the glass with the trace projected for THAT view, and a composited canvas
+        // that matches it, so the replay's 30 fps frames can resume at once after the finger lifts.
+        if (g_tab == 2 && !g_settings && screenOn && g_drag) om::map_tab::draw();
         // The repeater list and a page's rows snap their give back the same way. The map picker has
         // no scroll of its own: its pan is applied live, so the release does nothing.
         if (g_tab == 3 && !g_settings && !g_rptrOsk && !g_rptrMapPick) {

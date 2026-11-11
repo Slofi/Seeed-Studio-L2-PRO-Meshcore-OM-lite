@@ -12,6 +12,12 @@
 // travelling hop by hop at 420 ms per hop (35 % tail, 900 ms fade on arrival); a direct arrival
 // (0 hops) pulses an expanding ring at our own radio instead. Replay runs the routes ONE AT A TIME.
 //
+// EST-394 (Filip 2026-11-11 16:41: "traces are all screwed up if/when I move the map"): the queue
+// and the animation keep the route in micro-degrees, NOT in screen pixels. Every sample projects the
+// route through the caller's current view (mapProject on the device), so a pan, a zoom or the bars'
+// slide moves the whole trace with the map. A frame is only ever valid for the view it was sampled
+// in, which is why the Map tab samples one at the top of build() for the frame it is about to draw.
+//
 // Plain C++ (no Arduino, no LovyanGFX) so test/host proves the mapping, the geometry, the timings
 // and the queue with the system g++.
 #pragma once
@@ -68,11 +74,23 @@ void traceBuildRoute(const uint8_t* path, uint8_t hashSize, uint8_t hopCount,
                      TraceRoute* out);
 
 // --------------------------------------------------------------------------------- the geometry
-// Screen pixels. The same model in e6 is projected by the caller; the animation needs distances.
+// Screen pixels, built from ONE sample's projection of the route (the animation needs distances).
 struct TracePt {
   int16_t x = 0;
   int16_t y = 0;
 };
+
+// EST-394: one georeferenced route point, exactly the micro-degrees traceBuildRoute() produces.
+// This is what the queue and the animation keep; a TracePt only ever exists for one sample, in the
+// view that sample was taken in.
+struct TraceGeoPt {
+  int32_t latE6 = 0;
+  int32_t lonE6 = 0;
+};
+
+// The caller's current view: the device passes mapProject(), a host test passes its own. False means
+// "the map is not open", which draws nothing but never loses the route.
+typedef bool (*TraceProject)(double lat, double lon, int& x, int& y);
 
 struct TraceGeom {
   int count = 0;
@@ -88,7 +106,7 @@ bool tracePointAt(const TraceGeom& g, const TracePt* pts, float frac, TracePt* o
 int traceSlice(const TraceGeom& g, const TracePt* pts, float from, float to, TracePt* out,
                int cap);
 
-// One frame's worth of drawing for ONE route.
+// One frame's worth of drawing for ONE route, valid only for the view it was sampled in.
 struct TraceFrame {
   bool live = false;        // something is animating (draw it)
   bool direct = false;      // a ring, no line
@@ -109,21 +127,22 @@ struct TraceFrame {
   uint8_t ringAlpha = 0;
 };
 
-// One route's animation. begin() starts the clock; sample() answers what to draw at nowMs and
-// false once the route has arrived AND faded.
+// One route's animation. begin() starts the clock on a georeferenced route; sample() projects it
+// through the CURRENT view and answers what to draw at nowMs, false once the route has arrived AND
+// faded. A route whose points cannot be projected (the map pack is not open) stays live and draws
+// nothing; it is never dropped.
 class TraceAnim {
  public:
-  void begin(const TracePt* route, int count, bool direct, uint8_t hops, uint32_t nowMs);
+  void begin(const TraceGeoPt* route, int count, bool direct, uint8_t hops, uint32_t nowMs);
   void cancel() { active_ = false; }
   bool active() const { return active_; }
   uint32_t durationMs() const { return durMs_; }
-  bool sample(uint32_t nowMs, TraceFrame* out);
+  bool sample(uint32_t nowMs, TraceProject project, TraceFrame* out);
 
  private:
   bool active_ = false;
   bool direct_ = false;
-  TraceGeom geom_;
-  TracePt route_[kTraceMaxPoints] = {};
+  TraceGeoPt route_[kTraceMaxPoints] = {};
   int routeCount_ = 0;
   uint32_t startedAt_ = 0;
   uint32_t durMs_ = 0;
@@ -137,13 +156,17 @@ class TraceQueue {
   bool busy() const { return anim_.active() || count_ > 0; }
   int pending() const { return count_; }
   // False when the route has nothing to draw (fewer than two points and not a usable direct point).
-  bool push(const TracePt* route, int count, bool direct, uint8_t hops, uint8_t key);
+  bool push(const TraceGeoPt* route, int count, bool direct, uint8_t hops, uint8_t key);
   // Start the next route when idle, sample the current one. False when nothing is live.
-  bool tick(uint32_t nowMs, TraceFrame* out);
+  bool tick(uint32_t nowMs, TraceProject project, TraceFrame* out);
+  // EST-394: re-sample the route that is already running in a NEW view, without starting a pending
+  // one. The Map tab calls this from build(), so the frame it draws was projected for the view under
+  // it (a pan, a zoom, a slide). False when no route is running.
+  bool sampleActive(uint32_t nowMs, TraceProject project, TraceFrame* out);
 
  private:
   struct Item {
-    TracePt pts[kTraceMaxPoints] = {};
+    TraceGeoPt pts[kTraceMaxPoints] = {};
     int count = 0;
     bool direct = false;
     uint8_t hops = 0;

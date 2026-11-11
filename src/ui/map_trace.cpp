@@ -134,7 +134,7 @@ int traceSlice(const TraceGeom& g, const TracePt* pts, float from, float to, Tra
 
 // ------------------------------------------------------------------------------------ animation
 
-void TraceAnim::begin(const TracePt* route, int count, bool direct, uint8_t hops,
+void TraceAnim::begin(const TraceGeoPt* route, int count, bool direct, uint8_t hops,
                       uint32_t nowMs) {
   active_ = false;
   direct_ = direct;
@@ -144,7 +144,6 @@ void TraceAnim::begin(const TracePt* route, int count, bool direct, uint8_t hops
   if (count > kTraceMaxPoints) count = kTraceMaxPoints;
   for (int i = 0; i < count; ++i) route_[i] = route[i];
   routeCount_ = count;
-  traceGeom(route_, routeCount_, &geom_);
   int h = hops;
   if (h < 1) h = 1;
   if (h > kTraceMaxHops) h = kTraceMaxHops;
@@ -152,18 +151,33 @@ void TraceAnim::begin(const TracePt* route, int count, bool direct, uint8_t hops
   active_ = true;
 }
 
-bool TraceAnim::sample(uint32_t nowMs, TraceFrame* out) {
+bool TraceAnim::sample(uint32_t nowMs, TraceProject project, TraceFrame* out) {
   if (out == nullptr || !active_) return false;
   out->live = true;
   out->direct = direct_;
-  out->routeCount = routeCount_;
-  for (int i = 0; i < routeCount_; ++i) out->route[i] = route_[i];
+  out->routeCount = 0;
   out->hasDot = false;
   out->tailCount = 0;
   out->dotAlpha = 0;
   out->tailAlpha = 0;
   out->ringAlpha = 0;
   out->ringR = 0;
+
+  // EST-394: the route is georeferenced; this frame is the current view of it. Project once, here,
+  // and every dot/tail/ring position below is derived from these pixels. If the map is not open the
+  // route stays live and draws nothing (no frame can be placed without a view).
+  TracePt px[kTraceMaxPoints];
+  if (project == nullptr) return true;
+  for (int i = 0; i < routeCount_; ++i) {
+    int x = 0, y = 0;
+    if (!project((double)route_[i].latE6 / 1e6, (double)route_[i].lonE6 / 1e6, x, y)) return true;
+    px[i].x = (int16_t)x;
+    px[i].y = (int16_t)y;
+  }
+  TraceGeom geom;
+  traceGeom(px, routeCount_, &geom);
+  out->routeCount = routeCount_;
+  for (int i = 0; i < routeCount_; ++i) out->route[i] = px[i];
 
   const uint32_t elapsed = nowMs - startedAt_;   // wrap-safe via the unsigned difference
   if (direct_) {
@@ -173,22 +187,22 @@ bool TraceAnim::sample(uint32_t nowMs, TraceFrame* out) {
       return false;
     }
     const float t = (float)elapsed / (float)durMs_;
-    out->ringX = routeCount_ > 0 ? route_[0].x : 0;
-    out->ringY = routeCount_ > 0 ? route_[0].y : 0;
+    out->ringX = routeCount_ > 0 ? px[0].x : 0;
+    out->ringY = routeCount_ > 0 ? px[0].y : 0;
     out->ringR = (int16_t)lround((double)kTraceRingStartR +
                                  (double)t * (double)(kTraceRingMaxR - kTraceRingStartR));
     out->ringAlpha = (uint8_t)lround((1.0 - (double)t) * 255.0);
     return true;
   }
 
-  if (geom_.count < 2) {
+  if (geom.count < 2) {
     // Fewer than two known points: nothing to travel along. A route with a known point still gets
     // the ring at that point (the ticket: "draws nothing but the ring").
     if (routeCount_ == 1 && elapsed < durMs_) {
       const float t = (float)elapsed / (float)durMs_;
       out->direct = true;
-      out->ringX = route_[0].x;
-      out->ringY = route_[0].y;
+      out->ringX = px[0].x;
+      out->ringY = px[0].y;
       out->ringR = (int16_t)lround((double)kTraceRingStartR +
                                    (double)t * (double)(kTraceRingMaxR - kTraceRingStartR));
       out->ringAlpha = (uint8_t)lround((1.0 - (double)t) * 255.0);
@@ -203,9 +217,9 @@ bool TraceAnim::sample(uint32_t nowMs, TraceFrame* out) {
   if (elapsed <= durMs_) {
     const float head = (durMs_ == 0) ? 1.0f : (float)elapsed / (float)durMs_;
     const float from = head > tailFrac ? head - tailFrac : 0.0f;
-    out->tailCount = traceSlice(geom_, route_, from, head, out->tail, kTraceMaxPoints + 1);
+    out->tailCount = traceSlice(geom, px, from, head, out->tail, kTraceMaxPoints + 1);
     out->tailAlpha = 230;
-    out->hasDot = tracePointAt(geom_, route_, head, &out->dot);
+    out->hasDot = tracePointAt(geom, px, head, &out->dot);
     out->dotAlpha = 255;
     return true;
   }
@@ -218,10 +232,9 @@ bool TraceAnim::sample(uint32_t nowMs, TraceFrame* out) {
     return false;
   }
   const float fade = (float)into / (float)kTraceFadeMs;
-  out->tailCount = traceSlice(geom_, route_, 1.0f - tailFrac, 1.0f, out->tail,
-                              kTraceMaxPoints + 1);
+  out->tailCount = traceSlice(geom, px, 1.0f - tailFrac, 1.0f, out->tail, kTraceMaxPoints + 1);
   out->tailAlpha = (uint8_t)lround((1.0 - (double)fade) * 230.0);
-  out->hasDot = tracePointAt(geom_, route_, 1.0f, &out->dot);
+  out->hasDot = tracePointAt(geom, px, 1.0f, &out->dot);
   out->dotAlpha = (uint8_t)lround((1.0 - (double)fade) * 255.0);
   return true;
 }
@@ -239,7 +252,7 @@ void TraceQueue::removeAt(int i) {
   --count_;
 }
 
-bool TraceQueue::push(const TracePt* route, int count, bool direct, uint8_t hops, uint8_t key) {
+bool TraceQueue::push(const TraceGeoPt* route, int count, bool direct, uint8_t hops, uint8_t key) {
   if (route == nullptr || count < 0) return false;
   if (count > kTraceMaxPoints) count = kTraceMaxPoints;
   if (count < 2 && !(direct && count == 1)) return false;
@@ -257,7 +270,7 @@ bool TraceQueue::push(const TracePt* route, int count, bool direct, uint8_t hops
   return true;
 }
 
-bool TraceQueue::tick(uint32_t nowMs, TraceFrame* out) {
+bool TraceQueue::tick(uint32_t nowMs, TraceProject project, TraceFrame* out) {
   if (out == nullptr) return false;
   out->live = false;
   for (;;) {
@@ -267,11 +280,16 @@ bool TraceQueue::tick(uint32_t nowMs, TraceFrame* out) {
       removeAt(0);
       anim_.begin(it.pts, it.count, it.direct, it.hops, nowMs);
     }
-    if (anim_.sample(nowMs, out)) return true;
+    if (anim_.sample(nowMs, project, out)) return true;
     // That one finished inside this call: the next pending route starts at once.
     out->live = false;
     if (count_ == 0 && !anim_.active()) return false;
   }
+}
+
+bool TraceQueue::sampleActive(uint32_t nowMs, TraceProject project, TraceFrame* out) {
+  if (out == nullptr || !anim_.active()) return false;
+  return anim_.sample(nowMs, project, out);
 }
 
 }  // namespace ui

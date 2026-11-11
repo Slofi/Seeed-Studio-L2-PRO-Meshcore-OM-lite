@@ -6826,3 +6826,100 @@ choose Fixed (the banner must sit flush with the bottom edge, its Save hit rect 
 check the cross at the map centre, drag the map, tap, Save, reopen the picker (the saved point must
 be under the cross), then open the RPTR Position page's picker and check the same banner and cross.
 That is the whole ticket.
+
+## 2026-11-11 (DS, EST-394): traces stay on their repeaters when the map is panned or zoomed
+Status: in_review (not committed, not pushed).
+
+### A. What was there before
+- **The pixels were fixed at arrival.** `traceEnqueue()` projected the route through
+  `om::mapProject()` once, when the message arrived, and pushed those `TracePt` screen pixels into
+  the queue. `TraceQueue`/`TraceAnim` then kept only pixels (and a pixel geometry). `build()` copied
+  the frame as it was. So a pan, a zoom or the bars' slide moved the tiles and the markers but left
+  the trace (route, dot, tail, direct-arrival ring) at the old screen coordinates. Filip's "traces
+  are all screwed up if/when I move the map" is exactly this.
+- **A second, smaller problem during a drag.** `pump()` draws its 30 fps animation frames with
+  `mapRepush()`, the composited canvas. During a pan that canvas still shows the previous view, so
+  even a correctly projected trace would have sat on old tiles for those frames. The drag's own
+  `draw()` (at most every ~60 ms) was the only frame with fresh tiles, and the release did not force
+  one, so the last part of a pan could stay undrawn.
+- **The picker's zoom label.** `map_pick.cpp` drew `v.hint` ("z15") at `m.back.right() + 8`, on the
+  Cancel key's own line, 8 px from its box. On the Settings picker the label was cramped against
+  "Cancel" (Claude's EST-393 preview check).
+
+### B. The change
+1. **The route stays in micro-degrees.** `ui/map_trace.h` gained `TraceGeoPt {latE6, lonE6}` and a
+   projector type `TraceProject`. `TraceQueue` and `TraceAnim` store `TraceGeoPt`; `push()`,
+   `begin()`, `tick()` and `sample()` take them. `traceEnqueue()` now copies `route.latE6/lonE6`
+   straight into the queue and never calls `mapProject()` (the direct-arrival ring is our own E6
+   point). Nothing is thrown away when the pack is not open: the route stays live and draws nothing
+   until a view exists.
+2. **Every frame is projected in the current view.** `TraceAnim::sample()` projects the route once
+   per sample (at most 12 `mapProject()` calls), builds the pixel geometry from those points, and
+   derives the dot, tail and ring exactly as EST-368/372 did. The output `TraceFrame` is still
+   pixels, so `screen_map.cpp`, the palette and the clipping are unchanged.
+3. **Every MapView re-samples.** New `TraceQueue::sampleActive()` re-projects the RUNNING route
+   without starting a pending one or resetting its clock. `map_tab.cpp`'s `build()` calls the new
+   `traceSampleNow()` before copying `v.trace`, so the full draw, the animation frame, the bars'
+   slide and the tap's hit-test view all carry a frame for the view under them. `pump()` passes
+   `om::mapProject` to `tick()`.
+4. **Drag choice: the trace is NOT skipped on the drag's own frames.** The 60 ms drag redraw already
+   re-renders the tiles and every marker; the trace adds one projection of at most 12 points plus
+   the same line/tail drawing it always had. Measured on the host: **2.25 us per 12-point sample**
+   (a second run 3.32 us) and 3.32 us includes all 12 projections, the geometry and the tail slice.
+   That is negligible next to EST-371's 19.8 ms canvas re-push / 31 ms frame, so the trace stays in
+   the drag frames. What IS skipped are the 30 fps replay frames while `mapViewStale()` is true:
+   they would re-push the pre-pan canvas under a trace projected for the new view. They resume on
+   the next pass after a full `draw()` has refreshed the canvas.
+5. **The release draws the final pan.** `main.cpp` now calls `om::map_tab::draw()` on the release of
+   a map drag (`g_tab == 2`, not Settings, screen on, `g_drag`), so the final pan and its trace are
+   on the glass even if the last 60 ms were not, and the replay has a matching canvas to resume on.
+6. **The zoom label has its own rectangle.** `RptrMapPickLayout` gained `Rect hint`, placed UNDER
+   the back key (`m.back.y + m.back.h + 6`, left-aligned to it, 60 x 14); `map_pick.cpp` draws
+   `v.hint` from `m.hint` in the same MonoMeta face and `kDim` ink. No "Cancel" width can reach it.
+
+### C. Files
+- `src/ui/map_trace.h` + `.cpp`: `TraceGeoPt`, `TraceProject`, geo queue/animation, per-sample
+  projection, `TraceQueue::sampleActive()`.
+- `src/screens/map_tab.cpp`: `traceEnqueue()` queues E6, `traceSampleNow()` in `build()`, `tick()`
+  takes `mapProject`, replay frames guarded by a matching canvas.
+- `src/main.cpp`: one full draw on the release of a map drag.
+- `src/ui/rptr_layout.h` + `.cpp`: `Rect hint` under the back key.
+- `src/ui/map_pick.cpp`: the zoom label is drawn from `m.hint`.
+- `test/host/test_est368.cpp`: its animation/queue cases now pass the flat test view (same pixel
+  expectations); `test/host/test_est394.cpp` + `test_est394.py` are new; `test/host/run.sh` runs them.
+
+### D. Build and tests (real exit codes)
+- `pio run -e om_lite_l2` (the REBUILD.md command): **exit 0**, SUCCESS. RAM **160,304 B** of
+  327,680 (48.9 %; EST-393 was 160,168, **+136 B**), flash **2,986,889 B** of 6,553,600 (45.6 %;
+  EST-393 was 2,986,657, **+232 B**), `firmware.bin` **2,987,248 B** (was 2,987,024, **+224 B**). The
+  build id is `fe865cd-dirty`.
+- `test/host/run.sh`: **exit 0**, **52 C++ binaries + 18 Python checks** (one new of each).
+- New `test_est394.cpp`: one 4-point route sampled at mid-route in view A and in view B (pan
+  +40/-25 px). Every route point, the dot and every tail vertex in B equals view B's projection of
+  the same lat/lon, and exactly A's pixel plus (40, -25). At one zoom level in, every point equals
+  the new projection, the polyline scales about (160,133), and the dot is recomputed on the new
+  geometry at the same route fraction. `sampleActive()` re-projects without restarting the clock
+  (the dot moves by the pan, it does not jump back to the start); a direct ring follows too. With
+  the pack not open the frame is live with no points and the route is not lost. The 12-point cost
+  is measured and printed. The last section checks the picker's `hint` rect at 320x240 and 800x480:
+  under the back key with a gap, no overlap with back / +/- / cross / panel, inside the map.
+- New `test_est394.py`: the model stores `TraceGeoPt` and takes a projector; `traceEnqueue()` has no
+  `om::mapProject()` call; `build()` re-samples before copying `v.trace`; `pump()` hands
+  `mapProject` to `tick()` and skips replay frames over a stale canvas; `main.cpp` draws on release;
+  `screen_map.cpp` still draws the pixel frame; `map_pick.cpp` draws `m.hint` and no longer uses
+  `m.back.right() + 8`.
+
+### E. Could not check (no device, no serial)
+- The glass: pan and zoom a live trace and watch route, dot, tail and ring ride the repeaters; the
+  drag feel and the one extra full frame on release; the 30 fps replay resuming after a pan.
+- The device-side cost of the drag frame with the trace kept (the host number is x86, not the
+  ESP32-S3; the projection chain is 12 `log/tan` calls and the drawing is unchanged from EST-372).
+- The picker label under Cancel on the real panel (the rects are proven; the font is the same).
+- No new screenshot was generated: `tools/mkpick.py` is the EST-393 artifact and still draws the old
+  label position. Claude can capture the picker on the glass if a shot is wanted.
+
+### F. Next step
+Claude reviews the diff, flashes, and on the glass: open the Map with Traces on, let a route play,
+pan during it (the trace must stay on the same repeaters), zoom + / - during it (same), tuck and
+restore the bars, then let go (the final pan and the trace must be drawn at once). Then Settings >
+General > POSITION > Fixed: "z15" must sit under Cancel, clear of it.

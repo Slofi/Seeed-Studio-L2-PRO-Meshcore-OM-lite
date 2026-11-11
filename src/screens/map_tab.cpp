@@ -127,28 +127,23 @@ bool traceEnqueue(const char* sender, const uint8_t* path, uint8_t hashSize, uin
                       s_traceSelfKnown, s_traceSelfLatE6, s_traceSelfLonE6, &route);
   if (route.count == 0) return false;
 
-  ui::TracePt pts[ui::kTraceMaxPoints];
+  // EST-394: queue the route in micro-degrees. Nothing is projected here: the animation samples it
+  // through mapProject() at draw time, so a pan, a zoom or the bars' slide moves the trace with the
+  // map instead of leaving it at the pixels it had when the message arrived.
+  ui::TraceGeoPt pts[ui::kTraceMaxPoints];
   int n = 0;
   const bool direct = route.hops == 0;
   if (direct) {
     // EST-368 (the ticket): a 0-hop arrival pulses a ring at OUR position, not a line. Without one
     // there is nothing to pulse, and the arrival stays silent on the glass.
     if (!s_traceSelfKnown) return false;
-    int x = 0, y = 0;
-    if (!om::mapProject((double)s_traceSelfLatE6 / 1e6, (double)s_traceSelfLonE6 / 1e6, x, y)) {
-      return false;
-    }
-    pts[0].x = (int16_t)x;
-    pts[0].y = (int16_t)y;
+    pts[0].latE6 = s_traceSelfLatE6;
+    pts[0].lonE6 = s_traceSelfLonE6;
     n = 1;
   } else {
     for (int i = 0; i < route.count; ++i) {
-      int x = 0, y = 0;
-      if (!om::mapProject((double)route.latE6[i] / 1e6, (double)route.lonE6[i] / 1e6, x, y)) {
-        return false;
-      }
-      pts[n].x = (int16_t)x;
-      pts[n].y = (int16_t)y;
+      pts[n].latE6 = route.latE6[i];
+      pts[n].lonE6 = route.lonE6[i];
       ++n;
     }
   }
@@ -228,6 +223,15 @@ const char* contactTypeName(uint8_t type) {
   return type == 2 ? "repeater" : (type == 3 ? "room" : (type == 4 ? "sensor" : "client"));
 }
 
+// EST-394: re-project the route that is running through the view as it is NOW. build() calls this for
+// every MapView (the full draw, the animation frame, the slide, the tap's hit test), so no draw path
+// can paint a trace that was sampled before a pan or a zoom. A frame that is not live stays as it is;
+// the queue's own tick() still starts the next pending route and reports completion.
+void traceSampleNow() {
+  if (!s_traceFrame.live) return;
+  s_traceQueue.sampleActive(millis(), om::mapProject, &s_traceFrame);
+}
+
 void build(ui::MapView& v) {
   v = ui::MapView();
   status(v.status);
@@ -241,6 +245,7 @@ void build(ui::MapView& v) {
   v.tracesOn = s_layers.traces();
   v.namesOn = s_layers.names();
   v.tabsHidden = s_layers.tabsHidden();
+  traceSampleNow();   // EST-394: the CURRENT view, not the one the route was queued in
   v.trace = s_traceFrame;
 
   // Our own position: the white GPS dot, or the small gold pin when the point is Fixed (EST-384).
@@ -493,11 +498,18 @@ void pump(bool visible, bool uiDrawOk) {
 #if defined(OM_ENABLE_MESH)
   traceWatchArrivals();
 #endif
+  // EST-394: an animation frame re-pushes the composited canvas. While a pan has moved the view past
+  // that canvas it would put the OLD tiles under a trace projected for the NEW one, so the 30 fps
+  // replay frames run only over a canvas that matches the current view. The drag's own draw() (at
+  // most every ~60 ms) is the frame that shows the trace during a drag; the animation resumes on the
+  // next pass after that draw has refreshed the canvas. Nothing is skipped for long: the route's
+  // clock keeps running, so it reappears at the right place and the right time.
+  const bool freshCanvas = om::mapCanvasReady() && !om::mapViewStale();
   if (!s_traceQueue.busy()) {
     if (s_traceFrame.live) {
       // The route ended while no frame could be drawn (the panel was off): one clean frame now.
       s_traceFrame = ui::TraceFrame();
-      if (uiDrawOk) drawAnimFrame();
+      if (uiDrawOk && freshCanvas) drawAnimFrame();
     }
     traceCostLine();
     return;
@@ -506,14 +518,14 @@ void pump(bool visible, bool uiDrawOk) {
   if (s_traceNextFrameMs != 0 && (int32_t)(now - s_traceNextFrameMs) < 0) return;
   s_traceNextFrameMs = now + kTraceFrameMs;
   if (s_traceSeqStartMs == 0) s_traceSeqStartMs = now;
-  if (!s_traceQueue.tick(now, &s_traceFrame)) {
+  if (!s_traceQueue.tick(now, om::mapProject, &s_traceFrame)) {
     // The last route just finished: one clean frame without the dot, then no more redraws.
     s_traceFrame = ui::TraceFrame();
-    if (uiDrawOk) drawAnimFrame();
+    if (uiDrawOk && freshCanvas) drawAnimFrame();
     traceCostLine();
     return;
   }
-  if (!uiDrawOk) return;
+  if (!uiDrawOk || !freshCanvas) return;
   const uint32_t t0 = micros();
   drawAnimFrame();
   const uint32_t took = micros() - t0;

@@ -86,7 +86,8 @@ BIN55="$(mktemp /tmp/om-lite-est400.XXXXXX)"
 BIN56="$(mktemp /tmp/om-lite-est401.XXXXXX)"
 BIN57="$(mktemp /tmp/om-lite-est402.XXXXXX)"
 BIN58="$(mktemp /tmp/om-lite-est403.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58"' EXIT
+BIN59="$(mktemp /tmp/om-lite-est404.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -563,11 +564,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est401.cpp \
 python3 -B test_est401.py
 
 # EST-402: the charging bolt. One STATUS0 (0x40) read every 2 s from the loop (no writes), debounced
-# by two equal reads in a row in charge_state.h; the bar draws a 5 x 7 gold bolt inside the battery
-# icon while the debounced flag is true, and "unknown" (the chip did not answer at boot, the POWER
-# write was not verified, or a poll read failed) never draws one. The C++ half is the debounce, the
-# unknown-means-no-bolt rule and the shape's bounds; test_est402.py is the source half: the 2 s gate,
-# the single read, the boot readiness, the one log line and the drawing path.
+# by two equal reads in a row in charge_state.h; the bar draws a gold bolt over the battery icon
+# (EST-404: 7 x 11, tips 2 px clear above and below the frame) while the debounced flag is true,
+# and "unknown" (the chip did not answer at boot, the POWER write was not verified, or a poll read
+# failed) never draws one. The C++ half is the debounce, the unknown-means-no-bolt rule and the
+# shape's bounds; test_est402.py is the source half: the 2 s gate, the single read, the boot
+# readiness, the one log line and the drawing path.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est402.cpp -o "$BIN57"
 "$BIN57"
 python3 -B test_est402.py
@@ -583,3 +585,12 @@ python3 -B test_est402.py
 # the record on every accepted source.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est403.cpp ../../src/timekeeper.cpp -o "$BIN58"
 "$BIN58"
+
+# EST-404: the charging bolt is drawn LAST, over the battery icon and its frame, not clipped to the
+# interior. 7 x 11: the middle 44 % of the 16 px body and 4 px taller than the 7 px body, so the top
+# and bottom tips stand 2 px above and below the frame, each with a 1 px bar-colour edge. test_est404
+# repeats the geometry on the WORST-CASE status row (100 %, "GPS 14", every optional icon on) and
+# proves the bolt and its edge overdraw no other cell; it also checks the gold is at least 2 px wide
+# in every row so it stays readable over the red low-battery fill and the green full one.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est404.cpp -o "$BIN59"
+"$BIN59"

@@ -8062,3 +8062,91 @@ clock kept from a gps-nofix record is still approximate), but it never outranks 
 
 Next step: Claude flashes over USB OTA and runs the four device checks above; the kept line and
 `clock=kept` are the review. Nothing else is pending in this ticket.
+
+## 2026-11-11 20:46 (DS, EST-404): L2 Pro firmware, a proper charging bolt over the battery icon
+
+Status: in_review (not committed, not pushed).
+
+DeepSeek (Paperclip worker). EST-402 drew a 5 x 7 bolt INSIDE the 16 x 7 battery icon, and Claude's
+screenshot showed what Filip saw on the device at 20:00: both tips were cut by the frame, so the bolt
+looked clipped and bad. This ticket draws the bolt last, over the icon (fill and frame), with the top
+and bottom tips standing clear of it.
+
+### 1. The shape and the drawing
+
+- `src/ui/battery_bolt.h`: the pixel rows are now **7 x 11** instead of 5 x 7, in the same one source
+  the panel and the preview share. The silhouette is the classic bolt: the top tip is at the upper
+  right (row 0 is `....###`), the upper edge steps left into a one-row middle bar (`#######`, row 5),
+  then the lower edge starts at the bar's right end and steps left again to the bottom tip at the
+  lower left (`##.....`, row 10). Every row is non-empty and 8-connected to the one above it; 37 gold
+  pixels in all.
+- `src/ui/theme.h`: `kBoltW` 5 -> 7 and `kBoltH` 7 -> 11. 7 of the 16 px body is the middle **44 %**,
+  inside the ticket's 40-50 %; 11 is **4 px taller** than the 7 px body, so `(kBoltH - kBattH) / 2`
+  is exactly the ticket's **2 px** above and below.
+- `src/ui/widgets.cpp` `drawBolt()`: `by = y - (kBoltH - kBattH) / 2`, so the tips stand 2 px above
+  and below the frame. The 1 px `kBar` edge is now drawn for **every** row (the old code skipped the
+  first and last, because they sat on the outline); the diamond of row edges is exactly a 1 px
+  dilation, and all gold rows are drawn afterwards, so the bolt is the last thing over the fill, the
+  frame and the nub side. Gold fill and the "external power present" meaning are unchanged.
+- `drawBattery()` still calls it after the frame, the nub and the fill, and only under
+  `externalPower`; the debounce and the "unknown = no bolt" rule from EST-402 are untouched.
+
+### 2. Does the status bar have room? Yes, checked by arithmetic and by a test
+
+- The bar is 26 px (`kStatusH`), the icon is centred at cy = 13, so its rows are 10..16. The bolt's
+  rows are 8..18, and with its 1 px edge 7..19. All of that is inside 0..25: **the 2 px above and
+  below need no layout change**, and `statusBarRects()` was not touched.
+- In x the edge stays inside the icon's 16 px (bolt box x 4..10, edge 3..11), short of the terminal
+  nub at 16..17. The percent text starts 6 px right of the icon and the GPS cell ends 6 px left of
+  it, so neither can be reached.
+- `test/host/test_est404.cpp` proves it on the **worst-case row**: clock, `100%` (4 glyphs), `GPS 14`
+  (6 glyphs) and every optional icon on. The bolt's edge rectangle overlaps none of `battText`, `gps`,
+  `gear`, `time`, `fault`, `dnd`, `wifi` or `bt`, and it is inside the 26 px bar.
+
+### 3. Readable on the red low fill and the green full fill
+
+Gold alone is weak on the fills (measured WCAG ratios: gold/green 1.07:1, gold/warn 1.07:1,
+gold/red 1.55:1), which is why the dark edge carries the shape. The edge is `kBar` and measures
+9.87:1 against green, 9.89:1 against warn, 5.97:1 against red and 6.83:1 against the grey frame, so
+the gold is separated from whatever is under it. Every row keeps at least 2 px of gold and a >= 4 px
+dark outline. The 8x preview below shows 12 % (red) and 100 % (full green) side by side.
+
+### Files
+
+- `src/ui/battery_bolt.h`, `src/ui/theme.h`, `src/ui/widgets.cpp`.
+- `test/host/test_est402.cpp` (the shape test now expects 7 x 11, 37 px, tip direction),
+  `test/host/test_est404.cpp` (new), `test/host/run.sh` (BIN59, EST-402 comment).
+- `tools/mkest404.py` (new), `docs/shots/2026-11-11-est404-bolt-tips.png` (preview).
+
+### Build and tests (real exit codes, this tree)
+
+- `pio run -e om_lite_l2`: **SUCCESS**, exit 0. **RAM 160,416 / 327,680 B (49.0 %; unchanged)**,
+  **Flash 2,991,497 / 6,553,600 B (45.6 %; before 2,991,529, -32 B)**, `firmware.bin` 2,991,856 B.
+  No warning in our files (the two RadioLib `#warning`s are pre-existing).
+- `test/host/run.sh`: **exit 0**, every suite green, **0 FAIL lines**.
+  - `test_est404.cpp`: the box is 4 px taller than the body with 2 px overhang each way and 40-50 %
+    of the width; the tips are outside the body; the edge is inside the 26 px bar and inside the
+    icon's width; the worst-case row is not overdrawn; every row has >= 2 px gold and the middle bar
+    is the only full-width row.
+  - `test_est402.cpp` still proves the debounce and "unknown = no bolt"; only its shape assertions
+    moved to 7 x 11 (37 gold px, tip direction, middle bar on the body's centre row).
+
+### Preview
+
+`docs/shots/2026-11-11-est404-bolt-tips.png` is a host render of the firmware's own rectangles, the
+real theme colours and the shared bolt runs, at **1x** and **8x**, in four states: plain, bolt at
+78 %, bolt at 12 % (red fill) and bolt at 100 % (full green fill). The icon is drawn straight onto the
+bar, so the tips outside the frame are visible exactly as on the panel. It is not a screenshot.
+
+### What I could not check, and the device test
+
+- **No device.** Nothing here was seen on the glass. Please check on the panel: (a) both tips are
+  fully visible above and below the frame and are not cut by the status bar; (b) the dark edge keeps
+  the gold crisp over the green, amber and red fills; (c) the percent text and the GPS cell are
+  untouched; (d) the bolt still appears within about 4 s of plugging in and leaves within about 4 s
+  of unplugging (the EST-402 poll was not changed).
+- The 0.5 px horizontal off-centre is inherent to centring a 7 px box in 16 px (`(16 - 7) / 2 = 4`);
+  it is the same convention the old 5 px bolt used and was not worth an odd 1 px shift.
+
+Next step: Claude flashes over USB OTA and takes the screenshot; the tips and the edge on the glass
+are the review. Nothing else is pending in this ticket.

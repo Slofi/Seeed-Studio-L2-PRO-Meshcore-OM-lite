@@ -38,26 +38,26 @@ void drawSignalBars(lgfx::LovyanGFX* d, int x, int bottom, int rssi) {
   }
 }
 
-// EST-402: the charging bolt. Gold is the theme's one accent, but gold on the green fill measures
-// about 1.1:1, so every row inside the icon gets a 1 px kBar edge: expanding the run one pixel left
-// and right and one row above and below is exactly a 1 px dilation, and the gold rows are drawn
-// afterwards over its middle. The two outer rows sit on the icon's own outline and need no edge.
+// EST-402/404: the charging bolt, drawn LAST over the battery icon (fill and frame). Gold is the
+// theme's one accent, but gold on the green fill measures about 1.1:1, so every row gets a 1 px kBar
+// edge: expanding the run one pixel left and right and one row above and below is exactly a 1 px
+// dilation, and the gold rows are drawn afterwards over its middle. EST-404: the edge is drawn for
+// ALL rows, including the tips, because the bolt is taller than the body and its tips now cross the
+// frame. `y` is the icon's top row; the bolt is centred on it, `(kBoltH - kBattH) / 2` (2 px) clear.
 //
 // It means "external power is present" and nothing more. The cell voltage stays at about 4.19 V both
 // while charging and once full, and BC_LVL is the port's claim, not proof, so this build makes NO
 // "charging" vs "full" guess (EST-402 item 3; the rule is charge_state.h).
 void drawBolt(lgfx::LovyanGFX* d, int x, int y) {
   const int bx = x + (kBattW - kBoltW) / 2;
+  const int by = y - (kBoltH - kBattH) / 2;   // the tips stand clear above and below the frame
   for (int r = 0; r < kBoltH; ++r) {
-    if (r == 0 || r == kBoltH - 1) continue;   // the outer rows sit on the icon's outline
     const int hx = bx + kBoltRuns[r].x - 1;
     const int hw = kBoltRuns[r].w + 2;
-    const int hy = (r == 1) ? y + 1 : y + r - 1;
-    const int hh = (r == 1 || r == kBoltH - 2) ? 2 : 3;
-    d->fillRect(hx, hy, hw, hh, kBar);
+    d->fillRect(hx, by + r - 1, hw, 3, kBar);
   }
   for (int r = 0; r < kBoltH; ++r) {
-    d->fillRect(bx + kBoltRuns[r].x, y + r, kBoltRuns[r].w, 1, kAcc);
+    d->fillRect(bx + kBoltRuns[r].x, by + r, kBoltRuns[r].w, 1, kAcc);
   }
 }
 

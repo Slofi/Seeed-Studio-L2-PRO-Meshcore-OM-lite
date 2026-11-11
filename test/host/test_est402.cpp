@@ -31,9 +31,10 @@ static int feed(ChargeBolt& b, VbusRead read, int n) {
 
 static void testConstants() {
   CHECK(om::kChargePollMs == 2000);   // the ticket's 2 s
-  CHECK(om::ui::kBoltW == 5);
-  CHECK(om::ui::kBoltH == 7);
-  CHECK(om::ui::kBoltH == om::ui::kBattH);   // it spans the icon's seven rows
+  // EST-404: 7 x 11 over the icon, 2 px of tip above and below the 7 px body.
+  CHECK(om::ui::kBoltW == 7);
+  CHECK(om::ui::kBoltH == 11);
+  CHECK(om::ui::kBoltH == om::ui::kBattH + 4);
 }
 
 static void testUnknownAtBoot() {
@@ -150,11 +151,18 @@ static void testBoltShapeFitsTheIcon() {
       CHECK(x <= px + pw && px <= x + w);
     }
   }
-  CHECK(gold == 17);
-  CHECK(om::ui::kBoltRuns[3].w == om::ui::kBoltW);   // the middle bar is the full bolt width
+  CHECK(gold == 37);
+  // EST-404: the middle bar is the full bolt width and sits on the body's centre row.
+  const int mid = om::ui::kBoltH / 2;
+  CHECK(om::ui::kBoltRuns[mid].w == om::ui::kBoltW);
+  CHECK(mid == (om::ui::kBattH - 1) / 2 + (om::ui::kBoltH - om::ui::kBattH) / 2);
+  // The top tip is upper right, the bottom tip lower left (the classic lightning direction).
+  CHECK(om::ui::kBoltRuns[0].x >= om::ui::kBoltW / 2);
+  CHECK(om::ui::kBoltRuns[om::ui::kBoltH - 1].x + om::ui::kBoltRuns[om::ui::kBoltH - 1].w <=
+        (om::ui::kBoltW + 1) / 2);
   // Centred on the 16 px battery icon with a margin on both sides.
   const int bx = (om::ui::kBattW - om::ui::kBoltW) / 2;
-  CHECK(bx == 5);
+  CHECK(bx == 4);
   CHECK(bx > 0);
   CHECK(bx + om::ui::kBoltW < om::ui::kBattW);
 }
@@ -170,7 +178,7 @@ int main() {
   testBeginResetsToUnknown();
   testBoltShapeFitsTheIcon();
   if (g_fail == 0) {
-    printf("est402: debounce, unknown-means-no-bolt and the 5x7 shape all pass\n");
+    printf("est402: debounce, unknown-means-no-bolt and the 7x11 shape all pass\n");
     return 0;
   }
   printf("est402: %d failure(s)\n", g_fail);

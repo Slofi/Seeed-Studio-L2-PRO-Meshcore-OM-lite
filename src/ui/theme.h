@@ -214,12 +214,13 @@ constexpr int16_t kNewDotR    = 2;
 constexpr int16_t kBattW      = 16;
 constexpr int16_t kBattH      = 7;
 constexpr int16_t kBattGap    = 8;   // mock .status .bits gap: icon -> "97%"
-// EST-402: the charging bolt drawn inside the battery icon while external power is present. The box
-// is 5 x 7, i.e. exactly the icon's height, and is centred on its 16 px width. The shape's rows are
-// ui/battery_bolt.h; the colours are theme constants in widgets.cpp (gold on the fill, a bar-colour
-// 1 px edge so the gold stays readable on every fill colour).
-constexpr int16_t kBoltW      = 5;
-constexpr int16_t kBoltH      = 7;
+// EST-402/404: the charging bolt drawn OVER the battery icon while external power is present. EST-404:
+// the box is 7 x 11, so it is 4 px taller than the 7 px body and its tips stand 2 px above and below
+// the frame instead of being clipped to the interior. 7 of 16 px is the middle 44 % of the body. Its
+// 1 px bar-colour edge is drawn first, all round, so the gold stays crisp over the fill AND the frame.
+// The shape's rows are ui/battery_bolt.h; gold is the accent from widgets.cpp.
+constexpr int16_t kBoltW      = 7;
+constexpr int16_t kBoltH      = 11;
 constexpr int16_t kBarsW      = 2;
 constexpr int16_t kBarsGap    = 1;
 constexpr int16_t kBarsH      = 7;

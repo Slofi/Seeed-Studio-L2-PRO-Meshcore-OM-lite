@@ -6535,3 +6535,62 @@ keyboard key (pressed + bubble, top row and a lower row), a selector row, a shee
 and chip, and an RPTR row. Then watch one minute of `[press] latency worst=...` on the Chat page with
 the keyboard open (the worst screen: a full chat + sheet compose). If Filip wants the slide-off to
 cancel the action as well, that is his call and a one-line change.
+
+## 2026-11-11 (DS, EST-391): the NTP capture's 32-bit `time_t` overflow, fixed in 2 checks
+Status: in_review (not committed, not pushed).
+
+### A. Root cause and fix
+Claude proved on 2026-11-11 15:58 that the device GETS an NTP reply (`[ntp] ... reach=1`) but the
+capture drops it (`sync=0 notify=0`). On this toolchain (esp-2021r2-patch5, GCC 8.4, xtensa-esp32s3)
+`sizeof(time_t) == 4`, so the bound cast `(time_t)om::kMaxSaneEpoch` is **-192522496** (the built
+`.word`); `tv->tv_sec >= -192522496` was true for EVERY real reply, so `src/wifi_link.cpp:44` and `:55`
+returned before storing. That was the whole "Wi-Fi time never arrives".
+
+- `src/ntp_plan.h` now holds the check in ONE small inline function, `ntp::replyEpochSane(int64_t)`,
+  which widens the seconds to `int64_t` before comparing against `kMinSaneEpoch` / `kMaxSaneEpoch`
+  (the timekeeper's own constants, `#include "timekeeper.h"`). One place, so the two hooks and the
+  host test cannot drift.
+- `src/wifi_link.cpp`: `sntp_sync_time()` and `sntpNotify()` both go through one `captureNtpReply()`
+  helper that does `const int64_t s = (int64_t)tv->tv_sec;`, calls the check, then stores
+  `s_ntpEpoch = (uint32_t)s` and `s_ntpGot = true` exactly as before. Nothing else on EST-385's path
+  changed (the schedule, the rotation, the sleep guard, the "after its attempt was closed" drop and
+  `timeKeeper().setFromSource()` are untouched).
+- The capture now logs one line, `[ntp] reply captured: epoch accepted` (no time value), printed in
+  the hook itself so the device log shows the catch even when the reply lands after its attempt was
+  closed (the loop still drops that one, honestly logged).
+- Grep of the whole `src/` tree: the only `(time_t)kMinSaneEpoch` / `(time_t)kMaxSaneEpoch` casts
+  were those two; `saneEpoch()` and `ui/age.h` already compare in `uint32_t` and are correct
+  (`kMaxSaneEpoch` fits in `uint32_t`), so they were left alone.
+
+### B. Host test
+New `test/host/test_est391.cpp`, built and run by `test/host/run.sh` (BIN49):
+- a `DeviceTimeval` struct with `int32_t tv_sec` holding **1794409120** (2026-11-11 14:58:40 UTC);
+- the OLD expression, replicated with the device's `int32_t` casts, is asserted to REJECT it (so the
+  test fails if the old code comes back), and `ntp::replyEpochSane()` (the firmware's own function)
+  is asserted to ACCEPT it, plus the combined assertion;
+- the proof as numbers: `(int32_t)kMaxSaneEpoch == -192522496` while `(int64_t)kMaxSaneEpoch ==
+  4102444800`; the window's edges (`min-1` and `max` refused, `min` and `max-1` accepted), `0` and
+  `-192522496` refused.
+
+### C. Build and tests
+- `pio run -e om_lite_l2` inside the sandbox: **SUCCESS**, exit 0. RAM **160168 / 327680 B (48.9 %)**,
+  flash **2985705 / 6553600 B (45.6 %)**.
+- `test/host/run.sh`: **exit 0**, all suites pass, including the new
+  `est391: the NTP capture accepts a 2026 reply on a 32-bit time_t`, and EST-385's rule-9 format grep
+  still passes with the new line (no address, SSID or password in it).
+
+### D. Could not check (no device, no serial)
+- That the reply now really lands: requires a flash and a Wi-Fi connection. The expected device log is
+  `[ntp] reply captured: epoch accepted`, then `[wifi] NTP <epoch> s: applied, source Wi-Fi`, then
+  `[ntp] attempt 1 ... result=ok`.
+- Whether `Serial.println()` from the two hooks (both run in the tcpip thread) ever stalls the stack:
+  it is one short line per accepted reply, at most one per attempt, and the ticket asks for the line
+  in the hook. If it ever shows up as a timing problem, the flag-based alternative is to let the loop
+  print it.
+- The real `sizeof(time_t)` on the device is taken from Claude's proof of the built `.word`; the host
+  test reproduces the 32-bit arithmetic deliberately, since host `time_t` is 64 bits.
+
+### E. Next step
+Claude reviews the diff and flashes, turns Wi-Fi on and watches the serial log for the three lines
+above; if `[ntp] reply captured: epoch accepted` appears and the clock sets, EST-391 is closed and the
+Wi-Fi time path can be checked on the glass (status bar time, then a reboot to see it survive).

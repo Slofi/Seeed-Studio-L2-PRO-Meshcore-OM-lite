@@ -15,8 +15,21 @@
 
 #include <stdint.h>
 
+#include "timekeeper.h"   // kMinSaneEpoch / kMaxSaneEpoch: the one set of bounds
+
 namespace om {
 namespace ntp {
+
+// --------------------------------------------------------------------------------- the reply capture
+// EST-391. The SNTP capture's sanity check, in ONE place and compared in a 64-bit integer. On the
+// device's toolchain (esp-2021r2-patch5, GCC 8.4, xtensa-esp32s3) sizeof(time_t) == 4, so the old
+// check `tv->tv_sec >= (time_t)om::kMaxSaneEpoch` compared against -192522496 (the assembled `.word`)
+// and was TRUE for every real reply: the capture threw all of them away, which is exactly the device's
+// "Wi-Fi time never arrives" (reach=1, sync=0, notify=0). Widening the seconds to int64_t BEFORE the
+// comparison is the whole fix; the bounds stay the timekeeper's own.
+inline bool replyEpochSane(int64_t sec) {
+  return sec >= (int64_t)om::kMinSaneEpoch && sec < (int64_t)om::kMaxSaneEpoch;
+}
 
 // ------------------------------------------------------------------------------- the server rotation
 // Per attempt, in this order, then back to the first: a pool name, a second public name, a fixed

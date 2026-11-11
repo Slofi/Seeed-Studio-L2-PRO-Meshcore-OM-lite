@@ -39,22 +39,28 @@ static volatile uint32_t s_ntpEpoch = 0;
 static volatile bool s_ntpGot = false;
 static volatile uint32_t s_ntpNotifyCount = 0;
 
-extern "C" void sntp_sync_time(struct timeval* tv) {
+// EST-391: both hooks capture through this one path, so the check and the log line cannot drift. The
+// check itself is ntp::replyEpochSane() (src/ntp_plan.h): it compares in int64_t, because on this
+// toolchain time_t is 32 bits and the old `(time_t)kMaxSaneEpoch` was NEGATIVE, i.e. true for every
+// real reply. The capture line is printed here, in the hook, so the device log shows the catch even
+// when the reply lands after its attempt was closed (the loop then drops it, but the log is honest).
+static void captureNtpReply(const struct timeval* tv) {
   if (tv == nullptr) return;
-  if (tv->tv_sec < (time_t)om::kMinSaneEpoch || tv->tv_sec >= (time_t)om::kMaxSaneEpoch) return;
-  s_ntpEpoch = (uint32_t)tv->tv_sec;
+  const int64_t s = (int64_t)tv->tv_sec;
+  if (!om::ntp::replyEpochSane(s)) return;
+  s_ntpEpoch = (uint32_t)s;
   s_ntpGot = true;
+  Serial.println("[ntp] reply captured: epoch accepted");
 }
+
+extern "C" void sntp_sync_time(struct timeval* tv) { captureNtpReply(tv); }
 
 // The notification callback is the second, independent capture: lwIP calls it after sntp_sync_time()
 // (IDF's own sntp_sync_time() body does; ours replaces that body, so today this counts 0). It only
-// touches volatiles, because it runs in the tcpip thread.
+// touches volatiles and the one EST-391 line, because it runs in the tcpip thread.
 static void sntpNotify(struct timeval* tv) {
   ++s_ntpNotifyCount;
-  if (tv == nullptr) return;
-  if (tv->tv_sec < (time_t)om::kMinSaneEpoch || tv->tv_sec >= (time_t)om::kMaxSaneEpoch) return;
-  s_ntpEpoch = (uint32_t)tv->tv_sec;
-  s_ntpGot = true;
+  captureNtpReply(tv);
 }
 
 namespace om {

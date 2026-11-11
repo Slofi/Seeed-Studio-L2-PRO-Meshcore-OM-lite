@@ -76,7 +76,8 @@ BIN45="$(mktemp /tmp/om-lite-est386.XXXXXX)"
 BIN46="$(mktemp /tmp/om-lite-est387.XXXXXX)"
 BIN47="$(mktemp /tmp/om-lite-est388.XXXXXX)"
 BIN48="$(mktemp /tmp/om-lite-est390.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48"' EXIT
+BIN49="$(mktemp /tmp/om-lite-est391.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -455,3 +456,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est390.cpp \
 # own, the look is a frame overlay under the toast, the preview exists only for character keys, the
 # touch sound stored default is OFF and plays only on a tap, and the latency line exists.
 python3 -B test_est390.py
+
+# EST-391: the NTP capture's sanity check compares in 64 bits. A struct with the device's 32-bit
+# tv_sec holding 2026-11-11 is REJECTED by the old expression (the bug, reproduced) and ACCEPTED by
+# ntp::replyEpochSane(), the firmware's own inline check, plus the window's four edges.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est391.cpp -o "$BIN49"
+"$BIN49"

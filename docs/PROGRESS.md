@@ -6923,3 +6923,388 @@ Claude reviews the diff, flashes, and on the glass: open the Map with Traces on,
 pan during it (the trace must stay on the same repeaters), zoom + / - during it (same), tuck and
 restore the bars, then let go (the final pan and the trace must be drawn at once). Then Settings >
 General > POSITION > Fixed: "z15" must sit under Cancel, clear of it.
+
+## EST-395 sweep: core and system
+
+Read-only sweep of the core and system code, DeepSeek (Paperclip worker, 2026-11-11). **No code was changed and
+nothing was committed.** Screens and UI are the next ticket; a UI file appears here only where a core finding
+reached into it (map.cpp's log line).
+
+**Counts: 14 findings: S1 0, S2 5, S3 3, S4 2, S5 4.** Ranked most severe first. Every finding quotes the real
+line; "not verified" marks what I inferred instead of measuring.
+
+### 1. S2 · timekeeper.h:41 + timekeeper.cpp:289 · the clock's sanity gate admits epochs that a 32-bit `time_t` cannot hold
+The gate accepts anything below 2100, but on this toolchain `time_t` is 32 bits and signed, so the top of that
+window is a negative number, and it is handed straight to `settimeofday()`.
+```
+timekeeper.h:41     constexpr uint32_t kMaxSaneEpoch = 4102444800UL;   // 2100-01-01 00:00:00 UTC
+timekeeper.h:73-74  constexpr bool saneEpoch(uint32_t epoch) { return epoch >= kMinSaneEpoch && epoch < kMaxSaneEpoch; }
+timekeeper.cpp:289    tv.tv_sec = (time_t)epoch;
+```
+Trigger: one NTP/GPS/phone time source returns anything from 2038-01-19 onward (a bad packet, a 2100-ish date from
+the L76K before its first fix, a stray value in NVS read as the floor). `saneEpoch()` passes it, `(time_t)epoch` is
+negative, `settimeofday` sets the system clock into 1901, and every stamp written afterwards (history, battery log,
+message ages) is wrong until the next restart. This is EST-391's root cause in a second place: the fix there was
+applied to the comparison, not to the bound that feeds the cast. Fix: bound `kMaxSaneEpoch` at `INT32_MAX`
+(2038-01-19 03:14:07 UTC) and add a host test that `saneEpoch` rejects the first value `(time_t)` turns negative.
+Effort S.
+
+### 2. S2 · board.cpp:729 · two `Wire.read()` calls in one expression: the ADC bytes can arrive swapped
+```c
+value = (uint16_t)((Wire.read() << 8) | Wire.read());
+```
+The order in which the two `Wire.read()` calls run is unspecified in C++ (any evaluation order, and the operands of
+`|` are unsequenced). If the compiler picks right-to-left, the ADS1115's high and low byte are swapped and the
+battery reads a garbled milli-voltage. GCC happens to order these calls left to right today, so the device looks
+correct, but nothing in the code or a test pins it and a toolchain change or `-O2` reordering can flip it.
+Trigger: a rebuild with a different optimisation or GCC version; the symptom is a battery percentage that jumps
+wildly, hardest to diagnose precisely because it looks like an ADC problem. Fix: read into two locals, then combine.
+Effort S.
+
+### 3. S2 · board.cpp:67-77 · a half-failed expander latch rolls the shadow copy back, leaving it disagreeing with the chip
+```c
+bool latch() {
+  return writeRegisters(0x02, s_output, sizeof(s_output)) &&
+         writeRegisters(0x06, s_config, sizeof(s_config));
+}
+...
+board.cpp:74-76    if (latch()) return true;
+                   s_output[0] = o0; s_output[1] = o1; s_config[0] = c0; s_config[1] = c1;
+```
+`&&` short-circuits: when the FIRST write succeeds and the SECOND (config, 0x06) fails, the PCA9554's output
+register has already taken the new levels, but the function reports failure and restores the old shadow. From then on
+`s_output` is a lie; every later `stageOutput()` + `latch()` recomputes from it, and `gnssResetAsserted()`,
+`gpsRailOn()` and `sdPresent()` all read that shadow rather than the hardware. One transient I2C error (the ticket's
+own 2026-11-09 touch failure was in this function) can silently leave a rail in a state the firmware believes is the
+opposite, and the boot-time GPS reset decision reads exactly these bits. Fix: only roll back when the first write
+failed; when the second fails, re-read 0x02/0x06 from the chip into the shadow and log that one line. Effort S.
+
+### 4. S2 · board.cpp:998 · the GNSS fix flag never expires, so a receiver that stops talking keeps advertising the old point
+```c
+out.valid = atoi(fields[6]) > 0;
+```
+`valid` is only ever written when a `$..GGA` line arrives. While the module talks this is fine (a lost fix arrives as
+quality 0 within a second), but if the UART goes quiet, or its RX pin fails as in the EST-383 pin-swap episode, the
+last `valid = true` and the last `lat/lon` stand for ever. The node then keeps advertising a position it no longer
+has and the screens keep showing "Fixed". Evidence that nothing else clears it: `GpsState` (gps_sky.h:88-99) has no
+timestamp field at all. Trigger: GPS antenna unplugged, UART wedged, or a Jamming-style hot start; the position on
+the map freezes at the last good value and nobody can tell it from a live fix. Fix: stamp `lastFixMs` in `GpsState`
+and clear `valid` in `gpsPoll()` after e.g. 5 s without a GGA, or gate every `valid` read on a fresh stamp. Effort S.
+
+### 5. S2 · history_store.cpp:83-90 · an exhausted file pool returns NULL and is counted nowhere
+```c
+HistoryFile* openAppend(const char* path) override {
+  for (int i = 0; i < kFiles; ++i) {
+    if (files_[i].busy()) continue;
+    return files_[i].begin(fs_, path, true) ? &files_[i] : nullptr;
+  }
+  return nullptr;
+}
+```
+The budget in sd_budget.h is now correct and static_asserted on both sides (see "clean" below), so the pool running
+dry should be rare, but when it does happen the store gets a NULL handle and the EST-380 lesson repeats: no counter,
+no line, `hist_dropped` stays 0 while messages are lost. Same shape for a card error inside `begin()`. Not verified
+whether `HistoryStore` counts a NULL append handle (I did not read history_log.h); if it does, this downgrades to S5.
+Fix: one `openFailures` counter on the volume, reported in the `history` status line. Effort S.
+
+### 6. S3 · map.cpp:520 · the map log prints the position to five decimals, i.e. to about a metre
+```c
+Serial.printf("[map] z%d%s %.5f,%.5f -> %d tiles\n", s_z, mag ? " (2x)" : "", s_cLat, s_cLon, drawn);
+```
+Rule 9 (REBUILD.md: the repo is public) allows no exact positions anywhere, and this line puts the node's real
+centre into every serial log and from there into whatever Claude pastes into a ticket or PROGRESS.md. It is written
+on every map open and every zoom. Fix: drop the pair, or print `%.1f` as rule 9 allows; if the number is needed to
+debug tiles, print the tile indices instead of the degrees (which the same line could carry instead). Effort S.
+Same line family: `[map] overlay z%d opened` (map.cpp:222) is safe.
+
+### 7. S3 · mesh_link.cpp:561, 884, 2530, 2553 · message texts, DM texts and node names go into the log
+```c
+mesh_link.cpp:561   Serial.printf("[mc] DM from %s: %s (hops %d snr %.2f)\n", from.name, text ? text : "", ...);
+mesh_link.cpp:884   Serial.printf("[mc] channel %d: %s (hops %d snr %.2f)%s\n", channelIdx, s_lastText, ...);
+mesh_link.cpp:2530  Serial.printf("[ble] phone sent ch%d: %s\n", ui, m.text);
+mesh_link.cpp:2553  Serial.printf("[ble] phone sent a DM to %s: %s\n", ci->name, m.text);
+```
+Four receive and send paths log the full body, and one also logs the sender's name. Rule 9 forbids "other people's
+message texts or names from real chats" in logs, and the log is the file that gets quoted into the public PROGRESS.md
+(and into tickets) whenever something is debugged. Trigger: any real chat while a serial capture runs, which is the
+normal way this project debugs. Fix: log the length and the channel/DM seq only, e.g. `[mc] channel %d: %u B
+(hops %d snr %.2f)`; keep the text in RAM where it already is. Effort S for all four.
+
+### 8. S3 · wifi_link.cpp:808 (also 799, 801, 838, 994) · the SSID and the LAN address are printed
+```c
+Serial.printf("[wifi] connected to \"%s\" ip=%s rssi=%d internal=%u largest=%u\n", ssid, ipText, ...);
+```
+Rule 9 names SSIDs and LAN addresses explicitly. The connect line prints both, and the save/forget lines print the
+SSID. Trigger: every Wi-Fi use, which EST-389's https probe makes routine. Fix: print the network's index in the saved
+list (or a hash prefix) and the DHCP success as a boolean; `[ntp] dns=%d main=%s ... (addresses not printed)` at line
+204 already shows the house style, so the connect line should follow it. Effort S.
+
+### 9. S4 · board.cpp:179 · about 700 ms of hard `delay()` before anything else in boot
+```c
+delay(500);   // (plus 40 + 10 + 50 + 20 + 10 + 60 in the same function, all blocking)
+```
+`expanderBegin()` alone blocks ~700 ms waiting for the panel's reset/SLPOUT timing (500 + 60 + 40) and the SD card
+power (50). None of it needs the loop task: SPIFFS/NVS/identity loading, the map pack open and the history store
+could run inside that window, which is what the boot log's own `[om] boot ... ms` stamps would show. Estimated gain
+300-500 ms of the visible boot (the 500 is the largest single block and the panel only needs it before the first
+pixel, not before NVS). Not verified how much of the rest of boot is already overlapped with it. Fix: split the
+function into "rails on" and "panel reset/release", and run the non-panel half of boot in between. Effort M.
+
+### 10. S4 · audio.cpp:185-191 · the sound buffer's fallback lands 48 KB in internal RAM
+```c
+s_buf = (int16_t*)ps_malloc((size_t)sound::kMaxSamples * sizeof(int16_t));
+if (s_buf == nullptr) { s_buf = (int16_t*)malloc((size_t)sound::kMaxSamples * sizeof(int16_t)); }
+```
+Deliberate and logged, but with the measured internal-RAM budget in this ticket (boot ~162 KB, BLE ~65 KB, Wi-Fi
+~22 KB, TLS ~58 KB, and the loop stack 16 KB) a 48 KB internal allocation is the single largest user and would push
+a Wi-Fi + BLE + TLS peak past the edge. Trigger: PSRAM refused once (a boot glitch, not a rare board) and then the
+first https probe during a BLE session. Fix: when PSRAM is absent, cut `kMaxSamples` to a quarter and log the shorter
+phrase, rather than take internal RAM for sound that nobody needs at full length. Effort S.
+
+### 11. S5 · board.cpp:132 and 162/185 · dead staging line and a duplicated assignment
+```c
+board.cpp:132  stageInput(kBitLcdControl);       // overridden 30 lines later by setOutput(kBitLcdControl, true)
+board.cpp:162  s_expanderReady = true;           // assigned again at 185, before the only console line that uses it
+```
+`stageOutput()` clears the config bit, so staging LCD control as an input first is a no-op that reads as intent. The
+double `s_expanderReady = true` is harmless but hides which one matters (162 is the one that makes the pulses work).
+Fix: delete both. Effort S.
+
+### 12. S5 · board.cpp:748-754 vs 729 · the battery scale exists twice
+```c
+adsPinMilliVolts():  const float volts = (float)(int16_t)raw * 4.096f / 32767.0f;  ... return mv <= 0.0f ? 0 : (uint16_t)mv;
+batteryMilliVolts(): const float volts = (float)(int16_t)raw * 4.096f / 32767.0f;  return (uint16_t)(volts * 2.0f * 1000.0f);
+```
+Two copies of the same ADC constant, one of them clamped at 0 and the other not, and the comment above them states
+the PGA field is 000 (+/-6.144 V) while the divisor is the 4.096 V one. The device's readings were accepted as
+correct, so I am not calling the number wrong ("not verified" either way), but any future calibration has to be made
+in two places and one of them will be missed. Fix: `batteryMilliVolts() { uint16_t raw; if (!adsReadChannel(0,&raw) ||
+!raw) return 0; return (uint16_t)(adsPinMilliVolts(raw) * 2u); }`. Effort S.
+
+### 13. S5 · board.cpp:1027 · the NMEA line buffer drops the overflow silently
+```c
+if (s_nmeaLen < sizeof(s_nmea) - 1) s_nmea[s_nmeaLen++] = c;
+```
+No `else`, no counter. A longer-than-127-byte line (or, with the CASIC reader off, a run of binary bytes that never
+contains `\n`) is truncated and then parsed as a sentence, fails its checksum and lands in `checksumBad` where it
+cannot be told from radio noise. Bounded and self-recovering, so not a crash; it only costs diagnosis. Fix: count
+`out.lineOverflow` in the `else`, and print it in the `gps` status line. Effort S.
+
+### 14. S5 · audio.cpp:210-215 · `codecMute()` writes 0 into the codec when its read fails
+```c
+if (Wire.endTransmission(false) == 0 && Wire.requestFrom((int)kAddr, 1) == 1) v = (uint8_t)Wire.read();
+v = (uint8_t)(v & 0x9F);
+w(0x31, mute ? (uint8_t)(v | 0x60) : v);
+```
+If the register read fails, `v` stays 0 and the write clears every other bit of 0x31 with no line in the log. The
+mute bit ends up right and the rest of the register is silently reset, which is the class this ticket hunts (a failed
+read presented as a value). Trigger: one I2C error during standby, which `audioStandby()` calls on every idle
+transition. Fix: on a failed read, write only the two mute bits from a cached copy of the register, or skip the write
+and count it. Effort S.
+
+### Clean (checked, nothing found)
+- **SD open-file budget (EST-380): consistent.** `history_store.cpp:117-118` pins the pool to the budget
+  (`static constexpr int kFiles = sd_budget::kHistoryPoolFiles; static_assert(kFiles == 4, ...)`) and map.cpp holds
+  exactly the counted five handles (main pack 346, two overlay idx/pack pairs 202/214). The `[sd] open-file budget`
+  line prints the sum at boot.
+- **crash_report.cpp: clean.** Boot checkpoint, coredump check, the erase-only-after-a-good-summary rule and the
+  `cs.task[16]` copy into `char task[17]` are all bounded correctly; the only ignored return is
+  `esp_core_dump_image_erase()`, whose failure only means the same dump is re-read next boot.
+- **gps_boot.h: clean and well guarded.** The reset table is the right shape and `board.cpp:88-99` static_asserts
+  the SDK's numbers onto it, so an SDK renumbering fails the build instead of silently changing the rule.
+- **I2C from a second task: not a fault today.** Only `board.cpp` and `audio.cpp` touch `Wire`, and `audio.cpp`'s I2C
+  calls (`audioBegin`, `audioVolume`, `codecMute`, `audioStandby`) are all loop-context; the `om_audio` task does
+  render + `i2s_write` only (audio.cpp:147-180). So there is no bus race despite there being no mutex. If any future
+  ticket moves a codec call into the task, that becomes an S1.
+
+### Coverage
+**Read in full:** `board.cpp` (all 1061 lines), `sd_budget.h`, `crash_report.cpp`, `audio.cpp:120-282`. **Read in
+part:** `board.h:1-120`, `timekeeper.cpp:225-300`, `gps_boot.h:1-60`, `gps_sky.h:88-129`, `wifi_link.cpp:560-760`,
+`history_store.cpp:1-129`, `power_log.cpp:1-60`, `REBUILD.md`. **Read only through targeted grep (not a full read,
+so absences there are not evidence of a clean file):** `mesh_link.cpp`, `map.cpp`, `timekeeper.h`, `ntp_plan.h`.
+**Not reached at all (left for the next run):** `main.cpp` setup()/loop() orchestration, `usb_commands.cpp`,
+`usb_cmd_logic.cpp`, `ota.cpp`, `mesh_link.cpp` body, `target.cpp/.h`, `ble_link.cpp`, `ntp_sleep.h`,
+`https_probe.h`, `https_probe_ca.h`, `radio.cpp`, `radio_diag.cpp`, `radio_stats.cpp`, `position.cpp/.h`,
+`position_source.h`, `power_log.cpp` body, `history/history_log.h`, `sound_synth.cpp`, `timekeeper.cpp` body,
+`gps_raw.cpp`, `gps_aid.h`, `gps_mode.h`, `wifi_link.cpp` body outside 560-760.
+**Not done:** the HTTPS probe's ~200 B per-probe loss. I read the whole `httpsExchange()` path (wifi_link.cpp:584-720)
+and every exit deletes the `WiFiClientSecure`; I found no leak there, so the loss is either inside mbedTLS/lwIP
+(TIME_WAIT, a cached session) or outside this function, and it needs a read of `httpsFinish()` plus a device
+measurement to settle. Say "not verified", not "leak fixed".
+
+### Next step
+S1-free this time, but #1 and #2 are one-line crashes-in-waiting and #3 can leave a rail inverted; Claude decides
+which of them to ticket first. The privacy family (#6-#8) is a single small commit and would make the log safe to
+paste. Everything above #9 is a few lines each; #9 and the not-reached list need a second 30-minute run.
+
+## EST-396 sweep: UI
+
+Read-only sweep of the UI layer, DeepSeek (Paperclip worker, 2026-11-11). **No code was changed and nothing was
+committed.** Scope: `src/ui/` (screens, map chrome/pick, notice panel, toast, widgets, theme, layouts, fonts, icons,
+keyboard, chat layout/selector, settings layout), `src/screens/` and `main.cpp`'s tap, drag, settings, keyboard and
+pop-up handlers. The core was swept in EST-395 and is only mentioned here where a UI file reached into it.
+
+**Counts: 8 findings: S1 0, S2 0, S3 2, S4 0, S5 6.** Ranked most severe first. Every finding quotes the real line;
+"not verified" marks what I inferred instead of measured. **The UI layer came out much cleaner than the core did:**
+the two S3s are log lines, and everything else is a constant or a dead line. I found no crash, no data loss, no
+wrong behaviour proven, and no memory or speed problem in this layer.
+
+### 1. S3 · main.cpp:1359 and main.cpp:5246 · a node's exact position and name go into the serial log
+```c
+main.cpp:1359    Serial.printf("[chat] map %s %.6f,%.6f\n", m.name, lat, lon);
+main.cpp:5246    Serial.printf("[nodes] map %s %.6f,%.6f\n", name, lat, lon);
+```
+Rule 9 (REBUILD.md: the repo is public) allows no exact positions anywhere, and these two lines print another node's
+real coordinates to six decimals (about 0.1 m) plus its name, every time someone taps INFO > Show on map or a node's
+sheet > Show on map. Trigger: one tap on either row for a node that has a position. This is the same family as
+EST-395 #6 (`map.cpp:520`); these two are the UI handlers that feed it, so fixing map.cpp alone leaves the position
+in the log from the tap side. Fix: drop the numbers, `Serial.printf("[chat] map %s (position)\n", m.name)`, or one
+decimal at most. Effort S.
+
+### 2. S3 · main.cpp:1172, 1372, 1375 · the message text itself is printed on send and on resend
+```c
+main.cpp:1172    Serial.printf("[mc] UI DM send: %s '%s'\n", sent ? "ok" : "failed", g_kbText);
+main.cpp:1372    Serial.printf("[chat] DM resend %s '%s'\n", sent ? "ok" : "failed", m.text);
+main.cpp:1375    Serial.printf("[chat] resend %s '%s'\n", sent ? "ok" : "failed", m.text);
+```
+Same log family as EST-395 #7, in the UI paths that were not covered there. Being precise about severity: rule 9's
+wording bans *other people's* message texts, and these are the user's own draft and own sent message, so this is a
+lesser case than #7. It still puts chat content into the one artefact that gets pasted into tickets. Not verified
+whether a clip is needed for the receiver's text elsewhere; I only checked these three. Fix: log the byte count and
+the verdict, not the text. Effort S.
+
+### 3. S5 · screen_nodes.cpp:38 · the sheet row reserves a hard-coded 70 px and puts the value on the panel edge
+```c
+drawTextEllipsis(d, FontRole::SansBody, kInk, kSheet, r.x, cy, r.w - 70, label);
+if (value != nullptr && value[0] != 0) {
+  drawTextRight(d, FontRole::MonoMeta, value[0] == 'o' && value[1] == 'n' ? kAcc : kDim, kSheet,
+                r.right(), cy, value);
+```
+Two problems in one row: `70` is a pixel number that belongs in the layout (the ticket's own class), and `r.right()`
+puts the value flush against the panel's edge while every other sheet row keeps `kSheetPadX`/`kSheetGap`. The label
+is cut at `r.w - 70` whether or not the value needs that room, so a long repeater name in the trace sheet is
+ellipsised earlier than necessary even when the value is short ("SNR 3.2" is about half of 70 px). The same function
+also decides colour by testing the string (`value[0] == 'o' && value[1] == 'n'`), so any future value starting with
+"on" is drawn as an online state. Trigger: a trace hop whose node name is long, or any row whose value begins "on".
+Fix: `kNodeSheetValueW` in theme.h, right-align at `r.right() - kSheetPadX`, and pass an "is-online" flag instead of
+sniffing the text. Effort S.
+
+### 4. S5 · screen_map.cpp:466-469 with map_chrome.cpp:70 · the callout's two text rows are literals, its box is a theme constant
+```c
+map_chrome.cpp:70   c.callout = Rect{8, (int16_t)(barTop - 8 - kMapCalloutH), (int16_t)(w - 16), kMapCalloutH};
+screen_map.cpp:467  drawTextEllipsis(d, FontRole::SansBody, kAccInk, kSelBg, c.callout.x + 7, c.callout.y + 12, c.callout.w - 14, v.calloutTitle);
+screen_map.cpp:468  drawTextEllipsis(d, FontRole::MonoMeta, kDim, kSelBg, c.callout.x + 7, c.callout.y + 28, c.callout.w - 14, v.calloutLine);
+```
+The box's height comes from `kMapCalloutH` (40) but the two baselines (12 and 28) and the padding (7, 14) do not, and
+the box's x/width use `8`/`16` where `kMapMargin` (6) exists. It looks right today; it stops being right the moment
+someone changes the callout height, and nothing in the build or a host test would say so. Trigger: any change to
+`kMapCalloutH` or to kMapMargin. Fix: `kMapCalloutPadX`, `kMapCalloutLine1Cy`, `kMapCalloutLine2Cy` in
+map_chrome.h, and `kMapMargin` for the box's inset. Effort S.
+
+### 5. S5 · main.cpp:5546 · a dead variable is the old coordinate hit test, left standing in front of the new one
+```c
+static void handleTap(int x, int y, bool longPress) {
+  Serial.printf("[tap] %d,%d\n", x, y);
+  om::sounds::playClick();
+  const bool topRight = (y < 40 && x >= 260);
+```
+`topRight` is never read anywhere in the tree (checked with ripgrep for the identifier: this line only). It is exactly
+the "stale branch left in front of the new one" pattern that bit three times in S492, in its smallest form: a
+coordinate rule that no longer decides anything. Harmless at run time, but the next person adding a top-right tap
+will find it and may trust it. Fix: delete the line (and, if the tap log is kept, keep it, it is screen coordinates,
+not a position). Effort S.
+
+### 6. S5 · widgets.cpp:387-401 · the one-line toast has no ellipsis and no clip, so a long line runs off its plate
+```c
+const Rect box{(int16_t)kToastMargin, (int16_t)(L.tabbar.y - kToastMargin - kToastH),
+               (int16_t)(L.width - 2 * kToastMargin), kToastH};
+...
+setRole(d, FontRole::SansBody);
+d->setTextDatum(lgfx::textdatum_t::middle_center);
+d->setTextColor(kInk, kPanel2);
+d->drawString(text, box.x + box.w / 2, box.y + box.h / 2);
+```
+This is the one text path in the UI that neither ellipsises nor clips: `drawString` centred on the plate draws past
+both rounded ends onto whatever is behind, and `ToastState::text` holds up to 63 bytes without a guard
+(`toast.h:67 snprintf(text, sizeof(text), "%s", t);`). The box is 304 px wide, about 48 characters at 11 px sans.
+**Not verified** that a current single-line caller exceeds that: the longest I found in the tap handlers is
+`"History not saved: card error, 4294967295 dropped"` (main.cpp:5704), which is 48 characters and therefore exactly on
+the edge, so this is one long count away from showing. Fix: `drawTextEllipsis(d, FontRole::SansBody, kInk, kPanel2,
+box.x + kToastMargin, box.y + box.h / 2, box.w - 2 * kToastMargin, text)`, or clip to the box. Effort S.
+
+### 7. S5 · screen_chat.cpp:520 and screen_nodes.cpp:56 · the keyboard sheet's corner radius is used as another sheet's radius
+```c
+screen_chat.cpp:520    d->fillRoundRect(g.panel.x, g.panel.y, g.panel.w, (int16_t)(g.panel.h + kOskRadius), kOskRadius, kSheet);
+screen_nodes.cpp:56    d->fillRoundRect(g.panel.x, g.panel.y, g.panel.w, (int16_t)(g.panel.h + kOskRadius), kOskRadius, kSheet);
+```
+Both are message/action sheets, not keyboard sheets: they use `kOskRadius` to round their top corners and to overflow
+the bottom edge deliberately. `kRadiusLg` exists for exactly this. Trigger: retune the on-screen keyboard's corners
+and the chat sheet and the Nodes sheet silently follow. Fix: `kSheetRadius` (or `kRadiusLg`) in theme.h. Effort S.
+
+### 8. S5 · screens/toasts.cpp:80-98 · the decision is logged before the show can still be refused, so the log can say `show` for nothing
+```c
+const ui::NoticeDecision dec = ui::noticeDecide(kind, title, s_screenOn, dnd, chatOpen, busy);
+logDecision(kindToken, dec);
+...
+case ui::NoticeDelivery::Shown:
+default:
+  if (!ui::toastState().showNotice(title, body, millis(), ui::kToastMs)) {
+    return ui::NoticeDelivery::Skipped;
+```
+`logDecision()` prints `[notice] show kind=...` first; if `showNotice()` then refuses (empty title, zero duration) the
+function returns Skipped **after** the log has already claimed the show. This matters more than it looks: that
+`[notice]` line is the instrument EST-381 added to settle the Map pop-up question, and an instrument that can report
+a show that never happened is the exact failure mode this ticket hunts (a write whose failure is not surfaced).
+**Not verified** that a caller can reach it: `noticeDecide` refuses an empty title first, in which case this branch
+is unreachable dead code rather than a lying log — both want the same one-line fix. Fix: log after the show succeeds
+(or log the refusal with its own token). Effort S.
+
+### Clean (checked, nothing found)
+- **One rectangle drives the draw and the tap: holding in this layer.** `ui/press_targets.h` asks each screen's own
+  hit test and returns that rectangle (`t.rect = L.rowVisible(row, scroll);`, `t.rect = g.keyHit[...]`), the chat's
+  message heights come from one `chatMsgHeights()` used by both the draw and the hit test (screen_chat.cpp:120), and
+  the Map's tabs come from one `mapTabRects()` list (`screen_map.cpp:437`: "drawn from the SAME list the hit test
+  reads"). I checked the four screens' row/key/selector rects and found no second set of numbers.
+- **Frame buffer: all six screens go through it, and every early exit closes the frame.**
+  `screen_chat.cpp:539`, `screen_settings.cpp:389`, `screen_rptr.cpp:418`, `screen_map.cpp:348`,
+  `screen_nodes.cpp:82`, `screen_node_info.cpp:23` all open `omFrameBegin()` and the failure branch is
+  `omFrameEnd(); return;`. No `pushSprite` exists anywhere outside board.cpp.
+- **Nothing in the UI writes to SD, NVS or the radio from a draw or a tap** (grep for those calls in `src/ui/` and
+  `src/screens/`: none), so the EST-348/350 rule holds here; the heavy work is deferred to the loop (`chatViewStep`,
+  `map_tab::pump`).
+- **Em dashes: only in comments**, never in a drawn string (`screen_settings.h:56`, `main.cpp:4782`). The screen
+  strings I read use commas and colons.
+- **Ages where the rule wants times: clean.** Every stamp I read goes through `ui/age.cpp::stampText`, which returns
+  the clock time first and the age only as the documented fallback (`drawListRow` shows `row.age`, which is already a
+  formatted stamp; the chat line and the selector use the Clock form; the sheet header uses DayTime).
+- **millis() arithmetic in the UI is wrap-safe**: the three UI sites use the `(uint32_t)(millis() - start)` form
+  (screens/toasts.cpp:142, screens/map_tab.cpp:345), and `ToastState::visible()` compares with an `int32_t`
+  difference (toast.h:48).
+
+### Coverage
+**Read in full:** `ui/theme.h`, `ui/toast.h`, `ui/age.cpp`, `ui/notice_panel.cpp`, `ui/screen_nodes.cpp`,
+`screens/toasts.cpp`, `ui/press_targets.h:1-120`, `ui/widgets.cpp` (in pieces, ~all of it). **Read in part:**
+`ui/screen_chat.cpp:1-120, 190-260, 450-545`, `ui/map_chrome.cpp:40-115`, `ui/map_chrome.h` (the map constants),
+`ui/screen_map.cpp:400-475`, `ui/press.h`, `main.cpp:1395-1415, 1416-1560, 4039-4075, 4490-4530, 4625-4660,
+4739-4870, 4960-5010, 5180-5232, 5238-5252, 5320-5400, 5543-5860, 6280-6420` (the gesture press/release path),
+`docs/REBUILD.md`.
+**Read only through targeted grep (so absences there are NOT evidence of a clean file):** `ui/screen_settings.cpp`,
+`ui/screen_rptr.cpp`, `ui/settings_layout.h`, `ui/rptr_layout.cpp`, `ui/chat_layout.cpp`,
+`ui/chat_layout.h`, `ui/chat_selector.cpp`, `ui/text_wrap.cpp`, `ui/layout.h`, `ui/keyboard_draw.h`, `ui/node_menu.*`,
+`ui/message_sheet.cpp`, `ui/emoji_picker.cpp`, `ui/compose_text.h`, `ui/notify.h`, `screens/map_tab.cpp`,
+`screens/sound_events.cpp`, `ui/icons.cpp`, `ui/fonts.cpp`.
+**Not reached at all:** `ui/map_pick.cpp`, `ui/map_trace.cpp`, `ui/press_feedback.cpp`, `ui/screen_node_info.cpp`
+(body), `ui/screen_settings.cpp` body, `ui/screen_rptr.cpp` body, `ui/emoji*.cpp` bodies, `ui/font_*.cpp` (blobs),
+`ui/dm_delivery.h`, `ui/dm_ring.h`, `ui/long_press.h`, `ui/status_cells.h`, `ui/new_node.h`, `ui/node_info.h`,
+`ui/map_layers.h`, `ui/settings_prefs.h`, `ui/badge_font.h`, `ui/rgb565.h`, `main.cpp` 9000-line remainder
+(compose/send paths 1100-1400, RPTR pumps 1700-3100, chat view build 600-900, the USB handlers).
+**Not done, deliberately:** the 30-minute cap. I worked severity first and stopped with the two S3s and the constants
+above; a second run should read the four screens I only grepped (Settings, RPTR, chat_layout and text_wrap) with the
+same "drawn rect == tapped rect" and "text can overflow" lens, because those are the largest files in scope and the
+place a real S2 would most likely hide. There was no build or host-test run: this ticket changes no code.
+
+### Next step
+The two S3s are one small commit and would make the tap-path log safe to paste (they belong with EST-395's #6-#8,
+which is the same fix in the same style). #5 is a one-line deletion that removes the last coordinate rule from
+`handleTap`; #3, #4 and #7 are constants moving into theme.h and can be one commit. #6 and #8 are one line each and
+Claude can decide whether they are worth a ticket at all. Then the second UI run for the four screens not reached.

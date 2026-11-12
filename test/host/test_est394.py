@@ -77,13 +77,20 @@ def main():
     if count(enqueue, ".latE6 = ") < 2 or count(enqueue, ".lonE6 = ") < 2:
         fail("traceEnqueue() does not copy both lat and lon into the queue")
 
-    # 3. Every MapView gets a frame sampled in the CURRENT view: build() calls traceSampleNow(), and
-    #    that is the one call site that hands mapProject() to the model.
-    build = block(map_tab, "void build(ui::MapView& v)", "\n}\n")
-    if "traceSampleNow();" not in build:
+    # 3. Every DRAWING MapView gets a frame sampled in the CURRENT view: build() calls
+    #    traceSampleNow() when its `sampleTrace` argument is true, and that is the one call site that
+    #    hands mapProject() to the model. EST-409: the two query callers pass false, so a hit test can
+    #    no longer advance the animation; the draw paths still pass true.
+    build = block(map_tab, "void build(ui::MapView& v, bool sampleTrace)", "\n}\n")
+    if "if (sampleTrace) {" not in build or "traceSampleNow();" not in build:
         fail("build() does not re-sample the trace for the view it is about to draw")
     if build.find("traceSampleNow();") > build.find("v.trace = s_traceFrame;"):
         fail("build() copies the trace frame before re-sampling it")
+    if "build(v, true)" not in block(map_tab, "void draw() {", "void pump("):
+        fail("draw() does not ask build() for a freshly sampled trace")
+    for query in ("om::ui::PressTarget pressTarget(","bool tap(int x, int y)"):
+        if "build(v, false)" not in block(map_tab, query, "\n}\n"):
+            fail(f"{query.strip()} does not keep build() a query (EST-409)")
     sample = block(map_tab, "void traceSampleNow()", "\n}\n")
     if "s_traceQueue.sampleActive(millis(), om::mapProject, &s_traceFrame)" not in sample:
         fail("traceSampleNow() does not sample the running route through mapProject()")

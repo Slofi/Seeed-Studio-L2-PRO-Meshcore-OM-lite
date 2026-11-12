@@ -60,6 +60,9 @@ struct TraceRoute {
   int32_t latE6[kTraceMaxPoints] = {};
   int32_t lonE6[kTraceMaxPoints] = {};
   uint8_t hops = 0;
+  // EST-409: true when the packet's own hop count was above kTraceMaxHops, so `hops` is the drawn
+  // (clamped) count rather than the raw one. One clamp, and the caller can report it.
+  bool hopsClamped = false;
   bool direct = false;
   int resolved = 0;    // hops that matched a positioned contact
 };
@@ -156,7 +159,10 @@ class TraceQueue {
   bool busy() const { return anim_.active() || count_ > 0; }
   int pending() const { return count_; }
   // False when the route has nothing to draw (fewer than two points and not a usable direct point).
-  bool push(const TraceGeoPt* route, int count, bool direct, uint8_t hops, uint8_t key);
+  // EST-409: the key is the sender's full 32-bit name hash; `evicted`, when given, reports that a
+  // full queue dropped its oldest pending route to make room.
+  bool push(const TraceGeoPt* route, int count, bool direct, uint8_t hops, uint32_t key,
+            bool* evicted = nullptr);
   // Start the next route when idle, sample the current one. False when nothing is live.
   bool tick(uint32_t nowMs, TraceProject project, TraceFrame* out);
   // EST-394: re-sample the route that is already running in a NEW view, without starting a pending
@@ -170,7 +176,7 @@ class TraceQueue {
     int count = 0;
     bool direct = false;
     uint8_t hops = 0;
-    uint8_t key = 0;
+    uint32_t key = 0;
   };
   void removeAt(int i);
   TraceAnim anim_;

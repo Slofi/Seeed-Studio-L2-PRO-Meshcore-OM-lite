@@ -52,17 +52,13 @@ bool tap(int x, int y);
 // pressed tint and the tap can never cover different pixels.
 om::ui::PressTarget pressTarget(int x, int y);
 
-// Selection and follow state, used by the shell and by the Nodes sheet.
+// Selection and follow state, used by the shell.
 void clearSelection();
-void select(const char* name);
 void setLock(bool on);
-bool locked();
 void showPoint(double lat, double lon, const char* name);   // "Show on map"
 
 // EST-368: restart the replay when the tab opens; the toggle ends or starts it in place.
 void tracesResetAndSeed();
-void tracesToggle();
-void namesToggle();
 
 }  // namespace map_tab
 }  // namespace om

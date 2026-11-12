@@ -15,6 +15,7 @@
 #include "ui/age.h"
 #include "ui/map_chrome.h"
 #include "ui/press_targets.h"   // EST-390: the pressed rectangle comes from the same hit test
+#include "ui/signature_cache.h" // EST-409: the contact table, copied only when its signature moves
 
 namespace om {
 namespace map_tab {
@@ -23,9 +24,11 @@ namespace {
 Host s_host;
 bool s_lock = false;              // follow our own position
 char s_selName[32] = "";          // the marker whose callout is open ("" = none)
-// EST-368: the Map's one 32-row copy of the contact table, shared by build()'s markers and
-// traceHopTable()'s path-hash lookup (one 3 KB copy, not two).
-MeshContact s_contacts[32];
+// EST-409: ONE copy of the contact table, shared by build()'s markers and traceHopTable()'s path-hash
+// lookup, and rebuilt only when om::meshContactSignature() moves. Before this, meshContactList()
+// copied and insertion-sorted up to 32 records on every animation frame and twice per tap.
+ui::SignatureCache<MeshContact, 32> s_contacts;
+bool s_markerBudgetLogged = false;   // the "N of M drawn" line, once per rebuilt contact list
 
 // --- EST-368 / EST-370: the layer switches and OM's Traces ---------------------------------------
 ui::MapLayerPrefs s_layers;
@@ -39,6 +42,12 @@ uint32_t s_traceWorstUs = 0;     // the slowest one
 int32_t s_traceSelfLatE6 = 0;    // our fix, else the last position we knew
 int32_t s_traceSelfLonE6 = 0;
 bool s_traceSelfKnown = false;
+// EST-409: the three ways a route can vanish before it is queued, counted by reason and printed in
+// traceCostLine(). A silent drop made "the trace did not show" indistinguishable from "traces off".
+uint32_t s_traceDropped = 0;
+uint32_t s_traceDropNoPoint = 0;
+uint32_t s_traceDropNoSelf = 0;
+uint32_t s_traceDropQueue = 0;
 constexpr uint32_t kTraceFrameMs = 33;   // ~30 fps while a trace runs; nothing when idle
 
 // EST-371: the fast open. enter() arms s_openFast; draw() then repushes the canvas map.cpp already
@@ -74,11 +83,13 @@ void traceRememberSelf() {
   s_traceSelfKnown = true;
 }
 
-uint8_t traceKeyForName(const char* name) {
-  // One byte is enough: it only separates senders for the "newest per sender wins" rule.
+uint32_t traceKeyForName(const char* name) {
+  // EST-409: the full 32-bit FNV hash. The old one-byte key made two senders collide about once in
+  // 256 pairs (the queue is only four deep, but the "newest per sender wins" rule must still separate
+  // them); the queue stores all 32 bits.
   uint32_t h = 2166136261u;
   for (const char* p = (name ? name : ""); *p; ++p) h = (h ^ (uint8_t)*p) * 16777619u;
-  return (uint8_t)h;
+  return h;
 }
 
 void traceMapReset() {
@@ -92,12 +103,22 @@ void traceMapReset() {
 }
 
 #if defined(OM_ENABLE_MESH)
+// EST-409: the contact table is copied and insertion-sorted only when its source signature moves.
+// build() (every animation frame), pressTarget() and tap() all reuse this one snapshot.
+void contactsEnsure() {
+  if (s_contacts.begin(om::meshContactSignature())) {
+    s_contacts.commit(om::meshContactList(s_contacts.rows(), s_contacts.capacity()));
+    s_markerBudgetLogged = false;   // a new list may hit the 32-contact budget again
+  }
+}
+
 // The repeaters we know with a public key, in the same 32-row view the map's markers use. A hop hash
 // is the first 1..3 bytes of the key, so the table carries three and the model compares only the
 // packet's own hash size.
 int traceHopTable(ui::TracePathHop* table, int cap) {
-  MeshContact* list = s_contacts;
-  const int n = om::meshContactList(list, 32);
+  contactsEnsure();
+  const MeshContact* list = s_contacts.rows();
+  const int n = s_contacts.count();
   int k = 0;
   for (int i = 0; i < n && k < cap; ++i) {
     if (list[i].type != 2 || !list[i].has_key) continue;
@@ -116,7 +137,7 @@ int traceHopTable(ui::TracePathHop* table, int cap) {
 // Build one message's route and hand it to the replay queue. The endpoints: the sender when its
 // contact has a position, us at the end (the GPS fix, else the last position we knew).
 bool traceEnqueue(const char* sender, const uint8_t* path, uint8_t hashSize, uint8_t hops,
-                  uint8_t key) {
+                  uint32_t key) {
   ui::TracePathHop table[32];
   const int tn = traceHopTable(table, 32);
   MeshContact sc{};
@@ -125,7 +146,11 @@ bool traceEnqueue(const char* sender, const uint8_t* path, uint8_t hashSize, uin
   ui::TraceRoute route;
   ui::traceBuildRoute(path, hashSize, hops, table, tn, senderKnown, sc.lat_e6, sc.lon_e6,
                       s_traceSelfKnown, s_traceSelfLatE6, s_traceSelfLonE6, &route);
-  if (route.count == 0) return false;
+  if (route.count == 0) {
+    ++s_traceDropped;
+    ++s_traceDropNoPoint;
+    return false;
+  }
 
   // EST-394: queue the route in micro-degrees. Nothing is projected here: the animation samples it
   // through mapProject() at draw time, so a pan, a zoom or the bars' slide moves the trace with the
@@ -136,7 +161,11 @@ bool traceEnqueue(const char* sender, const uint8_t* path, uint8_t hashSize, uin
   if (direct) {
     // EST-368 (the ticket): a 0-hop arrival pulses a ring at OUR position, not a line. Without one
     // there is nothing to pulse, and the arrival stays silent on the glass.
-    if (!s_traceSelfKnown) return false;
+    if (!s_traceSelfKnown) {
+      ++s_traceDropped;
+      ++s_traceDropNoSelf;
+      return false;
+    }
     pts[0].latE6 = s_traceSelfLatE6;
     pts[0].lonE6 = s_traceSelfLonE6;
     n = 1;
@@ -148,22 +177,34 @@ bool traceEnqueue(const char* sender, const uint8_t* path, uint8_t hashSize, uin
     }
   }
   const bool ringOnly = direct || n < 2;
+  bool evicted = false;
   if (ringOnly) {
     // Fewer than two known points: the line is not drawn, only the ring. It pulses at the one point
     // the route does know (normally our own radio at its end).
     if (n >= 2) pts[0] = pts[n - 1];
     n = 1;
-    const bool ok = s_traceQueue.push(pts, 1, true, route.hops, key);
+    const bool ok = s_traceQueue.push(pts, 1, true, route.hops, key, &evicted);
+    if (evicted) {
+      ++s_traceDropped;
+      ++s_traceDropQueue;
+    }
     if (ok) {
-      Serial.printf("[map] trace %s %u hop(s), ring only\n", sender ? sender : "?",
-                    (unsigned)route.hops);
+      // EST-409: counts only (rule 9). The sender's name used to be printed here.
+      Serial.printf("[map] trace %u hop(s)%s, ring only\n", (unsigned)route.hops,
+                    route.hopsClamped ? " (hops clamped)" : "");
     }
     return ok;
   }
-  const bool ok = s_traceQueue.push(pts, n, false, route.hops, key);
+  const bool ok = s_traceQueue.push(pts, n, false, route.hops, key, &evicted);
+  if (evicted) {
+    ++s_traceDropped;
+    ++s_traceDropQueue;
+  }
   if (ok) {
-    Serial.printf("[map] trace %s %u hop(s), %d known point(s), %d resolved\n", sender ? sender : "?",
-                  (unsigned)route.hops, n, route.resolved);
+    // EST-409: counts only (rule 9): hops, known points, resolved hops.
+    Serial.printf("[map] trace %u hop(s)%s, %d known point(s), %d resolved\n",
+                  (unsigned)route.hops, route.hopsClamped ? " (hops clamped)" : "", n,
+                  route.resolved);
   }
   return ok;
 }
@@ -232,7 +273,9 @@ void traceSampleNow() {
   s_traceQueue.sampleActive(millis(), om::mapProject, &s_traceFrame);
 }
 
-void build(ui::MapView& v) {
+// EST-409: `sampleTrace` is false for the two QUERY calls (the pressed look and the tap's hit test).
+// Those must not change state: no trace clock advance, no selection change. The draw paths pass true.
+void build(ui::MapView& v, bool sampleTrace) {
   v = ui::MapView();
   status(v.status);
   v.tabs = tabBar(ui::Tab::Map);
@@ -245,8 +288,10 @@ void build(ui::MapView& v) {
   v.tracesOn = s_layers.traces();
   v.namesOn = s_layers.names();
   v.tabsHidden = s_layers.tabsHidden();
-  traceSampleNow();   // EST-394: the CURRENT view, not the one the route was queued in
-  v.trace = s_traceFrame;
+  if (sampleTrace) {
+    traceSampleNow();   // EST-394: the CURRENT view, not the one the route was queued in
+    v.trace = s_traceFrame;
+  }
 
   // Our own position: the white GPS dot, or the small gold pin when the point is Fixed (EST-384).
   const PositionFix& g = fix();
@@ -268,19 +313,27 @@ void build(ui::MapView& v) {
   }
 
 #if defined(OM_ENABLE_MESH)
-  MeshContact* list = s_contacts;
-  const int n = om::meshContactList(list, 32);
+  contactsEnsure();   // EST-409: the cached table, rebuilt only when its signature moves
+  const MeshContact* list = s_contacts.rows();
+  const int n = s_contacts.count();
   const uint32_t nowWall = om::timeKeeper().now();
   const uint32_t nowUp = millis() / 1000;
   const bool nowReal = om::timeKeeper().realSinceBoot();
-  for (int i = 0; i < n && v.markerCount < ui::kMapMaxMarkers; ++i) {
+  // EST-409: our own dot has its own slot (screen_map.h, kMapMaxMarkers + 1); the contact budget is
+  // exactly kMapMaxMarkers, so a full table no longer loses its 32nd row to the self marker.
+  int candidates = 0;
+  int drawn = 0;
+  for (int i = 0; i < n; ++i) {
     if (!list[i].has_pos) continue;
     int x = 0, y = 0;
     if (!om::mapProject((double)list[i].lat_e6 / 1e6, (double)list[i].lon_e6 / 1e6, x, y)) continue;
-    if (x < -4 || x >= ui::kMapCanvasW + 4 || y < ui::kMapCanvasTop - 4 ||
-        y >= ui::kMapCanvasTop + ui::kMapCanvasH + 4) {
+    if (x < -ui::kMapMarkerR || x >= ui::kMapCanvasW + ui::kMapMarkerR ||
+        y < ui::kMapCanvasTop - ui::kMapMarkerR ||
+        y >= ui::kMapCanvasTop + ui::kMapCanvasH + ui::kMapMarkerR) {
       continue;
     }
+    ++candidates;
+    if (drawn >= ui::kMapMaxMarkers) continue;
     ui::MapMarker& m = v.markers[v.markerCount++];
     m = ui::MapMarker();
     m.x = (int16_t)x;
@@ -300,16 +353,24 @@ void build(ui::MapView& v) {
       snprintf(v.calloutLine, sizeof(v.calloutLine), "%s \xC2\xB7 %s \xC2\xB7 %s",
                contactTypeName(list[i].type), path, stamp);
     }
+    ++drawn;
+  }
+  if (candidates > drawn && !s_markerBudgetLogged) {
+    s_markerBudgetLogged = true;
+    Serial.printf("[map] markers %d of %d drawn (budget %d)\n", drawn, candidates,
+                  ui::kMapMaxMarkers);
   }
 #endif
-  if (s_selName[0] && !v.callout) s_selName[0] = 0;
+  // EST-409: the selection is NOT cleared here. build() is a query from pressTarget() and tap(), so a
+  // touch-down used to clear it; and a marker panned off the canvas must keep its callout, which comes
+  // back when it is panned back. Only an explicit tap elsewhere clears it (the Map case in tap()).
 }
 
 void drawAnimFrame() {
   const PositionFix& g = fix();
   if (s_lock && g.valid) om::mapSetView(g.lat, g.lon, om::mapZoom());
   ui::MapView v;
-  build(v);
+  build(v, true);
   ui::mapScreenAnimate(v);
 }
 
@@ -324,7 +385,7 @@ void drawAnimFrame() {
 // is skipped: an empty map sliding would say nothing, and the one draw below is the whole change.
 void slideBars(bool hidden) {
   ui::MapView v;
-  build(v);   // the view already carries the NEW state: chip, chevron and dot flip on the first frame
+  build(v, true);   // the view already carries the NEW state: chip, chevron and dot flip on the first frame
   const uint32_t t0 = millis();
   int frames = 0;
   if (ui::kMapSlideSteps > 1 && om::mapCanvasReady()) {
@@ -384,20 +445,31 @@ void traceWatchArrivals() {
 #endif
 
 // The measured cost of the replay that just drained: the ticket's "measure the cost per frame".
+// EST-409: the three trace drops are reported here too, by reason, and only once (the counters are
+// cleared after the line). A pass with drops but no frames still prints, so a route that never
+// reached the queue can never be silent again.
 void traceCostLine() {
-  if (s_traceFrames == 0) {
+  if (s_traceFrames == 0 && s_traceDropped == 0) {
     s_traceSeqStartMs = 0;
     return;
   }
-  const uint32_t span = millis() - s_traceSeqStartMs;
-  Serial.printf("[map] traces %lu frames in %lu ms, avg %lu us, worst %lu us, in flight %d\n",
-                (unsigned long)s_traceFrames, (unsigned long)span,
-                (unsigned long)(s_traceFrameUs / s_traceFrames), (unsigned long)s_traceWorstUs,
-                s_traceQueue.pending());
+  const uint32_t span = s_traceFrames == 0 ? 0 : millis() - s_traceSeqStartMs;
+  const unsigned long avg =
+      s_traceFrames == 0 ? 0 : (unsigned long)(s_traceFrameUs / s_traceFrames);
+  Serial.printf("[map] traces %lu frames in %lu ms, avg %lu us, worst %lu us, in flight %d, "
+                "dropped %lu (no point %lu, no self %lu, queue %lu)\n",
+                (unsigned long)s_traceFrames, (unsigned long)span, avg,
+                (unsigned long)s_traceWorstUs, s_traceQueue.pending(), (unsigned long)s_traceDropped,
+                (unsigned long)s_traceDropNoPoint, (unsigned long)s_traceDropNoSelf,
+                (unsigned long)s_traceDropQueue);
   s_traceFrames = 0;
   s_traceFrameUs = 0;
   s_traceWorstUs = 0;
   s_traceSeqStartMs = 0;
+  s_traceDropped = 0;
+  s_traceDropNoPoint = 0;
+  s_traceDropNoSelf = 0;
+  s_traceDropQueue = 0;
 }
 
 }  // namespace
@@ -415,7 +487,8 @@ bool namesOn() { return s_layers.names(); }
 bool tabsHidden() { return s_layers.tabsHidden(); }
 
 void clearSelection() { s_selName[0] = 0; }
-void select(const char* name) {
+// EST-409: internal only (showPoint and the marker tap); it is no longer in the header.
+static void select(const char* name) {
   if (name == nullptr) {
     s_selName[0] = 0;
     return;
@@ -423,7 +496,6 @@ void select(const char* name) {
   snprintf(s_selName, sizeof(s_selName), "%s", name);
 }
 void setLock(bool on) { s_lock = on; }
-bool locked() { return s_lock; }
 
 void showPoint(double lat, double lon, const char* name) {
   s_lock = false;
@@ -453,7 +525,7 @@ void draw() {
   if (s_lock && g.valid) om::mapSetView(g.lat, g.lon, om::mapZoom());
   traceRememberSelf();
   ui::MapView v;
-  build(v);
+  build(v, true);
   // EST-371: a Map open draws the canvas that is already in PSRAM first. mapScreenAnimate repushes
   // it and redraws all the chrome (status, markers, zN, tabs, callout), so the frame is current
   // except for the tiles; only a changed view needs those decoded, one pass later. The same rule
@@ -538,7 +610,7 @@ void pump(bool visible, bool uiDrawOk) {
 // the same two calls tap() makes, so the tint can never sit off the element the tap lands on.
 om::ui::PressTarget pressTarget(int x, int y) {
   ui::MapView v;
-  build(v);
+  build(v, false);   // EST-409: a query: it must not advance the trace clock or touch the selection
   const ui::MapChrome c = ui::mapScreenChrome(v);
   return ui::pressTargetForMap(c, v.markers, v.markerCount, x, y);
 }
@@ -546,7 +618,7 @@ om::ui::PressTarget pressTarget(int x, int y) {
 bool tap(int x, int y) {
   // The chrome's rectangles and the hit test are one function: no number is repeated here.
   ui::MapView v;
-  build(v);
+  build(v, false);   // EST-409: a query; the actions below draw() their own state changes
   const ui::MapChrome c = ui::mapScreenChrome(v);
   const ui::MapHit hit = ui::mapHitAt(c, v.markers, v.markerCount, x, y);
   switch (hit.kind) {
@@ -569,7 +641,10 @@ bool tap(int x, int y) {
     case ui::MapHitKind::Traces: {
       // EST-368: the toggle, highlighted while on, saved (default on). Turning it off ends the
       // current route and clears the dot; turning it on replays the newest message per sender.
-      const bool on = s_layers.toggleTraces();
+      // EST-409: the return is the NVS write's, so read the state back (as TabsToggle does); the old
+      // line treated a healthy write as "on" and re-seeded a replay while turning Traces OFF.
+      s_layers.toggleTraces();
+      const bool on = s_layers.traces();
       traceMapReset();
       if (on) traceSeedFromRing();
       Serial.printf("[map] traces %s\n", on ? "on" : "off");
@@ -578,7 +653,9 @@ bool tap(int x, int y) {
     }
     case ui::MapHitKind::Names: {
       // EST-370: hide or show every marker label; the markers stay. Saved (default on).
-      const bool on = s_layers.toggleNames();
+      // EST-409: same rule as Traces: the write's result is not the state.
+      s_layers.toggleNames();
+      const bool on = s_layers.names();
       Serial.printf("[map] names %s\n", on ? "on" : "off");
       draw();
       return true;

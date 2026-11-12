@@ -152,9 +152,14 @@ uint16_t mixOverFrame(int x, int y, uint16_t fg, uint8_t a) {
 
 // One blended line from a to b, pixel by pixel. `w` makes it a band of w px (EST-372: the tail is
 // 2 px). The colour is mixed with the tile under each pixel, so the line reads on a bright map as
-// well as on a dark one.
+// well as on a dark one. EST-409: every pixel is checked against the canvas BEFORE mixOverFrame()
+// reads the frame and drawPixel() writes it, so a far-off route can never read or write past the
+// buffer (the `int16_t` coordinates used to be the only thing between a route point and the buffer).
 void blendLine(lgfx::LovyanGFX* d, int x0, int y0, int x1, int y1, uint16_t col, uint8_t alpha,
                int w) {
+  if (d == nullptr) return;
+  const int fw = (int)d->width();
+  const int fh = (int)d->height();
   const int dx = x1 - x0;
   const int dy = y1 - y0;
   const int n = (abs(dx) > abs(dy) ? abs(dx) : abs(dy));
@@ -162,6 +167,7 @@ void blendLine(lgfx::LovyanGFX* d, int x0, int y0, int x1, int y1, uint16_t col,
     for (int o = 0; o < w; ++o) {
       const int x = x0 + (w > 1 ? o : 0);
       const int y = y0;
+      if (x < 0 || y < 0 || x >= fw || y >= fh) continue;
       d->drawPixel((int16_t)x, (int16_t)y, mixOverFrame(x, y, col, alpha));
     }
     return;
@@ -173,6 +179,7 @@ void blendLine(lgfx::LovyanGFX* d, int x0, int y0, int x1, int y1, uint16_t col,
     for (int o = 0; o < w; ++o) {
       const int xx = horizontal ? x + o : x;
       const int yy = horizontal ? y : y + o;
+      if (xx < 0 || yy < 0 || xx >= fw || yy >= fh) continue;
       d->drawPixel((int16_t)xx, (int16_t)yy, mixOverFrame(xx, yy, col, alpha));
     }
   }

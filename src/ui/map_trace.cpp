@@ -42,7 +42,10 @@ void traceBuildRoute(const uint8_t* path, uint8_t hashSize, uint8_t hopCount,
                      TraceRoute* out) {
   if (out == nullptr) return;
   out->count = 0;
-  out->hops = hopCount;
+  // EST-409: clamp ONCE, here, and report it. The drawn path and the reported hop count can never
+  // disagree again (a raw 12-hop packet used to draw 8 hops but log 12).
+  out->hopsClamped = hopCount > kTraceMaxHops;
+  out->hops = out->hopsClamped ? (uint8_t)kTraceMaxHops : hopCount;
   out->direct = hopCount == 0;
   out->resolved = 0;
 
@@ -51,8 +54,7 @@ void traceBuildRoute(const uint8_t* path, uint8_t hashSize, uint8_t hopCount,
   if (hasSender) appendPoint(out, senderLatE6, senderLonE6);
 
   const uint8_t size = (hashSize < 1) ? 1 : (hashSize > 3 ? 3 : hashSize);
-  int hops = hopCount;
-  if (hops > kTraceMaxHops) hops = kTraceMaxHops;
+  const int hops = out->hops;
   for (int i = 0; i < hops; ++i) {
     const uint8_t* hash = path + (size_t)i * size;   // path is not read when hops == 0
     const int at = traceMatchHop(hash, size, table, tableCount);
@@ -171,6 +173,11 @@ bool TraceAnim::sample(uint32_t nowMs, TraceProject project, TraceFrame* out) {
   for (int i = 0; i < routeCount_; ++i) {
     int x = 0, y = 0;
     if (!project((double)route_[i].latE6 / 1e6, (double)route_[i].lonE6 / 1e6, x, y)) return true;
+    // EST-409: a point outside the int16-safe band means this frame cannot be placed (a zoomed-in
+    // view with a route tens of km away projects to ~120,000 px). Draw nothing and let the clock
+    // run: a cast here used to wrap the pixel to the opposite sign and the tail then blended outside
+    // the 320 x 214 frame buffer.
+    if (x < -16384 || x > 16384 || y < -16384 || y > 16384) return true;
     px[i].x = (int16_t)x;
     px[i].y = (int16_t)y;
   }
@@ -217,7 +224,8 @@ bool TraceAnim::sample(uint32_t nowMs, TraceProject project, TraceFrame* out) {
   if (elapsed <= durMs_) {
     const float head = (durMs_ == 0) ? 1.0f : (float)elapsed / (float)durMs_;
     const float from = head > tailFrac ? head - tailFrac : 0.0f;
-    out->tailCount = traceSlice(geom, px, from, head, out->tail, kTraceMaxPoints + 1);
+    out->tailCount = traceSlice(geom, px, from, head, out->tail,
+                                (int)(sizeof(out->tail) / sizeof(out->tail[0])));
     out->tailAlpha = 230;
     out->hasDot = tracePointAt(geom, px, head, &out->dot);
     out->dotAlpha = 255;
@@ -232,7 +240,8 @@ bool TraceAnim::sample(uint32_t nowMs, TraceProject project, TraceFrame* out) {
     return false;
   }
   const float fade = (float)into / (float)kTraceFadeMs;
-  out->tailCount = traceSlice(geom, px, 1.0f - tailFrac, 1.0f, out->tail, kTraceMaxPoints + 1);
+  out->tailCount = traceSlice(geom, px, 1.0f - tailFrac, 1.0f, out->tail,
+                              (int)(sizeof(out->tail) / sizeof(out->tail[0])));
   out->tailAlpha = (uint8_t)lround((1.0 - (double)fade) * 230.0);
   out->hasDot = tracePointAt(geom, px, 1.0f, &out->dot);
   out->dotAlpha = (uint8_t)lround((1.0 - (double)fade) * 255.0);
@@ -252,15 +261,21 @@ void TraceQueue::removeAt(int i) {
   --count_;
 }
 
-bool TraceQueue::push(const TraceGeoPt* route, int count, bool direct, uint8_t hops, uint8_t key) {
+bool TraceQueue::push(const TraceGeoPt* route, int count, bool direct, uint8_t hops, uint32_t key,
+                      bool* evicted) {
+  if (evicted != nullptr) *evicted = false;
   if (route == nullptr || count < 0) return false;
   if (count > kTraceMaxPoints) count = kTraceMaxPoints;
   if (count < 2 && !(direct && count == 1)) return false;
-  // A newer route from the same sender replaces the one still waiting (one tail per corridor).
-  for (int i = 0; i < count_; ++i) {
+  // A newer route from the same sender replaces the one still waiting (one tail per corridor). Walk
+  // backwards: removeAt() shifts the next item into this slot, so a forward ++i would skip it.
+  for (int i = count_ - 1; i >= 0; --i) {
     if (pending_[i].key == key) removeAt(i);
   }
-  if (count_ >= kTraceQueueMax) removeAt(0);   // drop the oldest pending route
+  if (count_ >= kTraceQueueMax) {
+    removeAt(0);   // drop the oldest pending route
+    if (evicted != nullptr) *evicted = true;
+  }
   Item& it = pending_[count_++];
   for (int i = 0; i < count; ++i) it.pts[i] = route[i];
   it.count = count;

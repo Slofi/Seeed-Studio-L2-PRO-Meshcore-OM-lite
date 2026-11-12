@@ -8680,3 +8680,180 @@ Finding 2 is the one to fix first (one line, and the file's own TabsToggle case 
 work and should extend a guard to `screens/map_tab.cpp`. #4, #5, #6, #7 and #8 are small and independent; #9-#12 are
 polish.
 
+## EST-409 map fixes
+
+Fixes for the EST-408 sweep: findings 1, 2, 3, 4 and 6-12. Finding 5 (the 125 ms slide) is left out as the
+ticket says. DeepSeek (Paperclip worker, 2026-11-12). **No code was committed, no device was touched, and
+nothing below claims anything about the glass.**
+
+### 1. S2 - `ui/map_trace.cpp` - a far route point no longer wraps
+`TraceAnim::sample()` now rejects the whole frame when ANY projected point is outside +-16384, before the
+`int16_t` cast. It returns true with `live` set and no route, tail or dot, so the animation clock keeps
+running and the route reappears at the right place and time. Second belt: `omFramePixel()` (board.cpp:522)
+returns 0 when there is no buffer or the coordinate is outside the frame, and `blendLine()` (screen_map.cpp)
+checks every pixel against `d->width()`/`d->height()` BEFORE `mixOverFrame()` reads the frame and
+`drawPixel()` writes it. Behaviour otherwise unchanged.
+
+Host test (`test_est409.cpp`, `testFarPointRejected`): a route point 50 km east of the centre at 46 N, z18,
+projects to about 120,000 px. The test asserts the point is outside the int16 band, that the old cast would
+wrap it, and that the frame draws zero points, zero tail pixels and no dot while the animation stays active.
+A near route still draws (positive control). The frame-bounds belt is compiled in the firmware but is NOT
+host-tested: board.cpp and screen_map.cpp need LovyanGFX, so that half is code-inspected only.
+
+### 2. S2 - `screens/map_tab.cpp` - Traces and Names read the state, not the write
+Both cases now do what TabsToggle already did: call the toggle as a statement, then read
+`s_layers.traces()` / `s_layers.names()`. The old line `const bool on = s_layers.toggleTraces();` treated a
+healthy NVS write (always true) as "on", so turning Traces OFF re-seeded a replay and logged "on"; a failed
+write did the opposite.
+
+Host test: `map_tab.cpp` cannot be host-compiled (Arduino + mesh_link), so the repo's source-level host test
+`test_est409.py` is the test. It pins the statement, the state read, `if (on) traceSeedFromRing();` and the
+log word built from the same `on`. It failed on the old line with exactly:
+```
+FAIL the Traces key treats the NVS write's result as the state (turning it off would seed):
+     still present 'const bool on = s_layers.toggleTraces();'
+FAIL the Traces key must read s_layers.traces() after the toggle:
+     missing 'const bool on = s_layers.traces();'
+FAIL the Names key treats the NVS write's result as the state: ...
+FAIL the Names key must read s_layers.names() after the toggle: ...
+```
+A separate red harness against the real `MapLayerPrefs` printed `old map_tab seed decision (the write's
+return) = 1, real state = 0` after turning Traces OFF; the existing `test_est370.cpp` already proves that
+mismatch in C++ (`CHECK(p.toggleTraces()); CHECK(!p.traces());`).
+
+### 3. S3, rule 9 - the two trace log lines print counts only
+`[map] trace %u hop(s)%s, ring only` and `[map] trace %u hop(s)%s, %d known point(s), %d resolved` (the
+`%s` is `" (hops clamped)"` or `""`). The sender's name is gone.
+
+The guard is ARMED: `test_est397.py`'s `NAME_ARG` now also matches a bare `sender` or `who` (a local that
+merely HOLDS a name), with the existing lookbehind so `m.sender` and `senderName` do not match. It also got
+two new negative controls. Run on the unfixed tree it failed with exactly two lines, exit 1:
+```
+FAIL src/screens/map_tab.cpp:158: log carries a %s fed by a name: Serial.printf("[map] trace %s %u hop(s), ring only\n", sender ? sender : "?", ...
+FAIL src/screens/map_tab.cpp:165: log carries a %s fed by a name: Serial.printf("[map] trace %s %u hop(s), %d known point(s), %d resolved\n", sender ? sender : "?", ...
+```
+No other real violation was found in 189 files, and there was no false positive to narrow. After the fix the
+same guard passes: 448 Serial statements, 189 files, 17 negative controls, 0 findings.
+
+### 4. S4 - the contact table is cached on `om::meshContactSignature()`
+New `src/ui/signature_cache.h` (`SignatureCache<T, N>`, plain C++). `map_tab.cpp` holds
+`ui::SignatureCache<MeshContact, 32> s_contacts`; `contactsEnsure()` is the ONLY caller of
+`om::meshContactList()` and rebuilds only when the signature moves. `build()`, `traceHopTable()`,
+`pressTarget()` and `tap()` all reuse the same snapshot. `s_markerBudgetLogged` resets on a rebuild.
+
+Host test: `testSignatureCache` in `test_est409.cpp` proves first build, same-signature reuse (rows keep
+their values), rebuild on a moved signature, rebuild when the signature moves back, an empty list as a valid
+snapshot, and `commit()` clamping to capacity. Old-tree evidence: the source half failed with "the Map does
+not use the signature cache" and "om::meshContactList() must be called only from the cache rebuild (2
+calls)".
+
+### 6. S5 - the tail capacity is the array's real size
+Both `traceSlice()` calls now pass `(int)(sizeof(out->tail) / sizeof(out->tail[0]))`. Source test fails on
+the old `out->tail, kTraceMaxPoints + 1)` (0 of 2 on the old tree).
+
+### 7. S5 - the three silent trace drops are counted and printed
+`s_traceDropped` plus `s_traceDropNoPoint`, `s_traceDropNoSelf` and `s_traceDropQueue`. The queue's
+reason comes from a new optional `bool* evicted` on `TraceQueue::push()`, set only when the oldest pending
+route is really dropped. `traceCostLine()` prints them and now also prints when there are drops but zero
+frames (the old early return hid exactly that case):
+```
+[map] traces %lu frames in %lu ms, avg %lu us, worst %lu us, in flight %d,
+dropped %lu (no point %lu, no self %lu, queue %lu)
+```
+Source test pins all four counters and the three reason strings. Old tree: all missing (4 failures).
+
+### 8. S5 - the self dot is outside the 32-contact budget
+`MapView::markers` is now `kMapMaxMarkers + 1`; the contact loop keeps its own `drawn < kMapMaxMarkers`
+budget, so a full table draws all 32 contacts plus our dot. The cull margin uses `ui::kMapMarkerR` instead
+of the bare 4. When the budget truncates, the Map logs once per rebuilt list:
+`[map] markers %d of %d drawn (budget %d)` where the denominator is the number of positioned, in-view
+contacts (not the whole table). Source test pins the array size, the `kMapMarkerR` cull and the log line.
+
+### 9. S5 - hops are clamped once and the clamp is reported
+`TraceRoute::hopsClamped` is set from the raw packet count; `out->hops` is the clamped count used by both the
+drawn path and every caller's log. `traceBuildRoute()` no longer keeps the raw value anywhere. The Map's
+trace log appends `" (hops clamped)"`. Old-tree red print: `old route.hops after a 12-hop packet = 12` while
+the path drew 8. `testHopsClamp` now asserts `hops == kTraceMaxHops`, the flag, and that a direct route is
+not flagged.
+
+### 10. S5 - the full 32-bit sender hash, and a safe dedupe loop
+`traceKeyForName()` returns the full FNV value, `traceEnqueue()` and `TraceQueue::push()` take `uint32_t`,
+and `Item::key` is `uint32_t`. The dedupe walks backwards (`for (int i = count_ - 1; i >= 0; --i)`), so a
+removal cannot skip the element shifted into its slot. Host test: two keys that share the low byte
+(`0x00000123` and `0x00000223`) both stay queued (old code kept one), while the same full key still
+replaces. A second check pushes A, B, A and asserts B's 3-point route is the one that plays. Old-tree red
+harness printed `FAIL two senders that share the low byte do not replace each other` (the other checks in
+that harness were the two finding-1 checks, 3 failures, exit 1).
+
+### 11. S5 - `build()` is a query when the hit test calls it
+`build(v, bool sampleTrace)`: `draw()`, `drawAnimFrame()` and `slideBars()` pass true;
+`pressTarget()` and `tap()` pass false, so neither advances the trace clock. The
+`if (s_selName[0] && !v.callout) s_selName[0] = 0;` line is gone: a marker panned off-screen keeps the
+selection and the callout returns when it is panned back. Only an explicit tap elsewhere clears it (the
+existing Map/Callout case). `test_est394.py` was updated to the new signature and pins true for `draw()`,
+false for the two query paths. Source test also fails on the old clear line and old `build(v)` calls.
+
+### 12. S5 - the header advertises only what exists
+Removed `select()` (now `static` in map_tab.cpp), `locked()` (definition and declaration), and the two
+undefined `tracesToggle()` / `namesToggle()`. `showPoint()`, `clearSelection()` and `setLock()` still
+remain for the shell. Source test fails on all four old declarations and on the old dead `locked()`
+definition.
+
+### Files
+Changed: `src/screens/map_tab.cpp`, `src/screens/map_tab.h`, `src/ui/map_trace.cpp`, `src/ui/map_trace.h`,
+`src/ui/screen_map.cpp`, `src/ui/screen_map.h`, `src/board.cpp`, `test/host/run.sh`,
+`test/host/test_est394.py`, `test/host/test_est397.py`.
+New: `src/ui/signature_cache.h`, `test/host/test_est409.cpp`, `test/host/test_est409.py`.
+
+### Build and tests (real exit codes, this tree)
+Build, same command as REBUILD.md (no device):
+```
+cd /home/slofi/Projects/pocket-mesh/firmware
+PLATFORMIO_CORE_DIR=/home/slofi/.cache/pio-om-lite/core \
+  /home/slofi/.local/share/pipx/venvs/platformio/bin/pio run -e om_lite_l2
+```
+- Before these edits: exit 0, RAM 160,480 B of 327,680 (49.0 %), flash 2,993,417 B of 6,553,600 (45.7 %).
+- After these edits: exit 0, RAM 160,528 B (+48 B), flash 2,994,089 B (+672 B), same percentages.
+
+Host suite, one command:
+```
+sh test/host/run.sh
+```
+- REAL exit 0, zero FAIL lines. 62 C++ binaries and 24 Python checks ran.
+- New: `test_est409.cpp` (binary 62) and `test_est409.py`. Changed: `test_est397.py` (armed) and
+  `test_est394.py` (build signature).
+- `test_est409.py` against the pre-fix files from `git show HEAD`: exit 1, 40 failures. The first four are
+  the toggle state (quoted above); the rest are the missing signature cache (2 meshContactList calls), the
+  hand-computed tail cap (0 of 2), the four missing drop counters, the missing marker `+ 1`, the missing
+  `kMapMarkerR` cull, the missing marker-count log, the missing hop flag and `out->hops = hopCount`, the
+  one-byte key and `return (uint8_t)h;`, the forward dedupe loop, the selection clear, `build(v)` in both
+  query paths, and the four old header declarations.
+- `test_est409.cpp` cannot compile against the old tree because `TraceRoute::hopsClamped` and
+  `ui/signature_cache.h` are themselves part of the fix. To prove the model checks can fail, a temporary
+  harness linked the OLD `map_trace.cpp` and printed:
+  ```
+  FAIL no route point is placed outside the int16-safe band
+  FAIL no wrapped coordinate reaches the tail or the dot
+  FAIL two senders that share the low byte do not replace each other
+  3 red check(s) FAILED on the old tree
+  ```
+  exit 1. The old hop value was printed separately (`12`), and the old toggle decision printed
+  `write's return = 1, real state = 0`.
+- The signature-cache test is a new-code test (the class does not exist on the old tree); the source half
+  is what failed there.
+
+### What I could not check
+- No device in this run, so nothing about the glass: the new log lines (`markers %d of %d`,
+  `dropped ... (no point ...)`), the `(hops clamped)` suffix and the callout returning after a pan are all
+  untested on hardware.
+- No host test for the frame bounds second belt (board.cpp / screen_map.cpp need LovyanGFX).
+- The cache is keyed on `meshContactSignature()`, which hashes lastmod/type/name/favourite but not lat/lon.
+  A position that changed without a lastmod change would wait for the next advert. MeshCore stamps every
+  advert, so this should not happen in practice, but it is the one assumption in finding 4 and worth a
+  reviewer's eye.
+- Finding 5 (the 125 ms slide) is untouched, as the ticket says.
+
+### Next step
+Claude's review and commit; then flash and check the map log lines and the panned-off callout on the device.
+
+

@@ -25,7 +25,9 @@ struct MapView {
   int zoom = 13;
   bool locked = false;       // follow our own position
   bool hasFix = false;
-  MapMarker markers[kMapMaxMarkers];
+  // EST-409: our own dot is not one of the 32 contacts, so the contact budget keeps all 32 slots
+  // (the 32nd contact used to lose its marker, label and tap target to the self marker).
+  MapMarker markers[kMapMaxMarkers + 1];
   int markerCount = 0;
   bool callout = false;      // a marker is selected
   char calloutTitle[32] = "";

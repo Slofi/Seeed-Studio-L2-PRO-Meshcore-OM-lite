@@ -89,7 +89,8 @@ BIN58="$(mktemp /tmp/om-lite-est403.XXXXXX)"
 BIN59="$(mktemp /tmp/om-lite-est404.XXXXXX)"
 BIN60="$(mktemp /tmp/om-lite-est405.XXXXXX)"
 BIN61="$(mktemp /tmp/om-lite-est406.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61"' EXIT
+BIN62="$(mktemp /tmp/om-lite-est409.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -615,3 +616,15 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est405.cpp -o "$BIN60
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est406.cpp ../../src/ui/chat_layout.cpp \
   -o "$BIN61"
 "$BIN61"
+
+# EST-409: the Map sweep fixes. C++: a route point 50 km off-centre at z18 rejects the frame (no
+# int16 wrap), a 12-hop packet reports the clamped 8 with its flag, two senders that share the low
+# byte no longer replace each other (the full 32-bit key), the dedupe loop keeps the next route, and
+# the signature cache rebuilds only when its source moves. test_est409.py is the source half: the
+# toggles read the state after the NVS write, the trace logs carry counts only, the contact table is
+# cached, the tail capacity is the array's own size, the drops are counted by reason, the self dot is
+# outside the contact budget, hops are clamped once, and the query paths do not advance the trace.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est409.cpp \
+  ../../src/ui/map_trace.cpp -o "$BIN62"
+"$BIN62"
+python3 -B test_est409.py

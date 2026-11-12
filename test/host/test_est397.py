@@ -50,7 +50,11 @@ TEXT_ARG = re.compile(r"(?:\.|->)(?:text|body)\b|\bs_lastText\b|(?<![\w.>(])(?:t
 # Any name: `name`, `m.name`, `ci->name`, `from.name`, and our own stores whose last word is `Name`
 # (g_replyName, s_currentName). A FUNCTION whose name ends in Name (om::timeSourceName(...)) is not a
 # string, so `Name` followed by `(` is not a hit.
-NAME_ARG = re.compile(r"(?:\.|->)name\b|(?<![\w.>(])name\b|\b[A-Za-z_]\w*Name\b(?!\s*\()")
+# EST-409: a SENDER is a node's name too. The Map's trace lines printed `sender` (`sender ? sender :
+# "?"`) and the guard walked past them, because none of the spellings above matches a bare local that
+# merely HOLDS a name. `who` is the same kind of holder in map_tab.cpp (meshMsgName() results).
+NAME_ARG = re.compile(r"(?:\.|->)name\b|(?<![\w.>(])name\b|\b[A-Za-z_]\w*Name\b(?!\s*\()"
+                      r"|(?<![\w.>(])(?:sender|who)\b")
 SSID_ARG = re.compile(r"(?<![\w.>(])ssid\b", re.IGNORECASE)
 
 # (path, needle that identifies the statement, why it is safe)
@@ -127,6 +131,11 @@ NEGATIVE_CONTROLS = [
     ('Serial.printf("[mc] UI send: %s \'%s\'\\n", sent ? "ok" : "failed", wire);',
      "a %s fed by a message text"),
     ('Serial.printf("[chat] mention %s\\n", tag);', "a %s fed by a message text"),
+    # EST-409: the Map's trace lines. Both printed the sender's name through `sender ? sender : "?"`;
+    # the widened NAME_ARG must catch the bare holder, and `who` (meshMsgName()'s result) too.
+    ('Serial.printf("[map] trace %s %u hop(s), ring only\\n", sender ? sender : "?", hops);',
+     "a %s fed by a name"),
+    ('Serial.printf("[map] trace %s %u hop(s)\\n", who, hops);', "a %s fed by a name"),
     ('Serial.printf("[wifi] connected %s\\n", ssid);', "a %s fed by an SSID"),
     ('Serial.printf("[wifi] up ip=%s\\n", ip);', "an ip= field"),
     ('Serial.printf("[wifi] ssid=%s\\n", s);', "an ssid= field"),

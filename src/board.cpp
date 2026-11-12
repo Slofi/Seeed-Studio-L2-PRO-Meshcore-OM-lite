@@ -520,7 +520,13 @@ bool omFrameSize(int& width, int& height) {
 }
 
 uint16_t omFramePixel(int x, int y) {
-  const uint16_t stored = ((const uint16_t*)s_frame.getBuffer())[(size_t)y * s_frame.width() + (size_t)x];
+  // EST-409: the one guard every blended read relies on. A coordinate outside the frame is black,
+  // not a read of whatever is mapped next: the trace used to reach here with a far-off point.
+  if (s_frame.getBuffer() == nullptr) return 0;
+  const int fw = (int)s_frame.width();
+  const int fh = (int)s_frame.height();
+  if (x < 0 || y < 0 || x >= fw || y >= fh) return 0;
+  const uint16_t stored = ((const uint16_t*)s_frame.getBuffer())[(size_t)y * (size_t)fw + (size_t)x];
   // The push above sends the stored words as they lie in memory when the probe found them swapped;
   // the host wants the native value (low byte first). Undo the sprite's order here, once, so the
   // screenshot tool never has to know which way this panel happens to store colour.

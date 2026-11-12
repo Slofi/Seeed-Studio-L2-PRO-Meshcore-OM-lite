@@ -9713,3 +9713,72 @@ Fn+up / Fn+down to zoom and Fn+left / Fn+right to switch tabs; (4) open a node s
 and press every arrow (nothing moves, Esc closes); (5) pull the keyboard out while the switch is on:
 one `[kb] keyboard disconnected` line, the toast, and the 5 V rail off, then toggle the switch off
 and on to probe again.
+
+## EST-418 battery log: satellites heard
+
+**The finding behind it (S497, Claude):** the log's `sats` column is GGA field 7, the satellites
+USED in the fix, so under a window `sats 0` meant only "no fix", not "no sky": 9.5 hours of it was
+read as "no satellites" and had to be corrected. The number that says whether the GPS can hear the
+sky at all (enough for GPS time) is the satellites HEARD, which the heartbeat already prints as
+`heard=N ... maxheard=M`. This ticket puts that number in the battery log.
+
+### What changed
+- `power_log_logic.h`: `Sample` gains `uint8_t heard` (satellites heard at that minute, the same
+  `gps.heardTotal` the heartbeat prints). `kPowerLogHeader` gains ONE name at the END,
+  `...,ain1,ain2,ain3,heard` (17 columns), and the comment beside it now says what the two GPS
+  columns mean: `sats` = used in the fix, `heard` = heard.
+- `power_log_logic.cpp`: the row formatter prints `heard` last. Every earlier field keeps its
+  position, so a reader of the old 16 columns reads the same bytes.
+- `power_log.h/.cpp`: `plog::State` gains `heard`; the line takes it from the caller (the logger
+  does not touch the GPS) and the `[plog] write` serial line prints `heard=%u` last, like it already
+  prints the other row values.
+- `main.cpp`: the one place that fills `plog::State` now passes `g_gps.heardTotal`, the very value
+  the heartbeat's `heard=` prints.
+- No file already on the card is rewritten: a day file that exists keeps its old header line, and
+  the new column simply appears as the row's 17th field (the host reader copes with a longer row).
+
+### Tests
+- New `test/host/test_est418.cpp` (plain g++, no Arduino), in `run.sh` as `$BIN68`:
+  1. the header is the OLD 16 names byte for byte, then exactly `,heard` (16 commas, 17 columns);
+  2. a formatted row: the first 16 fields equal the pre-EST-418 row, pinned literally in the test
+     (the arm), and the row continues with exactly `,15\n`; read as 17 columns, `sats` keeps its
+     place (field 7) and `heard` is the one after `ain3`;
+  3. the S497 case: `fix 0` + `sats 0` with `heard 9` is a real line, and a dark sky is a real 0 in
+     both columns, not an "unknown" mark;
+  4. edges: a default `Sample` writes `heard 0`, the full uint8 range (`255`) prints whole, and
+     header + row still fit the 256-byte buffer the device hands to `File::write()`; an existing
+     file gets the row only (its old header line stays).
+- Updated for the one new field: `test_est377.cpp` (the exact line, 16 commas) and
+  `test_est401.cpp` (the exact line, the split into 17 columns, the four EST-401 fields now followed
+  by `heard`). No other test touches the row.
+- `sh test/host/run.sh`: REAL exit 0, 0 `FAIL` lines, including the new EST-418 test.
+- **Armed.** Copies of `test_est418.cpp` + `power_log_logic.*` in /tmp, one mutation at a time:
+  `heard` printed right after `sats` instead of last (format and args moved together) -> exit 1,
+  8 failures; the header's `,heard` removed -> exit 1, 3 failures; the formatter printing `sats` in
+  the new field (the S497 confusion itself) -> exit 1, 6 failures. Restored, exit 0.
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0 (incremental after the edit, then a clean build;
+  the clean numbers are the ones below).
+  RAM **160,896 B** (49.1% of 327,680), unchanged: the new `uint8_t` fits the padding the two
+  `uint8_t`s before it already had.
+  Flash **3,001,973 B** (45.8% of 6,553,600), was 3,001,925 B, **+48 B**.
+  `firmware.bin` 3,002,336 B (was 3,002,288 B, +48 B). The incremental build measured 16 B more
+  (Flash 3,001,989 B, bin 3,002,352 B), the same link/section-order noise EST-410/411/416/417 saw.
+
+### Could not check (no device in this run)
+- Nothing on the glass: no L2 was flashed and no row was written to a card here, so the log itself
+  was not seen. The formatter is host-tested; that `g_gps.heardTotal` really reaches the file is one
+  line in `main.cpp` and Claude can check it in the `[plog] write ... heard=` serial line after a
+  flash (that line now prints the same number last).
+- The host-side reader of these CSV files is not in this folder, so "a longer row still parses" is
+  the ticket's own statement, not something this run could run. Nothing here writes a header into
+  an existing day file, so an old file keeps its 16-name header and gains a 17th value per row.
+- The battery cost of the extra number is a `uint8_t` read and a few characters a minute: not
+  measured, and far below the EST-401 I2C reads that already run on the same minute.
+
+### Next step
+Claude: review and commit. Filip: after a flash, `log power tail` should show the header with
+`,heard` on a NEW day file (fresh card or a new date), and the last number of each row should follow
+the heartbeat's `heard=`, not `used=`; a night in a window should show `sats 0` with a `heard` that
+is still above zero whenever the GPS can hear the sky.

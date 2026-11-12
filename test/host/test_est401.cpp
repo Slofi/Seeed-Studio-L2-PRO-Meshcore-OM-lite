@@ -155,43 +155,46 @@ static void testCsv() {
   const om::plog::LocalStamp t = stampForTest();
   char line[256];
   CHECK(om::plog::formatLine(s, t, line, sizeof(line)) > 0);
+  // EST-418 appends its `heard` column last; this test's sample leaves it at 0.
   CHECK(strcmp(line,
-               "2026-11-11 16:49,4012,1,160,1,1,9,0,0,12,-97,3600,1,3285,576,575\n") == 0);
+               "2026-11-11 16:49,4012,1,160,1,1,9,0,0,12,-97,3600,1,3285,576,575,0\n") == 0);
 
-  // 16 columns: 15 commas, and the header names the four new ones last, in this order.
+  // 17 columns: 16 commas, and the header names the four EST-401 columns after the old ones, in
+  // this order, with EST-418's `heard` last.
   int commas = 0;
   for (const char* p = line; *p; ++p) {
     if (*p == ',') ++commas;
   }
-  CHECK(commas == 15);
+  CHECK(commas == 16);
   const char* header = om::plog::kPowerLogHeader;
   const char* tail = strstr(header, ",vbus,ain1,ain2,ain3");
   CHECK(tail != nullptr);
-  if (tail != nullptr) CHECK(strcmp(tail, ",vbus,ain1,ain2,ain3") == 0);
+  if (tail != nullptr) CHECK(strcmp(tail, ",vbus,ain1,ain2,ain3,heard") == 0);
   // The old columns keep their positions: the first 12 names are the 12 known ones.
   CHECK(strncmp(header, "time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s",
                 strlen("time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s")) ==
         0);
 
-  const char* f[16] = {};
-  CHECK(split(line, f, 16) == 16);
-  // The four new fields are the last four and carry the sample's numbers.
+  const char* f[17] = {};
+  CHECK(split(line, f, 17) == 17);
+  // The four new fields are the last four and carry the sample's numbers, then heard.
   CHECK(strncmp(f[12], "1,", 2) == 0);
   CHECK(strncmp(f[13], "3285,", 5) == 0);
   CHECK(strncmp(f[14], "576,", 4) == 0);
-  CHECK(strncmp(f[15], "575\n", 4) == 0);
+  CHECK(strncmp(f[15], "575,", 4) == 0);
+  CHECK(strncmp(f[16], "0\n", 2) == 0);
 
   // A cable that is not there: vbus 0, and the ADC numbers are whatever they are.
   om::plog::Sample absent = s;
   absent.vbus = 0;
   CHECK(om::plog::formatLine(absent, t, line, sizeof(line)) > 0);
-  CHECK(strstr(line, ",3600,0,3285,576,575\n") != nullptr);
+  CHECK(strstr(line, ",3600,0,3285,576,575,0\n") != nullptr);
 
   // A STATUS0 read that failed is -1, NOT 0: "unknown" must be distinguishable from "no cable".
   om::plog::Sample unknown = s;
   unknown.vbus = -1;
   CHECK(om::plog::formatLine(unknown, t, line, sizeof(line)) > 0);
-  CHECK(strstr(line, ",3600,-1,3285,576,575\n") != nullptr);
+  CHECK(strstr(line, ",3600,-1,3285,576,575,0\n") != nullptr);
 
   // The default Sample is "unknown" + 0 on the three channels (the value a caller that fills nothing
   // gets), so an unfilled line can never claim a cable.
@@ -199,7 +202,7 @@ static void testCsv() {
   CHECK(fresh.vbus == -1);
   CHECK(fresh.ain1Mv == 0 && fresh.ain2Mv == 0 && fresh.ain3Mv == 0);
   CHECK(om::plog::formatLine(fresh, t, line, sizeof(line)) > 0);
-  CHECK(strstr(line, ",0,-1,0,0,0\n") != nullptr);   // a Sample nobody filled: uptime 0
+  CHECK(strstr(line, ",0,-1,0,0,0,0\n") != nullptr);   // a Sample nobody filled: uptime 0
 
   // The append buffer still fits header + line in the 256-byte buffer the device hands to write().
   CHECK(om::plog::formatLine(s, t, line, sizeof(line)) > 0);

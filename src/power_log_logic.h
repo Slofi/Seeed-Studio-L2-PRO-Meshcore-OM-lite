@@ -78,14 +78,21 @@ struct Sample {
   uint16_t ain1Mv = 0;      // ADS1115 AIN1..AIN3 at the pin, 0 = the read failed
   uint16_t ain2Mv = 0;
   uint16_t ain3Mv = 0;
+  // EST-418: satellites HEARD at this minute (GSV, a C/N0 above zero), the same number the heartbeat
+  // prints as `heard=`. `sats` above is the satellites USED in the fix, so it is 0 whenever there is
+  // no fix; this one says whether the receiver can hear the sky at all (enough for GPS time).
+  uint8_t heard = 0;
 };
 
-// The header line, WITHOUT a newline. A new file gets this line first. The four EST-401 columns are
-// APPENDED, so every position a reader already used keeps its meaning.
+// The header line, WITHOUT a newline. A new file gets this line first. The four EST-401 columns and
+// EST-418's `heard` are APPENDED, so every position a reader already used keeps its meaning.
+// The two GPS columns, side by side: `sats` = the satellites USED in the fix (GGA field 7, 0 without
+// a fix), `heard` = the satellites HEARD (GSV, the heartbeat's `heard=`, no fix needed).
 constexpr const char* kPowerLogHeader =
-    "time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s,vbus,ain1,ain2,ain3";
+    "time,batt_mv,screen,brightness,gps,fix,sats,wifi,ble,pkts,noise,uptime_s,vbus,ain1,ain2,ain3,"
+    "heard";
 
-// "YYYY-MM-DD HH:MM,<15 more fields>\n". Returns the length written (without the NUL) or -1 when
+// "YYYY-MM-DD HH:MM,<16 more fields>\n". Returns the length written (without the NUL) or -1 when
 // the buffer is too small.
 int formatLine(const Sample& s, const LocalStamp& t, char* out, size_t cap);
 

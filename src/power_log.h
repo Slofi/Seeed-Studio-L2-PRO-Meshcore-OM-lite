@@ -23,7 +23,8 @@ struct State {
   uint8_t brightness = 0;  // the backlight level actually applied
   bool gpsRailOn = false;  // the GNSS power rail (board::gpsRailOn)
   bool fix = false;
-  uint8_t sats = 0;
+  uint8_t sats = 0;        // the satellites USED in the fix (GGA)
+  uint8_t heard = 0;       // EST-418: the satellites HEARD (GSV), the heartbeat's `heard=`
   bool wifiOn = false;
   bool bleOn = false;
   uint32_t uptimeSec = 0;

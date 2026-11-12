@@ -24,13 +24,15 @@ bool logLocalStamp(uint32_t epochUtc, bool clockRealSinceBoot, LocalStamp& out) 
 
 int formatLine(const Sample& s, const LocalStamp& t, char* out, size_t cap) {
   if (out == nullptr || cap == 0) return -1;
+  // EST-418: `heard` is the LAST field, after ain3; every earlier field keeps its position.
   const int n = snprintf(out, cap,
-                         "%04d-%02d-%02d %02d:%02d,%u,%d,%u,%d,%d,%u,%d,%d,%lu,%d,%lu,%d,%u,%u,%u\n",
+                         "%04d-%02d-%02d %02d:%02d,%u,%d,%u,%d,%d,%u,%d,%d,%lu,%d,%lu,%d,%u,%u,%u,%u\n",
                          t.year, t.month, t.day, t.hour, t.minute, (unsigned)s.battMv,
                          s.screenOn ? 1 : 0, (unsigned)s.brightness, s.gpsRailOn ? 1 : 0,
                          s.fix ? 1 : 0, (unsigned)s.sats, s.wifiOn ? 1 : 0, s.bleOn ? 1 : 0,
                          (unsigned long)s.packets, s.noiseDbm, (unsigned long)s.uptimeSec,
-                         (int)s.vbus, (unsigned)s.ain1Mv, (unsigned)s.ain2Mv, (unsigned)s.ain3Mv);
+                         (int)s.vbus, (unsigned)s.ain1Mv, (unsigned)s.ain2Mv, (unsigned)s.ain3Mv,
+                         (unsigned)s.heard);
   if (n < 0 || (size_t)n >= cap) return -1;
   return n;
 }

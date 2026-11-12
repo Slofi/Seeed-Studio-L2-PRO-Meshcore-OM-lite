@@ -4737,6 +4737,7 @@ void loop() {
     ps.gpsRailOn = om::gpsRailOn();
     ps.fix = g_gps.valid;
     ps.sats = g_gps.sats;
+    ps.heard = g_gps.heardTotal;   // EST-418: the heartbeat's own `heard=` number
     ps.wifiOn = om::wifiIsEnabled();
     ps.bleOn = om::bleIsEnabled();
     ps.uptimeSec = millis() / 1000;

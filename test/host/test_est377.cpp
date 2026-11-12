@@ -90,6 +90,8 @@ static om::plog::Sample sampleForTest() {
   s.ain1Mv = 3285;
   s.ain2Mv = 576;
   s.ain3Mv = 575;
+  // EST-418: satellites heard, the last column (a fix with 9 used and 15 heard).
+  s.heard = 15;
   return s;
 }
 
@@ -115,14 +117,14 @@ static void testCsv() {
   const om::plog::Sample s = sampleForTest();
   const om::plog::LocalStamp t = stampForTest();
   const char* kExpected =
-      "2026-11-11 09:41,4012,1,160,1,1,9,0,0,12,-97,3600,1,3285,576,575\n";
+      "2026-11-11 09:41,4012,1,160,1,1,9,0,0,12,-97,3600,1,3285,576,575,15\n";
 
   char line[256];
   CHECK(om::plog::formatLine(s, t, line, sizeof(line)) == (int)strlen(kExpected));
   CHECK(strcmp(line, kExpected) == 0);
-  // 16 columns (12 + EST-401's four): 15 commas in the header and in every line.
-  CHECK(countCommas(om::plog::kPowerLogHeader) == 15);
-  CHECK(countCommas(line) == 15);
+  // 17 columns (12 + EST-401's four + EST-418's heard): 16 commas in the header and in every line.
+  CHECK(countCommas(om::plog::kPowerLogHeader) == 16);
+  CHECK(countCommas(line) == 16);
 
   // A screen-off minute writes 0 brightness even if the caller's brightness field is stale.
   om::plog::Sample off = s;
@@ -130,13 +132,14 @@ static void testCsv() {
   off.brightness = 0;
   off.fix = false;
   off.sats = 0;
+  off.heard = 0;
   off.wifiOn = true;
   off.bleOn = true;
   off.packets = 0;
   off.noiseDbm = 0;
   off.uptimeSec = 61;
   CHECK(om::plog::formatLine(off, t, line, sizeof(line)) > 0);
-  CHECK(strcmp(line, "2026-11-11 09:41,4012,0,0,1,0,0,1,1,0,0,61,1,3285,576,575\n") == 0);
+  CHECK(strcmp(line, "2026-11-11 09:41,4012,0,0,1,0,0,1,1,0,0,61,1,3285,576,575,0\n") == 0);
 
   char name[48];
   CHECK(om::plog::formatFileName(t, name, sizeof(name)) == (int)strlen("/log/power-20261111.csv"));
@@ -151,7 +154,7 @@ static void testHeader() {
   const om::plog::Sample s = sampleForTest();
   const om::plog::LocalStamp t = stampForTest();
   char buf[512];
-  const char* line = "2026-11-11 09:41,4012,1,160,1,1,9,0,0,12,-97,3600,1,3285,576,575\n";
+  const char* line = "2026-11-11 09:41,4012,1,160,1,1,9,0,0,12,-97,3600,1,3285,576,575,15\n";
 
   const int fresh = om::plog::formatAppend(s, t, true, buf, sizeof(buf));
   CHECK(fresh > 0);

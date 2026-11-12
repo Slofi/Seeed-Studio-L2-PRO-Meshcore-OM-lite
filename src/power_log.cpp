@@ -146,6 +146,7 @@ void loop(uint32_t nowMs, const State& st) {
   s.gpsRailOn = st.gpsRailOn;
   s.fix = st.fix;
   s.sats = st.sats;
+  s.heard = st.heard;   // EST-418: the same `heard=` the heartbeat prints
   s.wifiOn = st.wifiOn;
   s.bleOn = st.bleOn;
   s.noiseDbm = noise;
@@ -190,12 +191,12 @@ void loop(uint32_t nowMs, const State& st) {
 
   Serial.printf("[plog] write %s new=%d bytes=%u/%d batt=%umV screen=%d bright=%u gps=%d fix=%d "
                 "sats=%u wifi=%d ble=%d pkts=%lu noise=%d uptime=%lus vbus=%d ain1=%u ain2=%u "
-                "ain3=%u\n",
+                "ain3=%u heard=%u\n",
                 path, newFile ? 1 : 0, (unsigned)wrote, n, (unsigned)s.battMv,
                 s.screenOn ? 1 : 0, (unsigned)s.brightness, s.gpsRailOn ? 1 : 0, s.fix ? 1 : 0,
                 (unsigned)s.sats, s.wifiOn ? 1 : 0, s.bleOn ? 1 : 0, (unsigned long)s.packets,
                 s.noiseDbm, (unsigned long)s.uptimeSec, (int)s.vbus, (unsigned)s.ain1Mv,
-                (unsigned)s.ain2Mv, (unsigned)s.ain3Mv);
+                (unsigned)s.ain2Mv, (unsigned)s.ain3Mv, (unsigned)s.heard);
 }
 
 int printTail() {

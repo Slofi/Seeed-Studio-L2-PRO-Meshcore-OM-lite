@@ -95,7 +95,8 @@ BIN64="$(mktemp /tmp/om-lite-est413.XXXXXX)"
 BIN65="$(mktemp /tmp/om-lite-est414.XXXXXX)"
 BIN66="$(mktemp /tmp/om-lite-est416.XXXXXX)"
 BIN67="$(mktemp /tmp/om-lite-est417.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65" "$BIN66" "$BIN67"' EXIT
+BIN68="$(mktemp /tmp/om-lite-est418.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65" "$BIN66" "$BIN67" "$BIN68"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -686,3 +687,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est416.cpp \
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est417.cpp -o "$BIN67"
 "$BIN67"
 python3 -B test_est417.py
+
+# EST-418: the battery log's `heard` column (satellites heard, the heartbeat's heard=) as the LAST
+# field after ain3. The old 16 fields are the arm (pinned byte for byte, so no position moved), the
+# header is the old header plus `,heard`, and the S497 case (`sats 0` with `heard 9`) formats as a
+# real line. The two power-log tests above are updated for the one new field.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est418.cpp \
+  ../../src/power_log_logic.cpp ../../src/timekeeper.cpp -o "$BIN68"
+"$BIN68"

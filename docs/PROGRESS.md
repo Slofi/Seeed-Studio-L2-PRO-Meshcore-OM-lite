@@ -8857,3 +8857,154 @@ sh test/host/run.sh
 Claude's review and commit; then flash and check the map log lines and the panned-off callout on the device.
 
 
+## EST-410 main.cpp split: RPTR
+
+The RPTR tab is out of main.cpp: `src/screens/rptr_tab.{h,cpp}`, in the same shape as
+`screens/map_tab.{h,cpp}` from EST-371. Moved: the tab's own state (session, list/page scroll, the
+CLI queue, Apply, the console log, the confirmation, the map picker, the keyboard sheet), the view
+builder, `drawRptrTab()`, `handleRptrTap()`, `rptrPump()`, the page taps, the sheet commit, the key
+handling and the RPTR-only helpers. `rptr_link`, `rptr_page` and `rptr_model` are untouched.
+
+### Size, build and tests
+- `src/main.cpp`: 7,178 -> 5,526 lines (-1,652).
+- New `src/screens/rptr_tab.cpp`: 1,801 lines; new `src/screens/rptr_tab.h`: 78 lines.
+- The moved block is 1,585 lines of HEAD's main.cpp (the EST-362 design comment, the
+  `drawRptrTab()` forward declaration, and lines 1780..3350). 1,557 of them are byte-identical;
+  28 lines were edited inside the block and are listed below.
+- Build with the REBUILD.md command (`PLATFORMIO_CORE_DIR=/home/slofi/.cache/pio-om-lite/core
+  /home/slofi/.local/share/pipx/venvs/platformio/bin/pio run -e om_lite_l2`): REAL exit 0.
+  RAM 160,808 B (49.1% of 327,680), was 160,528 B (+280 B).
+  Flash 2,995,605 B (45.7% of 6,553,600), was 2,994,073 B (+1,532 B).
+  `firmware.bin` 2,995,968 B, was 2,994,432 B (+1,536 B).
+- Why the growth (bigger than a few hundred bytes in flash): this build has no LTO, so the six Host
+  services (`buildStatus`, `tabBar`, `gps`, `toast`, `screenVisible`, `redraw`) are indirect calls
+  where they were direct calls in the same translation unit, and the exported wrappers are real calls too. The moved code itself is text-identical. The +280 B RAM is the Host (6 pointers, 24 B)
+  plus the null fallback `static GpsState none{}` in `gps()` (sizeof(GpsState) = 264 B), used only
+  before `begin()`. No heap allocation, no new task, no changed task affinity.
+- `sh test/host/run.sh`: REAL exit 0, 0 FAIL lines.
+
+### git diff
+`git diff --stat` (tracked files; the two new files are untracked, their `--no-index` stat follows):
+
+```
+ src/main.cpp                    | 1766 ++-------------------------------------
+ test/host/test_est393.py        |   11 +-
+ test/host/test_est397.py        |    4 +-
+ test/host/test_tab_bar_calls.py |    9 +-
+ 4 files changed, 74 insertions(+), 1716 deletions(-)
+ /dev/null => src/screens/rptr_tab.h   |   78 +++++++++++++++++++++++++++++++++
+ /dev/null => src/screens/rptr_tab.cpp | 1801 +++++++++++++++++++++++++++++++++
+```
+
+`git diff --color-moved=zebra --stat` prints the same four tracked lines: git's stat has no
+cross-file moved-line count, so the equivalent measure is a unified diff of the block itself:
+
+```
+original moved block: 1585 lines
+new moved block:      1587 lines
+diff lines (+/-):     58  (+30 / -28)
+```
+
+The 58 are 28 changed source lines (each a `-`/`+` pair) plus 2 blank separator lines. The other
+1,557 lines are a pure move. This was produced with `python3` `difflib` over
+`git show HEAD:src/main.cpp` lines 1743..1755 + 1757 + 1780..3350 and the same block in
+`src/screens/rptr_tab.cpp`.
+
+### Non-move edits (rule 1, one per line)
+
+Inside the moved block (28 lines, 30 substitutions):
+- `showToast(...)` -> `toast(...)` on 14 lines: the toast is a Host service now.
+- `redrawCurrentScreen()` -> `redraw()` on 6 lines: the shell redraw is a Host service.
+- `g_gps.valid` / `.lat` / `.lon` -> `gps().valid` / `.lat` / `.lon` on 5 lines (6 occurrences): the
+  raw parser state is a Host service, and it stays the RAW parser state, not `posOwn()`.
+- `buildStatus(v.status)` -> `status(v.status)`: the status bar is a Host service.
+- `currentTabBar(om::ui::Tab::Rptr)` -> `tabBar(ui::Tab::Rptr)`: the tab bar is a Host service.
+- `g_tab == 3 && !g_settings && !g_rptrList && !g_rptrMapPick` -> `visible() && ...`: the shell's
+  screen test is a Host service.
+- `g_tab == 3 && !g_settings && !g_rptrList` -> `visible() && !g_rptrList`: same test, pump path.
+
+New code that is not a move:
+- `src/screens/rptr_tab.h`: the `Host` struct and the module's public surface (`begin`, `draw`,
+  `tap`, `pressTarget`, `pump`, `beginDrag`, `dragMove`, `endPickerDrag`, `releaseSnap`, the six
+  state accessors, `open`, `clearSession`, `openNodeName`, `coordText`).
+- `src/screens/rptr_tab.cpp`: the Host helper functions (`toast`, `status`, `tabBar`, `gps`,
+  `visible`, `redraw`), the local `constexpr unsigned kLoopStackSize = 16384` (same value; main.cpp's
+  copy is static to that file and only the `[rptr] build` log line prints it), the exported wrappers
+  named above, and `pressTarget()`, which is the old press-target block moved into the module.
+- `pressTarget()` body was moved from main.cpp's `pressTargetAt()`; the tab bar, gear and fault
+  mark checks stayed in main.cpp, exactly where the Map's are.
+- The loop's RPTR drag branch became `rptr_tab::dragMove(x, y, dy, g_drag, g_lastX, g_lastY,
+  g_lastRender)`: same code, with the shell's drag latch, pan base and 60 ms frame clock passed by
+  reference so they keep their old values and stamp order.
+- The release clamp became `rptr_tab::releaseSnap(g_drag)`: same code; the `g_tab == 3 &&
+  !g_settings` guard stayed in main.cpp.
+- `rptrOpen`, `rptrClearSession`, `rptrCoordText`, `drawRptrTab`, `handleRptrTap` and `rptrPump`
+  keep their old names and bodies inside the module; public wrappers `open`, `clearSession`,
+  `coordText`, `draw`, `tap` and `pump` are the only new entry points.
+- main.cpp: `#include "screens/rptr_tab.h"`; three Host adapters `appRawGps()`,
+  `appRptrVisible()` and `appRedraw()`; the `rptrHost` wiring in `setup()`; `showToast`'s forward
+  declaration stayed where it was, `drawRptrTab`'s was removed.
+- main.cpp Settings: `g_rptrNode` reads now use `om::rptr_tab::openNodeName()` (the Open row and
+  the Forget guard); `rptrClearSession()` -> `om::rptr_tab::clearSession()`.
+- main.cpp drawing: `drawRptrTab()` -> `om::rptr_tab::draw()` in `redrawMainTab()` and
+  `redrawCurrentScreen()`.
+- main.cpp showTab: `g_rptrList` -> `om::rptr_tab::listShowing()`.
+- main.cpp Nodes menu: `rptrOpen(name)` -> `om::rptr_tab::open(name)`.
+- main.cpp press path: `g_rptrOsk` -> `keyboardOpen()`, `handleRptrTap` -> `tap()`; main.cpp
+  pressTarget: `g_rptrOsk` -> `keyboardOpen()` and the old block -> `pressTarget()`.
+- main.cpp idle blockers: `g_rptrOsk` -> `keyboardOpen()`; `g_rptrAskOpen || g_rptrMapPick` ->
+  `modalOpen() || mapPickerOpen()`; `(g_rptrMapPick && g_rptrPickDragging)` ->
+  `(mapPickerOpen() && mapPickerDragging())`.
+- main.cpp loop: `rptrPump()` -> `om::rptr_tab::pump()`; `g_rptrPickDragging = false` ->
+  `endPickerDrag()`; the two drag-base assignments -> `beginDrag()`; the drag branch ->
+  `dragMove()`; the release clamp -> `releaseSnap(g_drag)`.
+- main.cpp Settings own-position picker: `rptrCoordText(...)` -> `om::rptr_tab::coordText(...)` on
+  its two lines (the same helper, now owned by the module that also uses it).
+- Tests, see below.
+
+No rename changed a string, an NVS key, a log line or a USB answer. No bug was found while moving,
+so nothing was fixed here.
+
+### State another screen touches (rule 3)
+- `g_rptrNode` was read by Settings (Open repeater row, Forget guard) and the Forget action also
+  cleared the session. It moved with the session and is exposed as `openNodeName()` /
+  `clearSession()` in `rptr_tab.h`; `app_shell.h` was not touched because the USB commands never
+  read RPTR state.
+- `g_rptrList` was read by showTab's auto scan: `listShowing()`.
+- `g_rptrOsk`, `g_rptrAskOpen`, `g_rptrMapPick` and `g_rptrPickDragging` were read by the loop's
+  idle blockers: `keyboardOpen()`, `modalOpen()`, `mapPickerOpen()`, `mapPickerDragging()`.
+- Everything else is RPTR-only and moved. `g_tab`, `g_settings` and `g_gps` are shell state and
+  stayed in main.cpp; they reach the module through the Host.
+
+### Tests changed and armed (rule 5)
+- `test/host/test_tab_bar_calls.py`: the Rptr model check now reads
+  `src/screens/rptr_tab.cpp` (`v.tabs = tabBar(ui::Tab::Rptr);`) and main.cpp must wire
+  `rptrHost.tabBar = appTabBar;`. Armed: replacing that one line in rptr_tab.cpp makes it exit 1
+  with `FAIL screens/rptr_tab.cpp: the RPTR view does not take its tab model from the Host`; the
+  file was restored and the test passes again.
+- `test/host/test_est393.py`: `rptrMapPickCentreToDraft` is now read from
+  `src/screens/rptr_tab.cpp`; `ownPickCentreToDraft` stays in main.cpp. Armed: removing the pinned
+  `om::mapScreenToLatLon(om::ui::kMapCentreX, om::ui::kMapCentreY, lat, lon)` line makes it exit 1
+  with that function's two failures; restored, it passes.
+- `test/host/test_est397.py`: the two RPTR log lines now point at `src/screens/rptr_tab.cpp`
+  (`answer does not fit` in the whitelist, `auto-login started` in the shapes). Armed: deleting
+  both lines makes it exit 1 with the stale whitelist entry and the missing shape; restored, it
+  passes.
+- No other host test pinned RPTR code in main.cpp. `test_est374.py` still sees the same tabAt()
+  count because the tab bar/gear/fault checks stayed in main.cpp; `test_est390.py` still sees the
+  same pressArmAt call count because only the screen's own target map moved.
+
+### Could not check (no device in this run)
+- Nothing about the glass: the RPTR list, a page after login, the picker, the keyboard sheet, the
+  confirmation, the console and the tab badge are untested on hardware here. The new code is the
+  same text and the same draw call (`ui::rptrScreenDraw`) as before, and the build is clean, but
+  that is not a glass check.
+- The loop stack high-water line `[rptr] build ... stack_free=` is unchanged in text; the actual
+  number can only be read on the device.
+- `rptr_link` / `rptr_model` behaviour is unchanged by construction and their host tests pass.
+
+### Next step
+Claude: review the diff and commit. On the device: RPTR list scan, open a repeater, log in, one
+setting Apply, the console, Back, the Position picker, and the Settings > RPTR Open repeater row.
+The serial log should still print `[rptr] open (found N)`, `[rptr] build list/page=... stack_free=...`
+and the same `[rptr] cli` lines, and `status` should show the same RAM/stack numbers.

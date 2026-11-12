@@ -109,11 +109,14 @@ def main():
             fail(f"the picker's hit test does not read {needle}")
 
     # 4. The saved point is the pixel under the cross: both shell paths ask mapScreenToLatLon() for
-    #    the Map's own centre constants.
-    for fn in ("rptrMapPickCentreToDraft", "ownPickCentreToDraft"):
-        body = block(main_cpp, f"static void {fn}()", "\n}\n")
+    #    the Map's own centre constants. EST-410: the RPTR picker's path moved with the RPTR tab to
+    #    screens/rptr_tab.cpp; the Settings one is still in main.cpp.
+    for fn, rel in (("rptrMapPickCentreToDraft", "src/screens/rptr_tab.cpp"),
+                    ("ownPickCentreToDraft", "src/main.cpp")):
+        text = main_cpp if rel == "src/main.cpp" else read(rel)
+        body = block(text, f"static void {fn}()", "\n}\n")
         if not body:
-            fail(f"{fn}() not found in main.cpp")
+            fail(f"{fn}() not found in {rel}")
             continue
         if "om::mapScreenToLatLon(om::ui::kMapCentreX, om::ui::kMapCentreY" not in body:
             fail(f"{fn}() does not turn the pixel under the cross into the saved coordinate")

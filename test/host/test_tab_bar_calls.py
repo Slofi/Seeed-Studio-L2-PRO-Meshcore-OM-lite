@@ -44,7 +44,7 @@ if "static om::ui::TabBarModel currentTabBar(om::ui::Tab active)" not in main:
     problems.append("main.cpp: the one currentTabBar() helper is missing")
 if "om::ui::tabBarModel(active, unreadTotal(), g_newNodeDot)" not in main:
     problems.append("main.cpp: currentTabBar does not use unreadTotal()/g_newNodeDot")
-for tab in ("Nodes", "Chat", "Rptr"):
+for tab in ("Nodes", "Chat"):
     want = f"tabs = currentTabBar(om::ui::Tab::{tab});"
     if want not in main:
         problems.append(f"main.cpp: no {want}")
@@ -55,6 +55,13 @@ if "v.tabs = tabBar(ui::Tab::Map);" not in map_tab:
     problems.append("screens/map_tab.cpp: the Map view does not take its tab model from the Host")
 if "mapHost.tabBar = appTabBar;" not in main or "static om::ui::TabBarModel appTabBar(" not in main:
     problems.append("main.cpp: the Map module's tabBar host is not wired to the one helper")
+# EST-410: the same for RPTR, moved to screens/rptr_tab.cpp. The one model still comes from
+# currentTabBar() through appTabBar(), so the badge has one source on every tab.
+rptr_tab = strip_comments((SRC / "screens" / "rptr_tab.cpp").read_text(encoding="utf-8"))
+if "v.tabs = tabBar(ui::Tab::Rptr);" not in rptr_tab:
+    problems.append("screens/rptr_tab.cpp: the RPTR view does not take its tab model from the Host")
+if "rptrHost.tabBar = appTabBar;" not in main:
+    problems.append("main.cpp: the RPTR module's tabBar host is not wired to the one helper")
 
 # 3. Each tab screen actually draws the bar (a screen that stops drawing it would pass 1 and 2).
 for name in ("screen_nodes.cpp", "screen_chat.cpp", "screen_map.cpp", "screen_rptr.cpp"):

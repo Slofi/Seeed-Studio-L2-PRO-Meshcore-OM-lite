@@ -76,7 +76,7 @@ WHITELIST = [
      "`history` USB answer, printed only when the operator asks for that record (Claude, EST-397)"),
     ("src/rptr_link.cpp", '"[rptr] cli <- %s: %s%s',
      "a repeater's CLI ANSWER (its own status text), not a person's message"),
-    ("src/main.cpp", '"[rptr] answer does not fit \\"%s\\", ignored: %s',
+    ("src/screens/rptr_tab.cpp", '"[rptr] answer does not fit \\"%s\\", ignored: %s',
      "the same repeater CLI ANSWER, logged because it did not fit our buffer"),
     ("src/usb_commands.cpp", '"[msg] seq=%lu where=\\"%s\\" from=\\"%s\\"',
      "`msg` USB answer for one record the operator names; never automatic (Claude, EST-397)"),
@@ -158,7 +158,7 @@ SHAPES = [
     ("main.cpp", '"[nodes] select %d\\n"'),
     ("main.cpp", '"[set] chat picked: %d of %d (chat screen still on %d)\\n"'),
     ("main.cpp", '"[hist] no older messages (chat %d, %s)\\n"'),
-    ("main.cpp", '"[rptr] auto-login started (found %d)\\n"'),
+    ("screens/rptr_tab.cpp", '"[rptr] auto-login started (found %d)\\n"'),
 ]
 
 

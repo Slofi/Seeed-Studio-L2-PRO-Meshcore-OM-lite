@@ -17,6 +17,12 @@ namespace om {
 constexpr int kPinSda = 47;
 constexpr int kPinScl = 48;
 
+// EST-412: the back Grove HY2.0-4P port. Seeed's wiki names the two data pins GROVE_DAT_1 = GPIO14
+// and GROVE_DAT_2 = GPIO13, and no source in this tree says which is SDA; cardkb.cpp tries both
+// orders once. Grove VCC is its own 5 V boost, switched by expander bit 7 (kBitGrovePower).
+constexpr int kPinGroveDat1 = 14;
+constexpr int kPinGroveDat2 = 13;
+
 // --- IO expander: PCA9554-compatible at 0x21 (input reg 0x00, output 0x02, config 0x06) ---
 constexpr uint8_t kExpanderAddr = 0x21;
 enum ExpanderBit : uint8_t {
@@ -62,6 +68,14 @@ bool boardBegin();
 
 // 0..255
 void boardSetBrightness(uint8_t brightness);
+
+// EST-412: Grove VCC (its own 5 V boost) through expander bit 7. `grove on|off` uses this and
+// nothing else: no bus is opened and no pin mode is set, so a meter on SDA/SCL sees only the
+// keyboard's own pull-ups. False when the expander write did not land (the shadow is rolled back).
+bool boardGrovePower(bool on);
+// The latched level of the same bit, for `grove status` and for the OFF log. False before the
+// expander is ready (the boot shadow's power-up level is off).
+bool boardGrovePowerOn();
 
 // The Wake button (expander input 0, active low). Returns false if the expander is not readable.
 bool wakePressed(bool& pressed);

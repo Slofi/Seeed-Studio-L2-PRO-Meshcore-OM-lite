@@ -15,6 +15,8 @@
 #include "audio.h"
 #include "ble_link.h"
 #include "board.h"
+#include "cardkb.h"          // EST-412: the Grove CardKB's bus and power
+#include "cardkb_logic.h"    // EST-412: the key mapping, the default and the polling gate
 #include "charge_state.h"   // EST-402: the charging bolt's two-read debounce and its unknown rule
 #include "clock_keep.h"     // EST-403: the clock kept in RTC_NOINIT across a warm restart
 #include "crash_report.h"
@@ -103,6 +105,11 @@ using SoundEvent = om::sound::Event;
 
 static bool g_boardOk = false;
 static int g_tab = 0;
+// EST-412: the CardKB switch, DEFAULT OFF (cardkb_logic.h's rule). It is the user's setting, not the
+// probe result: cardkb::found() says whether the keyboard answered at enable. With this false the
+// Grove 5 V rail is off and no second I2C bus exists.
+static bool g_kbEnabled = om::cardkb::kDefaultEnabled;
+static uint32_t g_kbIgnored = 0;   // codes this build did not act on, for the one log line
 // Settings (EST-347) keeps only state; every rectangle comes from ui/settings_layout.h and every
 // pixel is drawn by ui/screen_settings.cpp. A page is a flat list of SettingRow, so one index drives
 // both the drawing and the tap. EST-350: the pages themselves and the history Back walks live in the
@@ -1578,6 +1585,8 @@ enum SetAct : uint16_t {
   A_None = 0,
   A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_BtToggle, A_BtNewPin, A_Sound,
   A_Brightness, A_Time, A_AdvertPos,
+  // EST-412: the Grove keyboard switch (default OFF).
+  A_GroveKeyboard,
   // EST-405: the screen auto-off switch and the row that opens its five time choices.
   A_IdleAutoOff, A_IdleTime,
   // EST-392: ONE position source control (the General page's `Position` row); it opens the small
@@ -1808,6 +1817,9 @@ static void buildSettingsRows() {
       else snprintf(v, sizeof(v), "on");
       setAdd(om::ui::SetRowKind::Chevron, A_Wifi, "Wi-Fi", v);
       setAdd(om::ui::SetRowKind::Chevron, A_Bt, "Bluetooth", om::ble::phaseLabel(om::blePhase()));
+      // EST-412: the M5 CardKB on the back Grove port. DEFAULT OFF, saved as "grovekb"; the ON
+      // action powers Grove, opens the second bus and probes 0x5F (the handler below).
+      setAdd(om::ui::SetRowKind::Toggle, A_GroveKeyboard, "Keyboard (Grove)", "ON", g_kbEnabled);
 
       setSection("SOUND");
       setAdd(om::ui::SetRowKind::Chevron, A_Sound, "Sound", om::sounds::masterOn() ? "on" : "off");
@@ -2717,6 +2729,22 @@ static void handleSettingsRow(uint16_t id) {
       showToast(pin != 0 ? "New PIN saved" : "New PIN failed");
       break;
     }
+    // EST-412: the Grove keyboard switch. The setting is RAM first and NVS after (a failed write is
+    // said out loud but does not undo the switch), exactly like the other saved bools. ON powers
+    // Grove, opens the second bus and probes 0x5F once in each pin order; OFF closes the bus and
+    // drops the 5 V rail. Nothing here runs while the switch is off.
+    case A_GroveKeyboard: {
+      g_kbEnabled = !g_kbEnabled;
+      const bool saved = mapLayerPrefWrite(nullptr, "grovekb", g_kbEnabled);
+      if (!saved) showToast("Keyboard setting not saved");
+      Serial.printf("[kb] switch %s (saved=%d)\n", g_kbEnabled ? "on" : "off", saved ? 1 : 0);
+      if (g_kbEnabled) {
+        if (!om::cardkb::begin()) showToast("CardKB not found");
+      } else {
+        om::cardkb::end();
+      }
+      break;
+    }
     case A_Sound:    setGo(SetPage::Sound); break;
     case A_Time:     setGo(SetPage::Time); break;
     // EST-405: the switch. Both stores move together: the saved one writes ONLY when the value
@@ -3473,6 +3501,18 @@ void setup() {
   Serial.printf("[map] layers traces=%d names=%d hidden=%d\n", om::map_tab::tracesOn() ? 1 : 0,
                 om::map_tab::namesOn() ? 1 : 0, om::map_tab::tabsHidden() ? 1 : 0);
   loadEmojiRecent();
+  // EST-412: the Grove keyboard switch. DEFAULT OFF and a missing key means OFF (cardkb_logic.h's
+  // enabledFromNvs), so an upgrade from an image without this key powers nothing and opens no bus.
+  // Only a saved ON runs the 50 ms settle, the power bit and the probe; the OFF path here is one
+  // NVS read and nothing else.
+  {
+    bool saved = false;
+    const bool present = mapLayerPrefRead(nullptr, "grovekb", false, saved);
+    g_kbEnabled = om::cardkb::enabledFromNvs(present, saved);
+    Serial.printf("[kb] switch %s (%s)\n", g_kbEnabled ? "on" : "off",
+                  present ? "saved" : "default");
+    if (g_kbEnabled && !om::cardkb::begin()) showToast("CardKB not found");
+  }
   // EST-405: the screen auto-off switch and time. DEFAULT OFF and 1 min; a missing key writes
   // nothing, so an upgrade from an image without them changes no NVS byte. The timer starts its
   // count here, so an image that boots with the switch on still shows the screen for a full time.
@@ -4013,15 +4053,25 @@ static void deleteArmTick(uint32_t now) {
   if (expired && g_settings && g_setEditor == om::ui::SettingsEditor::None) drawSettings();
 }
 
+// EST-412: is a text field open right now? The same list the auto-off timer already had, now with
+// one owner and with the screen it belongs to: Settings owns its editors, the Chat tab owns the
+// composer sheet (channel, DM and reply all share g_kb) and the RPTR tab owns its sheet. The CardKB
+// polls only when this is true, so a closed composer never reads the Grove bus and a sheet left
+// behind on another tab can never receive a key.
+static bool textFieldOpen() {
+  if (g_settings) return g_setEditor != om::ui::SettingsEditor::None;
+  if (g_tab == 1) return g_kb.open;
+  if (g_tab == 3) return om::rptr_tab::keyboardOpen();
+  return false;
+}
+
 // EST-405: everything the ticket says must keep the auto-off timer paused. Defined here, after every
 // screen's own state it reads and just before its one caller.
 static om::IdleBlockers idleBlockersNow() {
   om::IdleBlockers b;
   // The keyboard sheet covers every composer and editor: the chat composer, the message sheet's
   // REPLY/COPY/MENTION, the DM composer, every Settings text editor and the RPTR sheet.
-  b.keyboard =
-      g_kb.open || om::rptr_tab::keyboardOpen() ||
-      (g_settings && g_setEditor != om::ui::SettingsEditor::None);
+  b.keyboard = textFieldOpen();
   // Pop-ups, confirmations, sheets and dropdowns: things that never finish themselves and that a tap
   // must not reach behind, so the timer waits. The own-position picker and the RPTR map picker are
   // full frames, but the user is in the middle of choosing a point, so they wait too.
@@ -4039,6 +4089,88 @@ static om::IdleBlockers idleBlockersNow() {
   // same test the drawing and the touch dismissal use.
   b.toast = om::ui::toastState().visible(millis());
   return b;
+}
+
+// EST-412: one CardKB key, applied through the SAME functions the on-screen keys use. The mapping is
+// cardkb_logic.h's; this is only the routing. `hasCursor` is false: today's editors insert at the
+// end of the draft and draw the caret there, so left/right have nowhere to move and stay ignored.
+// A key on a sleeping screen wakes it like a touch and is not applied (the touch rule), and an
+// unrecognised code is counted and logged, never inserted.
+static void cardKbKey(uint8_t code) {
+  const om::cardkb::Key k = om::cardkb::mapCode(code, false);
+  if (k.action == om::cardkb::Action::None) return;
+  if (!g_screenOn) {
+    screenWake("keyboard");
+    return;
+  }
+  g_idle.onActivity(millis());   // a real key press is the user being there
+  // The ticket allows the touch-feedback click here but does not require it. It is left to the
+  // TAP path only (EST-390's one-call-site rule), so the keyboard is silent like a USB-injected
+  // gesture while the on-screen keys keep their tick.
+  if (k.action == om::cardkb::Action::Ignored) {
+    ++g_kbIgnored;
+    Serial.printf("[kb] ignored code 0x%02X (%lu)\n", (unsigned)code, (unsigned long)g_kbIgnored);
+    return;
+  }
+  if (g_tab == 1 && !g_settings && g_kb.open) {
+    switch (k.action) {
+      case om::cardkb::Action::Char: {
+        char one[2] = {k.ch, 0};
+        om::ui::composeAppend(g_kbText, (int)sizeof(g_kbText), one, chatDraftAllowance());
+        break;
+      }
+      case om::cardkb::Action::Backspace:
+        om::ui::composeBackspace(g_kbText);   // one whole code point, as the sheet's Del key does
+        break;
+      case om::cardkb::Action::Enter:
+        chatSendDraft();                      // the one Send door, channel/DM/reply alike
+        break;
+      case om::cardkb::Action::Esc:
+        g_kb.close();                         // the on-screen Back above the sheet
+        break;
+      default:
+        break;
+    }
+    drawChat();
+    return;
+  }
+  if (g_settings && g_setEditor != om::ui::SettingsEditor::None) {
+    switch (k.action) {
+      case om::cardkb::Action::Char:
+        settingsEditAppendChar(k.ch);         // the field's own filter and byte budget
+        break;
+      case om::cardkb::Action::Backspace:
+        om::ui::composeBackspace(settingsEditBuf());
+        break;
+      case om::cardkb::Action::Enter:
+        settingsEditorOk();                   // the sheet's OK / Join / Connect
+        return;                               // it drew its own frame
+      case om::cardkb::Action::Esc:
+        settingsBack();                       // the page's own Back
+        return;
+      default:
+        break;
+    }
+    drawSettings();
+    return;
+  }
+  if (g_tab == 3 && !g_settings && om::rptr_tab::keyboardOpen()) {
+    switch (k.action) {
+      case om::cardkb::Action::Char:      om::rptr_tab::keyboardText(k.ch); break;
+      case om::cardkb::Action::Backspace: om::rptr_tab::keyboardBackspace(); break;
+      case om::cardkb::Action::Enter:     om::rptr_tab::keyboardConfirm(); break;
+      case om::cardkb::Action::Esc:       om::rptr_tab::keyboardClose(); break;
+      default:                            break;
+    }
+  }
+}
+
+// The one poll, from the loop task only, and only through the gate: switch on, keyboard found, a
+// text field open. cardkb::poll() meters itself to ~30 ms and returns one new press at a time.
+static void cardKbStep(uint32_t nowMs) {
+  if (!om::cardkb::shouldPoll(g_kbEnabled, om::cardkb::found(), textFieldOpen())) return;
+  const int code = om::cardkb::poll(nowMs);
+  if (code > 0) cardKbKey((uint8_t)code);
 }
 
 void loop() {
@@ -5050,6 +5182,11 @@ void loop() {
     // repaint); the ACTION rule is untouched, so the release does exactly what it did before.
     if (om::ui::pressMove((int)x, (int)y)) redrawCurrentScreen();
   }
+
+  // EST-412: the Grove keyboard, from this task only. The gate inside cardKbStep() is the ticket's:
+  // switch on, the probe found 0x5F, and a text field is open on this screen right now. With the
+  // switch off nothing here calls the bus at all.
+  cardKbStep(millis());
 
   // EST-405: the auto-off timer's once-per-pass step, AFTER this pass's touch sample and USB poll so
   // both are already in. The timer only decides; screenSleep() is the wake button's own transition,

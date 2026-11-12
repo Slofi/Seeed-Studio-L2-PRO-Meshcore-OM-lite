@@ -60,6 +60,13 @@ void releaseSnap(bool dragging);
 
 // State the shell reads. Kept behind accessors because it is the tab's own.
 bool keyboardOpen();      // the keyboard sheet covers the tab bar and the gear
+// EST-412: the CardKB drives the open sheet through the same functions its own on-screen keys do.
+// Each returns false when the sheet is not open (or the field refuses the character), so a key
+// pressed at the wrong moment changes nothing. Confirm is the sheet's Send/OK.
+bool keyboardText(char ch);
+bool keyboardBackspace();
+bool keyboardConfirm();
+bool keyboardClose();     // Esc and the tap above the sheet both just close it
 bool modalOpen();         // a confirmation is up
 bool mapPickerOpen();     // the Position page's map picker is the whole frame
 bool mapPickerDragging();

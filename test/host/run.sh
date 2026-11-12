@@ -90,7 +90,8 @@ BIN59="$(mktemp /tmp/om-lite-est404.XXXXXX)"
 BIN60="$(mktemp /tmp/om-lite-est405.XXXXXX)"
 BIN61="$(mktemp /tmp/om-lite-est406.XXXXXX)"
 BIN62="$(mktemp /tmp/om-lite-est409.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62"' EXIT
+BIN63="$(mktemp /tmp/om-lite-est412.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -628,3 +629,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est409.cpp \
   ../../src/ui/map_trace.cpp -o "$BIN62"
 "$BIN62"
 python3 -B test_est409.py
+
+# EST-412: the M5 CardKB on Grove. Every key-code class (printable ASCII, backspace, enter, esc,
+# left/right with and without a cursor, up/down, and a list of unknown bytes), the OFF default with a
+# missing NVS key, and the polling gate (switch on AND found AND a text field open). test_est412.py
+# is the shell half: the row's default, the NVS key, the boot/enable paths, and the one poll inside
+# the loop under that gate.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est412.cpp -o "$BIN63"
+"$BIN63"
+python3 -B test_est412.py

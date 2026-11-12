@@ -401,6 +401,24 @@ Command parseCommand(char* line) {
     }
     return c;
   }
+  // EST-412: Grove VCC only. `grove on|off` writes expander bit 7 and `grove status` reads the
+  // latched level; no word opens an I2C bus or touches a data pin, so a meter on SDA/SCL measures
+  // the keyboard's own pull-ups. Exactly one of the three words, nothing else.
+  if (strcmp(verb, "grove") == 0) {
+    c.kind = Kind::Grove;
+    const char* sub = cur.next();
+    if (sub == nullptr) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    if (strcmp(sub, "on") != 0 && strcmp(sub, "off") != 0 && strcmp(sub, "status") != 0) {
+      c.error = cur.bad() ? "quote" : "args";
+      return c;
+    }
+    c.target = sub;
+    if (cur.next() != nullptr) c.error = cur.bad() ? "quote" : "args";
+    return c;
+  }
   if (strcmp(verb, "tap") == 0) {
     c.kind = Kind::Tap;
     const char* error = nullptr;

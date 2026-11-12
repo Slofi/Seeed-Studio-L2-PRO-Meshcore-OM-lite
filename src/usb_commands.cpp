@@ -1090,6 +1090,25 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       return;
     }
 
+    // EST-412: the one safety command before anything is plugged in. It writes (or reads) expander
+    // bit 7, Grove's own 5 V boost, and NOTHING else: no Wire1, no pin mode, so SDA/SCL on the
+    // keyboard are measured through the keyboard's own pull-ups. A refused expander write says so
+    // instead of pretending the rail moved.
+    case om::usb::Kind::Grove: {
+      if (strcmp(cmd.target, "status") == 0) {
+        snprintf(reply, cap, "[cmd] ok grove power=%s",
+                 om::boardGrovePowerOn() ? "on" : "off");
+        return;
+      }
+      const bool on = strcmp(cmd.target, "on") == 0;
+      if (!om::boardGrovePower(on)) {
+        cmdError(reply, cap, "expander");
+        return;
+      }
+      snprintf(reply, cap, "[cmd] ok grove power=%s", on ? "on" : "off");
+      return;
+    }
+
     case om::usb::Kind::KeyWake:
       om::usbWakePress();
       snprintf(reply, cap, "[cmd] ok key wake");

@@ -1707,6 +1707,39 @@ void beginDrag() {
 void endPickerDrag() { g_rptrPickDragging = false; }
 
 bool keyboardOpen() { return g_rptrOsk; }
+// EST-412: the CardKB's four doors. Each is the on-screen path itself (rptrAppendText,
+// composeBackspace/the secret length, rptrSheetCommit, the tap above the sheet), so the two input
+// devices cannot drift apart; the draw is the same drawRptrTab() a tap does.
+bool keyboardText(char ch) {
+  if (!g_rptrOsk || ch == 0) return false;
+  const int before = g_rptrTextLen;
+  rptrAppendText(ch);
+  if (g_rptrTextLen == before) return false;
+  drawRptrTab();
+  return true;
+}
+bool keyboardBackspace() {
+  if (!g_rptrOsk) return false;
+  if (g_rptrSecret) {
+    if (g_rptrTextLen > 0) g_rptrText[--g_rptrTextLen] = 0;
+  } else {
+    om::ui::composeBackspace(g_rptrText);
+    g_rptrTextLen = (int)strlen(g_rptrText);
+  }
+  drawRptrTab();
+  return true;
+}
+bool keyboardConfirm() {
+  if (!g_rptrOsk) return false;
+  rptrSheetCommit();
+  return true;
+}
+bool keyboardClose() {
+  if (!g_rptrOsk) return false;
+  g_rptrOsk = false;
+  drawRptrTab();
+  return true;
+}
 bool modalOpen() { return g_rptrAskOpen; }
 bool mapPickerOpen() { return g_rptrMapPick; }
 bool mapPickerDragging() { return g_rptrPickDragging; }

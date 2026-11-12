@@ -326,6 +326,14 @@ uint32_t s_composeUs = 0;
 
 }  // namespace
 
+// EST-412: Grove VCC (its own 5 V boost) through expander bit 7. Exactly one expander write and
+// nothing else: no I2C bus, no pin mode, so `grove on` cannot influence a meter reading on SDA/SCL.
+bool boardGrovePower(bool on) { return setOutput(kBitGrovePower, on); }
+
+bool boardGrovePowerOn() {
+  return (s_output[kBitGrovePower >> 3] & (uint8_t)(1U << (kBitGrovePower & 7))) != 0;
+}
+
 void omFrameSetOverlay(omFrameOverlay fn) { s_frameOverlay = fn; }
 
 uint16_t omFramePushCount() { return s_pushCount; }

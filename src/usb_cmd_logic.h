@@ -42,6 +42,7 @@ enum class Kind : uint8_t {
   Gps,      // gps raw <5..120>   (EST-383: the safe NMEA fields of RMC/ZDA/GGA/GSA + a type tally)
   Pos,      // pos gps | pos fixed-here   (EST-384: the node's own position source)
   Https,    // https probe   (EST-388: one measured HTTPS GET to the game server, from the loop)
+  Grove,    // grove on|off|status   (EST-412: Grove VCC through expander bit 7, nothing else)
 };
 
 // A parsed command. `target` and `text` point into the line given to parseCommand(), which is

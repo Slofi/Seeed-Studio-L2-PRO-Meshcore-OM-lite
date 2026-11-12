@@ -9179,3 +9179,113 @@ new-node dot on an advert and a trace's hop sheet. The serial log should still p
 `[nodes] menu N, N row(s)`, `[nodes] info N`, `[nodes] select N`, `[nodes] map: opening the node's
 position`, `[nodes] trace: N hop(s), M ms` and `[tap] x,y away from the node sheet: closed, gesture
 spent`.
+
+## EST-412 CardKB on Grove
+
+The M5Stack Unit CardKB (v1.1, ATmega8A, 0x5F) can now be used on the L2's back Grove port. The
+switch is Settings > General > CONNECTIONS > **Keyboard (Grove)**, DEFAULT OFF and saved in NVS as
+`grovekb`. OFF (and a boot with the key missing) leaves Grove power off, starts no bus and touches no
+Grove pin. ON switches Grove VCC through expander bit 7, waits 50 ms for the ATmega, opens a SECOND
+I2C bus (`Wire1`, 100 kHz) on GPIO14/GPIO13, probes 0x5F and logs `[kb] cardkb found (sda=.., scl=..)`
+or `[kb] cardkb not found` (plus the short toast). The internal bus (expander, touch, ADS1115, USB-C
+controller) is never touched. If the probe fails the 5 V rail stays on (the switch is on) and the bus
+is closed; toggling off/on probes again. There is no hot-plug rescan.
+
+### Safety: the data lines, and what the sources say
+- **Pull-ups: no source in this tree answers it.** I searched `src/board.cpp`, `src/board.h`, all of
+  `lib/` (only the MeshCore/MeshCore-companion/ed25519 trees are vendored), `reference/`, and there
+  is no Meshtastic or MeshCore Wio-Tracker-L2 variant here. No file says the Grove SDA/SCL have
+  pull-ups, or to which rail.
+- The only pull-ups this firmware can enable are the ESP32-S3's **internal** ones. The Arduino core's
+  `i2cInit()` sets `sda_pullup_en`/`scl_pullup_en` to `GPIO_PULLUP_ENABLE`
+  (`framework-arduinoespressif32/cores/esp32/esp32-hal-i2c.c`, lines 81-82), and those are tied to
+  the chip's 3.3 V rail; `Wire1.begin()` is the only thing that turns them on. This code has no way
+  to select another rail. They do NOT protect the pins from a pull-up on the keyboard that goes to
+  5 V, so the meter still decides.
+- `grove on` therefore writes expander bit 7 and **nothing else**: no `Wire1`, no `pinMode`, no
+  pull-up. A meter on SDA/SCL with the keyboard connected sees the keyboard's own pull-ups, not ours.
+  `grove off` clears the bit; `grove status` reads the latched bit without writing anything.
+- The expected reading is about 3.3 V. **Above 3.6 V: stop, do not turn the keyboard switch on.**
+
+### Which pin is SDA
+Seeed's wiki names only `GROVE_DAT_1` = GPIO14 and `GROVE_DAT_2` = GPIO13. Nothing in `src/`,
+`lib/` or `reference/` assigns SDA/SCL, so the driver does what the ticket says: at enable it tries
+(14 = SDA, 13 = SCL) once, then (13 = SDA, 14 = SCL) once, and logs which order answered. There are
+never more than those two probes per enable.
+
+### Keys
+- Printable ASCII 0x20..0x7E is inserted through the same door as the on-screen key
+  (`composeAppend` for the chat draft, `settingsEditAppendChar` for a Settings field,
+  `rptrAppendText` for the RPTR sheet). The draft cursor is the end of the text: these editors have
+  no movable cursor, so insertion is at the same place the on-screen key puts it.
+- 0x08 Backspace is `composeBackspace` (one whole code point, as the Del key); 0x0D Enter is the
+  sheet's own Send/OK (`chatSendDraft`, `settingsEditorOk`, the RPTR commit); 0x1B Esc is the
+  sheet's Back (`g_kb.close`, `settingsBack`, the RPTR sheet close).
+- Arrows are not ASCII. M5Stack's CardKB v1.1 key-code table (its CardKB firmware source, the same
+  table published for the Unit CardKB) gives 0xB4 left, 0xB5 up, 0xB6 down, 0xB7 right. This sandbox
+  had no network and there is no local copy of that source, so the four bytes could not be
+  re-fetched today. `mapCode(code, hasCursor)` exposes left/right, but the shell passes
+  `hasCursor = false` because no editor has a movable cursor, so both are ignored; up/down are
+  ignored too. An unknown code is counted and logged (`[kb] ignored code 0xNN (n)`) and never
+  inserted, so a different arrow byte on a real unit would show up there instead of corrupting a
+  draft.
+- A key press wakes a screen the button put to sleep, exactly like a touch, and is not applied on
+  that press. The touch-feedback click is left on the TAP path only (the ticket allows it here but
+  does not require it; EST-390's one-call-site rule stays).
+- Polling is one call from the loop task: `cardKbStep()` runs only when the switch is on, the probe
+  found the keyboard and `textFieldOpen()` is true (Chat composer incl. DM/reply, any Settings
+  editor, RPTR sheet). The read is metered to ~30 ms; the idle loop sleeps 20 ms, so in practice it
+  is one read per 40 ms pass (30 ms while a fade is running). A code held down is returned once; the
+  0x00 between presses re-arms it, so one physical press is one character.
+- The on-screen keyboard is unchanged; both work together.
+
+### Size, build and tests
+- New `src/cardkb_logic.h` (87 lines, the testable rules), `src/cardkb.{h,cpp}` (30 + 114 lines, bus
+  and power). No heap and no task anywhere in the driver.
+- Build with the REBUILD.md command (`PLATFORMIO_CORE_DIR=/home/slofi/.cache/pio-om-lite/core
+  /home/slofi/.local/share/pipx/venvs/platformio/bin/pio run -e om_lite_l2`): REAL exit 0.
+  RAM **160,872 B** (49.1% of 327,680), was 160,856 B, **+16 B**.
+  Flash **2,998,821 B** (45.8% of 6,553,600), was 2,996,449 B, **+2,372 B**.
+  `firmware.bin` 2,999,184 B, was 2,996,816 B (+2,368 B). Budget: +2,372 <= 8,192 B flash,
+  +16 <= 256 B RAM. (An incremental build of the same tree measured 16 B more, 2,998,837 B flash
+  and 2,999,200 B bin: the link/section-order noise EST-410/411 also saw. The clean build's numbers
+  are the ones above.)
+- The +16 B static is the seven scalars (`g_kbEnabled`, `g_kbIgnored`, and cardkb.cpp's
+  found/bus/have-last/last-code/last-poll state). `Wire1` is a 76 B core global in `.bss`; the RAM
+  delta shows it was already linked, so it is not a new cost.
+- While the switch is ON, the Arduino core's `TwoWire::begin()` allocates its own RX and TX buffers
+  before it starts the bus: `I2C_BUFFER_LENGTH` is 128 B each, so **2 x 128 = 256 B heap**
+  (`libraries/Wire/src/Wire.cpp`, `allocateWireBuffer()`; `TwoWire::end()` frees both again in
+  `freeWireBuffer()`). Then `i2cInit()` calls `i2c_driver_install(port, I2C_MODE_MASTER, 0, 0, 0)`
+  (`esp32-hal-i2c.c:90`), so the IDF's slave RX/TX ring buffers are **0 bytes each**. The IDF driver
+  also allocates its own driver object and semaphores on install and a command link per transaction,
+  freed after it; those are heap and were not measurable without a device. With the switch OFF none
+  of that exists: no `Wire1.begin()`, no buffers, no driver install, no task, no delay. The OFF boot
+  path is one `Preferences` bool read and one log line, so no boot delay was added.
+- `sh test/host/run.sh`: REAL exit 0, 0 FAIL lines (the full suite, including the two new tests).
+- `test/host/test_est412.cpp` proves the mapping (every printable byte, 0x00 not a key, 0x08/0x0D/
+  0x1B, left/right with and without a cursor, up/down, and 17 unknown bytes), the OFF default
+  (`kDefaultEnabled == false`, a missing key is OFF whatever the buffer held) and the gate (all
+  eight switch/found/field combinations; only true/true/true polls).
+- Armed, each against a broken header in /tmp: setting unknown codes to Char makes the mapping test
+  exit 1; `kDefaultEnabled = true` makes the default test exit 1 (3 failures); changing the gate to
+  `enabled && found && (textFieldOpen || !textFieldOpen)` makes the gate test exit 1 (2 failures).
+  Restored, all pass.
+- `test/host/test_est412.py` is the shell half: the `grove` verb/handler touches only
+  `boardGrovePower`/`boardGrovePowerOn`, the row and its OFF default, the `grovekb` key, the boot
+  and toggle paths, the one `cardkb::poll` call site behind `shouldPoll`, the on-screen doors, and no
+  heap/task in the driver. Armed by removing the `shouldPoll` guard from a copied `main.cpp`: it
+  exits 1 with `the poll is not behind the switch + found + text-field gate`.
+
+### Could not check (no device in this run)
+- Nothing about the glass or the keyboard: `grove on|off|status` has not run on hardware, no meter
+  reading was taken, no CardKB was probed, and no key has been typed. The SDA/SCL order, the actual
+  idle level, the CardKB's own pull-up rail and the arrow bytes are all unconfirmed here.
+- The IDF driver's heap footprint while ON is not measurable without a device.
+
+### Next step
+Claude: review the diff and commit. Filip, before the keyboard switch: `grove on`, measure SDA and
+SCL to GND with the CardKB connected (expect ~3.3 V, above 3.6 V stop), then `grove off`. Then turn
+on Settings > General > Keyboard (Grove), watch `[kb] cardkb found (sda=.., scl=..)` (or the
+not-found toast), open a chat composer and type, then try Backspace, Enter (send), Esc (close), a
+deliberately ignored key, and the Settings and RPTR editors. `grove status` answers the rail state.

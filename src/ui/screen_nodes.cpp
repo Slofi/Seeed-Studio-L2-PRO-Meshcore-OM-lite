@@ -11,6 +11,7 @@
 #include "board.h"
 #include "ui/layout.h"
 #include "ui/nodes_header.h"
+#include "ui/scroll_indicator.h"
 #include "ui/theme.h"
 
 namespace om {
@@ -124,6 +125,15 @@ void nodesScreenDraw(const NodesView& view) {
       drawListRow(d, L.row(i, view.scroll), row);
     }
     d->clearClipRect();
+  }
+
+  // EST-414: the scroll indicator, from the list's own body rectangle and the same count the rows
+  // were drawn from. It sits in the body's 7 px right padding, so no row text is under it, and it
+  // is drawn after the rows so a row's bottom line cannot cut through it.
+  if (view.count > 0 && view.items != nullptr) {
+    const Rect body = L.listBody();
+    drawScrollIndicator(d, scrollIndicatorFor(body, view.count * kRowH, body.h, view.scroll,
+                                             L.maxScroll(view.count), false));
   }
 
   drawStatusBar(d, L, view.status);

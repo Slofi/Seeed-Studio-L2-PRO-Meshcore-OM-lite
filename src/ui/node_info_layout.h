@@ -44,17 +44,14 @@ constexpr int nodeInfoMaxScroll(int lineCount, const NodeInfoLayout& g) {
 
 // The same fingertip rule as the Nodes list and the Settings pages (kSelGive px of stretch, snapped
 // back on release), so the Info page feels like every other list.
+// EST-414: the rule itself moved to layout.h (listGiveScroll / listSnapScroll) so there is ONE
+// implementation behind every list; these two names stay for the EST-400 callers and their test.
 constexpr int nodeInfoDragScroll(int base, int dyUp, int maxScroll) {
-  int next = base + dyUp;
-  if (next < -kSelGive) next = -kSelGive;
-  if (next > maxScroll + kSelGive) next = maxScroll + kSelGive;
-  return next;
+  return listGiveScroll(base, dyUp, maxScroll);
 }
 
 constexpr int nodeInfoSnapScroll(int v, int maxScroll) {
-  if (v < 0) return 0;
-  if (v > maxScroll) return maxScroll;
-  return v;
+  return listSnapScroll(v, maxScroll);
 }
 
 }  // namespace ui

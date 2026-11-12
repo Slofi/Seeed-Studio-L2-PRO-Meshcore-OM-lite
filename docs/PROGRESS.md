@@ -9391,3 +9391,107 @@ Claude: review the diff and commit. Filip: power the L2 off for a minute and on,
 a fix, run `log power tail` (expect `no real time yet skipped=N`), then let GPS or Wi-Fi set the
 clock and run it again (expect today's file and the same `skipped` count); the first CSV row after
 that should carry the real wall minute.
+
+## EST-415 UI tweaks (EST-414 continued)
+
+EST-414 was stopped by the 30-minute cap (exit 124) with no report and nothing committed. This entry
+starts from its working tree, which already holds the five glass-test changes; EST-415 finishes and
+verifies them, then folds the six per-ticket preview generators into one `tools/preview.py`.
+
+State of the five items in the tree EST-415 inherited (evidence against the working tree, which is
+what will be committed):
+
+1. **Scroll indicator on the Nodes list, the chat list and an open chat: DONE.**
+   One geometry (`src/ui/scroll_indicator.h`, `scrollIndicatorFor()`) and one drawing helper
+   (`src/ui/scroll_indicator.cpp`, `drawScrollIndicator()`); the three lists pass their own layout
+   rectangle:
+   - Nodes: `src/ui/screen_nodes.cpp:130-137` (`body = L.listBody()`, top-down, `false`).
+   - chat/channel list: `src/ui/chat_selector.cpp:128-134` (`list`, top-down, `false`).
+   - open chat: `src/ui/screen_chat.cpp:268-274` (`g.msgs`, bottom-anchored, `true`).
+2. **The end bounce on those three, reusing the Node Info rule: DONE.**
+   `listGiveScroll()` / `listSnapScroll()` are the ONE rule in `src/ui/layout.h:156-167`; the old
+   `nodeInfoDragScroll` / `nodeInfoSnapScroll`, `settings*` and `selDragScroll` names forward to it
+   (`src/ui/node_info_layout.h:47-56`, `src/ui/settings_layout.h:371-381`,
+   `src/ui/chat_layout.cpp:544-550`). Nodes keeps the drag's give through `refreshNodes()`
+   (`src/screens/nodes_tab.cpp:141-146`, drag `:548-554`, release `:577-579`); the chat's channel list
+   and message band use it in `src/main.cpp:1077-1081`, `:5183`, `:5195`, with the release snap at
+   `:4904` and `:4912`.
+3. **RPTR does not auto scan when the tab opens: DONE in this tree, contrary to the ticket note.**
+   `src/main.cpp:3793-3797` replaces the EST-362 `rptrScanStart()` block; `rptrScanStart` and
+   `[rptr] auto scan` no longer occur anywhere in `src/main.cpp` (`grep` confirms). The Scan chip
+   still starts one (`src/screens/rptr_tab.cpp:1559`).
+4. **Settings > Channels without the unread count: DONE.** `src/main.cpp:2103-2114`: the row value is
+   only ON / muted / OFF; the `meshUnread` / `"+%d"` append is gone. The Chat tab's own unread
+   badge and per-chat dot/count are untouched.
+5. **Settings > "Open repeater" tappable, jumping to the RPTR tab with the open session: DONE.**
+   Live Chevron while a session is open and a plain `none` value otherwise
+   (`src/main.cpp:1979-1985`); `A_RptrOpen` (`:1608`) is handled at `:2828-2836`: it leaves Settings
+   through `settingsLeaveState()` and calls `showTab(3)` (or repaints the RPTR tab in place), without
+   clearing or re-opening the session. The tap still comes from `settingsRowHit()`, the same rows the
+   drawing uses.
+
+What EST-415 itself changes:
+- Re-read the five items against the inherited tree. All five are present; item 3 is fixed in this
+  tree even though the ticket note said it was not: the EST-362 block is gone from `showTab()` and
+  `grep -n "rptrScanStart" src/main.cpp` finds nothing and `"auto scan"` finds only the explanatory
+  comment.
+- One small hardening in the bounce (item 2): `nodes_tab::beginDrag()` now clears `g_nodeDrag`, so an
+  interrupted gesture (a screen change before the finger lifts) cannot leave the "keep the give" flag
+  true and stop the next refresh from snapping (`src/screens/nodes_tab.cpp:488-495`). The release
+  and the new test still use the same path.
+- Folded the six preview generators into `tools/preview.py` and deleted
+  `tools/mkest400.py`, `mkest402.py`, `mkest404.py`, `mkest405.py`, `mkest406.py` and `mkest414.py`
+  (the last was untracked; git keeps the committed five). The previews in `docs/shots/` are untouched.
+
+### Preview tool (EST-415)
+`tools/preview.py` is the one host renderer for the previews the tickets needed. It still compiles a
+small dumper with the system `g++` over the firmware's own headers, so the rectangles and colours are
+the firmware's, and fills them with PIL. It is NOT a screenshot: no frame comes off the device and the
+text is desktop DejaVu, not the VLW faces.
+
+How to call it:
+```
+python3 tools/preview.py                    # every preview
+python3 tools/preview.py est414             # one (est400, est402, est404, est405, est406, est414)
+python3 tools/preview.py est400 est405      # any set
+PREVIEW_OUT=/tmp/png python3 tools/preview.py   # write elsewhere; default is docs/shots
+```
+What it renders, and the output each name writes:
+| name | output in `docs/shots/` | what it shows |
+|---|---|---|
+| `est400` | `2026-11-11-est400-polish.png` | the toast plate, the Settings Warn row, the Info page clip at two scrolls |
+| `est402` | `2026-11-11-est402-charging-bolt.png` | the status bar with and without the charging bolt, 8x icon crop |
+| `est404` | `2026-11-11-est404-bolt-tips.png` | the bolt over the icon, four states, 1x and 8x |
+| `est405` | `2026-11-11-est405-auto-off-rows.png` | Settings > General display rows, switch OFF and ON |
+| `est406` | `2026-11-11-est406-send-button.png` | the send key on the composer line, empty vs "hello" |
+| `est414` | `2026-11-12-est414-scroll-indicator.png` | the indicator on the Nodes list, the channel list and an open chat |
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0 (after the final edit).
+  RAM **160,888 B** (49.1% of 327,680), was 160,880 B, **+8 B** (the drag flag's reset).
+  Flash **3,000,161 B** (45.8% of 6,553,600), was 2,999,305 B, **+856 B**.
+  `firmware.bin` 3,000,528 B.
+- `sh test/host/run.sh`: REAL exit 0, 0 `FAIL` lines, including both new EST-414 tests.
+- `test/host/test_est414.cpp` (compiled by run.sh): indicator geometry on all three lists (proportional
+  thumb, top/middle/end, bottom-anchored chat at rest, minimum thumb, nothing when the content fits,
+  track never over text) and the one give/snap rule with every old name answering the same numbers.
+- `test/host/test_est414.py`: REAL exit 0 on the current tree. **Armed**: against an export of HEAD
+  (`git archive HEAD`, the pre-EST-414 tree) it exits 1 with 59 failures, including the old
+  `[rptr] auto scan` line, the `meshUnread` append, the missing `A_RptrOpen` and the old chat clamps.
+- `tools/preview.py`: `python3 -m py_compile` OK; all six renderers ran with REAL exit 0 to a temp
+  directory. Five regenerated PNGs are byte-identical to the committed previews. `est402` differs
+  only inside the bottom 8x icon crop (the committed PNG is slightly older than the current generator);
+  the committed preview was left as it is, as the ticket asks.
+
+### Could not check (no device in this run)
+- Nothing about the glass: no L2 was flashed, the indicator has not been seen at the real fonts and
+  panel, no finger has pulled a list past its end, the RPTR tab has not been opened to confirm it stays
+  quiet, and the "Open repeater" row has not been tapped on hardware. All of that is host geometry,
+  source checks and the build.
+- The previews are host renders, not device screenshots; they can be wrong about the VLW text but not
+  about the rectangles and colours, which come from the headers.
+
+### Next step
+Claude: review the diff, the deleted generators and `tools/preview.py`, then commit. Filip: flash and
+check the five on the glass, especially that the list gives a little at either end and that Settings >
+RPTR > Open repeater lands on the open session's page.

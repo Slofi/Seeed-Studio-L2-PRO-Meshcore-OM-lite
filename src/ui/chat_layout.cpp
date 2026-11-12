@@ -543,11 +543,10 @@ int selRowAt(const Rect& list, int channelCount, int dmCount, int scroll, int py
 // The list follows the finger. A larger scroll moves the rows UP (selRowTop subtracts it), so a finger
 // that went UP by dyUp (screen y decreased) has to INCREASE the scroll by dyUp. This is the sign that
 // was wrong: the old drag did `base - dy` and the list ran away from the finger (EST-334).
+// EST-414: the give and the ceiling are ui/layout.h's listGiveScroll now, the one rule every list
+// uses; this name stays for the call sites and the tests that already ask for it.
 int selDragScroll(int base, int dyUp, int maxScroll) {
-  int next = base + dyUp;
-  if (next < -kSelGive) next = -kSelGive;
-  if (next > maxScroll + kSelGive) next = maxScroll + kSelGive;
-  return next;
+  return listGiveScroll(base, dyUp, maxScroll);
 }
 
 int msgContentHeight(const int16_t* heights, int n) {

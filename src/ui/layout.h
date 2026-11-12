@@ -147,6 +147,25 @@ struct Layout {
   }
 };
 
+// EST-414: ONE give-and-snap rule for every vertical list. EST-400 wrote it for the Info page
+// (nodeInfoDragScroll / nodeInfoSnapScroll) and it had been copied into the chat list, the Settings
+// pages and the inline chat drag; all of them now forward here, so "the same give" cannot drift
+// between two screens. A drag moves the content with the finger (dyUp is startY - nowY, so a finger
+// that went UP grows the scroll) and may stretch kSelGive px past either end; the release snaps it
+// back into [0, maxScroll].
+constexpr int listGiveScroll(int base, int dyUp, int maxScroll) {
+  int next = base + dyUp;
+  if (next < -kSelGive) next = -kSelGive;
+  if (next > maxScroll + kSelGive) next = maxScroll + kSelGive;
+  return next;
+}
+
+constexpr int listSnapScroll(int v, int maxScroll) {
+  if (v < 0) return 0;
+  if (v > maxScroll) return maxScroll;
+  return v;
+}
+
 // The unread badge's box on a tab: a 13 px circle for one digit, the 19 px pill for two and the 23 px
 // one for "99+", its centre at the top-right corner of the tab icon and its top 1 px under the
 // selected tab's gold line (theme.h holds the numbers). Drawing and the preview tool use this same

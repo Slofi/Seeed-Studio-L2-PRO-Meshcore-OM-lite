@@ -370,17 +370,14 @@ constexpr int settingsStepperPart(const Rect& row, int x, int y) {
 
 // Same fingertip rule as the chat list (chat_layout.h selDragScroll): the content moves with the
 // finger, with kSelGive px of stretch past either end, snapped back on release.
+// EST-414: both are ui/layout.h's one listGiveScroll / listSnapScroll; these names stay for the
+// existing callers and tests.
 constexpr int settingsDragScroll(int base, int dyUp, int maxScroll) {
-  int next = base + dyUp;
-  if (next < -kSelGive) next = -kSelGive;
-  if (next > maxScroll + kSelGive) next = maxScroll + kSelGive;
-  return next;
+  return listGiveScroll(base, dyUp, maxScroll);
 }
 
 constexpr int settingsSnapScroll(int v, int maxScroll) {
-  if (v < 0) return 0;
-  if (v > maxScroll) return maxScroll;
-  return v;
+  return listSnapScroll(v, maxScroll);
 }
 
 // ------------------------------------------------------------------------------- position choice

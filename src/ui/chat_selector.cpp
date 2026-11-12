@@ -11,6 +11,7 @@
 #include "ui/age.h"          // the one timestamp formatter (row ages)
 #include "ui/badge_font.h"   // the one unread-count rule
 #include "ui/fonts.h"
+#include "ui/scroll_indicator.h"
 #include "ui/widgets.h"
 
 namespace om {
@@ -123,6 +124,14 @@ void drawChatSelector(lgfx::LovyanGFX* d, const SelectorModel& m, const Rect& pa
     }
   }
   d->clearClipRect();
+
+  // EST-414: the channel list's scroll indicator, from the list rectangle the rows were drawn into
+  // and the same content height selMaxScroll() clamps against. It sits in the list's 7 px right
+  // padding, so no row's name, age or unread count is under it. The pinned Manage row below is
+  // outside `list`, so it never gets a track.
+  drawScrollIndicator(d, scrollIndicatorFor(list, selContentHeight(m.channelCount, m.dmCount),
+                                           list.h, m.scroll,
+                                           selMaxScroll(list, m.channelCount, m.dmCount), false));
 
   if (manage.empty()) return;
   const int cy = manage.y + manage.h / 2;

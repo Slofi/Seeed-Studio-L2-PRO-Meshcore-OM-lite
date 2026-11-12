@@ -321,6 +321,10 @@ static bool g_wakePrev = false;          // the wake button's last sampled level
 static bool g_down = false;
 static bool g_drag = false;
 static bool g_acted = false;
+// EST-414: true only while a finger is dragging one of the scrolling lists past its end. The views'
+// own clamps (drawChat, nodes_tab's refreshNodes) keep the give while it is set and clamp absolutely
+// outside it, so a content that shrinks while nobody is dragging can never strand a gap at the end.
+static bool g_listGive = false;
 static om::ScreenIdle g_idle;            // the auto-off timer (screen_idle.h)
 static om::ScreenIdlePrefs g_idlePrefs;  // its two saved values
 
@@ -1065,12 +1069,18 @@ static void drawChat() {
   om::ui::ChatView v;
   buildChatView(v);
   g_chatMaxScroll = om::ui::chatMaxScroll(v);
-  if (g_chatScroll > g_chatMaxScroll) g_chatScroll = g_chatMaxScroll;
-  if (g_chatScroll < 0) g_chatScroll = 0;
-  v.scroll = g_chatScroll;
   g_selMaxScroll = om::ui::chatSelectorMaxScroll(v);
-  if (g_selScroll > g_selMaxScroll) g_selScroll = g_selMaxScroll;
-  if (g_selScroll < 0) g_selScroll = 0;
+  // EST-414: while a finger is dragging the message band or the channel list, the kSelGive stretch
+  // past either end IS the scroll (releaseSnap's listSnapScroll takes it back). Outside a drag the
+  // clamp is absolute, so a content that shrinks (a new page, a removed chat) can never leave a gap.
+  if (g_listGive) {
+    g_chatScroll = om::ui::listGiveScroll(0, g_chatScroll, g_chatMaxScroll);
+    g_selScroll = om::ui::listGiveScroll(0, g_selScroll, g_selMaxScroll);
+  } else {
+    g_chatScroll = om::ui::listSnapScroll(g_chatScroll, g_chatMaxScroll);
+    g_selScroll = om::ui::listSnapScroll(g_selScroll, g_selMaxScroll);
+  }
+  v.scroll = g_chatScroll;
   v.selScroll = g_selScroll;
   g_emojiMaxScroll = om::ui::chatEmojiMaxScroll(v);
   if (g_emojiScroll > g_emojiMaxScroll) g_emojiScroll = g_emojiMaxScroll;
@@ -1594,6 +1604,8 @@ enum SetAct : uint16_t {
   A_PosSource,
   A_Apply, A_Cancel,
   A_MapRecentre, A_MapClear, A_RptrForget, A_RptrAuto,
+  // EST-414: Settings > RPTR > "Open repeater" jumps to the open session's page on the RPTR tab.
+  A_RptrOpen,
   A_ChatPick, A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
   A_ChatMsgSound, A_ChatDmSound, A_ChatMenSound,
   A_SoundMaster, A_SoundVolume, A_SoundBoot, A_SoundMsg, A_SoundDm, A_SoundMen, A_SoundSent,
@@ -1964,7 +1976,14 @@ static void buildSettingsRows() {
       setSection("REPEATER");
       // EST-410: the open session's repeater name, now owned by screens/rptr_tab.cpp.
       const char* openRptr = om::rptr_tab::openNodeName();
-      setAdd(om::ui::SetRowKind::Value, A_None, "Open repeater", openRptr[0] ? openRptr : "none");
+      // EST-414 (Filip's glass test): while a session is open the row is a Chevron that jumps to the
+      // RPTR tab, which still holds that session's page (the same view as after login). With nothing
+      // open it stays a plain read-only value: no action, no '>', so a tap does nothing.
+      if (openRptr[0]) {
+        setAdd(om::ui::SetRowKind::Chevron, A_RptrOpen, "Open repeater", openRptr);
+      } else {
+        setAdd(om::ui::SetRowKind::Value, A_None, "Open repeater", "none");
+      }
       // EST-358: the switch the ticket asks for, on the Settings RPTR tab.
       setAdd(om::ui::SetRowKind::Toggle, A_RptrAuto, "Auto-login", "ON", om::rptrAutoLogin());
       const int remembered = om::rptrRememberedCount();
@@ -2089,11 +2108,8 @@ static void buildSettingsRows() {
         if (!om::mcChannelEnabled(i)) snprintf(v, sizeof(v), "OFF");
         else if (om::mcChannelMuted(i)) snprintf(v, sizeof(v), "muted");
         else snprintf(v, sizeof(v), "ON");
-        if (om::meshUnread(i) > 0) {
-          char u[16];
-          snprintf(u, sizeof(u), " +%d", om::meshUnread(i));
-          strncat(v, u, sizeof(v) - strlen(v) - 1);
-        }
+        // EST-414: no unread count here any more ("+2"). Unread belongs to the Chat tab (its own
+        // badge and its per-chat dot/count); a channel row here says only ON / muted / OFF.
         setAdd(om::ui::SetRowKind::Chevron, (uint16_t)(A_ChanBase + i), om::mcChannelName(i), v);
       }
       if (om::mcChannelCount() < om::kMaxChannels) {
@@ -2521,6 +2537,18 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
   drawSettings();
 }
 
+// EST-414: the ONE place that clears Settings' transient state when Settings is left, whether by Back
+// from a root page or by a row that jumps to another tab (Settings > RPTR > Open repeater). It does
+// not draw: the caller decides between redrawing the tab already on the glass and a screen change.
+static void settingsLeaveState() {
+  g_settings = false;
+  g_setEditor = om::ui::SettingsEditor::None;
+  clearDeleteArms();
+  g_clearAsk = false;
+  g_setSelOpen = false;
+  g_posChoice = false;   // EST-392
+}
+
 static void settingsBack() {
   // EST-354: Back out of the password sheet wipes the typed secret; it is not needed after leaving.
   if (g_setPage == SetPage::WifiPass) {
@@ -2532,12 +2560,7 @@ static void settingsBack() {
   // it returns to is the one the user came from, at the scroll it was left at. An empty history means
   // this is a root page: Back leaves Settings for the screen the gear was pressed on.
   if (g_setNav.empty()) {
-    g_settings = false;
-    g_setEditor = om::ui::SettingsEditor::None;
-    clearDeleteArms();
-    g_clearAsk = false;
-    g_setSelOpen = false;
-    g_posChoice = false;   // EST-392
+    settingsLeaveState();
     redrawMainTab();
     return;
   }
@@ -2802,6 +2825,14 @@ static void handleSettingsRow(uint16_t id) {
       om::rptrSetAutoLogin(!om::rptrAutoLogin());
       showToast(om::rptrAutoLogin() ? "Auto-login on" : "Auto-login off");
       break;
+    case A_RptrOpen:
+      // EST-414: leave Settings and show the RPTR tab as it stands. The tab's own state is NOT reset,
+      // so the open session's page (the view login left behind) is exactly what comes back. Settings
+      // clears its transient state first, through the same helper Back uses.
+      settingsLeaveState();
+      if (g_tab == 3) redrawMainTab();   // already the RPTR tab: repaint it in place
+      else showTab(3);                   // the screen change composes and pushes it
+      return;
 
     // Chat tab: the same channel, reached from the open chat.
     case A_ChatOpen:
@@ -3759,11 +3790,10 @@ static void showTab(int tab) {
     // run one at a time. Nothing is replayed when the Traces toggle is off.
     om::map_tab::tracesResetAndSeed();
   }
-  if (tab == 3 && om::rptr_tab::listShowing() && !om::rptrScan().listening) {
-    // EST-362: opening the tab scans by itself. The header's Scan is the rescan (and the only
-    // control on the list besides the rows).
-    if (om::rptrScanStart()) Serial.printf("[rptr] auto scan\n");
-  }
+  // EST-414 (Filip's glass test): the RPTR tab no longer scans when it opens. EST-362's auto scan is
+  // gone; the header's Scan chip is the one door (screens/rptr_tab.cpp, RptrHit::Scan), and the list
+  // of the last scan, the remembered passwords and the one-tap login are untouched. Nothing else in
+  // this switch starts a scan.
   Serial.printf("[tab] %s\n", om::ui::tabLabel((om::ui::Tab)g_tab));
   beginScreenChange(fromTab, tab);
 }
@@ -4869,16 +4899,17 @@ void loop() {
             }
           } else if (!g_kb.open) {
             if (g_selector) {
-              const int clamped = g_selScroll < 0 ? 0
-                                : (g_selScroll > g_selMaxScroll ? g_selMaxScroll : g_selScroll);
+              // EST-414: the one snap rule (ui/layout.h listSnapScroll) for the channel list.
+              g_listGive = false;
+              const int clamped = om::ui::listSnapScroll(g_selScroll, g_selMaxScroll);
               if (clamped != g_selScroll) {
                 g_selScroll = clamped;
                 redraw = true;
               }
             } else {
-              const int clamped = g_chatScroll < 0 ? 0
-                                : (g_chatScroll > g_chatMaxScroll ? g_chatMaxScroll
-                                                                  : g_chatScroll);
+              // EST-414: and for the bottom-anchored message band.
+              g_listGive = false;
+              const int clamped = om::ui::listSnapScroll(g_chatScroll, g_chatMaxScroll);
               if (clamped != g_chatScroll) {
                 g_chatScroll = clamped;
                 redraw = true;
@@ -4933,6 +4964,7 @@ void loop() {
     om::nodes_tab::beginDrag();   // EST-411: the Nodes list/Info drag bases
     om::rptr_tab::beginDrag();   // EST-410: the RPTR list/page drag bases
     g_drag = false;
+    g_listGive = false;   // EST-414: a new gesture starts inside the lists' bounds
     g_acted = false;
     om::nodes_tab::holdDisarm();
     g_keyHoldArmed = false;
@@ -5143,22 +5175,24 @@ void loop() {
           if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
         }
       } else if (g_tab == 1 && g_selector) {
-        // The dropdown's list follows the finger (selDragScroll holds the sign and the give): the
-        // content moves with the fingertip, and the release path snaps the stretch back. The message
-        // band underneath is not touched.
-        const int next = om::ui::selDragScroll(g_selScroll0, dy, g_selMaxScroll);
+        // The dropdown's list follows the finger: the one shared give rule (ui/layout.h
+        // listGiveScroll) keeps the sign and kSelGive of stretch, and the release path snaps the
+        // stretch back. The message band underneath is not touched. g_listGive tells drawChat's
+        // clamp that the stretch is the scroll (EST-414).
+        g_listGive = true;
+        const int next = om::ui::listGiveScroll(g_selScroll0, dy, g_selMaxScroll);
         if (next != g_selScroll) {
           g_selScroll = next;
           if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
         }
       } else if (g_tab == 1 && !g_kb.open) {
-        // A fingertip of give past either end, snapped back on release (see the release path). The
-        // base is the chat's own scroll: using g_scroll0 here meant every drag started from the sound
-        // picker's position, which made the chat jump when a drag began away from 0.
-        constexpr int kGive = 10;
-        int next = g_chatScroll0 - dy;
-        if (next < -kGive) next = -kGive;
-        if (next > g_chatMaxScroll + kGive) next = g_chatMaxScroll + kGive;
+        // The message band is bottom-anchored (scroll grows as the finger goes down into history),
+        // so its delta enters the shared rule with the opposite sign; the give past either end and
+        // the snap-back are the same ones every list uses (EST-414: no local kGive copy any more).
+        // The base is the chat's own scroll: using g_scroll0 here meant every drag started from the
+        // sound picker's position, which made the chat jump when a drag began away from 0.
+        g_listGive = true;
+        const int next = om::ui::listGiveScroll(g_chatScroll0, -dy, g_chatMaxScroll);
         g_chatScroll = next;
         if (millis() - g_lastRender > 60) { g_lastRender = millis(); drawChat(); }
       } else if (g_tab == 2) {

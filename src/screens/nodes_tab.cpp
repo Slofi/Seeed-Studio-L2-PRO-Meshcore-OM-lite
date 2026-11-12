@@ -68,6 +68,10 @@ static bool g_nodeLastHourKnown = false;
 static int g_nodeSel = -1;
 static int g_nodeScroll = 0;
 static int g_nodeScroll0 = 0;      // finger-down base for the list drag
+// EST-414: true only while the list's own drag is stretching past an end, so refreshNodes keeps the
+// give during the drag and clamps absolutely otherwise (a contact table that shrinks while nobody is
+// dragging must not leave a gap at the last row).
+static bool g_nodeDrag = false;
 static uint32_t g_nodeSig = 0;     // contact-table change detector
 // EST-342: the long-press sheet, the Info page and the new-node dot.
 static om::ui::LongPress g_nodeHold;   // the one tested timing rule (ui/long_press.h)
@@ -134,9 +138,12 @@ static void refreshNodes() {
     }
   }
   if (g_nodeSel >= n) g_nodeSel = n - 1;
+  // EST-414: the drag's give past either end (listGiveScroll's kSelGive) is part of the scroll while
+  // the finger is down, so this refresh must not clamp it away or the Nodes list would stop hard at
+  // its last row again. Outside a drag the clamp is absolute; releaseSnap() does the same on release.
   const int maxScroll = om::ui::l2().maxScroll(n);
-  if (g_nodeScroll > maxScroll) g_nodeScroll = maxScroll;
-  if (g_nodeScroll < 0) g_nodeScroll = 0;
+  g_nodeScroll = g_nodeDrag ? om::ui::listGiveScroll(0, g_nodeScroll, maxScroll)
+                            : om::ui::listSnapScroll(g_nodeScroll, maxScroll);
 }
 
 // ------------------------------------------------------------------- Nodes: sheet, info, long press
@@ -481,6 +488,10 @@ void setTrace(const ui::TraceView& tv, const char* title) {
 void beginDrag() {
   g_nodeScroll0 = g_nodeScroll;
   g_nodeInfoScroll0 = g_nodeInfoScroll;   // EST-400: the Info page's own drag base
+  // EST-414: a new gesture starts inside the list's bounds. releaseSnap() clears this too, so this is
+  // only the belt for an interrupted gesture (a screen change before the finger lifts); without it a
+  // stale true would keep the next refresh from snapping a stretch that no finger is holding.
+  g_nodeDrag = false;
 }
 
 void holdPress(int x, int y, uint32_t now) {
@@ -538,10 +549,12 @@ void dragMove(int dy, uint32_t& lastRender) {
       }
     }
   } else {
-    // Nodes scrolls WITH the finger: selDragScroll is the one tested sign (EST-334's bug class,
-    // fixed here again for this list). The release path snaps the give back into range.
+    // Nodes scrolls WITH the finger: the one shared give rule (ui/layout.h listGiveScroll, EST-400's
+    // nodeInfoDragScroll moved there in EST-414) keeps the sign right and allows kSelGive px past
+    // either end; releaseSnap() snaps it back.
+    g_nodeDrag = true;   // the refresh must keep this give (EST-414)
     const int maxScroll = om::ui::l2().maxScroll(g_nodeCount);
-    const int next = om::ui::selDragScroll(g_nodeScroll0, dy, maxScroll);
+    const int next = om::ui::listGiveScroll(g_nodeScroll0, dy, maxScroll);
     g_nodeScroll = next;
     if (millis() - lastRender > 60) {
       lastRender = millis();
@@ -562,11 +575,12 @@ void releaseSnap(bool dragging) {
     g_nodeInfoScroll = clamped;
     if (dragging || changed) drawHome();
   } else {
-    // The Nodes scroll is clamped and snapped back when the finger lifts; the last 60 ms of a
-    // drag may not have been drawn, so the final position is always drawn here.
+    // The Nodes scroll is clamped and snapped back when the finger lifts, through the one shared
+    // snap rule (EST-414); the last 60 ms of a drag may not have been drawn, so the final position
+    // is always drawn here.
+    g_nodeDrag = false;   // the drag is over: the refresh clamps absolutely again
     const int maxScroll = om::ui::l2().maxScroll(g_nodeCount);
-    const int clamped = g_nodeScroll < 0 ? 0
-                      : (g_nodeScroll > maxScroll ? maxScroll : g_nodeScroll);
+    const int clamped = om::ui::listSnapScroll(g_nodeScroll, maxScroll);
     const bool changed = clamped != g_nodeScroll;
     g_nodeScroll = clamped;
     if (dragging || changed) drawHome();

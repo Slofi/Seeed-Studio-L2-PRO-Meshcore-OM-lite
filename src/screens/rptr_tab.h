@@ -70,7 +70,10 @@ bool keyboardClose();     // Esc and the tap above the sheet both just close it
 bool modalOpen();         // a confirmation is up
 bool mapPickerOpen();     // the Position page's map picker is the whole frame
 bool mapPickerDragging();
-bool listShowing();       // the tab-change auto scan runs only on the list
+// EST-414: the tab no longer scans when it opens (the Scan chip is the only door), so this getter
+// has no caller left; it stays because it is the tab's own answer to "is the list showing" and a
+// later ticket (a USB status line, a test) may ask it.
+bool listShowing();
 const char* openNodeName();   // the repeater the open session is about; Settings shows it too
 
 // Actions the shell and Settings take on the session.

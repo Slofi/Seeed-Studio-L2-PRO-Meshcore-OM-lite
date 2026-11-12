@@ -82,19 +82,28 @@ def main():
          "another row's action disarms the Wi-Fi forget")
 
     # Leaving a page disarms every arm: the three leave paths must call the one clear function.
+    # EST-414 moved settingsBack's leave-the-page clears into ONE helper, settingsLeaveState(), which
+    # Back and the RPTR "Open repeater" row both call, so the check follows the call into the helper
+    # and then proves Back still goes through it. The invariant is the same one EST-399 asked for.
     clears = main_cpp.count("clearDeleteArms();")
     if clears < 7:
         fail(f"only {clears} clearDeleteArms() calls; every page-leave path needs one "
-             f"(setGo, setBack, openSettings, settingsBack x2, the tab switch, the selector, A_ChatPick)")
+             f"(setGo, setBack, openSettings, settingsLeaveState, the tab switch, the selector, "
+             f"A_ChatPick)")
     for fn in ("static void setGo(SetPage p) {", "static void setBack() {",
                "static void openSettings(int mainTab, om::ui::SettingsTab tab) {",
-               "static void settingsBack() {"):
+               "static void settingsLeaveState() {"):
         idx = main_cpp.find(fn)
         if idx < 0:
             fail(f"main.cpp: {fn} not found")
             continue
         if "clearDeleteArms();" not in main_cpp[idx:idx + 2500]:
             fail(f"main.cpp: {fn} does not clear the delete arms on the way out")
+    idx = main_cpp.find("static void settingsBack() {")
+    if idx < 0:
+        fail("main.cpp: static void settingsBack() { not found")
+    elif "settingsLeaveState();" not in main_cpp[idx:idx + 2500]:
+        fail("main.cpp: settingsBack() does not leave through settingsLeaveState()")
 
     # The timeout reaches the glass.
     need(main_cpp, "static void deleteArmTick(uint32_t now)", "the arm timeout tick exists")

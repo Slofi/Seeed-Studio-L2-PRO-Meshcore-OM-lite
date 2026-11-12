@@ -275,6 +275,18 @@ constexpr int16_t kSelChevronW  = 5;   // the right chevron of the Manage row
 // fingertip of give the message band has). The list follows the finger: see selDragScroll().
 constexpr int16_t kSelGive      = 10;
 
+// EST-414 (Filip's glass test, 2026-11-12): the scroll indicator on every scrolling list. A thin
+// track in the LAST kScrollTrackW px of the list's own right padding, never over text: kRowPadX,
+// kSelPadX and kMsgPadX are all 7 px, so the text column ends 3 px before the track starts. One
+// helper draws it (ui/scroll_indicator.h) and every screen passes the list's own layout rectangle,
+// so the width, the colours and the arithmetic cannot differ between the Nodes list, the chat's
+// channel list and an open chat. The track is the separator grey; the thumb is the OM gold. The
+// thumb is at least kScrollMinThumbH tall, so a very long list still shows something to hold.
+constexpr int16_t kScrollTrackW    = 4;   // the S492 width, one value for every screen
+constexpr int16_t kScrollMinThumbH = 8;
+constexpr uint16_t kScrollTrack    = kLine;
+constexpr uint16_t kScrollThumb    = kAcc;
+
 // Message band: .msgs padding 5px 7px, 4px between messages, line-height 1.35 at 9 px -> 14 px pitch.
 constexpr int16_t kMsgPadX     = 7;
 constexpr int16_t kMsgPadY     = 5;

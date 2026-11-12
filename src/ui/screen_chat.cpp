@@ -18,6 +18,7 @@
 #include "ui/fonts.h"
 #include "ui/keyboard_draw.h"   // the one key-cap / accent-bubble drawing (EST-352)
 #include "ui/press_targets.h"   // EST-390: the pressed rectangle IS the hit test's rectangle
+#include "ui/scroll_indicator.h"
 #include "ui/text_wrap.h"
 #include "ui/theme.h"
 
@@ -264,6 +265,12 @@ void drawMessages(lgfx::LovyanGFX* d, const ChatView& v, const ChatLayout& g) {
     drawMessage(d, v, v.msgs[i], g.msgs, tops[i]);
   }
   d->clearClipRect();
+  // EST-414: the message band's indicator, from the band the messages were written into and the same
+  // heights msgMaxScroll() uses. This view is BOTTOM-anchored (scroll 0 is the newest message), so
+  // the thumb rests at the bottom of its track and climbs as the finger scrolls up into history. It
+  // sits in the band's 7 px right padding, so no message line is under it.
+  drawScrollIndicator(d, scrollIndicatorFor(g.msgs, msgContentHeight(heights, n), g.msgs.h,
+                                           v.scroll, msgMaxScroll(g.msgs, heights, n), true));
 }
 
 // The draft text, its caret and (near the limit) the remaining bytes, shared by the compose field and

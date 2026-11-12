@@ -114,3 +114,10 @@ MeshCore features -> sounds. The list below is the original plan, kept for its d
   reports what the screen shows.
 - At the end of every run, append to `docs/PROGRESS.md`: the ticket, what changed, build size (RAM and
   flash), test results, what you could not check, and the next step. Plain words.
+- **No clutter (Filip, 2026-11-12: "make sure we are not accumulating unneeded files").** Do not add a
+  one-off script per ticket to `tools/` (the `mkestNNN.py` preview generators piled up): preview PNGs come
+  from ONE shared tool, `tools/preview.py`, extended per screen. Put new code in the existing module it
+  belongs to rather than a new file, unless the module boundary really calls for one. Tests stay one file
+  per ticket in `test/host/` (they are the regression suite).
+- **Watch the 30-minute cap.** Write the PROGRESS entry BEFORE the last build/test round, then update it,
+  so a run stopped by the cap (exit 124) still leaves a report.

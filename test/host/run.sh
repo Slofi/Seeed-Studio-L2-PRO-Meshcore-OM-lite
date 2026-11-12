@@ -92,7 +92,8 @@ BIN61="$(mktemp /tmp/om-lite-est406.XXXXXX)"
 BIN62="$(mktemp /tmp/om-lite-est409.XXXXXX)"
 BIN63="$(mktemp /tmp/om-lite-est412.XXXXXX)"
 BIN64="$(mktemp /tmp/om-lite-est413.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64"' EXIT
+BIN65="$(mktemp /tmp/om-lite-est414.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -649,3 +650,15 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est413.cpp \
   ../../src/power_log_logic.cpp ../../src/timekeeper.cpp -o "$BIN64"
 "$BIN64"
 python3 -B test_est413.py
+
+# EST-414: Filip's five glass-test changes. C++: the scroll indicator's geometry on all three lists
+# (thumb size = visible / total, top = scroll / max, top / middle / end, the bottom-anchored chat
+# band at rest, the minimum thumb, nothing when the content fits), the track never over text, and the
+# ONE give-and-snap rule with every old name answering the same numbers. test_est414.py is the source
+# half: one indicator helper called by the three lists, the one bounce rule (and the Nodes refresh no
+# longer clamping the give away), no scan on the RPTR tab open, Settings > Channels without an unread
+# count, and the live "Open repeater" row.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est414.cpp \
+  ../../src/ui/chat_layout.cpp -o "$BIN65"
+"$BIN65"
+python3 -B test_est414.py

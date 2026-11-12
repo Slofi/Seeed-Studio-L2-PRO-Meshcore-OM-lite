@@ -8448,3 +8448,235 @@ Next step: Claude flashes over USB OTA and takes the screenshot; the two judgmen
 Send removed; no send button on the closed compose row) are the things to confirm with Filip. Nothing
 else is pending in this ticket.
 
+## EST-408 sweep: UI part 3 (map)
+
+Read-only sweep of the two files EST-396 and EST-398 did not read in full, DeepSeek (Paperclip worker, 2026-11-12).
+**No code was changed and nothing was committed.** Scope: `ui/map_trace.cpp` and `screens/map_tab.cpp`, both read in
+full, plus the headers they own and the few callers needed as evidence.
+
+**Counts: 12 findings: S1 0, S2 2, S3 1, S4 2, S5 7.** Ranked most severe first. Every finding quotes the real line;
+"not verified" marks what I inferred. The two S2s are a route point that is cast to 16 bits without a clip (the trace
+then draws at the wrong place and the tail blends pixels outside the frame buffer) and the Traces key reading the NVS
+write's result as the new state. There is no SD, radio, socket, timer, I2C or allocation in either file, so classes 1,
+4, 5, 6 and 7 of the hunt are clean here apart from what is listed; the model itself (`traceMatchHop`,
+`traceBuildRoute`, `traceGeom`, `tracePointAt`, `traceSlice`, the queue) is well covered by `test_est368.cpp` and
+`test_est394.cpp` and I found no arithmetic error in it.
+
+### 1. S2 · ui/map_trace.cpp:173-175 · a projected route point is cast to int16 with no clip, so an off-screen hop wraps and the tail blends outside the frame buffer
+```c
+if (!project((double)route_[i].latE6 / 1e6, (double)route_[i].lonE6 / 1e6, x, y)) return true;
+px[i].x = (int16_t)x;
+px[i].y = (int16_t)y;
+```
+`project` is `om::mapProject` (`map.cpp:424-433`), which returns screen pixels in an `int` and never bounds them:
+`x = (int)lround((lonToXf(lon, rz) * kTile - cpx) * scale + kViewW / 2.0);` with `scale = 2.0` at z18
+(`map.cpp:426-428`, `kZMax = 18` at `map.cpp:41`, "18 == z17 magnified 2x"). At z18 the projection is 256 * 2^17 / 360
+* 2 pixels per degree of longitude, about 186,000, so a hop 0.18 deg of longitude from the centre (about 14 km in mid
+latitudes) sits at +-33,500 px and anything further wraps to the opposite sign. `build()` guards the MARKERS with
+`x < -4 || x >= ui::kMapCanvasW + 4` (`map_tab.cpp:280`), the trace has no such guard. Trigger: zoom in to z17/z18 with
+a route whose sender or repeater is tens of km away (the z18 window is about 190 m wide), and the dashed route and the
+tail are painted through a wrapped coordinate: the line crosses the map in the wrong place. The tail is worse: it is
+drawn with `blendLine`, which reads the frame for every pixel (`screen_map.cpp:176`
+`d->drawPixel((int16_t)xx, (int16_t)yy, mixOverFrame(xx, yy, col, alpha));`) and `omFramePixel` has no bounds check
+(`board.cpp:523` `[(size_t)y * s_frame.width() + (size_t)x]`). For x above 320 the index leaves the 320x214 canvas and
+at y 213 it is about 48 KB past the end of the 150 KB frame buffer (a wrong-row read in most cases, a read of whatever
+is mapped next at the edge), and for a negative x the `(size_t)` cast makes the index wrap modulo 2^64. So: wrong
+drawing certainly, a memory-safety defect probably, a load fault possibly (not verified on the device). The same
+coordinates also make `drawTraceRoute` walk up to 65,535 steps per segment per frame (`screen_map.cpp:186-197`).
+Fix: clamp in one place before the cast, e.g. skip a point (or clamp to the canvas plus a margin) when the projected
+value is outside int16, and keep the route in int32 `TracePt` if the wrap is ever wanted for clipping; the cheap
+version is to reject the whole frame when any point is outside +-16384 and let the animation keep its clock (the model
+already survives an unprojectable frame). Effort S.
+
+### 2. S2 · screens/map_tab.cpp:572 and :581 · the Traces/Names keys read the NVS write's result as the new state, so turning them off re-seeds a replay and the log says "on"
+```c
+const bool on = s_layers.toggleTraces();
+traceMapReset();
+if (on) traceSeedFromRing();
+Serial.printf("[map] traces %s\n", on ? "on" : "off");
+```
+`MapLayerPrefs::toggleTraces()` flips the value and then `return store(kMapPrefTraces, traces_);`
+(`ui/map_layers.h:60-63`), i.e. the return is the WRITE, not the state. `test_est370.cpp:238-239` proves it:
+`CHECK(p.toggleTraces()); CHECK(!p.traces());`. So with a healthy NVS, `on` is true on BOTH taps: turning Traces OFF
+still queues up to `kTraceSeedMax` routes (they are then never pumped, because `pump()` returns at
+`if (!s_layers.traces()) return;`) and the log prints "traces on" while the chip shows off. With a FAILING write the
+opposite happens: tapping Traces ON returns false, `traceSeedFromRing()` is skipped, and the log says "off" although
+the chip is on, so nothing replays until the tab is reopened. The same file gets this right two cases below, with the
+comment `// the return is the write's, so read the state back below` (`map_tab.cpp:591`). `Names` has the same read at
+`:581` and prints the same wrong word (`:582`). Fix: `const bool on = s_layers.traces();` after the toggle (and
+`s_layers.names()`), exactly as the TabsToggle case does; if the write's failure should be visible, log it separately.
+Effort S.
+
+### 3. S3 · screens/map_tab.cpp:158 and :165 · both trace log lines print another node's name (rule 9)
+```c
+Serial.printf("[map] trace %s %u hop(s), ring only\n", sender ? sender : "?", (unsigned)route.hops);
+Serial.printf("[map] trace %s %u hop(s), %d known point(s), %d resolved\n", sender ? sender : "?", ...);
+```
+`sender` is a contact's name (from `meshMsgName()` or `MeshDm::name`), printed on every traced arrival and every tab
+open that seeds a replay. This is the exact line EST-399 fixed on the neighbouring screen, whose comment is three
+hundred lines below: `// EST-399: the marker's index, not the node's name (rule 9)` (`map_tab.cpp:604`). No rule-9 guard
+covers it: the guards are per-ticket Python checks (`test_est384.py`, `test_est385.py`, `test_est387.py` in
+`run.sh:21-26`), none of them looks at `screens/map_tab.cpp`. Fix: print the hop count, the known-point count and the
+resolved count only, or the marker index the map already logs; keep the name out. Effort S.
+
+### 4. S4 · screens/map_tab.cpp:272 (inside build()) · the whole contact table is copied and insertion-sorted on every animation frame, and again for every tap and every pressed look
+```c
+const int n = om::meshContactList(list, 32);
+```
+`build()` is called from `draw()`, from `drawAnimFrame()` (up to 30 times a second through `pump()`), from `tap()`
+(`:548`) and from `pressTarget()` (`:541`), i.e. twice per tap. `meshContactList` walks every contact slot and
+insertion-sorts up to 32 `MeshContact` records (about 104 bytes each) into the caller's array with struct copies
+(`mesh_link.cpp:2117-2138`): roughly 32 `getContactByIdx` calls plus up to ~500 record copies, about 50 KB of memcpy
+per call. At 30 fps that is 1.5 MB/s of internal-RAM copying for a table that changes only when an advert arrives, and
+`om::meshContactSignature()` exists for exactly this (`mesh_link.h:238` "Cheap change detector"). Fix: keep the marker
+list (positions and names only, ~12 bytes per row) and rebuild it only when the signature changes; it also makes
+`pressTarget()` cheap. Gain estimated at 0.1-0.4 ms per frame, not measured (no build and no device in this run).
+Effort M.
+
+### 5. S4 · screens/map_tab.cpp:325-347 slideBars() · four full panel pushes and a draw() inside one tap, about 125 ms with the loop stalled
+```c
+ui::mapScreenSlide(v, (int16_t)tabOff, (int16_t)barOff);
+...
+draw();   // the steady frame of the new state
+```
+The function's own comment budgets 31 ms per frame (`map_tab.cpp:320-324`: "a frame is a 19.8 ms canvas repush plus an
+11.5 ms panel push (31 ms ...), so 4 frames is about 125 ms"), and all of it runs synchronously inside `tap()`, which
+the loop calls (`main.cpp:5880`). For that ~125 ms the loop task services nothing else: no radio, no audio, no USB.
+Fix: the trace pump already shows the pattern (a per-pass state machine with a frame clock), so give the slide its own
+`slideNext(nowMs)` called from `pump()` and return early while it runs. Same 125 ms of pixels, spread over passes.
+Effort M (only worth it if the stall is felt on the glass).
+
+### 6. S5 · ui/map_trace.cpp:220 and :235 · the slice capacity is a hand-computed duplicate of the array size, exactly 13 of 13 elements today
+```c
+out->tailCount = traceSlice(geom, px, from, head, out->tail, kTraceMaxPoints + 1);
+```
+`TraceFrame::tail` is `TracePt tail[kTraceMaxPoints + 1]` (`map_trace.h:120`) and `traceSlice` can write
+`g.count - 1` vertices plus the two endpoints, i.e. 13 for a 12-point route: the call is correct and has no spare
+element. If `tail[]` is ever sized like the route, or the route grows, this is a one-element overflow with no compiler
+complaint (`g++ -Warray-bounds` will not see it through the reference). Fix: pass
+`(int)(sizeof(out->tail) / sizeof(out->tail[0]))`, or `static_assert` the relation. Effort S.
+
+### 7. S5 · screens/map_tab.cpp:128, :139, :263 · three silent drops on the trace path: no counter, no log
+```c
+if (route.count == 0) return false;                         // :128
+if (!s_traceSelfKnown) return false;                        // :139
+if (count_ >= kTraceQueueMax) removeAt(0);                  // :263
+```
+A message whose sender and hops all lack a position (and we have no fix either) produces no trace and no line; a
+direct arrival without our own position is dropped the same way; a fifth route in a burst silently evicts the oldest.
+This is EST-380's shape (`hist_dropped = 0` while losing data): the device log says nothing, so "the trace did not
+show" cannot be told apart from "traces off" or "no message". Fix: one `s_traceDropped` counter with a reason byte,
+printed in `traceCostLine()` (`[map] traces ... dropped %lu (no point %lu, no self %lu, queue %lu)`), or at least a
+line per drop. Effort S.
+
+### 8. S5 · screens/map_tab.cpp:242-276 · the marker budget is `kMapMaxMarkers = 32` and our own dot takes one slot, so the 32nd contact is silently never drawn or tappable
+```c
+v.markerCount = 0;                                          // :242
+ui::MapMarker& m = v.markers[v.markerCount++];              // :259 (our own dot, unguarded)
+for (int i = 0; i < n && v.markerCount < ui::kMapMaxMarkers; ++i) {   // :276
+```
+With a full 32-row contact table the loop stops at index 30 and the oldest contact loses its marker, its label and its
+tap target, with nothing in the log. The self marker is also the only one added without a capacity test (`:259`), which
+is safe today only because it is added first. The cull margin is a bare `4` twice (`:280-281` `x < -4 || x >=
+ui::kMapCanvasW + 4`), which is `kMapMarkerR` by hand (`map_chrome.h:36`) and does not account for a label drawn to
+the right of an off-screen marker. Fix: size the array `kMapMaxMarkers + 1` or count the self dot outside the contact
+budget, log the count actually drawn (`%d of %d`), and use `kMapMarkerR` in the cull. Effort S.
+
+### 9. S5 · ui/map_trace.cpp:45 with :53-55 · `out->hops` keeps the raw packet hop count while the drawn path is silently clamped to 8
+```c
+out->hops = hopCount;                                       // :45
+int hops = hopCount;
+if (hops > kTraceMaxHops) hops = kTraceMaxHops;             // :55
+```
+A packet with more than `kTraceMaxHops` (8) hops draws 8 of them, animates 8 * 420 ms, and still reports (and logs) the
+untruncated count from `route.hops` at `map_tab.cpp:166`. Not verified whether a >8-hop packet can arrive: the header
+calls 8 "MeshCore's own trace limit" (`map_trace.h:32`), but `hopCount` is a `uint8` straight from the packet, so the
+code has no way to know. Fix: clamp once and either report the clamp in `resolved`/a flag or log it. Effort S.
+
+### 10. S5 · ui/map_trace.cpp:77-82 with :259-262 · the "newest route per sender wins" key is one byte, and the dedupe loop skips an element after each removal
+```c
+return (uint8_t)h;                                           // map_tab.cpp:81
+for (int i = 0; i < count_; ++i) {
+  if (pending_[i].key == key) removeAt(i);                   // map_trace.cpp:260-261
+}
+```
+At most `kTraceQueueMax` = 4 routes are ever pending, so the birthday risk is about 1 % per four-sender burst rather
+than the 50 % the comment's "one byte is enough" reasoning would suggest at the 32-contact scale: still, a collision
+means one sender's route silently replaces another's, and the comment's justification is only true by accident of the
+queue size. The loop is also written unsafely: `removeAt(i)` shifts the next item into slot `i` and `++i` then skips it,
+which is harmless only because `push()` dedupes on entry. Fix: keep the full 32-bit hash in `Item` (4 bytes x 4 slots)
+and step `i` back after a removal. Effort S.
+
+### 11. S5 · screens/map_tab.cpp:305 · build() clears the saved selection, and it is called from the hit test and from the pressed look
+```c
+if (s_selName[0] && !v.callout) s_selName[0] = 0;
+```
+`build()` is used as a query by `pressTarget()` (`:541`) and `tap()` (`:548`), so a touch-down can clear the selection
+before the tap is even resolved, and a drag that pans the selected marker off the canvas clears it for good: pan back
+and the callout is gone, with no way to know why. It also makes the trace animation advance from a hit test, because
+`build()` ends in `traceSampleNow()` (`:248`, `millis()` inside `sampleActive`). Not verified whether clearing on
+"marker not drawn" is intended; if it is, do it in the draw path only, not in the two query paths. Effort S.
+
+### 12. S5 · screens/map_tab.h:57, :59, :64, :65 · four public functions nobody calls, two of them not even defined
+```c
+void select(const char* name);
+bool locked();
+void tracesToggle();
+void namesToggle();
+```
+`select()` is only called from inside this module (`showPoint()`), `locked()` has no caller at all, and
+`tracesToggle()`/`namesToggle()` have no definition in `map_tab.cpp`, so the header advertises two entry points that
+would fail to link. The header's own comment promises `select` is "used by the shell and by the Nodes sheet". Fix:
+delete the four (the Map's toggles are the two hit kinds in `tap()`), or define the two toggles if a USB command is
+meant to drive them. Effort S.
+
+### Clean areas (checked, nothing found)
+- **Shared resources with a hard count (class 1):** no file, socket, queue, timer or I2C handle in either file. The
+  only counts are the marker table (finding 8), the 4-slot route queue (finding 7) and the 13-slot tail (finding 6).
+- **Integer width and casts (class 2) other than finding 1:** no `time_t`, `long` or `size_t` cast of a large
+  constant; the two millis() comparisons are wrap-safe by the unsigned difference
+  (`map_trace.cpp:182` `const uint32_t elapsed = nowMs - startedAt_;`, `map_tab.cpp:518`
+  `(int32_t)(now - s_traceNextFrameMs) < 0`); no signed/unsigned compare and no `uint8` counter that can wrap.
+- **Silent failure (class 3):** only the three trace drops (finding 7); every other failure path here is a
+  documented "draw nothing" (a frame with no projection stays live and draws nothing, `map_trace.cpp:170-176`).
+- **Boot side effects (class 4):** `begin()` copies the host, nothing else; `loadLayers()` only reads the three keys.
+  No GPS, radio, advert, SD or NVS write on the boot path of either file.
+- **Retry (class 5) and wrong task (class 6):** nothing one-shot and retryable here, and nothing runs off the loop
+  task: `tap()` is reached from the loop (`main.cpp:5880`) and USB touch samples are consumed there too, so the slide
+  (finding 5) is a stall, not a cross-task call. No stack growth worth naming: the largest locals are
+  `ui::MapView v` (a 32-row marker array plus one `TraceFrame`, about 1 KB) and `TracePathHop table[32]` (512 B), both
+  well inside the loop's 16 KB stack.
+- **Internal RAM (class 7):** no allocation at all in these files; the statics are `s_contacts` (32 x ~104 B = 3.3 KB)
+  and the queue (`TraceQueue`, about 0.5 KB). The 133 KB canvas stays map.cpp's PSRAM buffer. Nothing here accounts
+  for the ~200 B per HTTPS probe in this ticket's scope.
+- **Flash wear (class 9):** the three layer keys are written only on a tap (`map_layers.h:60-72`), never on a timer,
+  per packet or at boot.
+- **Privacy (class 8):** only finding 3. No format in either file can print a coordinate, an address, an SSID, a
+  password or a message text; `[map] select marker %d` and `[map] zoom %d` are already clean.
+- **UI classes:** one rectangle drives draw and tap (`pressTarget()` and `tap()` both call the same `build()` and
+  `mapScreenChrome()`/`mapHitAt()` pair, `:539-551`), the `tap()` switch has no stale branch in front of another and
+  every case returns, a settings overlay cannot reach the map's handlers (the shell gates with `!g_settings`), the
+  screen draws through `ui::mapScreen*` rather than straight to the panel, the callout's stamp is a clock time
+  (`StampForm::DayTime`), its two strings are ellipsised at draw time (`screen_map.cpp:466-471`) and the names are
+  copied into 32-byte fields that exactly match MeshCore's `char name[32]`, and there is no em dash in any string that
+  reaches the glass.
+
+### Coverage
+**Read in full:** `ui/map_trace.cpp` (296 lines), `ui/map_trace.h` (183), `screens/map_tab.cpp` (629),
+`screens/map_tab.h` (69), `ui/map_layers.h`, `docs/REBUILD.md`.
+**Read in part, only as evidence for a finding (so absences there are NOT evidence):** `ui/map_chrome.h:1-140`,
+`ui/screen_map.h:1-70`, `ui/screen_map.cpp:136-230, 460-478`, `map.cpp:28-41, 300-395, 424-434`,
+`board.cpp:385-410, 520-545`, `mesh_link.h:1-250` (targeted greps only), `mesh_link.cpp` (the accessors quoted),
+`mesh_text.h:1-30`, `ui/dm_ring.h:1-120`, `test/host/test_est368.cpp`, `test_est394.cpp`, `test_est370.cpp`
+(targeted), `test/host/run.sh:15-40`, `docs/PROGRESS.md:7395-7600`.
+**In scope but not read:** nothing. Both files in this ticket's scope were read in full; the neighbouring drawing and
+tile files (`ui/screen_map.cpp` beyond the lines quoted, `map.cpp` beyond the projection, `ui/map_chrome.cpp`,
+`ui/map_pick.cpp`) were not this ticket's scope and are not covered by this report.
+No build and no host test was run: this ticket changes no code, and the sandbox has no device.
+
+### Next step
+Finding 2 is the one to fix first (one line, and the file's own TabsToggle case shows the shape); finding 1 next
+(a clamp before the `int16` cast, which also removes the out-of-bounds frame reads); finding 3 goes with the rule-9 log
+work and should extend a guard to `screens/map_tab.cpp`. #4, #5, #6, #7 and #8 are small and independent; #9-#12 are
+polish.
+

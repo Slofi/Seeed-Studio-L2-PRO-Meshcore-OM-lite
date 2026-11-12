@@ -145,7 +145,7 @@ NEGATIVE_CONTROLS = [
 # satisfiable by deleting the log line instead of fixing it.
 SHAPES = [
     ("main.cpp", '"[chat] map: opening the node\'s position\\n"'),
-    ("main.cpp", '"[nodes] map: opening the node\'s position\\n"'),
+    ("screens/nodes_tab.cpp", '"[nodes] map: opening the node\'s position\\n"'),
     ("main.cpp", '"[chat] DM refused: unknown contact\\n"'),
     ("main.cpp", '"[chat] reply opened: seq %lu\\n"'),
     ("main.cpp", '"[chat] mention prepended: %u B\\n"'),
@@ -153,9 +153,9 @@ SHAPES = [
     ("main.cpp", '"[mc] UI send: %s, %u B%s\\n"'),
     ("main.cpp", '"[chat] DM resend %s, %u B\\n"'),
     ("main.cpp", '"[chat] resend %s, %u B\\n"'),
-    ("main.cpp", '"[nodes] info %d\\n"'),
-    ("main.cpp", '"[nodes] menu %d, %d row(s)\\n"'),
-    ("main.cpp", '"[nodes] select %d\\n"'),
+    ("screens/nodes_tab.cpp", '"[nodes] info %d\\n"'),
+    ("screens/nodes_tab.cpp", '"[nodes] menu %d, %d row(s)\\n"'),
+    ("screens/nodes_tab.cpp", '"[nodes] select %d\\n"'),
     ("main.cpp", '"[set] chat picked: %d of %d (chat screen still on %d)\\n"'),
     ("main.cpp", '"[hist] no older messages (chat %d, %s)\\n"'),
     ("screens/rptr_tab.cpp", '"[rptr] auto-login started (found %d)\\n"'),

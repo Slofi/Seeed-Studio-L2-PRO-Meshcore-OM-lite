@@ -85,6 +85,7 @@ def main():
     node_info_h = read("src/ui/node_info.h")
     node_info_layout_h = read("src/ui/node_info_layout.h")
     screen_node_info_cpp = read("src/ui/screen_node_info.cpp")
+    nodes_tab_cpp = read("src/screens/nodes_tab.cpp")
 
     # ---- EST-396 #3: the Nodes sheet row's value column -------------------------------------
     need(theme_h, "constexpr int16_t kNodeSheetValueW = 70;", "theme keeps the value column")
@@ -239,12 +240,13 @@ def main():
     need(screen_node_info_cpp, "g.hint.y + g.hint.h / 2", "the hint's own line")
     forbid(screen_node_info_cpp, "const int16_t rowH = 20", "the literal row height")
     forbid(screen_node_info_cpp, "L.height - 10", "the literal hint baseline")
-    need(main_cpp, "nodeInfoDraw(status, g_nodeInfoModel, g_nodeInfoScroll)",
+    # EST-411: the Info page's state and drawing glue moved with the Nodes tab.
+    need(nodes_tab_cpp, "nodeInfoDraw(status, g_nodeInfoModel, g_nodeInfoScroll)",
          "the shell passes the scroll")
-    need(main_cpp, "g_nodeInfoScroll0 = g_nodeInfoScroll;", "the drag base")
-    need(main_cpp, "om::ui::nodeInfoDragScroll(", "the drag")
-    need(main_cpp, "om::ui::nodeInfoSnapScroll(", "the release clamp")
-    need(main_cpp, "g_nodeInfoScroll = 0;", "the page opens at the top")
+    need(nodes_tab_cpp, "g_nodeInfoScroll0 = g_nodeInfoScroll;", "the drag base")
+    need(nodes_tab_cpp, "om::ui::nodeInfoDragScroll(", "the drag")
+    need(nodes_tab_cpp, "om::ui::nodeInfoSnapScroll(", "the release clamp")
+    need(nodes_tab_cpp, "g_nodeInfoScroll = 0;", "the page opens at the top")
 
     if FAIL == 0:
         print("EST-400: source checks passed (sheets, toast, notice log, manual time, year range, "

@@ -79,6 +79,7 @@
 #include "ui/toast.h"
 #include "ui/widgets.h"
 #include "screens/map_tab.h"
+#include "screens/nodes_tab.h"
 #include "screens/rptr_tab.h"
 #include "screens/toasts.h"
 #include "screens/sound_events.h"
@@ -340,35 +341,13 @@ static uint8_t g_changeOldLuma = 0;     // the visible frame's mean brightness w
 static uint8_t g_tabLuma[4] = {0, 0, 0, 0};
 static bool g_tabLumaKnown[4] = {false, false, false, false};
 
-// Nodes tab state. The rows are copied out of mesh_link's contact table, never sample data.
-static constexpr int kNodeCap = 64;
+// EST-411: the Nodes tab's own state (the list copy and its scroll, the sheet, the Info page, the
+// trace sheet and the new-node dot) lives in screens/nodes_tab.cpp. The two PSRAM pointers stay
+// here because allocUiBuffers() below is EST-357's one allocation point; they are handed to the
+// module once, in setup().
 static om::ui::NodeItem* g_nodes = nullptr;   // PSRAM, allocUiBuffers()
 // refreshNodes()'s copy of the contact table (64 x 92 B): also PSRAM, never the loop stack.
 static om::MeshContact* g_contactScratch = nullptr;
-static int g_nodeCount = 0;
-static int g_nodeLastHour = 0;       // contacts heard in the last hour, only when times are real
-static bool g_nodeLastHourKnown = false;
-static int g_nodeSel = -1;
-static int g_nodeScroll = 0;
-static int g_nodeScroll0 = 0;      // finger-down base for the list drag
-static uint32_t g_nodeSig = 0;     // contact-table change detector
-// EST-342: the long-press sheet, the Info page and the new-node dot.
-static om::ui::LongPress g_nodeHold;   // the one tested timing rule (ui/long_press.h)
-static bool g_nodeHoldArmed = false;   // the press began on a Nodes row
-static int g_nodeMenu = -1;            // node index whose sheet is open, -1 = closed
-static bool g_nodeMenuRemoveArmed = false;
-static om::ui::NodeMenuRow g_nodeMenuRows[om::ui::kMaxNodeMenuRows];
-static int g_nodeMenuCount = 0;
-static char g_nodeMenuTitle[32] = "";
-static char g_nodeMenuSub[72] = "";
-static om::ui::TraceView g_nodeTrace;      // the last trace result
-static char g_nodeTraceTitle[32] = "";     // whose result it is (TraceView has no name)
-static bool g_nodeTraceOpen = false;       // the sheet is showing that trace
-static int g_nodeInfo = -1;                // node index whose full Info page is open
-static om::ui::NodeInfoModel g_nodeInfoModel;
-static int g_nodeInfoScroll = 0;           // EST-400: the Info page's body offset (0 when opened)
-static int g_nodeInfoScroll0 = 0;          // the finger-down base for that drag
-static bool g_newNodeDot = false;          // a contact was added since Nodes was last opened
 
 // EST-357: every UI scratch array above is one PSRAM allocation, made once here. The crash that
 // started this ticket was an internal-RAM allocation inside Bluedroid while Wi-Fi held 37.6 KB; these
@@ -376,21 +355,21 @@ static bool g_newNodeDot = false;          // a contact was added since Nodes wa
 // here too. A board whose PSRAM did not come up gets internal RAM back from the allocator's own
 // fallback (psram_alloc.h) and the log says which one answered.
 static void allocUiBuffers() {
-  const size_t nodesB = sizeof(om::ui::NodeItem) * (size_t)kNodeCap;
+  const size_t nodesB = sizeof(om::ui::NodeItem) * (size_t)om::nodes_tab::kNodeCap;
   const size_t chatsB = sizeof(om::ui::ChatEntry) * (size_t)om::ui::kMaxChats;
   const size_t chatMsgsB = sizeof(om::ui::ChatMsgView) * (size_t)kChatMsgsCap;
   // EST-367: one chat's own view (its newest page plus the older pages the finger asks for).
   const size_t viewMsgsB = sizeof(om::history::Msg) * (size_t)om::ui::kChatViewCap;
   const size_t dmB = sizeof(om::MeshDm) * (size_t)om::ui::kMaxChatMsgs;
   const size_t setB = sizeof(om::ui::SettingRow) * (size_t)kSetRowsCap;
-  const size_t contactsB = sizeof(om::MeshContact) * (size_t)kNodeCap;
-  g_nodes = om::psramArray<om::ui::NodeItem>(kNodeCap);
+  const size_t contactsB = sizeof(om::MeshContact) * (size_t)om::nodes_tab::kNodeCap;
+  g_nodes = om::psramArray<om::ui::NodeItem>(om::nodes_tab::kNodeCap);
   g_chats = om::psramArray<om::ui::ChatEntry>(om::ui::kMaxChats);
   g_chatMsgs = om::psramArray<om::ui::ChatMsgView>(kChatMsgsCap);
   g_viewMsgs = om::psramArray<om::history::Msg>(om::ui::kChatViewCap);
   g_dmScratch = om::psramArray<om::MeshDm>(om::ui::kMaxChatMsgs);
   g_setRows = om::psramArray<om::ui::SettingRow>(kSetRowsCap);
-  g_contactScratch = om::psramArray<om::MeshContact>(kNodeCap);
+  g_contactScratch = om::psramArray<om::MeshContact>(om::nodes_tab::kNodeCap);
   const uint32_t total = (uint32_t)(nodesB + chatsB + chatMsgsB + viewMsgsB + dmB + setB + contactsB);
   const bool ok = g_nodes && g_chats && g_chatMsgs && g_viewMsgs && g_dmScratch && g_setRows &&
                   g_contactScratch;
@@ -515,7 +494,7 @@ static int unreadTotal();
 // EST-365: the ONE source of the tab bar's badge. Every screen's view carries the returned model,
 // so a screen can no longer pass its own count (the RPTR page passed 0 and lost the badge).
 static om::ui::TabBarModel currentTabBar(om::ui::Tab active) {
-  return om::ui::tabBarModel(active, unreadTotal(), g_newNodeDot);
+  return om::ui::tabBarModel(active, unreadTotal(), om::nodes_tab::newNodeDot());
 }
 static om::ui::TabBarModel appTabBar(om::ui::Tab active) { return currentTabBar(active); }
 // EST-384: the Map, locate/follow and the traces read the ONE own-position source, not the raw GPS
@@ -527,7 +506,6 @@ static const om::PositionFix* appGps() { return &om::posOwn(); }
 static const om::GpsState* appRawGps() { return &g_gps; }
 static bool appRptrVisible() { return g_tab == 3 && !g_settings; }
 
-static void drawHome();
 // Defined far below; the toast paths need it now that showing a toast means "redraw the current
 // screen with the toast in the frame" (EST-344). It answers whether it drew (EST-381), so a frame
 // refused by a running screen change can be asked for again instead of being lost.
@@ -626,133 +604,6 @@ static int unreadTotal() {
   return n;
 }
 
-static void refreshNodes() {
-  // EST-357: the copy is 64 x MeshContact in PSRAM (g_contactScratch), not internal .bss and not the
-  // loop task's stack.
-  om::MeshContact* list = g_contactScratch;
-  if (list == nullptr) return;
-  const int n = om::meshContactList(list, kNodeCap);
-  const uint32_t nowWall = om::timeKeeper().now();
-  const uint32_t nowUp = millis() / 1000;
-  const bool nowReal = om::timeKeeper().realSinceBoot();
-  g_nodeCount = n;
-  // "M in the last hour" is only honest once a real source has set the clock since boot; before
-  // that every timestamp is a floor and the header drops the clause (ui/nodes_header.h).
-  g_nodeLastHour = 0;
-  g_nodeLastHourKnown = nowReal;
-  for (int i = 0; i < n; ++i) {
-    om::ui::NodeItem& it = g_nodes[i];
-    snprintf(it.name, sizeof(it.name), "%s", list[i].name);
-    switch (list[i].type) {
-      case 1: it.type = om::ui::NodeType::Client; break;     // ADV_TYPE_CHAT
-      case 2: it.type = om::ui::NodeType::Repeater; break;   // ADV_TYPE_REPEATER
-      case 3: it.type = om::ui::NodeType::Room; break;       // ADV_TYPE_ROOM
-      case 4: it.type = om::ui::NodeType::Sensor; break;     // ADV_TYPE_SENSOR
-      default: it.type = om::ui::NodeType::Unknown; break;
-    }
-    // MeshCore's contact record has no RSSI, so no signal bars are claimed for a contact.
-    it.rssi = om::ui::kNoRssi;
-    it.favourite = list[i].favourite;   // EST-342: sorts first, drawn as a star at the right
-    // out_path_len is already decoded to hops by the facade (mesh_path.h, EST-344): 0 = heard
-    // directly, -1 = unknown. The raw encoded byte never reaches the screen.
-    if (list[i].path_hops < 0) snprintf(it.note, sizeof(it.note), "path --");
-    else if (list[i].path_hops == 0) snprintf(it.note, sizeof(it.note), "direct");
-    else snprintf(it.note, sizeof(it.note), "path %d hop%s", (int)list[i].path_hops,
-                  list[i].path_hops == 1 ? "" : "s");
-    om::ui::Stamp when;
-    when.wall = list[i].lastmod;
-    when.uptime = list[i].lastmodUp;
-    when.wallReal = list[i].lastmodReal;
-    om::ui::stampText(it.age, sizeof(it.age), when, nowWall, nowUp, nowReal,
-                      om::ui::StampForm::DayTime);
-    // The same fixed 2025-01-01 cut-off the formatter uses: not in the future, not the old 2024
-    // clock, and inside the hour.
-    if (g_nodeLastHourKnown && list[i].lastmod != 0 && list[i].lastmod <= nowWall &&
-        om::ui::stampIsReal(list[i].lastmod) && nowWall - list[i].lastmod <= 3600UL) {
-      ++g_nodeLastHour;
-    }
-  }
-  if (g_nodeSel >= n) g_nodeSel = n - 1;
-  const int maxScroll = om::ui::l2().maxScroll(n);
-  if (g_nodeScroll > maxScroll) g_nodeScroll = maxScroll;
-  if (g_nodeScroll < 0) g_nodeScroll = 0;
-}
-
-// ------------------------------------------------------------------- Nodes: sheet, info, long press
-// EST-342. All of it is built from the contact behind the row at the moment it opens, so the sheet
-// cannot show one node's facts over another node's name.
-
-
-static void buildNodeMenu(int node) {
-  g_nodeMenuCount = 0;
-  g_nodeMenuTitle[0] = 0;
-  g_nodeMenuSub[0] = 0;
-  if (node < 0 || node >= g_nodeCount) return;
-  om::MeshContact c{};
-  if (!om::meshContactByName(g_nodes[node].name, &c)) return;
-  om::ui::NodeMenuContext ctx;
-  ctx.advType = c.type;
-  ctx.hasKey = c.has_key;
-  ctx.hasPosition = c.has_pos;
-  // A trace needs a real path; OUT_PATH_UNKNOWN (0xFF) means there is nowhere to aim it.
-  ctx.pathKnown = c.path_hops >= 0;
-  ctx.favourite = c.favourite;
-  ctx.rptrTabExists = om::meshRptrTabExists();
-  ctx.removeArmed = g_nodeMenuRemoveArmed;
-  g_nodeMenuCount = om::ui::nodeMenuRows(ctx, g_nodeMenuRows, om::ui::kMaxNodeMenuRows);
-  snprintf(g_nodeMenuTitle, sizeof(g_nodeMenuTitle), "%s", c.name);
-  char path[48];
-  if (!om::meshContactPathText(c.name, path, sizeof(path))) path[0] = 0;
-  snprintf(g_nodeMenuSub, sizeof(g_nodeMenuSub), "%s \xC2\xB7 %s \xC2\xB7 %s",
-           om::ui::advTypeName(c.type), g_nodes[node].age, path);
-}
-
-static void openNodeMenu(int node) {
-  g_nodeMenuRemoveArmed = false;
-  g_nodeTraceOpen = false;
-  g_nodeMenu = node;
-  g_nodeSel = node;   // the gold row behind the sheet is the cue that the hold registered
-  buildNodeMenu(node);
-  // EST-399: the row index and the sheet's size, never the node's name (REBUILD.md rule 9).
-  Serial.printf("[nodes] menu %d, %d row(s)\n", node, g_nodeMenuCount);
-  drawHome();
-}
-
-static void closeNodeSheets() {
-  g_nodeMenu = -1;
-  g_nodeTraceOpen = false;
-  g_nodeMenuRemoveArmed = false;
-}
-
-static bool buildNodeInfoModel(int node, om::ui::NodeInfoModel* m) {
-  if (m == nullptr || node < 0 || node >= g_nodeCount) return false;
-  om::MeshContact c{};
-  if (!om::meshContactByName(g_nodes[node].name, &c)) return false;
-  *m = om::ui::NodeInfoModel();
-  snprintf(m->name, sizeof(m->name), "%s", c.name);
-  m->advType = c.type;
-  m->hasKey = c.has_key;
-  if (c.has_key) memcpy(m->key, c.pub_key, sizeof(m->key));
-  m->hasPosition = c.has_pos;
-  m->lat_e6 = c.lat_e6;
-  m->lon_e6 = c.lon_e6;
-  snprintf(m->lastSeen, sizeof(m->lastSeen), "%s", g_nodes[node].age);
-  if (!om::meshContactPathText(c.name, m->path, sizeof(m->path))) m->path[0] = 0;
-  m->hasSnr = c.adv_snr_known;
-  m->snr4 = c.adv_snr4;
-  return true;
-}
-
-static void openNodeInfo(int node) {
-  if (!buildNodeInfoModel(node, &g_nodeInfoModel)) return;
-  g_nodeInfo = node;
-  g_nodeInfoScroll = 0;   // EST-400: the page opens at its first row, never where the last one was
-  closeNodeSheets();
-  // EST-399: the row, not the name the sheet is showing (rule 9).
-  Serial.printf("[nodes] info %d\n", node);
-  drawHome();
-}
-
 static void buildStatus(om::ui::StatusModel& s) {
   s = om::ui::StatusModel();
   s.gpsValid = g_gps.valid;
@@ -781,53 +632,6 @@ static void buildStatus(om::ui::StatusModel& s) {
   } else {
     s.clock = "--:--";
   }
-}
-
-// One NodesView for the drawing, the hit test and the long-press sheet: the three look at exactly
-// the same rectangles because they look at the same filled structure.
-static void buildNodesView(om::ui::NodesView& view) {
-  view = om::ui::NodesView();
-  buildStatus(view.status);
-  view.items = g_nodes;
-  view.count = g_nodeCount;
-  view.selected = g_nodeSel;
-  view.scroll = g_nodeScroll;
-  view.tabs = currentTabBar(om::ui::Tab::Nodes);
-  view.heardLastHour = g_nodeLastHour;
-  view.heardLastHourKnown = g_nodeLastHourKnown;
-  if (g_nodeTraceOpen) {
-    view.trace = &g_nodeTrace;
-    view.menuTitle = g_nodeTraceTitle;
-    view.menuSub = "trace result";
-  } else if (g_nodeMenu >= 0) {
-    view.menu = g_nodeMenuRows;
-    view.menuCount = g_nodeMenuCount;
-    view.menuTitle = g_nodeMenuTitle;
-    view.menuSub = g_nodeMenuSub;
-  }
-}
-
-// The old home screen is gone; this name is kept because every old tab switch already calls it.
-static void drawHome() {
-  refreshNodes();
-  om::ui::StatusModel status;
-  buildStatus(status);
-  // The Info page is a full page over the Nodes tab (EST-342); drawing it here means every caller
-  // that returns to Nodes and every repaint keeps it open.
-  if (g_nodeInfo >= 0) {
-    if (!buildNodeInfoModel(g_nodeInfo, &g_nodeInfoModel)) {
-      g_nodeInfo = -1;   // the contact went away (removed, or the table changed under us)
-    } else {
-      om::ui::nodeInfoDraw(status, g_nodeInfoModel, g_nodeInfoScroll);
-      return;
-    }
-  }
-  om::ui::NodesView view;
-  buildNodesView(view);
-  om::ui::nodesScreenDraw(view);
-  // Opening the Nodes screen is what clears the new-node dot (the ticket's rule).
-  g_newNodeDot = false;
-  g_nodeSig = om::meshContactSignature();
 }
 
 // The fault mark's toast. It no longer draws on top of the panel: omFrameEnd() draws the active
@@ -1503,17 +1307,9 @@ static void handleSheetAction(const om::ui::ChatHitResult& hit) {
       break;
     }
     case om::ui::SheetAction::NodeDetails: {
-      refreshNodes();
-      int at = -1;
-      for (int i = 0; i < g_nodeCount; ++i) {
-        if (strcmp(g_nodes[i].name, m.name) == 0) {
-          at = i;
-          break;
-        }
-      }
+      om::nodes_tab::selectByName(m.name);
       g_bubMenuSeq = 0;
       g_selector = false;
-      if (at >= 0) g_nodeSel = at;
       showTab(0);
       return;
     }
@@ -2090,7 +1886,7 @@ static void buildSettingsRows() {
     case SetPage::NodesRoot: {
       char v[32];
       setSection("NODE LIST");
-      snprintf(v, sizeof(v), "%d", g_nodeCount);
+      snprintf(v, sizeof(v), "%d", om::nodes_tab::count());
       setAdd(om::ui::SetRowKind::Value, A_None, "Nodes heard", v);
       setAdd(om::ui::SetRowKind::Note, A_None, "No node list settings yet.");
       setAdd(om::ui::SetRowKind::Note, A_None,
@@ -2657,7 +2453,7 @@ static bool settingsEditAppendAccent() {
 }
 
 static void redrawMainTab() {
-  if (g_tab == 0) drawHome();
+  if (g_tab == 0) om::nodes_tab::draw();
   else if (g_tab == 1) drawChat();
   else if (g_tab == 2) om::map_tab::draw();
   else om::rptr_tab::draw();
@@ -3563,6 +3359,12 @@ static void settingsBegin() {
   if (seeded) Serial.println("[set] radio prefs seeded from the build values");
 }
 
+// EST-411: the Nodes tab module's shell services. Its long-press arm and press-away rule only run
+// on the Nodes screen; a sheet row can open a DM or switch page through the shell's own functions.
+static bool appNodesVisible() { return g_tab == 0 && !g_settings; }
+static bool appOpenDm(const char* name) { return chatOpenDmFor(name); }
+static void appShowTab(int tab) { showTab(tab); }
+
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
@@ -3619,6 +3421,18 @@ void setup() {
   om::ui::loadFonts();                // anti-aliased VLW tables, needed before the first Nodes draw
   // EST-357: the one-time PSRAM move, and the boot number the Bluetooth guard is built from.
   allocUiBuffers();
+  // EST-411: the Nodes tab module gets its shell services and the two PSRAM buffers it fills, once,
+  // before the first draw.
+  {
+    om::nodes_tab::Host nodesHost;
+    nodesHost.buildStatus = buildStatus;
+    nodesHost.tabBar = appTabBar;
+    nodesHost.toast = showToast;
+    nodesHost.screenVisible = appNodesVisible;
+    nodesHost.openDm = appOpenDm;
+    nodesHost.showTab = appShowTab;
+    om::nodes_tab::begin(nodesHost, g_nodes, g_contactScratch);
+  }
   om::printMemLine("boot (before Wi-Fi, before BLE)");
 
   om::crashCheckpoint("[om] prefs + clock");
@@ -3759,7 +3573,7 @@ void setup() {
   // EST-377: the battery log's switch, loaded after Preferences is open (a missing key is ON and is
   // not written). The card itself is only touched from the loop, below.
   om::plog::begin(mapLayerPrefRead, mapLayerPrefWrite, nullptr);
-  drawHome();
+  om::nodes_tab::draw();
   // EST-355: the first screen is on the glass now, so its brightness is known before the first
   // change is asked for.
   g_tabLuma[0] = om::omFrameMeanLuma(om::ui::kChangeLumaStep);
@@ -3864,7 +3678,7 @@ static void screenChangeLoop() {
 }
 
 // One tab switch for the new shell. The old screens keep their own tap paths for now; both end here
-// or in drawHome(), so returning to Nodes always redraws the new chrome.
+// or in om::nodes_tab::draw(), so returning to Nodes always redraws the new chrome.
 //
 // EST-355: the switch itself is NOT drawn here any more. It is handed to the screen-change machine
 // (screen_change.h) and performed by screenChangeLoop() from loop(): with the light taken down first
@@ -3876,7 +3690,7 @@ static void showTab(int tab) {
   if (tab == g_tab) {
     // A plain redraw of the screen that is already up. Not while a change owns the light and the
     // frame (EST-355): it would push into a light that is on its way down or up.
-    if (tab == 0 && !g_change.active()) drawHome();
+    if (tab == 0 && !g_change.active()) om::nodes_tab::draw();
     return;
   }
   const int fromTab = g_tab;
@@ -3915,112 +3729,6 @@ static void showTab(int tab) {
 // carries it too (EST-344); only expiry asks for another redraw.
 // One duration for every toast: theme.h kToastMs (5 s, EST-346).
 static void showToast(const char* text) { om::toasts::text(text); }
-
-// One row of the Nodes long-press sheet. Every case here was offered only because it can work
-// (ui/node_menu.h), so a tap never lands on a row that silently does nothing.
-static void handleNodeAction(om::ui::NodeAction action, int node) {
-  if (node < 0 || node >= g_nodeCount) return;
-  const char* name = g_nodes[node].name;
-  om::MeshContact contact{};
-  const bool known = om::meshContactByName(name, &contact);
-  switch (action) {
-    case om::ui::NodeAction::DirectMessage:
-      closeNodeSheets();
-      chatOpenDmFor(name);
-      return;
-    case om::ui::NodeAction::Info:
-      openNodeInfo(node);
-      return;
-    case om::ui::NodeAction::ShowOnMap:
-      if (known && contact.has_pos) {
-        const double lat = (double)contact.lat_e6 / 1e6;
-        const double lon = (double)contact.lon_e6 / 1e6;
-        closeNodeSheets();
-        om::map_tab::showPoint(lat, lon, name);
-        // EST-397 removed the point; EST-399 removes the name too (rule 9: index/length only).
-        Serial.printf("[nodes] map: opening the node's position\n");
-        showTab(2);
-      }
-      return;
-    case om::ui::NodeAction::Ping: {
-      const bool sent = om::meshNodePing(name);
-      char text[64];
-      snprintf(text, sizeof(text), sent ? "Ping sent to %s" : "Ping %s: send failed", name);
-      closeNodeSheets();
-      drawHome();
-      showToast(text);
-      return;
-    }
-    case om::ui::NodeAction::Trace: {
-      const bool sent = om::meshNodeTrace(name);
-      char text[64];
-      snprintf(text, sizeof(text), sent ? "Trace sent to %s" : "Trace %s: no path", name);
-      closeNodeSheets();
-      drawHome();
-      showToast(text);
-      return;
-    }
-    case om::ui::NodeAction::ResetPath:
-      om::meshNodeResetPath(name);
-      // The path-dependent rows (Trace, Reset path) disappear now, so the sheet is rebuilt.
-      buildNodeMenu(node);
-      drawHome();
-      showToast("Path reset");
-      return;
-    case om::ui::NodeAction::Favourite: {
-      bool nowFav = false;
-      if (known) nowFav = contact.favourite;
-      om::meshNodeFavourite(name, !nowFav);
-      // The star sorts the node to the top, so the sheet is rebuilt for the node's NEW row, found
-      // by name: rebuilding it at the old index would show another node's facts.
-      char favName[32];
-      snprintf(favName, sizeof(favName), "%s", name);
-      refreshNodes();
-      int at = -1;
-      for (int i = 0; i < g_nodeCount; ++i) {
-        if (strcmp(g_nodes[i].name, favName) == 0) {
-          at = i;
-          break;
-        }
-      }
-      if (at >= 0) {
-        g_nodeMenu = at;
-        g_nodeSel = at;
-        buildNodeMenu(at);
-      }
-      drawHome();
-      showToast(nowFav ? "Favourite removed" : "Favourite added");
-      return;
-    }
-    case om::ui::NodeAction::RemoveContact:
-      if (!g_nodeMenuRemoveArmed) {
-        // Two-step: the first tap only renames the row, so a stray tap cannot delete a contact.
-        g_nodeMenuRemoveArmed = true;
-        buildNodeMenu(node);
-        drawHome();
-        return;
-      }
-      g_nodeMenuRemoveArmed = false;
-      closeNodeSheets();
-      om::meshNodeRemove(name);
-      g_nodeInfo = -1;
-      refreshNodes();
-      drawHome();
-      showToast("Contact removed");
-      return;
-    case om::ui::NodeAction::LoginRptr: {
-      closeNodeSheets();
-      om::rptr_tab::open(name);
-      showTab(3);   // that node's login page (or straight in, when it is remembered and auto-login is on)
-      return;
-    }
-    case om::ui::NodeAction::None:
-    default:
-      closeNodeSheets();
-      drawHome();
-      return;
-  }
-}
 
 // EST-390: what the pressed look goes on, screen by screen. Every branch asks the SAME hit test the
 // tap path asks (through ui/press_targets.h) and then returns the rectangle that hit test used, so
@@ -4079,31 +3787,16 @@ static bool pressTargetAt(int x, int y, om::ui::PressTarget* out) {
   }
 
   if (g_tab == 0) {
-    // The full Info page has one door: its header row.
-    if (g_nodeInfo >= 0) {
-      if (om::ui::nodeInfoBackRect().contains(x, y)) {
-        out->kind = om::ui::PressKind::Button;
-        out->rect = om::ui::nodeInfoBackRect();
-      }
+    // The info page and the sheets own every press while they are up (EST-411: the screen's own
+    // hit test lives in screens/nodes_tab.cpp).
+    if (om::nodes_tab::overlayOpen()) {
+      *out = om::nodes_tab::pressTarget(x, y);
       return out->valid();
     }
-    // A Nodes sheet is over the list: a row is its action, the header closes it (consumed).
-    if (g_nodeMenu >= 0 || g_nodeTraceOpen) {
-      om::ui::NodesView sheet;
-      buildNodesView(sheet);
-      const int row = om::ui::nodeSheetRowAt(sheet, x, y);
-      if (row >= 0) {
-        out->kind = om::ui::PressKind::Row;
-        out->rect = om::ui::nodeSheetRowRect(sheet, row);
-        return true;
-      }
-      // The sheet's header or a gap: it only closes (consumed), so nothing is pressed.
-      *out = om::ui::PressTarget{};
-      return false;
-    }
+    // The tab bar, the gear and the radio-fault mark are the shell's, exactly as on every tab.
     *out = om::ui::pressTargetForChrome(L, x, y);
     if (out->valid()) return true;
-    *out = om::ui::pressTargetForNodesRow(L, g_nodeScroll, g_nodeCount, x, y);
+    *out = om::nodes_tab::pressTarget(x, y);
     return out->valid();
   }
 
@@ -4217,33 +3910,11 @@ static void handleTap(int x, int y, bool longPress) {
 
   if (!g_settings && g_tab == 0) {
     const om::ui::Layout& L = om::ui::l2();
-    // The full Info page has one door: its header row. No tab bar is drawn there, so nothing else
-    // is tappable until it closes (EST-342).
-    if (g_nodeInfo >= 0) {
-      if (om::ui::nodeInfoBackRect().contains(x, y)) {
-        g_nodeInfo = -1;
-        drawHome();
-      }
-      return;
-    }
-    // A sheet over the Nodes list: a row is its action, the header or anything outside closes it.
-    // The panel comes from the same NodesView the drawing used.
-    if (g_nodeMenu >= 0 || g_nodeTraceOpen) {
-      om::ui::NodesView sheet;
-      buildNodesView(sheet);
-      const om::ui::Rect panel = om::ui::nodeSheetPanel(sheet);
-      if (panel.contains(x, y)) {
-        const int r = om::ui::nodeSheetRowAt(sheet, x, y);
-        if (!g_nodeTraceOpen && r >= 0 && r < g_nodeMenuCount) {
-          handleNodeAction(g_nodeMenuRows[r].action, g_nodeMenu);
-        } else {
-          closeNodeSheets();
-          drawHome();
-        }
-      } else {
-        closeNodeSheets();
-        drawHome();
-      }
+    // The Info page and the sheets own every tap: no tab bar is drawn there, so nothing else is
+    // tappable until they close (EST-342, EST-411: the screen's own tap handling is in
+    // screens/nodes_tab.cpp).
+    if (om::nodes_tab::overlayOpen()) {
+      (void)om::nodes_tab::tap(x, y, longPress);
       return;
     }
     const int tab = L.tabAt(x, y);
@@ -4261,16 +3932,7 @@ static void handleTap(int x, int y, bool longPress) {
       showRadioFaultToast();
       return;
     }
-    const int row = L.rowAt(x, y, g_nodeScroll, g_nodeCount);
-    if (row >= 0) {
-      if (longPress) {
-        openNodeMenu(row);   // EST-342: a plain tap still just selects (Filip's rule)
-      } else {
-        g_nodeSel = row;
-        Serial.printf("[nodes] select %d\n", row);   // EST-399: the row, not the node's name
-        drawHome();
-      }
-    }
+    (void)om::nodes_tab::tap(x, y, longPress);
     return;
   }
 
@@ -4328,7 +3990,7 @@ static bool redrawCurrentScreen() {
     drawSettings();
     return true;
   }
-  if (g_tab == 0) drawHome();
+  if (g_tab == 0) om::nodes_tab::draw();
   else if (g_tab == 1) drawChat();
   else if (g_tab == 2) om::map_tab::draw();
   else om::rptr_tab::draw();
@@ -4364,7 +4026,7 @@ static om::IdleBlockers idleBlockersNow() {
   // must not reach behind, so the timer waits. The own-position picker and the RPTR map picker are
   // full frames, but the user is in the middle of choosing a point, so they wait too.
   b.popup = g_clearAsk || g_setSelOpen || g_posChoice || g_ownPick || g_selector || g_advertMenu ||
-            g_bubMenuSeq != 0 || g_nodeMenu >= 0 || g_nodeTraceOpen ||
+            g_bubMenuSeq != 0 || om::nodes_tab::modalOpen() ||
             om::rptr_tab::modalOpen() || om::rptr_tab::mapPickerOpen();
   b.ota = om::otaActive();
   // A drag is the finger down and moving; a stale canvas is a pan, zoom or recentre whose tiles are
@@ -4540,7 +4202,7 @@ void loop() {
     const uint16_t mv = om::batteryMilliVolts();
     if (mv != g_battMv) {
       g_battMv = mv;
-      if (g_tab == 0 && !g_settings && uiDrawOk) drawHome();
+      if (g_tab == 0 && !g_settings && uiDrawOk) om::nodes_tab::draw();
       Serial.printf("[batt] %u mV\n", g_battMv);
     }
     const int pct = batteryPercent(g_battMv);
@@ -4619,7 +4281,7 @@ void loop() {
       lastSats = g_gps.sats;
       lastValid = g_gps.valid;
       lastHeard = g_gps.heardTotal;
-      if (g_tab == 0 && !g_settings && uiDrawOk) drawHome();
+      if (g_tab == 0 && !g_settings && uiDrawOk) om::nodes_tab::draw();
       Serial.printf("[gps] %s used=%u expected=%u heard=%u best=%u maxheard=%u\n",
                     g_gps.valid ? "fix" : "no-fix", g_gps.sats, g_gps.expectedTotal,
                     g_gps.heardTotal, g_gps.bestSnr, g_gps.maxHeard);
@@ -4634,9 +4296,9 @@ void loop() {
     lastNodeCheck = millis();
     const uint32_t sig = om::meshContactSignature();
     const int unread = unreadTotal();
-    if (sig != g_nodeSig || unread != lastUnreadSeen) {
+    if (sig != om::nodes_tab::seenSignature() || unread != lastUnreadSeen) {
       lastUnreadSeen = unread;
-      drawHome();
+      om::nodes_tab::draw();
     }
   }
 
@@ -4834,7 +4496,7 @@ void loop() {
       if (lastText[0] != 0) {
         const om::ui::NodeNotice notice =
             om::ui::newNodeNotice(true, om::sounds::masterOn(), om::sounds::dnd(), !om::sound::validSound(om::sounds::choice(SoundEvent::NewNode)));
-        g_newNodeDot = true;   // until the Nodes screen is next drawn
+        om::nodes_tab::noteNewNode();   // the dot, until the Nodes screen is next drawn
         if (notice.sound) om::sounds::playEvent(SoundEvent::NewNode);
         // EST-366 (rule 9): the same toast door as a message, so DND and a burst are handled once.
         // The dot still appears: it is information on the bar, not a pop-up.
@@ -4940,11 +4602,8 @@ void loop() {
         tv.rttMs = trace.rttMs;
         tv.haveRtt = trace.haveRtt;
         if (tv.haveRtt) {
-          g_nodeTrace = tv;
-          snprintf(g_nodeTraceTitle, sizeof(g_nodeTraceTitle), "%s", trace.node);
-          g_nodeTraceOpen = true;
-          g_nodeMenu = -1;
-          if (g_tab == 0 && !g_settings && uiDrawOk) drawHome();
+          om::nodes_tab::setTrace(tv, trace.node);
+          if (g_tab == 0 && !g_settings && uiDrawOk) om::nodes_tab::draw();
           else if (g_screenOn) showToast("Trace came back");
           Serial.printf("[nodes] trace: %d hop(s), %lu ms\n", tv.count, (unsigned long)tv.rttMs);
         } else if (g_screenOn) {
@@ -5033,8 +4692,7 @@ void loop() {
       const bool setAccent = g_setAccentPreview;   // the same hold on a Settings editor (EST-352)
       g_dismiss.onRelease();
       g_spent = false;
-      g_nodeHoldArmed = false;
-      g_nodeHold.release();
+      om::nodes_tab::holdRelease();
       g_keyHoldArmed = false;
       g_keyHold.release();
       g_accentPreview = false;
@@ -5096,24 +4754,9 @@ void loop() {
         }
         // The Info page's scroll snaps its give back the same way, and its last drawn position is
         // always painted here too (the drag may not have drawn in the last 60 ms).
-        if (g_tab == 0 && !g_settings && g_screenOn && g_nodeInfo >= 0) {
-          const om::ui::NodeInfoLayout nl = om::ui::nodeInfoLayoutFor(om::ui::l2());
-          const int maxScroll =
-              om::ui::nodeInfoMaxScroll(om::ui::nodeInfoLineCount(g_nodeInfoModel), nl);
-          const int clamped = om::ui::nodeInfoSnapScroll(g_nodeInfoScroll, maxScroll);
-          const bool changed = clamped != g_nodeInfoScroll;
-          g_nodeInfoScroll = clamped;
-          if (g_drag || changed) drawHome();
-        } else if (g_tab == 0 && !g_settings && g_screenOn) {
-          // The Nodes scroll is clamped and snapped back when the finger lifts; the last 60 ms of a
-          // drag may not have been drawn, so the final position is always drawn here.
-          const int maxScroll = om::ui::l2().maxScroll(g_nodeCount);
-          const int clamped = g_nodeScroll < 0 ? 0
-                            : (g_nodeScroll > maxScroll ? maxScroll : g_nodeScroll);
-          const bool changed = clamped != g_nodeScroll;
-          g_nodeScroll = clamped;
-          if (g_drag || changed) drawHome();
-        }
+        // EST-411: the Nodes list and the Info page clamp their give in screens/nodes_tab.cpp,
+        // with the same 60 ms frame clock the loop used.
+        if (g_tab == 0 && !g_settings && g_screenOn) om::nodes_tab::releaseSnap(g_drag);
         // EST-394: the last 60 ms of a map drag may not have been drawn. One full draw here leaves
         // the final pan on the glass with the trace projected for THAT view, and a composited canvas
         // that matches it, so the replay's 30 fps frames can resume at once after the finger lifts.
@@ -5150,12 +4793,11 @@ void loop() {
     g_emojiScroll0 = g_emojiScroll;
     g_setScroll0 = g_setScroll;
     g_setSelScroll0 = g_setSelScroll;
-    g_nodeScroll0 = g_nodeScroll;
-    g_nodeInfoScroll0 = g_nodeInfoScroll;   // EST-400: the Info page's own drag base
+    om::nodes_tab::beginDrag();   // EST-411: the Nodes list/Info drag bases
     om::rptr_tab::beginDrag();   // EST-410: the RPTR list/page drag bases
     g_drag = false;
     g_acted = false;
-    g_nodeHoldArmed = false;
+    om::nodes_tab::holdDisarm();
     g_keyHoldArmed = false;
     g_accentPreview = false;
     g_accentCp = 0;
@@ -5172,14 +4814,9 @@ void loop() {
       redrawCurrentScreen();   // the frame without the toast
       Serial.printf("[tap] %d,%d dismissed the toast, gesture spent\n", (int)x, (int)y);
     }
-    // EST-342: a press that begins on a Nodes ROW arms the long-press rule (ui/long_press.h); a
-    // press anywhere else, or while a sheet is open, never does. The release of a short press is
-    // still an ordinary tap, so a plain tap keeps doing what it did.
-    if (!g_spent && g_tab == 0 && !g_settings && g_nodeInfo < 0 && g_nodeMenu < 0 &&
-        !g_nodeTraceOpen && om::ui::l2().rowAt(x, y, g_nodeScroll, g_nodeCount) >= 0) {
-      g_nodeHold.press(x, y, millis());
-      g_nodeHoldArmed = true;
-    }
+    // EST-342 / EST-411: a press that begins on a Nodes ROW arms the long-press rule; the test
+    // and the timing live in screens/nodes_tab.cpp.
+    if (!g_spent) om::nodes_tab::holdPress((int)x, (int)y, millis());
     // EST-339, the one rule for every overlay on the Chat tab: a new press INSIDE the overlay on top
     // is an ordinary gesture; a press OUTSIDE it closes the overlay on this press and spends the whole
     // gesture (its drag and its release included), so nothing behind the overlay is pressed. Only the
@@ -5205,18 +4842,10 @@ void loop() {
     }
     // EST-342: a press outside the Nodes long-press sheet closes it and spends its gesture, the same
     // rule the chat overlays follow, so nothing behind the sheet is scrolled or tapped.
-    if (!g_spent && g_tab == 0 && !g_settings && (g_nodeMenu >= 0 || g_nodeTraceOpen)) {
-      om::ui::NodesView sheet;
-      buildNodesView(sheet);
-      if (!om::ui::nodeSheetPanel(sheet).contains(x, y)) {
-        closeNodeSheets();
-        drawHome();
-        g_spent = true;
-        g_drag = true;
-        g_acted = true;
-        Serial.printf("[tap] %d,%d away from the node sheet: closed, gesture spent\n", (int)x,
-                      (int)y);
-      }
+    if (!g_spent && om::nodes_tab::closeSheetAwayFrom((int)x, (int)y)) {
+      g_spent = true;
+      g_drag = true;
+      g_acted = true;
     }
     // EST-346: a press on s, c or z on the LETTERS page arms the accent hold (the same LongPress rule
     // the node menu uses). The letter is fixed at the press, so the shift state cannot change under a
@@ -5311,10 +4940,10 @@ void loop() {
         }
       }
     }
-    if (!accentFired && !g_spent && !g_acted && g_nodeHoldArmed) {
+    if (!accentFired && !g_spent && !g_acted && om::nodes_tab::holdArmed()) {
       if (g_drag) {
-        g_nodeHold.reset();
-      } else if (g_nodeHold.update((int)x, (int)y, millis())) {
+        om::nodes_tab::holdReset();
+      } else if (om::nodes_tab::holdUpdate((int)x, (int)y, millis())) {
         g_acted = true;
         handleTap(x, y, true);
       }
@@ -5411,30 +5040,10 @@ void loop() {
         // EST-410: the picker's pan and the list/page drag live in screens/rptr_tab.cpp. The
         // 60 ms render clock is the shell's and is stamped there, exactly where the loop did.
         om::rptr_tab::dragMove(x, y, dy, g_drag, g_lastX, g_lastY, g_lastRender);
-      } else if (g_tab == 0 && !g_settings && g_nodeInfo >= 0) {
-        // EST-400: the Info page's rows scroll with the finger once they do not fit the body (a
-        // ninth row is one field away), through the same give rule as every other list.
-        const om::ui::NodeInfoLayout nl = om::ui::nodeInfoLayoutFor(om::ui::l2());
-        const int maxScroll =
-            om::ui::nodeInfoMaxScroll(om::ui::nodeInfoLineCount(g_nodeInfoModel), nl);
-        const int next = om::ui::nodeInfoDragScroll(g_nodeInfoScroll0, dy, maxScroll);
-        if (next != g_nodeInfoScroll) {
-          g_nodeInfoScroll = next;
-          if (millis() - g_lastRender > 60) {
-            g_lastRender = millis();
-            drawHome();
-          }
-        }
       } else if (g_tab == 0 && !g_settings) {
-        // Nodes scrolls WITH the finger: selDragScroll is the one tested sign (EST-334's bug class,
-        // fixed here again for this list). The release path snaps the give back into range.
-        const int maxScroll = om::ui::l2().maxScroll(g_nodeCount);
-        const int next = om::ui::selDragScroll(g_nodeScroll0, dy, maxScroll);
-        g_nodeScroll = next;
-        if (millis() - g_lastRender > 60) {
-          g_lastRender = millis();
-          drawHome();
-        }
+        // EST-411: the Info page's and the list's scroll (and the 60 ms render clock) live in
+        // screens/nodes_tab.cpp; the sign and the give are the same tested rules.
+        om::nodes_tab::dragMove(dy, g_lastRender);
       }
     }
     // EST-390: the look stays only while the finger is on the element. Sliding off clears it (one
@@ -5489,9 +5098,9 @@ void loop() {
 namespace om {
 namespace app {
 
-int nodeCount() { return g_nodeCount; }
-const ui::NodeItem& node(int i) { return g_nodes[i]; }
-void refreshNodesNow() { refreshNodes(); }
+int nodeCount() { return om::nodes_tab::count(); }
+const ui::NodeItem& node(int i) { return om::nodes_tab::item(i); }
+void refreshNodesNow() { om::nodes_tab::refresh(); }
 int unreadTotal() { return ::unreadTotal(); }
 
 void refreshChatsNow() { refreshChats(); }

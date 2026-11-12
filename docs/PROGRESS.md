@@ -9008,3 +9008,174 @@ Claude: review the diff and commit. On the device: RPTR list scan, open a repeat
 setting Apply, the console, Back, the Position picker, and the Settings > RPTR Open repeater row.
 The serial log should still print `[rptr] open (found N)`, `[rptr] build list/page=... stack_free=...`
 and the same `[rptr] cli` lines, and `status` should show the same RAM/stack numbers.
+
+
+## EST-411 main.cpp split: Nodes
+
+The Nodes tab is out of main.cpp: `src/screens/nodes_tab.{h,cpp}`, in the same shape as
+`screens/rptr_tab.{h,cpp}` from EST-410. Moved: the tab's own state (the row copy and its scroll
+bases, the node sheet, the Info page, the trace sheet, the new-node dot and the long-press timing),
+`refreshNodes()`, `buildNodeMenu()`, `openNodeMenu()`, `closeNodeSheets()`, `buildNodeInfoModel()`,
+`openNodeInfo()`, `buildNodesView()`, `drawHome()`, the Nodes tap handling, `handleNodeAction()` and
+the loop's hold/drag/release blocks. `mesh_link`, the contact table and the favourites store are
+untouched; `ui/node_menu.cpp`, `ui/screen_nodes.cpp`, `ui/screen_node_info.cpp` and
+`ui/node_info_layout.h` still own the rows and pixels.
+
+### Size, build and tests
+- `src/main.cpp`: 5,526 -> 5,135 lines (-391).
+- New `src/screens/nodes_tab.cpp`: 577 lines; new `src/screens/nodes_tab.h`: 82 lines.
+- The four principal moved blocks are BYTE-IDENTICAL to HEAD's main.cpp: 128 lines (Nodes data +
+  sheet + Info, HEAD 628..755), 46 lines (`buildNodesView` + `drawHome`, HEAD 786..831), 107 lines
+  (`handleNodeAction`, HEAD 3918..4024) and 27 lines (the state block, HEAD 345..371), 308 lines in
+  all. With the `difflib` line matcher over the whole file, 344 of the 577 lines match a HEAD line
+  verbatim; the other 233 are the new Host wrappers, the public entry points and the four branch
+  rewrites listed below.
+- Build with the REBUILD.md command (`PLATFORMIO_CORE_DIR=/home/slofi/.cache/pio-om-lite/core
+  /home/slofi/.local/share/pipx/venvs/platformio/bin/pio run -e om_lite_l2`, after `-t clean`):
+  REAL exit 0. RAM 160,856 B (49.1% of 327,680), was 160,808 B (+48 B).
+  Flash 2,996,449 B (45.7% of 6,553,600), was 2,995,589 B (+860 B).
+  `firmware.bin` 2,996,816 B, was 2,995,952 B (+864 B).
+- The +48 B RAM is exactly the Host (6 pointers). The +860 B flash is larger than a few hundred
+  and is the same effect EST-410 measured: this build has no LTO, so each Host service is an
+  indirect call where it was a direct call in the same translation unit, and the public wrappers
+  are real calls too. The moved bodies are text-identical. No heap allocation, no new task, no
+  changed task affinity.
+- Baseline note: the same HEAD re-measured here was 2,995,589 B flash (EST-410's entry says
+  2,995,605, 16 B more; the build id was `b43ba03-dirty` in both). That 16 B is link/section-order
+  noise between builds, so the comparison above uses the baseline measured on this tree today.
+- `sh test/host/run.sh`: REAL exit 0, 0 FAIL lines.
+
+### git diff
+`git diff --stat` (tracked files; the two new files are untracked, their `--no-index` stat follows):
+
+```
+ docs/PROGRESS.md                | 169 +++++++++++++
+ src/main.cpp                    | 545 ++++++----------------------------------
+ test/host/test_est397.py        |   8 +-
+ test/host/test_est400.py        |  12 +-
+ test/host/test_tab_bar_calls.py |  19 +-
+ 5 files changed, 270 insertions(+), 483 deletions(-)
+ /dev/null => src/screens/nodes_tab.h   |  82 ++++++++++++++++++++++++++
+ /dev/null => src/screens/nodes_tab.cpp | 577 ++++++++++++++++++++++++++++++++++
+```
+
+`git diff --color-moved=zebra --stat` prints the same five tracked lines (git's stat has no
+cross-file moved-line count), so the equivalent measure is the block comparison above. The
+PROGRESS.md line is this entry itself.
+
+### Non-move edits (rule 1, one per line)
+Interface and new code in `src/screens/nodes_tab.{h,cpp}`:
+- `Host` struct + `begin(host, items, scratch)`: the module cannot see main.cpp's statics.
+- Host wrappers `showToast()`, `buildStatus()`, `currentTabBar()`, `chatOpenDmFor()`, `showTab()`,
+  `visible()`: the moved bodies keep their old call names, so they stay text-identical.
+- A `static void drawHome();` forward declaration: `openNodeMenu()` and `openNodeInfo()` call it
+  before its definition, exactly as main.cpp did.
+- `kNodeCap` moved from main.cpp to `nodes_tab.h` (`constexpr int kNodeCap = 64`, same value);
+  main.cpp's allocUiBuffers() uses `om::nodes_tab::kNodeCap` on 4 lines: one constant, and the
+  module owns the list size.
+- `g_nodes` / `g_contactScratch` are still allocated by main.cpp's allocUiBuffers() (EST-357's one
+  PSRAM point) and handed over in `begin()`: no new allocation, same buffers, same sizes.
+- `draw()` is a one-line wrapper around the moved `drawHome()`: the shell's entry point, while the
+  moved body keeps its old name.
+- `tap(x, y, longPress)` is the old handleTap Nodes branch minus the shell chrome, answering bool:
+  main keeps the tab bar, gear and fault mark exactly as on the RPTR branch.
+- `pressTarget(x, y)` is the old pressTargetAt Nodes branch with `out->` rewritten to a local `t`
+  and a return-by-value: same shape as map_tab::pressTarget and rptr_tab::pressTarget.
+- `overlayOpen()` (Info page or a sheet) and `modalOpen()` (a sheet only): main needs the old
+  early-return tests and the idle blocker.
+- `count()`, `item(i)`, `refresh()`, `seenSignature()`, `newNodeDot()`, `noteNewNode()`,
+  `selectByName()`, `setTrace()`: state the shell, Chat, Settings, the USB commands and the async
+  loop read or set.
+- `beginDrag()`, `holdPress()`, `holdDisarm()`, `holdArmed()`, `holdReset()`, `holdUpdate()`,
+  `holdRelease()`, `closeSheetAwayFrom()`, `dragMove()`, `releaseSnap()`: the loop's press,
+  release and drag blocks, while the shell keeps `g_drag`, `g_spent`, `g_acted` and the 60 ms
+  frame clock.
+
+main.cpp:
+- `#include "screens/nodes_tab.h"`.
+- the 29 Nodes state declarations replaced by a comment; the two PSRAM pointers stay.
+- `refreshNodes()`, `buildNodeMenu()`, `openNodeMenu()`, `closeNodeSheets()`, `buildNodeInfoModel()`,
+  `openNodeInfo()`, `buildNodesView()` and `drawHome()` removed (moved); `buildStatus()` stayed in
+  main.cpp because the Map and RPTR Hosts take it from there too.
+- the `drawHome()` forward declaration removed.
+- `currentTabBar`: `g_newNodeDot` -> `om::nodes_tab::newNodeDot()`.
+- Chat `SheetAction::NodeDetails`: the refresh/find/set block -> `selectByName(m.name)`.
+- Settings `NodesRoot`: `g_nodeCount` -> `om::nodes_tab::count()`.
+- 8 draw call sites (`drawHome()` -> `om::nodes_tab::draw()`): redrawMainTab, setup, showTab,
+  redrawCurrentScreen, the battery redraw, the GPS redraw, the 1 s Nodes refresh, the trace result.
+- `pressTargetAt` Nodes branch: the info/sheet/row block -> `overlayOpen()` / `pressTarget()`;
+  `pressTargetForChrome()` stays in main.
+- `handleTap` Nodes branch: the info/sheet/row block -> `overlayOpen()` / `tap()`; tab bar, gear and
+  the fault toast stay in main.
+- idle blockers: `g_nodeMenu >= 0 || g_nodeTraceOpen` -> `om::nodes_tab::modalOpen()`.
+- the 1 s refresh: `g_nodeSig` -> `om::nodes_tab::seenSignature()`.
+- the new-node advert: `g_newNodeDot = true` -> `om::nodes_tab::noteNewNode()`.
+- the trace result: four assignments -> `om::nodes_tab::setTrace(tv, trace.node)`.
+- release: `g_nodeHoldArmed = false; g_nodeHold.release()` -> `holdRelease()`.
+- the Info/list release clamps: two blocks -> `releaseSnap(g_drag)`.
+- the press base: two `scroll0` assignments -> `beginDrag()`.
+- a new press: `g_nodeHoldArmed = false` -> `holdDisarm()`.
+- the hold arm: the five-condition block -> `holdPress(x, y, millis())`.
+- the press away from a sheet: the close block -> `closeSheetAwayFrom(x, y)` plus the shell's
+  three latches.
+- the hold step: `g_nodeHoldArmed` / `reset()` / `update()` -> `holdArmed()` / `holdReset()` /
+  `holdUpdate()`; the release still calls the shell's `handleTap(x, y, true)`, so the `[tap]` line
+  and the click sound are unchanged.
+- the drag branches: the Info and list blocks -> `dragMove(dy, g_lastRender)`.
+- `app_shell`: `nodeCount()`, `node(i)` and `refreshNodesNow()` delegate to `count()`, `item(i)`
+  and `refresh()`.
+- setup(): three adapters (`appNodesVisible`, `appOpenDm`, `appShowTab`) and the `nodesHost`
+  wiring right after `allocUiBuffers()`.
+
+No rename changed a string, an NVS key, a log line or a USB answer. No bug was found while moving,
+so nothing was fixed here.
+
+### State another screen touches (rule 3)
+- The Chat tab's "Node details" action selects a Nodes row: `selectByName(name)`.
+- Settings > Nodes shows the count: `count()`.
+- The tab bar's new-node badge reads it: `newNodeDot()`.
+- The `nodes` USB answer reads the list: `app_shell` delegates to `count()`, `item(i)`, `refresh()`.
+- The async loop's new-advert and trace events write it: `noteNewNode()`, `setTrace()`.
+- The shell's own `g_tab`, `g_settings`, `g_drag`, `g_spent`, `g_acted` and `g_lastRender` stay in
+  main.cpp; the module reaches the first two through `Host::screenVisible` and the rest are passed
+  in or back by the loop hooks.
+
+### Tests changed and armed (rule 5)
+- `test/host/test_tab_bar_calls.py`: `currentTabBar()` must now read
+  `om::nodes_tab::newNodeDot()`; the Nodes view check reads `src/screens/nodes_tab.cpp`
+  (`view.tabs = currentTabBar(om::ui::Tab::Nodes);`) and main.cpp must wire
+  `nodesHost.tabBar = appTabBar;`. Armed: replacing that one line in nodes_tab.cpp makes it exit 1
+  with `FAIL screens/nodes_tab.cpp: the Nodes view does not take its tab model from the Host`;
+  restored, it passes.
+- `test/host/test_est397.py`: the four Nodes `SHAPES` entries (`[nodes] map`, `[nodes] info`,
+  `[nodes] menu`, `[nodes] select`) now point at `src/screens/nodes_tab.cpp`; the `[nodes] %s`
+  whitelist entry stays in main.cpp (the ping toast is still there). Armed: deleting the
+  `[nodes] select %d` line makes it exit 1 with `the rewritten log line is missing`; restored, it
+  passes.
+- `test/host/test_est400.py`: the five Info-page wiring checks now read
+  `src/screens/nodes_tab.cpp` (`nodeInfoDraw(...)`, `g_nodeInfoScroll0 = g_nodeInfoScroll;`,
+  `nodeInfoDragScroll(`, `nodeInfoSnapScroll(`, `g_nodeInfoScroll = 0;`). Armed: deleting the drag
+  base line makes it exit 1 with `FAIL the drag base: missing 'g_nodeInfoScroll0 = ...'`;
+  restored, it passes.
+- No other host test pinned Nodes code in main.cpp. `test_est374.py` still sees the same tabAt()
+  and showTab() counts because the tab bar/gear/fault checks stayed in main.cpp; `test_est390.py`
+  still sees the same `pressArmAt` count; `test_est381.py` still sees the same handleTap shape
+  (the release still goes through it).
+
+### Could not check (no device in this run)
+- Nothing about the glass: the Nodes list, a row tap, every sheet row (Info, Direct message, Show
+  on map, Ping, Trace, Favourite, Reset path, Remove contact, Login), Back from Info, the two
+  scroll drags and the new-node dot are untested on hardware here. The moved code is the same text
+  and the same draw calls (`ui::nodesScreenDraw` / `ui::nodeInfoDraw`) as before, and the build is
+  clean, but that is not a glass check.
+- The contact table, the favourites store and `mesh_link` are unchanged by construction.
+- The USB `nodes` answer is the same code path through the new accessors; no device was present to
+  run it.
+
+### Next step
+Claude: review the diff and commit. On the device: open Nodes, tap a row, long-press a few rows
+through every sheet action that applies, Back from Info, drag the list and the Info page, watch the
+new-node dot on an advert and a trace's hop sheet. The serial log should still print
+`[nodes] menu N, N row(s)`, `[nodes] info N`, `[nodes] select N`, `[nodes] map: opening the node's
+position`, `[nodes] trace: N hop(s), M ms` and `[tap] x,y away from the node sheet: closed, gesture
+spent`.

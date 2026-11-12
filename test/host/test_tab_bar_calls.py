@@ -42,12 +42,12 @@ for path in sorted(SRC.rglob("*.cpp")):
 main = strip_comments((SRC / "main.cpp").read_text(encoding="utf-8"))
 if "static om::ui::TabBarModel currentTabBar(om::ui::Tab active)" not in main:
     problems.append("main.cpp: the one currentTabBar() helper is missing")
-if "om::ui::tabBarModel(active, unreadTotal(), g_newNodeDot)" not in main:
-    problems.append("main.cpp: currentTabBar does not use unreadTotal()/g_newNodeDot")
-for tab in ("Nodes", "Chat"):
-    want = f"tabs = currentTabBar(om::ui::Tab::{tab});"
-    if want not in main:
-        problems.append(f"main.cpp: no {want}")
+# EST-411: the new-node dot moved into screens/nodes_tab.cpp; the one helper reads it through the
+# module's accessor, so every tab still gets the same badge source.
+if "om::ui::tabBarModel(active, unreadTotal(), om::nodes_tab::newNodeDot())" not in main:
+    problems.append("main.cpp: currentTabBar does not use unreadTotal()/nodes_tab::newNodeDot()")
+if "tabs = currentTabBar(om::ui::Tab::Chat);" not in main:
+    problems.append("main.cpp: no tabs = currentTabBar(om::ui::Tab::Chat);")
 # EST-371: the Map tab's state and drawing glue moved to screens/map_tab.cpp. It gets the one model
 # through the Host's tabBar callback, which setup() wires to appTabBar() -> currentTabBar().
 map_tab = strip_comments((SRC / "screens" / "map_tab.cpp").read_text(encoding="utf-8"))
@@ -62,6 +62,13 @@ if "v.tabs = tabBar(ui::Tab::Rptr);" not in rptr_tab:
     problems.append("screens/rptr_tab.cpp: the RPTR view does not take its tab model from the Host")
 if "rptrHost.tabBar = appTabBar;" not in main:
     problems.append("main.cpp: the RPTR module's tabBar host is not wired to the one helper")
+# EST-411: the Nodes view moved to screens/nodes_tab.cpp. It takes the one model through its Host's
+# tabBar callback too, so the badge still has one source on every tab.
+nodes_tab = strip_comments((SRC / "screens" / "nodes_tab.cpp").read_text(encoding="utf-8"))
+if "view.tabs = currentTabBar(om::ui::Tab::Nodes);" not in nodes_tab:
+    problems.append("screens/nodes_tab.cpp: the Nodes view does not take its tab model from the Host")
+if "nodesHost.tabBar = appTabBar;" not in main:
+    problems.append("main.cpp: the Nodes module's tabBar host is not wired to the one helper")
 
 # 3. Each tab screen actually draws the bar (a screen that stops drawing it would pass 1 and 2).
 for name in ("screen_nodes.cpp", "screen_chat.cpp", "screen_map.cpp", "screen_rptr.cpp"):

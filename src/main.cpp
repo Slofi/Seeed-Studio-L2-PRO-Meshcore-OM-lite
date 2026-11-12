@@ -17,6 +17,7 @@
 #include "board.h"
 #include "cardkb.h"          // EST-412: the Grove CardKB's bus and power
 #include "cardkb_logic.h"    // EST-412: the key mapping, the default and the polling gate
+#include "keynav_logic.h"    // EST-417: what an arrow does per screen, and the no-wrap tab rule
 #include "charge_state.h"   // EST-402: the charging bolt's two-read debounce and its unknown rule
 #include "clock_keep.h"     // EST-403: the clock kept in RTC_NOINIT across a warm restart
 #include "crash_report.h"
@@ -4090,14 +4091,26 @@ static void deleteArmTick(uint32_t now) {
 
 // EST-412: is a text field open right now? The same list the auto-off timer already had, now with
 // one owner and with the screen it belongs to: Settings owns its editors, the Chat tab owns the
-// composer sheet (channel, DM and reply all share g_kb) and the RPTR tab owns its sheet. The CardKB
-// polls only when this is true, so a closed composer never reads the Grove bus and a sheet left
-// behind on another tab can never receive a key.
+// composer sheet (channel, DM and reply all share g_kb) and the RPTR tab owns its sheet.
+// EST-417: this no longer gates the CardKB (the arrows work on every screen, so the keys are read on
+// every screen); it now says whether a key is typing and, on the Chat tab, whether the arrows scroll
+// the chat behind the composer.
 static bool textFieldOpen() {
   if (g_settings) return g_setEditor != om::ui::SettingsEditor::None;
   if (g_tab == 1) return g_kb.open;
   if (g_tab == 3) return om::rptr_tab::keyboardOpen();
   return false;
+}
+
+// EST-417: every pop-up, sheet, confirmation and dropdown on top of the current screen. It is the
+// auto-off timer's own list (EST-405), moved into one name so the arrow keys and the timer cannot
+// disagree about what counts as a sheet.
+static bool popupOpen() {
+  // The own-position picker and the RPTR map picker are full frames, but the user is in the middle of
+  // choosing a point, so they are sheets here too, exactly as they are for the timer.
+  return g_clearAsk || g_setSelOpen || g_posChoice || g_ownPick || g_selector || g_advertMenu ||
+         g_bubMenuSeq != 0 || om::nodes_tab::modalOpen() ||
+         om::rptr_tab::modalOpen() || om::rptr_tab::mapPickerOpen();
 }
 
 // EST-405: everything the ticket says must keep the auto-off timer paused. Defined here, after every
@@ -4108,11 +4121,8 @@ static om::IdleBlockers idleBlockersNow() {
   // REPLY/COPY/MENTION, the DM composer, every Settings text editor and the RPTR sheet.
   b.keyboard = textFieldOpen();
   // Pop-ups, confirmations, sheets and dropdowns: things that never finish themselves and that a tap
-  // must not reach behind, so the timer waits. The own-position picker and the RPTR map picker are
-  // full frames, but the user is in the middle of choosing a point, so they wait too.
-  b.popup = g_clearAsk || g_setSelOpen || g_posChoice || g_ownPick || g_selector || g_advertMenu ||
-            g_bubMenuSeq != 0 || om::nodes_tab::modalOpen() ||
-            om::rptr_tab::modalOpen() || om::rptr_tab::mapPickerOpen();
+  // must not reach behind, so the timer waits (EST-417: one owner, popupOpen()).
+  b.popup = popupOpen();
   b.ota = om::otaActive();
   // A drag is the finger down and moving; a stale canvas is a pan, zoom or recentre whose tiles are
   // still being decoded, which is the "zoom in progress" the ticket means.
@@ -4126,19 +4136,133 @@ static om::IdleBlockers idleBlockersNow() {
   return b;
 }
 
+// EST-417: what a CardKB arrow means on the screen that is up now. One context wins, in the ticket's
+// order: a text field (its composer may scroll the chat behind it), then a sheet or pop-up (the
+// arrows do nothing), then the Map (plain arrows pan), then a list screen (plain arrows switch tabs
+// and scroll). The table itself is keynav_logic.h's, so the host test proves every cell.
+static om::keynav::Context keynavContext() {
+  if (textFieldOpen()) return om::keynav::Context::TextField;
+  // The chat selector is the channel list the ticket says the arrows scroll, so it is a LIST here
+  // even though it is a dropdown for the auto-off timer (popupOpen). Every other pop-up stays a
+  // sheet, where the arrows do nothing at all.
+  if (popupOpen() && !(g_selector && !g_settings)) return om::keynav::Context::Sheet;
+  if (g_tab == 2 && !g_settings) return om::keynav::Context::Map;
+  return om::keynav::Context::List;
+}
+
+// EST-417 rules 2 and 3: previous / next tab, and NO wrap at either end (Nodes and RPTR are stops).
+// The row that is on the glass is the one stepped: inside Settings that is Settings' own five tabs
+// (the same page change a tab tap makes, its history reset included); everywhere else it is the four
+// main tabs through showTab(), so leaving Settings' gear pages cannot be forgotten here.
+static void keynavTabStep(int delta) {
+  if (g_settings) {
+    const int t = om::keynav::tabStep((int)g_setTab, delta, om::ui::kSettingsTabCount);
+    if (t < 0) return;
+    g_setTab = (om::ui::SettingsTab)t;
+    g_setPage = setRootForTab(g_setTab);
+    g_setScroll = 0;
+    g_setNav.reset();
+    clearDeleteArms();
+    g_posChoice = false;
+    drawSettings();
+    return;
+  }
+  const int t = om::keynav::tabStep(g_tab, delta, om::ui::kTabCount);
+  if (t < 0) return;
+  showTab(t);
+}
+
+// EST-417 rules 2 and 5: one row of scroll in whatever list owns the screen, through the SAME clamp
+// a finger's release applies. `dir` is +1 for the row below (towards the end), -1 for the row above.
+// A key has no fingertip, so there is no give: the ends stop dead, where a drag would stretch 10 px.
+static void keynavScroll(om::keynav::Context ctx, int dir) {
+  if (ctx == om::keynav::Context::TextField) {
+    // Only the Chat composer has a chat behind it; a Settings editor and the RPTR sheet do not
+    // scroll anything from the arrows (item 5).
+    if (g_settings || g_tab != 1) return;
+    const int next = om::keynav::keyScroll(g_chatScroll, -dir, om::ui::kRowH, g_chatMaxScroll);
+    if (next == g_chatScroll) return;
+    g_chatScroll = next;
+    drawChat();
+    return;
+  }
+  if (g_settings) {
+    const int next = om::keynav::keyScroll(g_setScroll, dir, om::ui::kRowH, g_setMaxScroll);
+    if (next == g_setScroll) return;
+    g_setScroll = next;
+    drawSettings();
+    return;
+  }
+  if (g_tab == 0) {
+    om::nodes_tab::scrollByRow(dir);   // the list and the Info page, each with its own rows
+    return;
+  }
+  if (g_tab == 1) {
+    if (g_selector) {
+      // The channel list is top-down, like the Nodes list: down shows later chats.
+      const int next = om::keynav::keyScroll(g_selScroll, dir, om::ui::kSelRowH, g_selMaxScroll);
+      if (next == g_selScroll) return;
+      g_selScroll = next;
+      drawChat();
+      return;
+    }
+    // The message band is bottom-anchored (its scroll grows into history), so "down" (towards the
+    // newest message) is the opposite sign, exactly as the drag path passes -dy there.
+    const int next = om::keynav::keyScroll(g_chatScroll, -dir, om::ui::kRowH, g_chatMaxScroll);
+    if (next == g_chatScroll) return;
+    g_chatScroll = next;
+    drawChat();
+    return;
+  }
+  if (g_tab == 3) {
+    om::rptr_tab::scrollByRow(dir);    // the list's 36 px rows or a page's 30 px ones
+    return;
+  }
+}
+
+// EST-417: one arrow press. The action comes from keynav_logic.h's table (arrow + context); this is
+// only the wiring to the functions a tap, a drag or a tab tap already uses.
+static void cardKbArrow(om::cardkb::Arrow a) {
+  const om::keynav::Context ctx = keynavContext();
+  switch (om::keynav::actFor(a, ctx)) {
+    case om::keynav::Act::TabPrev:    keynavTabStep(-1); break;
+    case om::keynav::Act::TabNext:    keynavTabStep(1); break;
+    case om::keynav::Act::ScrollUp:   keynavScroll(ctx, -1); break;
+    case om::keynav::Act::ScrollDown: keynavScroll(ctx, 1); break;
+    // The Map: one fixed step through the drag's own path, so traces and markers follow.
+    case om::keynav::Act::PanLeft:   om::map_tab::panStep(-om::ui::kMapKeyPanX, 0); break;
+    case om::keynav::Act::PanRight:  om::map_tab::panStep(om::ui::kMapKeyPanX, 0); break;
+    case om::keynav::Act::PanUp:     om::map_tab::panStep(0, -om::ui::kMapKeyPanY); break;
+    case om::keynav::Act::PanDown:   om::map_tab::panStep(0, om::ui::kMapKeyPanY); break;
+    // Fn+Up / Fn+Down zoom: keynav_logic.h's kFnZoomOnMap is the whole mapping, so dropping it is one
+    // constant and these two lines never run.
+    case om::keynav::Act::ZoomIn:    om::map_tab::zoomStep(1); break;
+    case om::keynav::Act::ZoomOut:   om::map_tab::zoomStep(-1); break;
+    case om::keynav::Act::None:
+    default:                         break;   // nothing on this screen: no redraw, no log line
+  }
+}
+
 // EST-412: one CardKB key, applied through the SAME functions the on-screen keys use. The mapping is
 // cardkb_logic.h's; this is only the routing. `hasCursor` is false: today's editors insert at the
-// end of the draft and draw the caret there, so left/right have nowhere to move and stay ignored.
-// A key on a sleeping screen wakes it like a touch and is not applied (the touch rule), and an
-// unrecognised code is counted and logged, never inserted.
+// end of the draft and draw the caret there, so left/right (for a future editor cursor) stay unused.
+// EST-417: an arrow is decided FIRST, by arrowFor() and keynav_logic.h, so no arrow byte ever reaches
+// mapCode. A key on a sleeping screen wakes it like a touch and is not applied (the touch rule),
+// arrows included; an unrecognised code is counted and logged, never inserted.
 static void cardKbKey(uint8_t code) {
-  const om::cardkb::Key k = om::cardkb::mapCode(code, false);
-  if (k.action == om::cardkb::Action::None) return;
+  const om::cardkb::Arrow arrow = om::cardkb::arrowFor(code);
+  const om::cardkb::Key k =
+      arrow == om::cardkb::Arrow::None ? om::cardkb::mapCode(code, false) : om::cardkb::Key{};
+  if (arrow == om::cardkb::Arrow::None && k.action == om::cardkb::Action::None) return;
   if (!g_screenOn) {
     screenWake("keyboard");
     return;
   }
   g_idle.onActivity(millis());   // a real key press is the user being there
+  if (arrow != om::cardkb::Arrow::None) {
+    cardKbArrow(arrow);
+    return;
+  }
   // The ticket allows the touch-feedback click here but does not require it. It is left to the
   // TAP path only (EST-390's one-call-site rule), so the keyboard is silent like a USB-injected
   // gesture while the on-screen keys keep their tick.
@@ -4200,10 +4324,16 @@ static void cardKbKey(uint8_t code) {
   }
 }
 
-// The one poll, from the loop task only, and only through the gate: switch on, keyboard found, a
-// text field open. cardkb::poll() meters itself to ~30 ms and returns one new press at a time.
+// The one poll, from the loop task only, and only through the gate: switch on and keyboard found, on
+// ANY screen (EST-417: the arrows work everywhere, so the keys are read everywhere; the text field
+// now only decides what a key does). cardkb::poll() meters itself to ~30 ms and returns one new
+// press at a time.
 static void cardKbStep(uint32_t nowMs) {
-  if (!om::cardkb::shouldPoll(g_kbEnabled, om::cardkb::found(), textFieldOpen())) return;
+  // EST-417 rule 8: the keyboard was pulled out. The driver has already logged once, closed the bus
+  // and dropped Grove power; all that is left is the short toast. Checked before the gate, because
+  // found() is false by now. The switch stays ON: off and on again probes.
+  if (om::cardkb::takeLostNotice()) showToast("Keyboard disconnected");
+  if (!om::cardkb::shouldPoll(g_kbEnabled, om::cardkb::found())) return;
   const int code = om::cardkb::poll(nowMs);
   if (code > 0) cardKbKey((uint8_t)code);
 }

@@ -110,6 +110,12 @@ constexpr int16_t kMapCanvasH = (int16_t)(kScreenH - kMapCanvasTop);   // 214
 constexpr int16_t kMapCentreX = (int16_t)(kMapCanvasW / 2);            // 160
 constexpr int16_t kMapCentreY = (int16_t)(kMapCanvasTop + kMapCanvasH / 2);   // 133
 
+// EST-417: one arrow press on the Map pans by a quarter of the canvas. That is the fixed step the
+// ticket asks for, expressed in the canvas it moves, and it is applied through om::mapPan() just as
+// a drag's delta is, so markers, the callout and a running trace re-project for the new view.
+constexpr int16_t kMapKeyPanX = (int16_t)(kMapCanvasW / 4);   // 80
+constexpr int16_t kMapKeyPanY = (int16_t)(kMapCanvasH / 4);   // 53
+
 // EST-374 (Filip): the tucked bottom bar. Shown it is the real 25 px page bar; hidden the SAME bar
 // slides down by kBarSlideDy and only its top 3 px are still on the screen, in kPanel, with the Map
 // tab's gold segment showing: it reads as "tucked under". The strip takes no taps (the map does).

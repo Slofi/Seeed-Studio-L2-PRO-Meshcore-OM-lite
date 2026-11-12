@@ -4,7 +4,8 @@
 //    0x08 Backspace, 0x0D Enter, 0x1B Esc, 0xB4/0xB7 left/right only with a movable cursor;
 //  * unknown codes are Ignored (counted by the shell, never inserted), and 0x00 is not a key at all;
 //  * the switch is OFF by default, including when the NVS key is missing;
-//  * polling needs all three: switch on, keyboard found, a text field open.
+//  * polling needs switch on AND found (EST-417 dropped the text-field term: the arrows act on every
+//    screen, so the keys are read on every screen).
 // src/cardkb_logic.h is plain C++: no Arduino, no Wire, no display.
 #include <stdio.h>
 
@@ -86,19 +87,18 @@ static void testDefaultOff() {
 
 // ---------------------------------------------------------------------------------- polling gate
 static void testPollGate() {
-  // Only the one true/true/true combination may read 0x5F.
+  // EST-417: the gate is switch on AND found, on any screen. A text field no longer gates the poll
+  // (the arrows work everywhere), so only the one true/true combination may read 0x5F.
   for (int enabled = 0; enabled <= 1; ++enabled) {
     for (int found = 0; found <= 1; ++found) {
-      for (int field = 0; field <= 1; ++field) {
-        const bool want = enabled && found && field;
-        CHECK(shouldPoll(enabled != 0, found != 0, field != 0) == want);
-      }
+      const bool want = enabled && found;
+      CHECK(shouldPoll(enabled != 0, found != 0) == want);
     }
   }
-  CHECK(shouldPoll(true, true, true));
-  CHECK(!shouldPoll(true, true, false));   // no text field: no background poll
-  CHECK(!shouldPoll(true, false, true));   // not found: nothing to read
-  CHECK(!shouldPoll(false, true, true));   // switch off: no heap, no bus, no poll
+  CHECK(shouldPoll(true, true));            // any screen, so no third term
+  CHECK(!shouldPoll(true, false));          // not found: nothing to read
+  CHECK(!shouldPoll(false, true));          // switch off: no heap, no bus, no poll
+  CHECK(!shouldPoll(false, false));
 }
 
 int main() {
@@ -106,7 +106,7 @@ int main() {
   testDefaultOff();
   testPollGate();
   if (g_fail == 0) {
-    printf("est412: CardKB key mapping, default OFF and the text-field polling gate\n");
+    printf("est412: CardKB key mapping, default OFF and the switch + found polling gate\n");
     return 0;
   }
   printf("est412: %d failure(s)\n", g_fail);

@@ -94,7 +94,8 @@ BIN63="$(mktemp /tmp/om-lite-est412.XXXXXX)"
 BIN64="$(mktemp /tmp/om-lite-est413.XXXXXX)"
 BIN65="$(mktemp /tmp/om-lite-est414.XXXXXX)"
 BIN66="$(mktemp /tmp/om-lite-est416.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65" "$BIN66"' EXIT
+BIN67="$(mktemp /tmp/om-lite-est417.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65" "$BIN66" "$BIN67"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -636,7 +637,7 @@ python3 -B test_est409.py
 
 # EST-412: the M5 CardKB on Grove. Every key-code class (printable ASCII, backspace, enter, esc,
 # left/right with and without a cursor, up/down, and a list of unknown bytes), the OFF default with a
-# missing NVS key, and the polling gate (switch on AND found AND a text field open). test_est412.py
+# missing NVS key, and the polling gate (EST-417: switch on AND found, any screen). test_est412.py
 # is the shell half: the row's default, the NVS key, the boot/enable paths, and the one poll inside
 # the loop under that gate.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est412.cpp -o "$BIN63"
@@ -673,3 +674,15 @@ python3 -B test_est414.py
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est416.cpp \
   ../../src/ui/map_chrome.cpp -o "$BIN66"
 "$BIN66"
+
+# EST-417: the CardKB's arrows navigate, and an unplugged keyboard is noticed. C++: every measured
+# arrow byte (plain and the one-shot Fn pair), the key-to-action table for all four contexts (list,
+# map, text field, sheet), the no-wrap tab step, one row of scroll per press through the release
+# clamp, the quarter-canvas map step, the lost-keyboard limit (N-1 keep, N lose) and the gate (switch
+# off never reads). test_est417.py is the source half: SDA=13 probed first, the disconnect path (bus
+# down, Grove off, ONE log line, one toast, switch untouched), arrowFor before mapCode, the map key
+# pan through the drag's path, a text field scrolling only a chat behind it, a sheet blocking all
+# arrows, the chat selector treated as the channel list, and no tab wrapper anywhere.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est417.cpp -o "$BIN67"
+"$BIN67"
+python3 -B test_est417.py

@@ -1752,6 +1752,34 @@ void open(const char* name) { rptrOpen(name); }
 void clearSession() { rptrClearSession(); }
 void coordText(char* out, size_t cap, int32_t e6) { rptrCoordText(out, cap, e6); }
 
+// EST-417: one arrow press scrolls the RPTR screen one row, through the SAME clamp its release uses
+// (listSnapScroll) and this tab's own ceilings. The list's rows are 36 px and a page's 30 px, so
+// each uses the height it draws. `dir` is +1 for the row below, -1 for the row above. Nothing while
+// the sheet, a confirmation or the map picker owns the frame.
+void scrollByRow(int dir) {
+  if (g_rptrOsk || g_rptrAskOpen || g_rptrMapPick) return;
+  if (g_rptrList) {
+    const ui::RptrListLayout rr = ui::rptrListLayoutFor(ui::l2());
+    const int maxScroll = ui::rptrListMaxScroll(rr, g_rptrCount);
+    const int next =
+        ui::listSnapScroll(g_rptrScroll + dir * (int)ui::kRptrRowH, maxScroll);
+    if (next == g_rptrScroll) return;
+    g_rptrScroll = next;
+    drawRptrTab();
+    return;
+  }
+  const ui::RptrPageLayout aa = ui::rptrPageLayoutFor(
+      ui::l2(), g_rptrViewStore.screen.cellCount > 0, g_rptrViewStore.screen.banner[0] != 0,
+      g_rptrViewStore.screen.hasApply, g_rptrViewStore.screen.bigButton,
+      g_rptrViewStore.screen.hasConsole);
+  const int maxScroll = ui::rptrPageMaxScroll(aa, g_rptrViewStore.screen.count);
+  const int next =
+      ui::listSnapScroll(g_rptrPageScroll + dir * (int)ui::kRptrPageRowH, maxScroll);
+  if (next == g_rptrPageScroll) return;
+  g_rptrPageScroll = next;
+  drawRptrTab();
+}
+
 // The release clamp for the list and the page rows (the map picker has no scroll of its own: its pan
 // is applied live, so the release does nothing there).
 void releaseSnap(bool dragging) {

@@ -459,6 +459,30 @@ bool overlayOpen() { return g_nodeInfo >= 0 || g_nodeMenu >= 0 || g_nodeTraceOpe
 
 bool modalOpen() { return g_nodeMenu >= 0 || g_nodeTraceOpen; }
 
+// EST-417: one arrow press scrolls this screen one row, clamped by the SAME rule a finger's release
+// applies (ui/layout.h listSnapScroll) and by this screen's own ceiling. `dir` is +1 for the row
+// below (the list moves up), -1 for the row above. The list uses the list's 30 px rows; the Info page
+// its own 20 px ones, because those are the rows it draws. A sheet is not scrolled at all: the shell
+// never routes an arrow here while one is up, and this refuses anyway. No give: a key has no finger.
+void scrollByRow(int dir) {
+  if (g_nodeMenu >= 0 || g_nodeTraceOpen) return;
+  if (g_nodeInfo >= 0) {
+    const om::ui::NodeInfoLayout nl = om::ui::nodeInfoLayoutFor(om::ui::l2());
+    const int maxScroll = om::ui::nodeInfoMaxScroll(om::ui::nodeInfoLineCount(g_nodeInfoModel), nl);
+    const int next =
+        om::ui::listSnapScroll(g_nodeInfoScroll + dir * (int)om::ui::kNodeInfoRowH, maxScroll);
+    if (next == g_nodeInfoScroll) return;
+    g_nodeInfoScroll = next;
+    drawHome();
+    return;
+  }
+  const int maxScroll = om::ui::l2().maxScroll(g_nodeCount);
+  const int next = om::ui::listSnapScroll(g_nodeScroll + dir * (int)om::ui::kRowH, maxScroll);
+  if (next == g_nodeScroll) return;
+  g_nodeScroll = next;
+  drawHome();
+}
+
 int count() { return g_nodeCount; }
 const ui::NodeItem& item(int i) { return g_nodes[i]; }
 uint32_t seenSignature() { return g_nodeSig; }

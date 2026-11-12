@@ -5,7 +5,8 @@
 #  * Grove power is the ONLY thing `grove on|off|status` touches, and the switch row exists with the
 #    OFF default and the saved key;
 #  * the enable path opens a SECOND bus (Wire1) and probes 0x5F exactly twice, one pin order each;
-#  * the poll is the one call site, inside the loop, behind shouldPoll(switch, found, text field);
+#  * the poll is the one call site, inside the loop, behind shouldPoll(switch, found) (EST-417: the
+#    text field no longer gates it);
 #  * the key routing uses mapCode(..., false) and the on-screen doors (composeAppend/Backspace,
 #    chatSendDraft, settingsEditAppendChar, settingsEditorOk, settingsBack, the RPTR sheet API);
 #  * no heap allocation lives in the keyboard's driver.
@@ -117,8 +118,10 @@ def main(argv):
     need(field, "g_setEditor != om::ui::SettingsEditor::None",
          "the gate does not see the Settings editors")
     step = block(maincpp, "static void cardKbStep(uint32_t nowMs)", "void loop()")
-    need(step, "shouldPoll(g_kbEnabled, om::cardkb::found(), textFieldOpen())",
-         "the poll is not behind the switch + found + text-field gate")
+    need(step, "shouldPoll(g_kbEnabled, om::cardkb::found())",
+         "the poll is not behind the switch + found gate")
+    forbid(step, "shouldPoll(g_kbEnabled, om::cardkb::found(),",
+           "the poll is still gated on a text field")
     need(step, "cardkb::poll(nowMs)", "cardKbStep does not read the keyboard")
     if maincpp.count("om::cardkb::poll(nowMs)") != 1:
         fail("the CardKB poll must have exactly one call site (the loop task)")
@@ -145,7 +148,7 @@ def main(argv):
 
     # --- the logic header keeps the tested rules --------------------------------------------
     need(logic, "constexpr bool kDefaultEnabled = false", "the default is not OFF")
-    need(logic, "return enabled && found && textFieldOpen;", "the gate is not the three-way AND")
+    need(logic, "return enabled && found;", "the gate is not the switch + found AND")
     need(logic, "0xB4", "the left arrow code is missing")
     need(logic, "0xB7", "the right arrow code is missing")
 

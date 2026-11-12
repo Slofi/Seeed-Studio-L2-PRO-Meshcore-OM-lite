@@ -84,5 +84,10 @@ void clearSession();          // Settings > Forget: the open session is dropped
 // RPTR Position page's editor uses).
 void coordText(char* out, size_t cap, int32_t e6);
 
+// EST-417: one arrow press scrolls this tab one row (the list's 36 px rows or the page's 30 px ones),
+// clamped by the same rule a finger's release uses. `dir` is +1 for the row below, -1 for the row
+// above. Nothing while the sheet, a confirmation or the map picker owns the frame.
+void scrollByRow(int dir);
+
 }  // namespace rptr_tab
 }  // namespace om

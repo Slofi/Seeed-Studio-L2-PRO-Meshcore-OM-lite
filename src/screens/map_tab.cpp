@@ -497,6 +497,28 @@ static void select(const char* name) {
 }
 void setLock(bool on) { s_lock = on; }
 
+// EST-417: an arrow key's pan. It takes the DRAG's own path exactly (the move branch of the shell's
+// touch handler): drop the follow lock, close the callout, move the view through om::mapPan(), then
+// draw. So a marker, the callout and a running trace re-project for the new view through the same
+// code a finger uses; there is no second way to move the map.
+void panStep(int dx, int dy) {
+  if (dx == 0 && dy == 0) return;
+  clearSelection();
+  s_lock = false;
+  om::mapPan(dx, dy);   // positive dx moves the view east, positive dy south
+  draw();
+}
+
+// EST-417 (rule 4, guarded by keynav_logic.h's kFnZoomOnMap): one zoom level in or out, the tap
+// path's own two steps (mapZoomBy, close the callout, log, draw).
+void zoomStep(int delta) {
+  if (delta == 0) return;
+  om::mapZoomBy(delta);
+  clearSelection();
+  Serial.printf("[map] zoom %d\n", om::mapZoom());
+  draw();
+}
+
 void showPoint(double lat, double lon, const char* name) {
   s_lock = false;
   select(name);

@@ -77,6 +77,10 @@ void holdRelease();
 bool closeSheetAwayFrom(int x, int y);            // true when this press closed a sheet
 void dragMove(int dy, uint32_t& lastRender);
 void releaseSnap(bool dragging);
+// EST-417: one arrow press scrolls this screen's list (or its Info page) one row, clamped by the same
+// rule a finger's release uses. `dir` is +1 for the row below, -1 for the row above. Nothing when a
+// sheet is up.
+void scrollByRow(int dir);
 
 }  // namespace nodes_tab
 }  // namespace om

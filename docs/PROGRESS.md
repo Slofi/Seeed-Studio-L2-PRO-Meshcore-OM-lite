@@ -9574,3 +9574,142 @@ Claude: review this diff, then commit. Filip: flash and check the two on the gla
 repeater dot under the "-" tab, tapping "-" zooms out; with the bars hidden, tapping the grey "+" /
 "-" zooms, while a dot elsewhere in that zone still opens the node; (2) a quick re-touch after a pan
 follows the finger with no jump.
+
+## EST-417 CardKB arrows navigate
+
+Filip's design (2026-11-12), from the bytes he measured on his own CardKB (the EST-412
+`[kb] ignored code ...` log): the arrows now navigate every screen, Fn+left / Fn+right step the tabs
+everywhere, the Map's plain arrows pan, and a keyboard pulled out while the switch is ON is noticed
+instead of being polled forever.
+
+### What changed, rule by rule (the ticket's numbers)
+1. **Poll gate.** `shouldPoll(enabled, found)`: switch ON + keyboard found, on ANY screen (it was
+   ON + found + a text field open). Same ~30 ms cadence, still the one call in `cardKbStep()` from
+   the loop task. Switch OFF is untouched: no power, no bus, no reads.
+2. **List screens** (no text field, no sheet/pop-up): left/right switch to the previous/next tab and
+   STOP at the ends (no wrap), up/down scroll the current list one row per press: the Nodes list,
+   the Nodes Info page, the Chat channel list (the selector), an open chat's messages, the Settings
+   pages, the RPTR list and RPTR pages. Each list steps by its OWN row height (`kRowH` 30,
+   `kSelRowH` 30, `kNodeInfoRowH` 20, `kRptrRowH` 36, `kRptrPageRowH` 30) and through the SAME
+   `ui::listSnapScroll` clamp a finger's release uses, so EST-414's indicator and ends follow with no
+   second rule. A key has no fingertip, so there is no `kSelGive` stretch: the ends stop dead.
+3. **Fn+left / Fn+right** step the tab row on EVERY screen that is not a text field or a sheet. The
+   row that is on the glass is the one stepped: the four main tabs through `showTab()` normally, and
+   Settings' own five tabs inside Settings (the same page change a tab tap makes, its history reset
+   included).
+4. **Map:** plain arrows pan one fixed step, a quarter of the canvas (`ui::kMapKeyPanX` 80,
+   `kMapKeyPanY` 53), through `map_tab::panStep()`, which takes the DRAG's own path: close the
+   callout, drop the follow lock, `om::mapPan()`, draw. So markers, the callout and a running trace
+   re-project exactly as under a finger. Fn+left/Fn+right still switch tabs; **Fn+up / Fn+down zoom**
+   in/out. The zoom is one constant (`keynav::kFnZoomOnMap`) plus two table entries, so Filip can
+   drop it without touching anything else.
+5. **Text field open** (composer, DM, reply, Settings editors, RPTR sheet): up/down scroll the chat
+   behind the composer, and only there (a Settings editor and the RPTR sheet have no chat to scroll,
+   so they do nothing); left/right and both Fn pairs do nothing; Esc/Enter/Backspace are exactly as
+   EST-412 left them.
+6. **Sheet or pop-up open** (message menu, advert menu, Settings dropdown, clear ask, Position
+   choice, own-position picker, the Nodes sheets, the RPTR confirmation and map picker): every arrow
+   does nothing, Esc closes as today. The set is ONE function, `popupOpen()`, which is the auto-off
+   timer's EST-405 list moved into a name, so the timer and the arrows cannot disagree.
+7. **A key press still wakes a sleeping screen first** and is not applied on that press, arrows
+   included (the check is before the arrow routes).
+8. **Unplugged keyboard:** `cardkb::poll()` now counts consecutive failed reads (a refused
+   `requestFrom` or a bad `read()`; the 30 ms metering early-return does not count). At
+   `kFailLimit = 10` in a row (~0.3-0.4 s) it logs `[kb] keyboard disconnected` ONCE, closes the
+   bus, clears found, drops Grove power through `boardGrovePower(false)` (the not-found path's own
+   ending) and raises a one-shot flag; `cardKbStep()` takes that flag and shows the short toast
+   "Keyboard disconnected". A single failed read changes nothing (a good read clears the run). The
+   switch stays ON; OFF then ON probes again. Counter and flag are 5 bytes.
+9. **Pin order:** the probe now tries SDA = GPIO13, SCL = GPIO14 FIRST (the order that answered on
+   Filip's unit) and keeps (14, 13) as the one fallback; still never more than two probes, on enable
+   only. Both log lines print the pair that answered.
+10. **The arrow bytes:** 0xB4 left, 0xB7 right, 0xB5 up, 0xB6 down and the one-shot Fn bytes 0x98
+    Fn+left, 0xA5 Fn+right, 0x99 Fn+up, 0xA4 Fn+down are in `cardkb_logic.h` with `arrowFor()`, the
+    one byte-to-arrow door. Every arrow is decided there BEFORE `mapCode()`, so no arrow byte can be
+    swallowed as an ignored code any more; a byte that is neither an arrow nor a named key is still
+    counted and logged, never inserted.
+
+### Where the code is
+- New `src/keynav_logic.h` (88 lines, plain C++): `Context` (List / Map / TextField / Sheet),
+  `Act`, the one `actFor(arrow, context)` table, `tabStep()` (no wrap) and `keyScroll()` (one row,
+  then `ui::listSnapScroll`). It is the whole rule; `main.cpp` only wires each action to the
+  function a tap, a drag or a tab tap already uses.
+- `src/main.cpp`: `popupOpen()`, `keynavContext()`, `keynavTabStep()`, `keynavScroll()`,
+  `cardKbArrow()`, and `cardKbKey()` asking `arrowFor()` first. `cardKbStep()` takes the lost notice
+  before the gate and calls the two-argument `shouldPoll`.
+- `src/screens/nodes_tab.*` and `src/screens/rptr_tab.*`: `scrollByRow(dir)`, each screen's own
+  scroll state, row heights and ceiling, the same clamp.
+- `src/screens/map_tab.*`: `panStep(dx, dy)` and `zoomStep(delta)`; `src/ui/map_chrome.h` holds the
+  quarter-canvas step next to the canvas it moves.
+- `src/cardkb.{h,cpp}`: the pin order, the failed-read counter, `noteFailedRead()` and
+  `takeLostNotice()`.
+
+### One decision to flag (Claude)
+The Chat selector is a dropdown (a pop-up for the auto-off timer) but the ticket names the "Chat
+channel list" as one of the lists the arrows scroll. So for the ARROWS it is a list: up/down scroll
+it, and left/right step tabs like any list screen (the dropdown closes on a tab switch, as it
+already did). Every other pop-up stays a sheet. Say so if Filip wants left/right to do nothing in
+that dropdown; it is one condition in `keynavContext()`.
+
+Also flagged: the Nodes Info page is not a sheet, so it scrolls with up/down and Fn+left/right still
+switches tabs while it is up (the page stays open behind, like the RPTR page and its scroll). The
+ticket does not name it either way.
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0 (the clean build, and again after the final edit).
+  RAM **160,896 B** (49.1% of 327,680), was 160,888 B, **+8 B** (the failed-read counter and the lost
+  notice, padded).
+  Flash **3,001,925 B** (45.8% of 6,553,600), was 3,000,485 B, **+1,440 B**.
+  `firmware.bin` 3,002,288 B (was 3,000,848 B, +1,440 B). The final incremental build measured 16 B
+  more (Flash 3,001,941 B, bin 3,002,304 B), the link/section-order noise EST-410/411/416 also saw;
+  the clean build's numbers are the ones above.
+- `sh test/host/run.sh`: REAL exit 0, 0 `FAIL` lines, including the new EST-417 test and the updated
+  EST-412 gate test.
+- `test/host/test_est417.cpp` (plain g++, no Arduino): every measured byte -> its Arrow (and all 256
+  bytes checked for "only those eight are arrows"), the key-to-action TABLE written out by hand for
+  all eight arrows in all four contexts (list / map / text field / sheet), the no-wrap tab step at
+  both ends of 4- and 5-tab rows, one press = one row of each list through the release clamp (stops
+  dead at both ends, no give, content that fits never moves), the quarter-canvas map step, the
+  lost-keyboard limit (1..N-1 keep, N loses, 10 x 30 ms inside 0.3-0.4 s) and the gate (switch off
+  never reads).
+- `test/host/test_est417.py`, the source half: SDA 13 probed FIRST with the (14, 13) fallback kept
+  and exactly two probes; the disconnect path (one log line, bus down, found cleared, Grove power
+  off, the toast flag, both failure kinds counted, a good read clearing the run, the switch never
+  touched, the notice taken before the gate); the two-argument gate with no text field in it and one
+  poll call site; `arrowFor()` before `mapCode()`; every `Act` handled; `popupOpen()` defined once
+  with both readers and all its members; the tab stepper through `keynav::tabStep` with no `%`
+  wrapper; every list through `keynav::keyScroll` with its own height and ceiling, the bottom-anchored
+  chat sign, and a text field scrolling nothing but a chat; the Nodes/RPTR `scrollByRow` (release
+  clamp, own rows, no give, refuses while a sheet is up); the map key pan through
+  `clearSelection`/`s_lock = false`/`mapPan`/`draw` (never a `mapSetView` jump), the key zoom through
+  `mapZoomBy`, and the shell keeping exactly its two drag `mapPan` callers.
+- **Armed.** C++ copy in /tmp, one mutation at a time: `kFnZoomOnMap = false` -> exit 1 (5 failures,
+  the two Map zoom rows plus the constant); a wrapping `tabStep` -> exit 1 (4 failures, both ends of
+  both rows); plain left on the Map returning TabPrev (the bug the table caught while writing it) ->
+  exit 1 (1 failure); `kFailLimit = 11` -> exit 1 (1 failure); removing the sheet early-return ->
+  exit 1 (12 failures). Restored, exit 0.
+  Python against an export of HEAD (the pre-EST-417 tree, `git archive HEAD`): exit 1 with 92
+  failures (no `keynav_logic.h`, the old gate, no arrow routing, SDA 14 first, no disconnect path).
+  `test_est412.py` against the same HEAD export: exit 1 with 3 failures (the old three-argument gate
+  text); the updated `test_est412.cpp` against HEAD's `cardkb_logic.h`: compile error, exit 1 (too
+  few arguments to `shouldPoll`).
+
+### Could not check (no device in this run)
+- Nothing about the glass or the keyboard: no L2 was flashed and no CardKB was polled here. Not
+  tested on hardware: that the eight measured bytes are what a press really sends (Filip measured
+  them), that the ~0.3 s unplug detection feels right, that a pulled keyboard's toast is seen, that
+  one row per press is the right amount to scroll on each list, that a quarter canvas is the right
+  pan step, and that Fn+up/down zoom is wanted. The SDA/SCL order change is still the pin order
+  Filip's probe reported; no meter reading was taken in this run, so EST-412's safety note stands
+  (about 3.3 V expected, above 3.6 V stop).
+- The scrolling arithmetic is host geometry, not what a row looks like at the real fonts.
+
+### Next step
+Claude: review this diff (especially the two flagged decisions) and commit. Filip: flash, turn the
+keyboard on, and on the glass: (1) on Nodes press up/down to scroll and left/right to change tab,
+including at both ends (no wrap); (2) on Chat with the composer open scroll the messages behind it
+with up/down, and left/right must do nothing; (3) open the Map and pan with the plain arrows, then
+Fn+up / Fn+down to zoom and Fn+left / Fn+right to switch tabs; (4) open a node sheet and a dropdown
+and press every arrow (nothing moves, Esc closes); (5) pull the keyboard out while the switch is on:
+one `[kb] keyboard disconnected` line, the toast, and the 5 V rail off, then toggle the switch off
+and on to probe again.

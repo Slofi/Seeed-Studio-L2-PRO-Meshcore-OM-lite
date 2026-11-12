@@ -57,6 +57,13 @@ void clearSelection();
 void setLock(bool on);
 void showPoint(double lat, double lon, const char* name);   // "Show on map"
 
+// EST-417: the CardKB's plain arrows pan, Fn+Up / Fn+Down zoom. panStep takes the DRAG's path (clear
+// the callout, drop the follow lock, om::mapPan, draw), so markers, the callout and a running trace
+// re-project exactly as they do under a finger; zoomStep is one level through the tap path's own
+// mapZoomBy. Main.cpp adds the fixed step (ui/map_chrome.h kMapKeyPanX / kMapKeyPanY).
+void panStep(int dx, int dy);
+void zoomStep(int delta);
+
 // EST-368: restart the replay when the tab opens; the toggle ends or starts it in place.
 void tracesResetAndSeed();
 

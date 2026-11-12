@@ -48,8 +48,14 @@ void loop(uint32_t nowMs, const State& st);
 // visible in the same check as the CSV itself.
 uint32_t writeFailures();
 
+// EST-413: the due minutes that wrote no row because the clock was not real since boot (the
+// timekeeper's floor is a lower bound, not a time). The first row after a real source is written
+// normally; `log power tail` reports this count, so a log that starts late says why.
+uint32_t skippedMinutes();
+
 // `log power tail`: prints the last 5 lines of today's file (the header counts as a line). Returns
-// the number printed, 0 for an empty file, or -1 when there is no card, no clock or no file.
+// the number printed, 0 for an empty file, or -1 when there is no card, no real clock or no file.
+// EST-413: a not-real clock never names a file, so a floor date cannot pick another day's run.
 int printTail();
 
 }  // namespace plog

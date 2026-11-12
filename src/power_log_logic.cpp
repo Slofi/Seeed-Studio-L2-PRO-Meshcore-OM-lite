@@ -4,8 +4,23 @@
 
 #include <stdio.h>
 
+#include "timekeeper.h"
+
 namespace om {
 namespace plog {
+
+// EST-413: one gate for every reader of the log's clock. The floor is a lower bound, not a time.
+bool logLocalStamp(uint32_t epochUtc, bool clockRealSinceBoot, LocalStamp& out) {
+  if (!clockRealSinceBoot) return false;
+  int year = 0, month = 0, day = 0, hour = 0, minute = 0;
+  if (!om::localCivil(epochUtc, year, month, day, hour, minute)) return false;
+  out.year = year;
+  out.month = month;
+  out.day = day;
+  out.hour = hour;
+  out.minute = minute;
+  return true;
+}
 
 int formatLine(const Sample& s, const LocalStamp& t, char* out, size_t cap) {
   if (out == nullptr || cap == 0) return -1;

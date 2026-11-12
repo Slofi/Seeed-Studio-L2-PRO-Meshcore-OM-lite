@@ -455,7 +455,9 @@ static void rptrApplyLines(char lines[][80], int n) {
 static void rptrSetClockNow() {
   char line[32];
   const uint32_t our = om::timeKeeper().now();
-  if (om::rptr::cliTime(line, sizeof(line), our) == 0) {
+  // EST-413: never send the floor as the repeater's clock. The button's guard already refuses a
+  // not-real clock, but the confirm retry reaches this write path directly, so it checks too.
+  if (!om::timeKeeper().realSinceBoot() || om::rptr::cliTime(line, sizeof(line), our) == 0) {
     snprintf(g_rptrResult, sizeof(g_rptrResult), "Our clock is not usable");
     g_rptrResultOk = false;
     return;

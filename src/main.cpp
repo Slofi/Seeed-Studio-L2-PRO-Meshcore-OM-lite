@@ -1728,9 +1728,14 @@ static void timeSourceLine(char* out, size_t cap) {
 }
 
 static void timeInitFromClock() {
-  const uint32_t now = om::timeKeeper().now();
+  // EST-413: a real clock seeds the steppers; a not-real clock is the floor (max saved NVS, build
+  // time) and must not be shown as the time to set. Start from the build time instead: it is not a
+  // real time either, but it is not the stale saved floor, and the Time page above already says
+  // "--:--" until a real source arrives.
+  const uint32_t seed = om::manualTimeSeedEpoch(om::timeKeeper().realSinceBoot(),
+                                                om::timeKeeper().now(), g_buildEpoch);
   int y = 2026, mo = 1, d = 1, h = 0, mi = 0;
-  if (!om::localCivil(now, y, mo, d, h, mi)) {
+  if (seed == 0 || !om::localCivil(seed, y, mo, d, h, mi)) {
     y = 2026; mo = 1; d = 1; h = 0; mi = 0;
   }
   g_setTime = om::ui::CivilTime{y, mo, d, h, mi};

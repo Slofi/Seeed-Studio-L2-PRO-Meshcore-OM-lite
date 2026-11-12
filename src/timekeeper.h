@@ -182,6 +182,14 @@ uint32_t bootEpoch(uint32_t savedFloorUtc, uint32_t buildEpochUtc);
 // Raises a floor with an epoch, never lowers it.
 uint32_t raisedFloor(uint32_t floorUtc, uint32_t epochUtc);
 
+// EST-413: where the manual-time steppers start. While the clock is not real since boot its value is
+// the floor (max(saved NVS, build time) plus the off time), never a real "now"; the steppers start
+// from the build time instead, so a quick "Set" cannot turn a stale floor into real time. The Time
+// page above them still shows "--:--" until a real source has set the clock.
+constexpr uint32_t manualTimeSeedEpoch(bool clockRealSinceBoot, uint32_t nowUtc, uint32_t buildUtc) {
+  return clockRealSinceBoot ? nowUtc : buildUtc;
+}
+
 // One clock and its source bookkeeping. A production instance is behind timeKeeper(); tests create
 // local instances with fake get/set functions, so no host clock is ever changed.
 class TimeKeeper {

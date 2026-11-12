@@ -24,6 +24,9 @@ namespace {
 
 PowerLogPref s_pref;
 MinuteGate s_gate;
+// EST-413: the clock side of the gate. It stamps only once the clock is real since boot and counts
+// the due minutes it skipped before that, so `log power tail` can report them.
+MinuteClock s_clock;
 bool s_havePackets = false;
 uint32_t s_lastPackets = 0;
 bool s_dirOk = false;
@@ -38,14 +41,9 @@ constexpr size_t kTailBytes = 1024;
 char s_tail[kTailBytes];
 
 bool localNow(LocalStamp& out) {
-  int year = 0, month = 0, day = 0, hour = 0, minute = 0;
-  if (!om::localCivil(om::timeKeeper().now(), year, month, day, hour, minute)) return false;
-  out.year = year;
-  out.month = month;
-  out.day = day;
-  out.hour = hour;
-  out.minute = minute;
-  return true;
+  // EST-413: the one rule lives in power_log_logic.cpp (and is host-tested): the timekeeper's floor
+  // is NOT a real time, so it must never become a CSV row.
+  return logLocalStamp(om::timeKeeper().now(), om::timeKeeper().realSinceBoot(), out);
 }
 
 // /log is made once, lazily, on the same loop pass that writes the first line. A failed mkdir is
@@ -69,6 +67,7 @@ void begin(PowerLogPref::ReadFn read, PowerLogPref::WriteFn write, void* ctx) {
   s_pref.begin(read, write, ctx);
   s_pref.load();
   s_gate.reset();
+  s_clock.reset();
   s_havePackets = false;
   s_lastPackets = 0;
   s_dirOk = false;
@@ -88,6 +87,8 @@ bool setEnabled(bool on) {
 
 uint32_t writeFailures() { return s_writeFail; }
 
+uint32_t skippedMinutes() { return s_clock.skipped(); }
+
 void loop(uint32_t nowMs, const State& st) {
   if (!s_pref.on()) return;
   if (!s_gate.due(nowMs)) return;
@@ -102,8 +103,17 @@ void loop(uint32_t nowMs, const State& st) {
   s_noCardLogged = false;
 
   LocalStamp t;
-  if (!localNow(t)) {
-    Serial.println("[plog] no local time yet, line skipped");
+  const bool clockReal = om::timeKeeper().realSinceBoot();
+  if (!s_clock.stamp(om::timeKeeper().now(), clockReal, t)) {
+    // EST-413: a due minute before a real source writes NO row (the floor is not a time, and the
+    // previous boot's rows may share this file); it is counted instead. The first minute after the
+    // clock becomes real stamps and writes normally.
+    if (!clockReal) {
+      Serial.printf("[plog] no local time yet, line skipped (%lu skipped since boot, not real)\n",
+                    (unsigned long)s_clock.skipped());
+    } else {
+      Serial.println("[plog] no local time yet, line skipped");
+    }
     return;
   }
   char path[40];
@@ -190,6 +200,10 @@ void loop(uint32_t nowMs, const State& st) {
 
 int printTail() {
   if (SD_MMC.totalBytes() == 0) return -1;
+  // EST-413: never name a day's file from a floor epoch. Before a real source the floor can be a
+  // different date (max(saved NVS, build time) plus the off time), so the tail would show another
+  // run's file as if it were today's.
+  if (!om::timeKeeper().realSinceBoot()) return -1;
   LocalStamp t;
   if (!localNow(t)) return -1;
   char path[40];

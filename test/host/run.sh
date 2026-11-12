@@ -91,7 +91,8 @@ BIN60="$(mktemp /tmp/om-lite-est405.XXXXXX)"
 BIN61="$(mktemp /tmp/om-lite-est406.XXXXXX)"
 BIN62="$(mktemp /tmp/om-lite-est409.XXXXXX)"
 BIN63="$(mktemp /tmp/om-lite-est412.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63"' EXIT
+BIN64="$(mktemp /tmp/om-lite-est413.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -370,7 +371,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est376.cpp \
 # resetAGC.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est377.cpp \
   ../../src/power_log_logic.cpp ../../src/diag_logic.cpp ../../src/usb_cmd_logic.cpp \
-  ../../src/sound_synth.cpp -o "$BIN38"
+  ../../src/sound_synth.cpp ../../src/timekeeper.cpp -o "$BIN38"
 "$BIN38"
 
 # EST-380: the SD open-file budget (the named constants sum to the mount limit, with the two slots of
@@ -563,7 +564,7 @@ python3 -B test_est400.py
 # 0x22 is classified, and exactly one data write exists, to POWER, from the static helper the boot
 # call reaches; SWITCHES0 is never written.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est401.cpp \
-  ../../src/power_log_logic.cpp ../../src/diag_logic.cpp -o "$BIN56"
+  ../../src/power_log_logic.cpp ../../src/diag_logic.cpp ../../src/timekeeper.cpp -o "$BIN56"
 "$BIN56"
 python3 -B test_est401.py
 
@@ -638,3 +639,13 @@ python3 -B test_est409.py
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est412.cpp -o "$BIN63"
 "$BIN63"
 python3 -B test_est412.py
+
+# EST-413: the timekeeper's floor is not a real time. While the clock is not real since boot a due
+# battery-log minute writes NO row and is counted as skipped; the first minute after a real source
+# stamps and writes normally. The manual-time steppers seed from the build time, never the stale
+# saved floor. test_est413.py is the source half: the logger's gate and tail refusal, the command's
+# no-real-time answer and skip count, the manual seed, and the repeater clock write's own check.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est413.cpp \
+  ../../src/power_log_logic.cpp ../../src/timekeeper.cpp -o "$BIN64"
+"$BIN64"
+python3 -B test_est413.py

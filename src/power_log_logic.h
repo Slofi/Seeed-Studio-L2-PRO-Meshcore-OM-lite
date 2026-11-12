@@ -32,6 +32,32 @@ struct LocalStamp {
   int minute = 0;
 };
 
+// EST-413: the log's clock rule. A CSV row may be stamped only when a real source has set the clock
+// since boot. The timekeeper's floor (max of the saved NVS lower bound and the build time) is NOT a
+// real time: writing it put rows 9 minutes behind the wall clock into the same day's file as the
+// previous boot's rows. `out` is left untouched when the clock is not real.
+bool logLocalStamp(uint32_t epochUtc, bool clockRealSinceBoot, LocalStamp& out);
+
+// The once-a-minute log's clock side. `stamp()` is the whole decision: a not-real clock writes no
+// row and counts the minute as skipped; a real clock fills `out` (through logLocalStamp). The skip
+// count is what `log power tail` reports, so a device that sat without a fix says how many minutes
+// it did not log instead of writing them with a wrong time.
+class MinuteClock {
+ public:
+  bool stamp(uint32_t epochUtc, bool clockRealSinceBoot, LocalStamp& out) {
+    if (!clockRealSinceBoot) {
+      ++skipped_;
+      return false;
+    }
+    return logLocalStamp(epochUtc, true, out);
+  }
+  uint32_t skipped() const { return skipped_; }
+  void reset() { skipped_ = 0; }
+
+ private:
+  uint32_t skipped_ = 0;
+};
+
 // Everything one CSV line reports. `packets` is the number heard IN THE MINUTE (the caller keeps
 // the previous minute's counter); the rest is the state at the moment the line is written.
 struct Sample {

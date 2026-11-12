@@ -1041,20 +1041,33 @@ void usbCommandExecute(char* text, char* reply, size_t cap) {
       if (cmd.text != nullptr && (strcmp(cmd.text, "on") == 0 || strcmp(cmd.text, "off") == 0)) {
         const bool on = strcmp(cmd.text, "on") == 0;
         const bool saved = om::plog::setEnabled(on);
-        snprintf(reply, cap, "[cmd] ok log power on=%d saved=%d", on ? 1 : 0, saved ? 1 : 0);
+        snprintf(reply, cap, "[cmd] ok log power on=%d saved=%d skipped=%lu", on ? 1 : 0,
+                 saved ? 1 : 0, (unsigned long)om::plog::skippedMinutes());
         return;
       }
       if (cmd.text != nullptr && strcmp(cmd.text, "tail") == 0) {
-        const int lines = om::plog::printTail();
-        // EST-380: the failure count is part of the answer, so a lost minute shows in `log power
-        // tail` itself and not only in a serial line nobody reads.
-        if (lines < 0) {
-          snprintf(reply, cap, "[cmd] error log power tail: no file on the card write_fail=%lu",
+        // EST-413: the tail names today's file from the clock, so it is honest only once a real
+        // source has set the clock since boot. Before that, the skipped-minute count IS the answer.
+        if (!om::timeKeeper().realSinceBoot()) {
+          snprintf(reply, cap,
+                   "[cmd] error log power tail: no real time yet skipped=%lu write_fail=%lu",
+                   (unsigned long)om::plog::skippedMinutes(),
                    (unsigned long)om::plog::writeFailures());
           return;
         }
-        snprintf(reply, cap, "[cmd] ok log power tail %d write_fail=%lu", lines,
-                 (unsigned long)om::plog::writeFailures());
+        const int lines = om::plog::printTail();
+        // EST-380: the failure count is part of the answer, so a lost minute shows in `log power
+        // tail` itself and not only in a serial line nobody reads. EST-413 adds the skip count.
+        if (lines < 0) {
+          snprintf(reply, cap,
+                   "[cmd] error log power tail: no file on the card write_fail=%lu skipped=%lu",
+                   (unsigned long)om::plog::writeFailures(),
+                   (unsigned long)om::plog::skippedMinutes());
+          return;
+        }
+        snprintf(reply, cap, "[cmd] ok log power tail %d write_fail=%lu skipped=%lu", lines,
+                 (unsigned long)om::plog::writeFailures(),
+                 (unsigned long)om::plog::skippedMinutes());
         return;
       }
       cmdError(reply, cap, "args");

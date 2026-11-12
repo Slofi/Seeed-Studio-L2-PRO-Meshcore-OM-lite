@@ -9289,3 +9289,105 @@ SCL to GND with the CardKB connected (expect ~3.3 V, above 3.6 V stop), then `gr
 on Settings > General > Keyboard (Grove), watch `[kb] cardkb found (sda=.., scl=..)` (or the
 not-found toast), open a chat composer and type, then try Backspace, Enter (send), Esc (close), a
 deliberately ignored key, and the Settings and RPTR editors. `grove status` answers the rail state.
+
+## EST-413 clock floor is not real time
+
+Filip's L2 wrote power-log rows stamped 13:27, 13:28 ... at uptime 8, 68, 128 s after a power-on
+while the wall clock was about 13:36, so those rows sat next to the previous boot's real 13:28-13:35
+rows in the same day's CSV. Cause: `timeKeeper().begin()` seeds the clock at max(saved NVS floor,
+build time) with `realSinceBoot() == false`, and the floor may be up to 10 minutes old plus the off
+time. `power_log.cpp`'s `localNow()` formatted `timeKeeper().now()` without asking whether the clock
+was real, so the floor was written as if it were the wall clock.
+
+### What changed
+- **Power log (`power_log.cpp`, `power_log.h`, `power_log_logic.{h,cpp}`).** The stamp rule is now
+  plain, host-tested C++: `logLocalStamp(epoch, realSinceBoot, out)` refuses a not-real clock, and
+  `MinuteClock::stamp()` is the one decision for a due minute: not real writes NO row and increments
+  `skipped`; the first minute after a real source stamps and writes normally. `localNow()` delegates
+  to it (it no longer calls `localCivil(now())` itself). `begin()` clears the count.
+  `skippedMinutes()` is reported by `log power on|off|tail`; the log line is
+  `[plog] no local time yet, line skipped (N skipped since boot, not real)`.
+  `printTail()` returns -1 before it names a file while the clock is not real, so a floor date can
+  never pick another day's run; `usb_commands.cpp` answers
+  `[cmd] error log power tail: no real time yet skipped=N write_fail=M` instead of a file error.
+- **Manual time (`main.cpp` `timeInitFromClock`, `timekeeper.h`).** The steppers used to start from
+  `timeKeeper().now()` even when that was the floor, so the "Set time" page showed a stale floor and
+  one tap on Set made it real. The new one rule, `manualTimeSeedEpoch(real, now, build)`, starts
+  them from the build epoch while the clock is not real (also not a real time, but not the stale
+  saved floor); the Time page above still shows "Now --:--" for the same reason.
+- **Repeater clock (`screens/rptr_tab.cpp` `rptrSetClockNow`).** The button's `clockGuard` already
+  refused a not-real clock, but the confirm retry reaches this write path directly, so it now checks
+  `realSinceBoot()` itself before building the CLI line.
+- **Not changed, by the ticket:** the floor, `kFloorSaveIntervalSec` (10 min), and the
+  `clock_keep.h` kept-clock decision. A power-on stays a cold start. MeshCore's own
+  `OmRTCClock::getCurrentTime()` is untouched.
+
+### The 29 `timeKeeper().now()` / `tk.now()` sites (pre-fix line numbers) and a verdict each
+| site | who reads it | verdict |
+|---|---|---|
+| board.cpp:1060 `aid::AidGate::shouldSend` | GPS AID send decision | OK: refuses when `!clockReal` inside `shouldSend()` |
+| board.cpp:1062 `aidTimeFromEpoch` | AID payload time | OK: reached only after 1060 accepted |
+| clock_keep.cpp:67 `storeRecord` | RTC_NOINIT record | OK by design: stores `real` too, and the next boot refuses `real != 1` |
+| main.cpp:637 `buildStatus` | status-bar HH:MM | OK: gated, else `--:--` |
+| main.cpp:994 `buildChatView` | chat/list stamp source | OK: carries `nowReal` into `stampText`, which needs both flags |
+| main.cpp:1708 `clockLine` | Settings > Time "Now" | OK: gated, else `--:--` |
+| main.cpp:1731 `timeInitFromClock` | manual-time steppers | **BUG, FIXED**: now seeds from the build epoch when not real |
+| main.cpp:2420 settings selector preview | chat preview times | OK: `nowWall` + `nowReal` pair |
+| main.cpp:4477 status-bar repaint | status-bar HH:MM | OK: gated, else `--:--` |
+| mesh_link.cpp:540 `storeDm` | received DM `wall` | OK: `wallReal` stored, formatter refuses |
+| mesh_link.cpp:739 `onACKRecv` | delivered ACK `wall` | OK: `ackReal` passed to `markDelivered` |
+| mesh_link.cpp:862 received channel msg | message `wall` | OK: `wallReal` stored |
+| mesh_link.cpp:1836 `meshDmSend` | sent DM `wall` | OK: `wallReal` stored |
+| mesh_link.cpp:2543 phone channel send | message `wall` | OK: `wallReal` stored |
+| mesh_link.cpp:2568 phone DM send | DM `wall` | OK: `wallReal` stored |
+| mesh_link.cpp:2610 `meshLinkSend` | sent channel `wall` | OK: `wallReal` stored |
+| power_log.cpp:42 `localNow` | CSV row / tail file date | **BUG, FIXED**: no row and no file name until real; skipped minutes counted |
+| rptr_link.cpp:559 scan answer | repeater "heard" stamp | OK: `heardReal` stored |
+| screens/map_tab.cpp:319 | map marker age/time | OK: `nowWall` + `nowReal` pair |
+| screens/nodes_tab.cpp:96 | Nodes heard time / last hour | OK: `nowReal` gates the last-hour count and `stampText` |
+| screens/rptr_tab.cpp:457 `rptrSetClockNow` | repeater set-clock write | **HARDENED**: its own `realSinceBoot()` check added (the guard upstream already refused) |
+| screens/rptr_tab.cpp:473 `rptrClockPressed` | repeater clock guard | OK: passes `real` to `clockGuard()` |
+| screens/rptr_tab.cpp:987 `rptrBuildList` | list "heard" stamps | OK: `f.heardReal` + `nowReal` |
+| screens/rptr_tab.cpp:1036 `rptrBuildPage` | page clocks | OK: `nowWall` + `nowReal` pair |
+| screens/rptr_tab.cpp:1042 `clockWrong` | repeater clock warning | OK: passes `real` |
+| target.cpp:72 `noteRawPacket` | radio reception stamp | OK: `realSinceBoot()` stored with it |
+| target.cpp:130 `OmRTCClock::getCurrentTime` | MeshCore's own clock | OK by design (the ticket's known exception: MeshCore needs rising timestamps; the floor exists for that) |
+| usb_commands.cpp:131 `cmdStamp` | USB `msgs`/`node` stamps | OK: passes `nowReal` to `stampText` |
+| usb_commands.cpp:192 `cmdPrintChats` | USB `chats` check | OK: `nowWall` + `nowReal` pair |
+
+No user-facing site other than the three above reads the floor as if it were real.
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0.
+  RAM **160,880 B** (49.1% of 327,680), was 160,872 B, **+8 B** (the `MinuteClock` count).
+  Flash **2,999,305 B** (45.8% of 6,553,600), was 2,998,845 B, **+460 B**.
+  `firmware.bin` 2,999,664 B, was 2,999,216 B (+448 B).
+- `sh test/host/run.sh`: REAL exit 0, 0 FAIL lines (the whole suite, including the two new tests).
+- `test/host/test_est413.cpp`: while not real, two due minutes write no row and count 2 skips; after
+  a real source the same minute stamps 13:36 local (CET) and the count stops at 2; the next minute
+  stamps 13:37. `logLocalStamp(false, ...)` is refused and leaves the caller's stamp untouched
+  (no half-filled row). `manualTimeSeedEpoch(false, floor, build)` is the build epoch, never the
+  floor; `true` uses the clock.
+- **Armed against the old `localNow()`**: with the real check removed from `logLocalStamp()` and the
+  `MinuteClock` gate changed to the old path (both in a temporary /tmp tree edit, restored
+  afterwards), the same test exits 1 with 8 failures: the two not-real minutes both stamp, the skip
+  count stays 0, and the sentinel stamp is overwritten. Restored, it exits 0.
+- `test/host/test_est413.py` is the source half: the logger stamps through `MinuteClock`,
+  `localNow()` no longer calls `localCivil(now())` itself, `printTail()` checks `realSinceBoot()`
+  before `formatFileName`, `usb_commands.cpp` says "no real time yet" before `printTail()` and
+  reports `skipped`, `timeInitFromClock()` uses `manualTimeSeedEpoch(...)`, `rptrSetClockNow()`
+  checks `realSinceBoot()` before `cliTime`, and the floor interval / kept-clock decision are
+  unchanged.
+
+### Could not check (no device in this run)
+- Nothing about the glass or a real power cycle: no L2 was switched off/on, no CSV was written, and
+  `log power tail` was not run on hardware. The fix is host-tested logic plus the build; the
+  "13:27 next to 13:28" file has not been reproduced or re-checked on the card.
+- The exact skip count the device prints after a real cold start (it depends on when the first GPS
+  or Wi-Fi source lands) was not observed.
+
+### Next step
+Claude: review the diff and commit. Filip: power the L2 off for a minute and on, let it boot without
+a fix, run `log power tail` (expect `no real time yet skipped=N`), then let GPS or Wi-Fi set the
+clock and run it again (expect today's file and the same `skipped` count); the first CSV row after
+that should carry the real wall minute.

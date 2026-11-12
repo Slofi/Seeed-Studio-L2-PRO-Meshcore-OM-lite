@@ -9495,3 +9495,82 @@ What it renders, and the output each name writes:
 Claude: review the diff, the deleted generators and `tools/preview.py`, then commit. Filip: flash and
 check the five on the glass, especially that the list gives a little at either end and that Settings >
 RPTR > Open repeater lands on the open session's page.
+
+## EST-416 map: the top layer wins the tap, no jump on a fast re-touch
+
+### What was wrong (both found by Filip on the glass, 2026-11-12)
+1. On the Map, the "-" zoom tab had a repeater marker under it. Tapping "-" opened the repeater's
+   info pop-up instead of zooming out. `ui/map_chrome.cpp`'s `mapHitAt()` tested MARKERS FIRST (the
+   EST-374 design choice "a finger on a dot is a node, even if the dot is under a tab"). That is
+   wrong: whatever is DRAWN on top must win.
+2. After moving the map, touching it again too soon made it jump (no fast panning). The press path in
+   `main.cpp` treated a press within 400 ms / 80 px of the previous release as a pan continuation
+   (right: the panel lifts between samples), but then called `om::mapPan(g_lastX - x, ...)` while
+   `g_lastX/Y` were still the PREVIOUS swipe's end point. A fast new swipe starts back near where the
+   last one started, so the map jumped by up to 80 px at touch-down.
+
+### The fix (one order, no second copy)
+- `ui/map_chrome.cpp` `mapHitAt()` is now the DRAW order, top layer first, and it depends on the bars:
+  - **shown**: status bar -> chip -> the five tabs -> the callout -> markers -> map;
+  - **hidden**: status bar -> chip -> the 6 px slivers -> the visible ghost + / - glyph boxes ->
+    the callout -> markers -> the REST of the ghost zoom zones -> map.
+  So a marker under a shown button never wins; under a hidden ghost glyph it does not win either;
+  elsewhere in a hidden ghost zone it does.
+- `ui/map_chrome.h` adds `mapZoomGlyphRect(zone)`: the small icon square a ghost glyph is drawn into,
+  centred on the zone's centre. `ui/screen_map.cpp`'s `drawTabsHidden()` hands that same rect to
+  `drawZoomGlyph()`, so the drawn pixels and the hit box are one rectangle (the glyph's ink, 12 x 9
+  for "+", 5 x 4 for "-", is inside it). No new number: it is the existing `kMapTabIconW` square the
+  tab width was already built from.
+- `mapZoomGlyphRect()` is plainly visible in the drawing and the test, so it cannot drift.
+  `pressTargetForMap()` was not touched: it already derives from `mapHitAt()`, so the pressed look
+  follows (the shown tab's rect, the chip's 30 x 26 target, the callout, the hidden ghost's shown
+  rect).
+- `ui/map_chrome.h` also adds `mapPressPan()` (plain C++, host-testable): it keeps the continuation
+  (400 ms, 80 px, on the Map, not spent, a previous release exists) but returns the press point as
+  the pan base and no delta. `main.cpp` now sets `g_lastX/Y` from that base and does not pan on the
+  press; the one remaining `om::mapPan(g_lastX - x, ...)` is the MOVE path, so the first move pans by
+  its own delta from where the finger landed.
+- `test/host/test_est381.py` updated for the new call shape: it still checks that the continuation is
+  behind `g_tab == 2` and `!g_spent`.
+
+### Tests
+- New `test/host/test_est416.cpp` (added to `run.sh`, BIN66), plain g++:
+  - shown: a marker under the status bar, the chip, each of the five tabs and the callout does NOT
+    win; the button's kind answers, and `pressTargetForMap()` returns that button's rect. A marker on
+    the plain map, and one 2 px left of the tab column, still wins.
+  - hidden: a marker under the visible ghost +/- glyph loses (ZoomIn / ZoomOut); a marker elsewhere in
+    the ghost zone (left of the glyph box, above it) wins, and the same point with no marker still
+    zooms; the 6 px sliver, the chip, the callout win over a marker; the 3 px tucked strip is still a
+    map tap; a marker on the plain map wins.
+  - pan: a press 60 px from the release within 120 ms gives zero delta at the press and the press
+    point as the base; the next move to (180,130) pans by its own 20 px each way, not the old 80.
+    Edges 399/400 ms and 79/80 px, a leftward press, a millis wrap, plus not-on-Map / spent / no
+    release. A source check: `main.cpp` has exactly ONE `om::mapPan(g_lastX - (int)x` call (the move
+    path) and calls `mapPressPan()`.
+- Turned the old markers-first assertions around: `test_est351.cpp` (a marker on the zoom tab is
+  now ZoomIn), `test_est370.cpp` (a marker on Names is now Names), `test_est374.cpp` (a marker at the
+  hidden ghost centre is now ZoomIn; one elsewhere in the zone is still Marker).
+- **Armed**: the new test built against the pre-fix `src/ui/map_chrome.cpp` exported from HEAD exits 1
+  with 38 failures, all the marker-under-chrome cases (chip, every tab, callout, hidden ghost glyphs,
+  slivers); the retained cases pass. The pan source check fails on the old two-call `main.cpp`.
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0.
+  RAM **160,888 B** (49.1% of 327,680), was 160,888 B, **+0 B**.
+  Flash **3,000,485 B** (45.8% of 6,553,600), was 3,000,161 B, **+324 B**.
+  `firmware.bin` 3,000,848 B (was 3,000,528 B, +320 B).
+- `sh test/host/run.sh`: REAL exit 0, 0 `FAIL` lines, including the new EST-416 test and the three
+  turned-around map tests.
+
+### Could not check (no device in this run)
+- Nothing about the glass: no L2 was flashed. Not seen at the real fonts and panel: the ghost glyph
+  box's exact feel under a finger (it is the tab's 17 px icon square, deliberately small), nor the
+  re-touch feel after a pan (the host test proves the arithmetic only). Filip has to confirm both on
+  the glass: the "-" tab must zoom out with a repeater under it, and a quick second swipe must pan
+  without a jump.
+
+### Next step
+Claude: review this diff, then commit. Filip: flash and check the two on the glass: (1) with a
+repeater dot under the "-" tab, tapping "-" zooms out; with the bars hidden, tapping the grey "+" /
+"-" zooms, while a dot elsewhere in that zone still opens the node; (2) a quick re-touch after a pan
+follows the finger with no jump.

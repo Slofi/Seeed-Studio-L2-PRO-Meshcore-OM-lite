@@ -114,10 +114,11 @@ static void testMapHit() {
   CHECK(h.marker == 0);
   CHECK(mapHitAt(c, m, 2, 200, 120).marker == 1);
   CHECK(mapHitAt(c, m, 2, 150, 150).kind == MapHitKind::Map);     // nothing within 11 px
-  // A marker wins over the key it happens to sit on.
+  // EST-416: the tab is DRAWN over the marker, so the tab wins the tap (this used to be "a marker
+  // wins over the key it happens to sit on"; Filip's "-" opened a repeater's pop-up on the glass).
   m[1].x = (int16_t)(c.zoomIn.x + c.zoomIn.w / 2);
   m[1].y = (int16_t)(c.zoomIn.y + c.zoomIn.h / 2);
-  CHECK(mapHitAt(c, m, 2, m[1].x, m[1].y).kind == MapHitKind::Marker);
+  CHECK(mapHitAt(c, m, 2, m[1].x, m[1].y).kind == MapHitKind::ZoomIn);
 }
 
 static void testRptr() {

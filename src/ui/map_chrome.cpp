@@ -7,7 +7,9 @@
 // EST-373 narrows the tabs to their widest icon plus 4 px each side, gives the cross one dark ink and
 // adds the arrow that hides the column. EST-374 makes the arrow a 22 px chip, hides the bottom bar
 // with the tabs (both down to a 3 px strip), runs the canvas to the screen floor in both states and
-// leaves the zoom + / - behind as grey ghosts so zooming still works while hidden.
+// leaves the zoom + / - behind as grey ghosts so zooming still works while hidden. EST-416: the hit
+// test is the DRAW order (the top layer wins the finger), and the two bugs that order fixes: a marker
+// under a button no longer steals the tap, and a quick re-touch after a pan does not jump.
 #include "ui/map_chrome.h"
 
 namespace om {
@@ -103,10 +105,10 @@ Rect mapCreditRect(const MapChrome& c, int16_t width) {
   return r;
 }
 
-MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, int y) {
-  MapHit hit;
-  if (c.status.contains(x, y)) return hit;   // the bar's own keys are handled before this
-  // Markers first: a finger on a dot is a node, even if the dot is under a tab.
+namespace {
+// The marker whose hit radius reaches the point, nearest first. The radius is the same
+// kMapMarkerHitR the pressed look uses, so the two cannot drift.
+int markerUnderPoint(const MapMarker* markers, int count, int x, int y) {
   int best = -1;
   int bestD2 = kMapMarkerHitR * kMapMarkerHitR;
   for (int i = 0; i < count; ++i) {
@@ -119,17 +121,21 @@ MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, 
       best = i;
     }
   }
-  if (best >= 0) {
-    hit.kind = MapHitKind::Marker;
-    hit.marker = best;
-    return hit;
-  }
-  // EST-374: the chip is the hide/show key, in both states. It ends above the top tab's top edge,
-  // so the two targets can never fight over a pixel (the 26 px target is why the tabs are 31 px).
+  return best;
+}
+}  // namespace
+
+MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, int y) {
+  MapHit hit;
+  if (c.status.contains(x, y)) return hit;   // the bar's own keys are handled before this
+  // EST-416: the test IS the draw order, top layer first. Whatever is painted over the map wins the
+  // finger; a marker only answers where nothing is drawn over it. The old order put markers first,
+  // so a repeater under the "-" tab opened its pop-up instead of zooming out.
   if (c.chipTap.contains(x, y)) { hit.kind = MapHitKind::TabsToggle; return hit; }
+
   // EST-373/374: the tabs and their tap zones are ONE list, built from the rectangles the screen
-  // draws. Hidden, the only tab pixels are the 6 px slivers, and a tap on one brings both groups
-  // back instead of firing a switch the finger cannot see.
+  // draws. Shown they answer their own kind; hidden their only pixels are the 6 px slivers, and a
+  // tap on one brings both groups back (the visible thing wins over what is under it).
   MapTab tabs[kMapTabCount];
   mapTabRects(c, tabs);
   for (int i = 0; i < kMapTabCount; ++i) {
@@ -137,14 +143,34 @@ MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, 
     hit.kind = c.tabsHidden ? MapHitKind::TabsToggle : tabs[i].kind;
     return hit;
   }
-  // EST-374: hidden, the zoom tabs leave their + and - behind at the SHOWN rectangles, and those
-  // are the tap zones while hidden. The sliver check above wins on its 6 px, so the visible remnant
-  // is still the hide/show key; everything else in the shown rectangle zooms.
+
+  // EST-416: hidden, the ghost + / - are DRAWN into their own small boxes at the SHOWN centres. A
+  // marker under the visible glyph loses; a marker elsewhere in the zone is answered below, after
+  // the callout and the markers.
+  if (c.tabsHidden) {
+    if (mapZoomGlyphRect(c.zoomInShown).contains(x, y)) { hit.kind = MapHitKind::ZoomIn; return hit; }
+    if (mapZoomGlyphRect(c.zoomOutShown).contains(x, y)) {
+      hit.kind = MapHitKind::ZoomOut;
+      return hit;
+    }
+  }
+
+  // The callout is drawn after the tabs (and, hidden, after the ghost glyphs): over markers and map.
+  if (!c.callout.empty() && c.callout.contains(x, y)) { hit.kind = MapHitKind::Callout; return hit; }
+
+  const int best = markerUnderPoint(markers, count, x, y);
+  if (best >= 0) {
+    hit.kind = MapHitKind::Marker;
+    hit.marker = best;
+    return hit;
+  }
+
+  // EST-416: hidden, the REST of each ghost zone still zooms, where no visible glyph and no marker
+  // is under the finger. Shown, these zones do not exist (the tab itself answered above).
   if (c.tabsHidden) {
     if (c.zoomInShown.contains(x, y)) { hit.kind = MapHitKind::ZoomIn; return hit; }
     if (c.zoomOutShown.contains(x, y)) { hit.kind = MapHitKind::ZoomOut; return hit; }
   }
-  if (!c.callout.empty() && c.callout.contains(x, y)) { hit.kind = MapHitKind::Callout; return hit; }
   if (c.view.contains(x, y)) { hit.kind = MapHitKind::Map; return hit; }
   return hit;
 }

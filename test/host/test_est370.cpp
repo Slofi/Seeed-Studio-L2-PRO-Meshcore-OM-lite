@@ -56,15 +56,22 @@ static void testNamesKey() {
   CHECK(mapHitAt(c, nullptr, 0, c.names.x - 1, cy).kind != MapHitKind::Names);
   CHECK(mapHitAt(c, nullptr, 0, c.names.right(), cy).kind != MapHitKind::Names);
 
-  // A marker still wins over the tab it sits on (the map's one rule).
+  // EST-416: the tab is DRAWN over the marker, so the visible tab wins the tap (the old rule here
+  // was "a marker still wins over the tab it sits on"; the markers-first order caused Filip's bug).
   MapMarker m;
   m.x = (int16_t)cx;
   m.y = (int16_t)cy;
   m.type = 2;
   m.name = "R1";
   const MapHit hit = mapHitAt(c, &m, 1, cx, cy);
-  CHECK(hit.kind == MapHitKind::Marker);
-  CHECK(hit.marker == 0);
+  CHECK(hit.kind == MapHitKind::Names);
+  CHECK(hit.marker == -1);
+  // ...and one on the plain map still wins.
+  m.x = 120;
+  m.y = 120;
+  const MapHit plain = mapHitAt(c, &m, 1, 120, 120);
+  CHECK(plain.kind == MapHitKind::Marker);
+  CHECK(plain.marker == 0);
 
   // The credit box never runs under the tab column.
   const Rect cr = mapCreditRect(c, 138);

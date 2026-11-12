@@ -125,7 +125,8 @@ void drawChevron(lgfx::LovyanGFX* d, const Rect& r, bool left, uint16_t ink) {
 // One zoom glyph, drawn exactly once (EST-374): the shown tab paints it on its kPanel body in kInk,
 // and the hidden state paints the SAME character at the SAME centre in kMapGhostInk with no body
 // ("same shape, size, stroke, only the colours inverted"). `plate` is the tab's background; without
-// it LovyanGFX draws only the glyph's own pixels, so the topo shows through.
+// it LovyanGFX draws only the glyph's own pixels, so the topo shows through. EST-416: the box is the
+// one mapZoomGlyphRect() hands the hit test too, so the pixels a finger must hit are the ones drawn.
 void drawZoomGlyph(lgfx::LovyanGFX* d, const Rect& box, char glyph, uint16_t ink, bool plate) {
   setRole(d, FontRole::SansTitle);
   d->setTextDatum(lgfx::textdatum_t::middle_center);
@@ -339,8 +340,8 @@ void drawTabsHidden(lgfx::LovyanGFX* d, const MapChrome& c, const MapView& v) {
     }
     edgeTabBox(d, tabs[i].rect, on ? kSelBg2 : kPanel, on ? kAcc : kLine);
   }
-  drawZoomGlyph(d, c.zoomInShown, '+', kMapGhostInk, false);
-  drawZoomGlyph(d, c.zoomOutShown, '-', kMapGhostInk, false);
+  drawZoomGlyph(d, mapZoomGlyphRect(c.zoomInShown), '+', kMapGhostInk, false);
+  drawZoomGlyph(d, mapZoomGlyphRect(c.zoomOutShown), '-', kMapGhostInk, false);
 }
 
 // One frame. `freshTiles` picks mapRender() (decode + composite) or mapRepush() (the canvas that is

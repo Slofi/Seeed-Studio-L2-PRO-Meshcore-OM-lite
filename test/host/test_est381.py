@@ -180,11 +180,15 @@ else:
     if "om::mapPan(" not in body:
         problems.append("main.cpp: the map's pan is not inside the !g_spent drag branch")
 
-cont_at = main.find("const bool cont = (g_tab == 2")
+# EST-416: the continuation's decision moved into om::ui::mapPressPan() (plain C++, host-tested by
+# test_est416). The shell's call still names its three gates: on the Map, not spent, and a release.
+cont_at = main.find("om::ui::mapPressPan(")
 if cont_at < 0:
     problems.append("main.cpp: the map's press continuation is missing")
 elif "!g_spent" not in main[cont_at:main.find(";", cont_at)]:
     problems.append("main.cpp: the map's press continuation is not guarded by !g_spent")
+elif "g_tab == 2" not in main[cont_at:main.find(";", cont_at)]:
+    problems.append("main.cpp: the map's press continuation is not guarded by the Map tab")
 
 # --- 4. the notice door has no Map special case ------------------------------------------------
 notify_calls = [m.group(0).replace("\n", " ") for m in

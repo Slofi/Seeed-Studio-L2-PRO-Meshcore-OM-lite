@@ -272,17 +272,58 @@ constexpr Rect mapEdgeTabDrawRect(const Rect& r) {
 // MapChrome the screen draws, including the 6 px slivers while the tabs are hidden.
 void mapTabRects(const MapChrome& c, MapTab out[kMapTabCount]);
 
+// EST-416: the small box a zoom glyph is DRAWN into. While hidden the + and - stay on the glass as
+// grey ghosts, and the finger has to find THEM, not the whole 25 x 31 ghost zone: a marker under the
+// visible glyph must lose, a marker elsewhere in the zone must win. The box is the icon square the
+// tab's width was already built from (kMapTabIconW), centred on the zone's centre, which is where
+// drawZoomGlyph() puts the character (same centre, same datum). So the drawing and the hit test use
+// ONE rectangle and there is no new number: the glyph's ink (12 x 9 for "+", 5 x 4 for "-") is
+// inside it. One helper for a zone, so neither the drawing nor the test can drift.
+constexpr Rect mapZoomGlyphRect(const Rect& zone) {
+  return Rect{(int16_t)(zone.x + (zone.w - kMapTabIconW) / 2),
+              (int16_t)(zone.y + (zone.h - kMapTabIconW) / 2), kMapTabIconW, kMapTabIconW};
+}
+
 struct MapHit {
   MapHitKind kind = MapHitKind::None;
   int marker = -1;   // valid when kind == Marker
 };
 
-// The tab or marker under a point. A marker wins over the map; the callout's own box is not a map
-// tap; the chip is the hide/show key; every toggle is a tab like the zoom ones. `count` markers in
-// `markers`. While the bars are hidden: their 6 px slivers are the only tab pixels and a tap on one
-// brings both groups back, and the zoom tabs leave their ghost + / - behind at the SHOWN rectangles
-// (minus those sliver pixels, which belong to the hide/show key) so zooming still works hidden.
+// The chrome, marker or map under a point, tested in DRAW order: whatever the screen draws on top
+// wins the finger. EST-416 replaced the old "markers first" rule (a marker under a tab used to win,
+// which is why the "-" tab opened a repeater's pop-up). Shown: status bar (never a map tap), chip,
+// the five tabs, the callout, markers, map. Hidden: status bar, chip, the 6 px slivers (the hide/show
+// key), the visible ghost + / - glyph boxes, the callout, markers, the REST of the ghost zoom zones,
+// map. So a marker under a drawn button never wins, a marker elsewhere in a ghost zone does.
 MapHit mapHitAt(const MapChrome& c, const MapMarker* markers, int count, int x, int y);
+
+// EST-416: the pan continuation, as one pure decision. The map panel lifts for a sample or two
+// during a drag, so a press within 400 ms and 80 px of the previous release continues that gesture:
+// no tap, still a drag. What the press must NOT do is pan. Before EST-416 it called
+// mapPan(g_lastX - x, ...) with g_lastX/Y still the PREVIOUS swipe's end point, so a fast new swipe
+// (which starts back near where the last one started) threw the map up to 80 px at touch-down. The
+// base is now the press point and only the following moves pan, each by its own delta. `notSpent` is
+// the shell's !g_spent (a press that closed an overlay never continues a pan).
+constexpr int kMapPanContinueMs = 400;
+constexpr int kMapPanContinuePx = 80;
+
+struct MapPressPan {
+  bool cont = false;   // the press continues the last pan: no tap on the release
+  int baseX = 0;       // the new pan base: ALWAYS the press point
+  int baseY = 0;
+};
+
+constexpr MapPressPan mapPressPan(bool onMap, bool notSpent, bool hasRelease, uint32_t upMs,
+                                  int upX, int upY, uint32_t nowMs, int x, int y) {
+  MapPressPan r;
+  r.baseX = x;
+  r.baseY = y;
+  const int dx = x > upX ? x - upX : upX - x;
+  const int dy = y > upY ? y - upY : upY - y;
+  r.cont = onMap && notSpent && hasRelease && (uint32_t)(nowMs - upMs) < (uint32_t)kMapPanContinueMs &&
+           dx < kMapPanContinuePx && dy < kMapPanContinuePx;
+  return r;   // no delta: the press moves nothing, the moves do
+}
 
 }  // namespace ui
 }  // namespace om

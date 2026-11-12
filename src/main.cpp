@@ -5067,20 +5067,19 @@ void loop() {
       }
     }
     // This panel lifts between samples during a drag, so a press that lands near the previous
-    // release shortly after it is treated as the same gesture (pan), not a tap.
-    const bool cont = (g_tab == 2 && !g_settings && g_upMs && !g_spent &&
-                       (millis() - g_upMs) < 400 &&
-                       abs((int)x - g_upX) < 80 && abs((int)y - g_upY) < 80);
-    if (cont) {
-      g_drag = true;
-      om::mapPan(g_lastX - (int)x, g_lastY - (int)y);
-      if (millis() - g_lastRender > 60) { g_lastRender = millis(); om::map_tab::draw(); }
-    }
+    // release shortly after it is treated as the same gesture (pan), not a tap. EST-416: the press
+    // itself must pan by NOTHING. It only becomes the new pan base, so a fast new swipe starts
+    // where the finger landed and the following moves pan by their own delta. Before this, the
+    // press panned against the PREVIOUS swipe's end point (up to 80 px), and the map jumped.
+    const om::ui::MapPressPan panPress =
+        om::ui::mapPressPan(g_tab == 2 && !g_settings, !g_spent, g_upMs != 0, g_upMs, g_upX,
+                            g_upY, millis(), (int)x, (int)y);
+    if (panPress.cont) g_drag = true;
     // EST-390: the press look. A spent gesture (a toast dismissed, an overlay closed by this
     // press) and a pan continuation get nothing: the consumed-press rule is unchanged.
     if (!g_spent && !g_drag) pressArmAt((int)x, (int)y);
-    g_lastX = x;
-    g_lastY = y;
+    g_lastX = panPress.baseX;
+    g_lastY = panPress.baseY;
   } else {
     const int dy = g_sy - (int)y;
     if (dy > 12 || dy < -12) g_drag = true;

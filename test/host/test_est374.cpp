@@ -293,12 +293,19 @@ static void testGhostZooms() {
         MapHitKind::TabsToggle);
   CHECK(mapHitAt(hidden, nullptr, 0, 314, hidden.zoomInShown.y + 15).kind ==
         MapHitKind::TabsToggle);
-  // A marker still wins over both (the map's one rule).
+  // EST-416: the marker at the ghost glyph's centre is UNDER the visible +, so the + wins the tap
+  // (this assertion used to say "a marker still wins over both"; the markers-first order caused
+  // Filip's "-" tab to open a repeater's pop-up). A marker elsewhere in the zone still wins.
   MapMarker m;
   m.x = (int16_t)(hidden.zoomInShown.x + 12);
   m.y = (int16_t)(hidden.zoomInShown.y + 15);
   m.type = 2;
   m.name = "R1";
+  CHECK(mapHitAt(hidden, &m, 1, m.x, m.y).kind == MapHitKind::ZoomIn);
+  CHECK(mapZoomGlyphRect(hidden.zoomInShown).contains(m.x, m.y));
+  m.x = (int16_t)(hidden.zoomInShown.x + 1);
+  CHECK(hidden.zoomInShown.contains(m.x, m.y));
+  CHECK(!mapZoomGlyphRect(hidden.zoomInShown).contains(m.x, m.y));
   CHECK(mapHitAt(hidden, &m, 1, m.x, m.y).kind == MapHitKind::Marker);
 
   // The ghost is the SAME character as the tab's (SansTitle "+" / "-"), so only the ink changes:

@@ -93,7 +93,8 @@ BIN62="$(mktemp /tmp/om-lite-est409.XXXXXX)"
 BIN63="$(mktemp /tmp/om-lite-est412.XXXXXX)"
 BIN64="$(mktemp /tmp/om-lite-est413.XXXXXX)"
 BIN65="$(mktemp /tmp/om-lite-est414.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65"' EXIT
+BIN66="$(mktemp /tmp/om-lite-est416.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65" "$BIN66"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -328,7 +329,8 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est368.cpp \
 
 # EST-370 + EST-372 + EST-373: the Map's Names tab, the centre cross, the trace palette and the saved
 # switches. The tab is the top of the right column (EST-373: 25x32, right edge 320, tap, no overlap
-# with the z13 line or the credit box, a marker still wins), the cross is 7x7 at (160,107), the same
+# with the z13 line or the credit box; EST-416: the tab is drawn over a marker, so the tab wins), the
+# cross is 7x7 at (160,107), the same
 # point map.cpp projects the view centre onto and the Position picker's mark uses, the trace
 # colour and widths are fixed in theme.h with a measured contrast floor, and the names/traces store
 # proves its defaults, one-key writes, reloads, a failed write and a missing key.
@@ -662,3 +664,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est414.cpp \
   ../../src/ui/chat_layout.cpp -o "$BIN65"
 "$BIN65"
 python3 -B test_est414.py
+
+# EST-416: the Map's draw-order hit test and the pan continuation. Shown, a marker under the chip, a
+# tab or the callout loses to it; hidden, a marker under the 6 px sliver or the visible ghost + / -
+# glyph box loses, one elsewhere in a ghost zone still wins and the rest of the zone still zooms.
+# pressTargetForMap follows the same test. The pan continuation has ZERO delta at the press (the
+# press point is the new base) and the next move pans by its own delta; main.cpp has ONE pan call.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est416.cpp \
+  ../../src/ui/map_chrome.cpp -o "$BIN66"
+"$BIN66"

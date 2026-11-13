@@ -10,13 +10,10 @@
 // 12 px, `g_drag` stayed false and the release tapped the PRESS point: the row or the switch under
 // the finger.
 //
-// A gesture is a tap only if the finger PROVABLY stayed put, which needs two things this struct
-// keeps:
-//   * `samples`: how many down samples the gesture was seen in, the press included. One sample means
-//     the loop saw a finger once and then it was gone: a tap and a flick look identical there, so
-//     the gesture is "unknown" and is NOT a tap. (The loop now also samples every ~2 ms while a
-//     finger is down, so a real tap of any human length is seen many times and a flick's first 12 px
-//     of travel are seen before the finger lifts.)
+// A gesture is a tap unless the finger was SEEN to move (or a drag/hold took it); this struct keeps:
+//   * `samples`: how many down samples the gesture was seen in, the press included. EST-422 refused a
+//     gesture seen only once; S498 (Filip) made it a tap again, because light taps are seen once too
+//     and the important Settings are now behind the confirm sheet. Kept for the log line and tests.
 //   * `lastX/lastY`: the last point the panel reported. The release edge is checked against the
 //     press point too, so a gesture that was seen to end away from where it began is a drag even if
 //     the vertical 12 px test never fired (that test only looks at Y: a sideways flick on the map or
@@ -50,17 +47,14 @@ struct TapTrace {
   int lastX = 0;
   int lastY = 0;
   int samples = 0;
-  // S498 keyboard fix (Claude, 2026-11-13): the press landed on a target that cannot scroll (a key of
-  // a keyboard sheet). Filip: "I can see the highlighted letter, but the real letter is not written…
-  // I have to press harder". A light tap is often seen in only ONE sample (the press-edge draw of the
-  // highlighted key blocks the loop until the finger has lifted), and `samples < 2` threw it away.
-  // The one-sample rule exists for flicks through SCROLLING lists; a key has nothing to scroll, so a
-  // one-sample press on a key is a key press. Lists, the emoji grid and the map keep the rule.
-  bool fixedTarget = false;
+  // S498 (Filip, 2026-11-13): a gesture seen in ONE sample is a tap again. EST-422 refused it as a
+  // possible flick, but a light tap is often seen once too, so keys, Send, the channel selector etc.
+  // needed a hard press ("I have to really press it"). Filip's call: the important Settings are now
+  // behind the confirm sheet, so a flick that taps is harmless there; fix it everywhere. What stays from
+  // EST-422: a gesture SEEN to move (last point or release > 12 px from the press) is never a tap.
 
   // The press edge. One sample so far.
   void press(int x, int y) {
-    fixedTarget = false;
     pressX = x;
     pressY = y;
     lastX = x;
@@ -75,15 +69,11 @@ struct TapTrace {
     ++samples;
   }
 
-  // The caller found a key under the press point (see fixedTarget).
-  void markFixedTarget() { fixedTarget = true; }
-
   // The finger lifted at (upX, upY): the last point the panel reported (the loop carries it into
   // the read, because LovyanGFX writes no coordinate when the panel reports nothing).
   // `drag` is the loop's own long-standing drag latch, `acted` a hold that already fired.
   bool tapAllowed(int upX, int upY, bool drag, bool acted) const {
     if (drag || acted) return false;              // a scroll, or a hold that already acted
-    if (samples < 2 && !fixedTarget) return false;   // seen once and gone: a flick, not provably a tap
     if (!withinTapSlop(pressX, pressY, lastX, lastY)) return false;
     return withinTapSlop(pressX, pressY, upX, upY);
   }

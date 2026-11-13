@@ -4334,24 +4334,6 @@ static void cardKbStep(uint32_t nowMs) {
   if (code > 0) cardKbKey((uint8_t)code);
 }
 
-// S498 keyboard fix (ui/tap_rule.h fixedTarget): is (x, y) on a key of an open keyboard sheet? The same
-// layout and keyAt() the key press itself uses, so the two cannot disagree. The emoji page scrolls, so
-// it is not a fixed target; the chat selector covers the sheet, so nothing under it is either.
-static bool pressOnKeyboardKey(int x, int y) {
-  if (g_tab == 1 && !g_settings && g_kb.open && !g_kb.emoji() && !g_selector) {
-    const om::ui::ChatLayout kg =
-        om::ui::chatLayoutFor(om::ui::l2(), true, g_replySeq != 0, g_kb.nums(), false);
-    return om::ui::keyAt(kg, g_kb.nums(), x, y).row >= 0;
-  }
-  if (g_settings && g_setEditor != om::ui::SettingsEditor::None) {
-    const om::ui::KeyboardField field = settingsEditField();
-    const om::ui::ChatLayout kg =
-        om::ui::chatLayoutFor(om::ui::l2(), true, false, g_setEditNums, false, field);
-    return om::ui::keyAt(kg, g_setEditNums, x, y, field).row >= 0;
-  }
-  return false;
-}
-
 void loop() {
   // EST-365: one pass timer, and one bucket per block the ticket names. The parts are measured
   // around the calls below; endPass() charges the remainder to Other, so a long pass always names
@@ -5023,8 +5005,9 @@ void loop() {
           settingsEditAppendAccent();   // the name field only; the filter refuses a base64 key
           drawSettings();
         } else if (g_tap.tapAllowed((int)x, (int)y, g_drag, g_acted)) {
-          // EST-422: the ONE tap rule (ui/tap_rule.h). A gesture seen only once, or seen to end away
-          // from where it began, is a flick and not a tap: nothing under the finger changes.
+          // EST-422: the ONE tap rule (ui/tap_rule.h). A gesture seen to end away from where it
+          // began is a flick and not a tap: nothing under the finger changes. (S498: a gesture seen
+          // only once IS a tap again, Filip's call.)
           handleTap(g_sx, g_sy, false);
         } else if (!g_drag && !g_acted) {
           Serial.printf("[tap] %d,%d ignored: %d sample(s), last %d,%d (flick, not a tap)\n",
@@ -5111,7 +5094,6 @@ void loop() {
     g_sx = x;
     g_sy = y;
     g_tap.press((int)x, (int)y);   // EST-422: the gesture's own record, sample 1 of the tap rule
-    if (pressOnKeyboardKey((int)x, (int)y)) g_tap.markFixedTarget();   // S498: a key cannot scroll
     g_chatScroll0 = g_chatScroll;
     g_selScroll0 = g_selScroll;
     g_emojiScroll0 = g_emojiScroll;

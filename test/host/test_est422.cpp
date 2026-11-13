@@ -76,17 +76,18 @@ static void testSlop() {
   CHECK(k.tapAllowed(12, 0, false, false));
 }
 
-static void testSeenOnceIsNotATap() {
-  // The flick that began and ended between two samples: the loop saw the finger exactly once, so a tap
-  // cannot be proven. The old rule tapped here.
+static void testSeenOnceIsATap() {
+  // S498 (Filip): a light tap seen in only one sample is a tap, everywhere. Armed: the EST-422 rule
+  // (samples < 2 -> no tap) fails here.
   TapTrace g;
   g.press(100, 100);
   CHECK(g.samples == 1);
-  CHECK(!g.tapAllowed(100, 100, false, false));
-  CHECK(tapAllowedLegacy(false, false));
-  // One more sample anywhere makes a still finger a tap again.
-  g.sample(100, 100);
   CHECK(g.tapAllowed(100, 100, false, false));
+  // A drag or a hold that already acted is still never a tap, seen once or not.
+  CHECK(!g.tapAllowed(100, 100, true, false));
+  CHECK(!g.tapAllowed(100, 100, false, true));
+  // Seen once, released 40 px away: a move the loop did see, still not a tap.
+  CHECK(!g.tapAllowed(100, 140, false, false));
 }
 
 static void testLongPressAndDrag() {
@@ -264,33 +265,11 @@ static void testTheKeysAreTheDrawnOnes() {
   CHECK(m.box.x >= 0 && m.box.y >= 0 && m.box.right() <= 320 && m.box.bottom() <= 240);
 }
 
-// S498 keyboard fix: a light tap on a key is seen once and must still type; the same one-sample
-// gesture in a list stays a flick (EST-422 stays fixed). Armed: fails with fixedTarget ignored.
-static void testOneSampleOnAKeyTypes() {
-  TapTrace key;
-  key.press(150, 200);
-  key.markFixedTarget();
-  CHECK(key.tapAllowed(150, 200, false, false));      // seen once, on a key: a key press
-  CHECK(!key.tapAllowed(150, 200, true, false));      // a drag is still never a tap
-  CHECK(!key.tapAllowed(150, 200, false, true));      // nor a hold that already acted
-  key.sample(150, 230);
-  CHECK(!key.tapAllowed(150, 230, false, false));     // slid 30 px off the key: not a tap
-  TapTrace list;
-  list.press(150, 120);                               // the same gesture in a scrolling list
-  CHECK(!list.tapAllowed(150, 120, false, false));    // stays a flick, not a tap
-  TapTrace next;                                      // press() forgets the previous key
-  next.press(10, 10);
-  key.press(10, 10);
-  CHECK(!key.tapAllowed(10, 10, false, false));
-  CHECK(!next.tapAllowed(10, 10, false, false));
-}
-
 int main() {
-  testOneSampleOnAKeyTypes();
   testStillPressIsATap();
   testFlickWithNoMoveSampleIsNotATap();
   testSlop();
-  testSeenOnceIsNotATap();
+  testSeenOnceIsATap();
   testLongPressAndDrag();
   testSidewaysFlick();
   testTheList();

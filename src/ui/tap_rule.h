@@ -50,9 +50,17 @@ struct TapTrace {
   int lastX = 0;
   int lastY = 0;
   int samples = 0;
+  // S498 keyboard fix (Claude, 2026-11-13): the press landed on a target that cannot scroll (a key of
+  // a keyboard sheet). Filip: "I can see the highlighted letter, but the real letter is not written…
+  // I have to press harder". A light tap is often seen in only ONE sample (the press-edge draw of the
+  // highlighted key blocks the loop until the finger has lifted), and `samples < 2` threw it away.
+  // The one-sample rule exists for flicks through SCROLLING lists; a key has nothing to scroll, so a
+  // one-sample press on a key is a key press. Lists, the emoji grid and the map keep the rule.
+  bool fixedTarget = false;
 
   // The press edge. One sample so far.
   void press(int x, int y) {
+    fixedTarget = false;
     pressX = x;
     pressY = y;
     lastX = x;
@@ -67,12 +75,15 @@ struct TapTrace {
     ++samples;
   }
 
+  // The caller found a key under the press point (see fixedTarget).
+  void markFixedTarget() { fixedTarget = true; }
+
   // The finger lifted at (upX, upY): the last point the panel reported (the loop carries it into
   // the read, because LovyanGFX writes no coordinate when the panel reports nothing).
   // `drag` is the loop's own long-standing drag latch, `acted` a hold that already fired.
   bool tapAllowed(int upX, int upY, bool drag, bool acted) const {
     if (drag || acted) return false;              // a scroll, or a hold that already acted
-    if (samples < 2) return false;                // seen once and gone: a flick, not provably a tap
+    if (samples < 2 && !fixedTarget) return false;   // seen once and gone: a flick, not provably a tap
     if (!withinTapSlop(pressX, pressY, lastX, lastY)) return false;
     return withinTapSlop(pressX, pressY, upX, upY);
   }

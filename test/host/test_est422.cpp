@@ -264,7 +264,29 @@ static void testTheKeysAreTheDrawnOnes() {
   CHECK(m.box.x >= 0 && m.box.y >= 0 && m.box.right() <= 320 && m.box.bottom() <= 240);
 }
 
+// S498 keyboard fix: a light tap on a key is seen once and must still type; the same one-sample
+// gesture in a list stays a flick (EST-422 stays fixed). Armed: fails with fixedTarget ignored.
+static void testOneSampleOnAKeyTypes() {
+  TapTrace key;
+  key.press(150, 200);
+  key.markFixedTarget();
+  CHECK(key.tapAllowed(150, 200, false, false));      // seen once, on a key: a key press
+  CHECK(!key.tapAllowed(150, 200, true, false));      // a drag is still never a tap
+  CHECK(!key.tapAllowed(150, 200, false, true));      // nor a hold that already acted
+  key.sample(150, 230);
+  CHECK(!key.tapAllowed(150, 230, false, false));     // slid 30 px off the key: not a tap
+  TapTrace list;
+  list.press(150, 120);                               // the same gesture in a scrolling list
+  CHECK(!list.tapAllowed(150, 120, false, false));    // stays a flick, not a tap
+  TapTrace next;                                      // press() forgets the previous key
+  next.press(10, 10);
+  key.press(10, 10);
+  CHECK(!key.tapAllowed(10, 10, false, false));
+  CHECK(!next.tapAllowed(10, 10, false, false));
+}
+
 int main() {
+  testOneSampleOnAKeyTypes();
   testStillPressIsATap();
   testFlickWithNoMoveSampleIsNotATap();
   testSlop();

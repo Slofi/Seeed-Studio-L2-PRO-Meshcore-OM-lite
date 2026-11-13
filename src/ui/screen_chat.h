@@ -80,6 +80,8 @@ struct ChatView {
 };
 
 void chatScreenDraw(const ChatView& v);
+// S499: only the keyboard sheet, drawn over the kept frame (ui/chat_redraw.h says when that is safe).
+void chatSheetDraw(const ChatView& v);
 
 enum class ChatHit : uint8_t {
   None, Head, SelRow, SelManage, SelClose, Msg, SenderName, SheetRow, SheetClose, Field, Key, Outside,

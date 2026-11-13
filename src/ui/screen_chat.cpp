@@ -597,6 +597,25 @@ void chatScreenDraw(const ChatView& v) {
   omFrameEnd();
 }
 
+// S499: a typed letter changes only the sheet. The off-screen frame keeps the rest of the last full
+// chat picture, so the sheet is drawn over it and the frame is pushed as usual (the push is ~4 ms; the
+// full compose of every bubble was the cost). The caller has checked ui/chat_redraw.h.
+void chatSheetDraw(const ChatView& v) {
+  if (!omFrameBegin()) {
+    omFrameEnd();
+    return;
+  }
+  lgfx::LovyanGFX* d = om_display();
+  if (d == nullptr) {
+    omFrameEnd();
+    return;
+  }
+  const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);
+  drawSheet(d, v, g);
+  om::useAppFont(d);
+  omFrameEnd();
+}
+
 ChatHitResult chatScreenHit(const ChatView& v, int x, int y) {
   ChatHitResult r;
   const ChatLayout g = chatLayoutFor(l2(), v.osk, v.replySeq != 0, v.nums, v.selector);

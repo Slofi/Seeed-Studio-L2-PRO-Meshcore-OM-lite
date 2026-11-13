@@ -77,6 +77,7 @@
 #include "ui/screen_settings.h"
 #include "ui/settings_actions.h"   // EST-422: the action ids, which of them ask first, the sheet
 #include "ui/settings_prefs.h"
+#include "ui/chat_redraw.h"       // S499: a typed letter redraws only the keyboard sheet
 #include "ui/tap_rule.h"          // EST-422: the one rule that decides a release is a tap
 #include "ui/notify.h"
 #include "ui/text_wrap.h"
@@ -1082,6 +1083,22 @@ static void drawChat() {
   om::ui::chatScreenDraw(v);
 }
 
+// S499: after a key, redraw only the sheet when ui/chat_redraw.h says nothing else can have changed;
+// otherwise the full drawChat(). The view is built the same way drawChat() builds it.
+static void drawChatAfterKey(om::ui::KeyKind kind) {
+  om::ui::ChatView v;
+  buildChatView(v);
+  if (om::ui::chatRedrawForKey(kind, v.osk, v.selector, v.advertMenu, v.menuMsg >= 0) !=
+      om::ui::ChatRedraw::SheetOnly) {
+    drawChat();
+    return;
+  }
+  v.scroll = g_chatScroll;
+  v.selScroll = g_selScroll;
+  v.emojiScroll = g_emojiScroll;
+  om::ui::chatSheetDraw(v);
+}
+
 // "Manage channels" in the chat selector is a door into the same Settings page: General > Channels.
 static void openChannelList() {
   openSettings(1, om::ui::SettingsTab::General);
@@ -1457,7 +1474,8 @@ static void handleChatTap(int x, int y) {
       break;
     case om::ui::ChatHit::Key:
       chatKey(hit);
-      break;
+      drawChatAfterKey(hit.keyKind);   // S499: a letter redraws only the sheet
+      return;
     case om::ui::ChatHit::EmojiCell:
       chatEmojiPick(hit.emojiCp);
       break;

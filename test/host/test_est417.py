@@ -63,20 +63,24 @@ def main(argv):
     rptrc = (src / "screens" / "rptr_tab.cpp").read_text(encoding="utf-8")
     rptrh = (src / "screens" / "rptr_tab.h").read_text(encoding="utf-8")
 
-    # --- the measured pin order: SDA 13 first, the other order kept ----------------------------
-    # EST-421: the probe moved out of begin() into the start window's step(), which tries the
-    # measured order (SDA 13 / SCL 14) first and the swap on every alternate attempt.
+    # --- the measured pin order: SDA 13 first, the swap kept as the one fallback ---------------
+    # EST-421: the probe moved out of begin() into the start window's step(). EST-423: the window
+    # tries the measured order (SDA 13 / SCL 14) ONLY; the swap is one attempt after the window.
     begin = block(driver, "bool begin() {", "void step(uint32_t nowMs) {")
     if "openAndProbe" in begin:
         fail("begin() must not probe: the start window's step() does that now")
     step = block(driver, "void step(uint32_t nowMs) {", "void end() {")
-    need(step, "w.sda13First ? kPinGroveDat2 : kPinGroveDat1",
-         "the probe no longer tries SDA = 13 (kPinGroveDat2) first")
-    need(step, "w.sda13First ? kPinGroveDat1 : kPinGroveDat2",
-         "the probe no longer tries the other pin order")
-    if step.find("w.sda13First ? kPinGroveDat2") > step.find("w.sda13First ? kPinGroveDat1"):
-        fail("the probe still tries SDA=14 first (Filip measured SDA=13)")
-    if driver.count("openAndProbe(") != 2:   # the helper's definition and its one call
+    probe = block(step, "case WindowAction::Probe: {", "case WindowAction::Fallback: {")
+    need(probe, "const int sda = kPinGroveDat2;",
+         "the window no longer tries SDA = 13 (kPinGroveDat2)")
+    need(probe, "const int scl = kPinGroveDat1;",
+         "the window no longer tries SCL = 14 (kPinGroveDat1)")
+    fallback = block(step, "case WindowAction::Fallback: {", "  }\n}")
+    need(fallback, "const int sda = kPinGroveDat1;",
+         "the one swapped attempt (SDA = 14) is missing")
+    need(fallback, "const int scl = kPinGroveDat2;",
+         "the one swapped attempt (SCL = 13) is missing")
+    if driver.count("openAndProbe(") != 3:   # the helper's definition and its two attempts
         fail(f"the enable path must have one probe call site, found "
              f"{driver.count('openAndProbe(')} mentions")
 

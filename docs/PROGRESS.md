@@ -9986,3 +9986,110 @@ sounds, share position, RPL auto-login, channel enabled/sound, the auto-off time
 Claude: review the diff (main.cpp, the three new ui headers, screen_settings' renamed sheet, the six
 updated source checks), flash, and have Filip test: flick through the Settings list (nothing may
 change), tap a row (must still work), then try each confirming setting's Cancel and Apply.
+
+## EST-423 CardKB window: one order, 10 s
+
+**The bug (Filip, 2026-11-13 09:40, on `26990bb` = EST-421 + EST-422):** boot logged
+`[kb] cardkb not found after 3000 ms, Grove power off` and the toggle showed "not found ... switch
+off/on to retry", with the CardKB PLUGGED IN and the switch ON. In the morning the keyboard was found
+on the FIRST probe (SDA 13 / SCL 14) after the rail had been on about 70 s. Two candidate causes had
+to be covered and told apart: (a) the CardKB needs more than 3 s after power-up; (b) the old
+alternating pin order disturbed it, because every odd attempt drove the keyboard's SDA as SCL and may
+leave its ATmega8A TWI in an error state.
+
+### What changed
+- `src/cardkb_logic.h`: `kStartWindowMs = 10000`. EVERY probe inside the window is the measured order
+  (`s.sda13First = true`), so the swap is never driven during it. New `WindowAction::Fallback`: at the
+  window's edge the state machine asks for exactly ONE swapped attempt (`sda13First = false`, guarded
+  by `fallbackUsed_`, reset by `start()`), and only its failure produces `TimedOut` (once, closing the
+  window). The probe spacing, the timeout-before-due edge and the no-catch-up-burst rule are
+  unchanged; between the 10000 edge and the timeout the window stays active, so that a successful
+  fallback can still be reported as found.
+- `src/cardkb.cpp`: the `Probe` branch now probes only SDA = GPIO13 / SCL = GPIO14
+  (`kPinGroveDat2` / `kPinGroveDat1`); the ternary that alternated is gone. The new `Fallback` branch
+  logs `[kb] no answer on 13/14 in 10000 ms, one swapped try (14/13)` FIRST, so the serial line
+  separates it from the window, then probes SDA = GPIO14 / SCL = GPIO13. Both answers go through one
+  `noteFound()` helper that keeps the bus up, closes the window and logs
+  `[kb] cardkb found (sda=<n> scl=<n>) after N ms` (N is the ms since the rail came on, read from the
+  step, so the fallback prints about 10000). The timeout branch is unchanged except for the ticket's
+  exact line: `[kb] cardkb not found after 10000 ms (13/14) and one 14/13 try, Grove power off`,
+  after the bus is closed and the rail dropped, with the one not-found notice the shell toasts.
+- `src/cardkb.h` and the shell comment in `src/main.cpp` say the new window and the one fallback.
+  Nothing else changed: OFF still cancels an open window (no probe, no fallback, no toast), the toast
+  text is still "CardKB not found (switch off/on to retry)", EST-422's KeyboardSwitch confirm sheet
+  still owns ON/OFF, and the poll is still the one call site behind `shouldPoll(switch, found)`.
+- How the log tells the causes apart: `found (sda=13 scl=14) after N` with N < 10000 is (a), and N is
+  the real start-up time; `found (sda=14 scl=13) after ~10000` right after the `one swapped try
+  (14/13)` line is (b); the not-found line means neither order worked in 10 s.
+
+### Tests
+- `test/host/test_est421.cpp` rewritten for the new window. It drives the state machine 1 ms at a
+  time: answers at 0, 400 and 9900 ms are found with N = 0, 400, 9900 (1, 5 and 100 probes, no
+  fallback); an answer at 9990 ms comes after the last window probe (9900), so the ONE swapped
+  fallback finds it at N = 10000 (cause b, asserted as `foundOnFallback`); no answer gives 100 probes
+  at 0..9900 in the measured order, exactly one 14/13 fallback at the edge, and the timeout only on
+  the next pass (elapsed 10001), then Idle forever with no second fallback; the switch OFF at 150 ms
+  gives 2 probes and no fallback, OFF at the edge gives 100 probes and no fallback, neither times
+  out; probes are exactly 100 ms apart and all `sda13First`; a slow 250 ms pass still gives one probe
+  then the next 100 ms later; a fresh `start()` resets the time, the count AND the fallback (the
+  second window gets its own); `kStartWindowMs == 10000`, `kProbeIntervalMs == 100`.
+- `test/host/test_est421.py`: the new constants; the alternation is forbidden in the header
+  (`forbid "(probes_ % 2) == 0"`) and `s.sda13First = true` / `s.sda13First = false` / the one-shot
+  guard are required; `step()` must have the Probe and the Fallback branches and exactly two
+  `openAndProbe(sda, scl)` calls; the window probes SDA 13 / SCL 14, the fallback SDA 14 / SCL 13,
+  the fallback is logged with `one swapped try (14/13)`, both attempts report N through `noteFound()`,
+  the found line is unchanged, the not-found line is the ticket's, the rail is dropped before it, the
+  driver never takes its own notice; begin(), the OFF cancel and the shell checks are unchanged.
+- `test_est412.py` and `test_est417.py` updated for the new shape, not weakened: two probe attempts
+  (so `openAndProbe(` is 3 mentions: the definition and the two attempts instead of 2), the window's
+  order and the fallback's order are named constants now, and the stale "two probes, one order each"
+  comments were corrected.
+- `sh test/host/run.sh`: REAL exit 0, 0 `FAIL` lines (the whole suite, test_est421 included).
+- **Armed against the current alternating 3000 ms code** (`git archive 26990bb` into /tmp):
+  `test_est421.cpp` does not compile against it (exit 2: no `WindowAction::Fallback`, no
+  `fallbackUsed()`); `test_est421.py` on that tree exits 1 with 19 failures; and the updated
+  `test_est412.py` / `test_est417.py` exit 1 with 5 failures each there (the alternation and the
+  single probe call site they used to pin).
+- Mutations, one at a time in /tmp: `kStartWindowMs = 3000` -> exit 1 (18 failures); the alternation
+  reinstated in the header -> exit 1 (54); the fallback not swapped -> exit 1 (4); the fallback
+  repeating (`if (!fallbackUsed_)` -> `if (true)`) -> exit 1 (10); no fallback at all -> exit 1 (23);
+  the driver's window order swapped to 14/13 -> the py test exits 1; the fallback's order not swapped
+  -> py exits 1; the fallback log line removed -> py exits 1. Restored, both exit 0.
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0 (the first full build 161.06 s).
+  RAM **160,952 B** (49.1% of 327,680), was 160,952 B for `26990bb`, **+0 B** (the state machine's new
+  bool fits the padding the old scalars already had).
+  Flash **3,003,037 B** (45.8% of 6,553,600), was 3,002,869 B, **+168 B** (the fallback branch, its
+  log line, the `noteFound()` helper and the longer not-found string).
+  `firmware.bin` 3,003,408 B, was 3,003,232 B (+176 B).
+- A `pio run -t clean` then a full build of the final tree (REAL exit 0, 139.55 s) reports the same
+  RAM 160,952 B / Flash 3,003,037 B / `firmware.bin` 3,003,408 B, so these are the final tree's
+  numbers. Note for the next runs: incremental builds of this same tree reported Flash 3,003,053 B
+  (16 B more) three times; the clean build is the one quoted.
+- `sh test/host/run.sh`: REAL exit 0, 0 FAIL lines.
+
+### Could not check (no device in this run)
+- Nothing about the real keyboard: no L2 was flashed and no CardKB was probed here. Not tested on
+  hardware: that the keyboard answers inside 10000 ms with one order (the after-N log now prints the
+  real start-up time), that the swap-only fallback works when the measured order does not, that the
+  extra 7 s before the not-found toast and the rail drop is acceptable at the boot and from the
+  Settings toggle, that 100 probes at 100 ms do not themselves disturb the ATmega8A, that a key
+  pressed during the window is not lost in a way the user notices (nothing is read until the answer,
+  by design), and that the longer log line reads right on the serial console.
+- The 5 V/safety note of EST-412 still stands unchanged (about 3.3 V expected on SDA/SCL, above
+  3.6 V stop): nothing here touches the pins beyond what EST-417 already measured, but the fallback
+  is the one attempt that puts the keyboard's SCL on GPIO14 for the first time in this order since
+  EST-421.
+- The heap cost of the window's hundred `Wire1.begin()`/`end()` pairs was not measured (the boot line
+  prints static RAM only, and no device was attached); the same pair of 128-byte allocations is
+  allocated and freed every time, as before.
+
+### Next step
+Claude: review and commit. Filip: flash and read the boot line. If it says
+`[kb] cardkb found (sda=13 scl=14) after N ms`, cause (a) was it and N is the real start-up time; if
+it says `one swapped try (14/13)` and then `found (sda=14 scl=13)`, cause (b) was it; if it says
+`cardkb not found after 10000 ms (13/14) and one 14/13 try, Grove power off`, neither order worked in
+10 s and the next step is the keyboard's own power-up behaviour (measure SDA/SCL and the 5 V rail),
+not another timing change. Then the toggle path (ON opens the window, OFF during it cancels silently)
+and the not-found toast after an unplugged boot.

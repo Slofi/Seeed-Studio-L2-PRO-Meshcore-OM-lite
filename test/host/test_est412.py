@@ -4,7 +4,8 @@
 # the OFF default and the polling gate; this file pins what the shell actually does with them:
 #  * Grove power is the ONLY thing `grove on|off|status` touches, and the switch row exists with the
 #    OFF default and the saved key;
-#  * the enable path opens a SECOND bus (Wire1) and probes 0x5F exactly twice, one pin order each;
+#  * the enable path opens a SECOND bus (Wire1) for the start window: 0x5F probed in the measured
+#    order inside it and once with the pins swapped after it (EST-423);
 #  * the poll is the one call site, inside the loop, behind shouldPoll(switch, found) (EST-417: the
 #    text field no longer gates it);
 #  * the key routing uses mapCode(..., false) and the on-screen doors (composeAppend/Backspace,
@@ -75,24 +76,25 @@ def main(argv):
     need(boardh, "bool boardGrovePower(bool on)", "board.h has no Grove power setter")
     need(boardc, "setOutput(kBitGrovePower, on)", "the setter does not write expander bit 7")
 
-    # --- the enabled path: ONE second bus, the two pin orders, no more -----------------------
+    # --- the enabled path: ONE second bus, the measured pin order plus one swap, no more ----------
     need(driver, "constexpr uint8_t kAddr = 0x5F", "the driver does not probe 0x5F")
     need(driver, "constexpr uint32_t kBusHz = 100000", "the bus is not 100 kHz")
     need(driver, "Wire1.begin(sda, scl, kBusHz)", "the driver does not open Wire1")
-    # EST-421: the probes moved out of begin() into the start window (one attempt per call), so the
-    # two measured orders now live in step(); the window itself is test_est421's subject.
+    # EST-421: the probes moved out of begin() into the start window (one attempt per call). EST-423:
+    # the window uses the measured order ONLY and the swap is ONE attempt after it; the window itself
+    # is test_est421's subject.
     need(driver, "openAndProbe(sda, scl)", "the start window never probes the keyboard")
-    need(driver, "w.sda13First ? kPinGroveDat2 : kPinGroveDat1",
-         "SDA = 13 is no longer the first order")
-    need(driver, "w.sda13First ? kPinGroveDat1 : kPinGroveDat2",
-         "the (14, 13) fallback order is missing")
-    if driver.count("openAndProbe(") != 2:   # the helper's definition and its one call
+    need(driver, "const int sda = kPinGroveDat2;", "the window no longer probes SDA = 13")
+    need(driver, "const int scl = kPinGroveDat1;", "the window no longer probes SCL = 14")
+    need(driver, "const int sda = kPinGroveDat1;", "the one swapped (14, 13) attempt is missing")
+    need(driver, "const int scl = kPinGroveDat2;", "the one swapped (14, 13) attempt is missing")
+    if driver.count("openAndProbe(") != 3:   # the helper's definition and its two attempts
         fail(f"the enable path must have one probe call site, found "
              f"{driver.count('openAndProbe(')} mentions")
     need(driver, "[kb] cardkb found", "the found log line is missing")
     need(driver, "[kb] cardkb not found after", "the not-found log line is missing")
     # Review fix (Claude): no rescan, so a not-found window must drop the 5 V rail again. EST-421:
-    # that now happens at the end of the 3000 ms window, before the log line.
+    # that happens at the end of the window, before the log line.
     timeout = block(driver, "case WindowAction::TimedOut:", "case WindowAction::Probe:")
     need(timeout, "boardGrovePower(false);", "a timed-out window leaves the Grove 5 V rail on")
     if timeout.find("boardGrovePower(false)") > timeout.find("[kb] cardkb not found after"):
@@ -125,7 +127,7 @@ def main(argv):
     need(apply_kb, 'mapLayerPrefWrite(nullptr, "grovekb", g_kbEnabled)',
          "the switch does not write the shared bool key")
     # EST-421: begin() no longer knows whether the keyboard answered, so the toggle cannot toast
-    # "not found"; the loop's cardKbStep() does, after the 3000 ms window.
+    # "not found"; the loop's cardKbStep() does, after the start window.
     forbid(apply_kb, 'showToast("CardKB not found")',
            "a non-blocking begin() cannot report a missing keyboard")
 

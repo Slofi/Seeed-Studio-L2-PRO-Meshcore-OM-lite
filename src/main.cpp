@@ -4317,8 +4317,10 @@ static void cardKbKey(uint8_t code) {
 // press at a time.
 static void cardKbStep(uint32_t nowMs) {
   // EST-421: the start window. This is the ONLY place it advances: one call per loop pass, metered
-  // inside to one probe per ~100 ms and closed at 3000 ms. No delay(), so the UI runs between
-  // probes; found() is false until the keyboard answers, so nothing polls it early. Off = no window.
+  // inside to one probe per ~100 ms and closed at 10000 ms. EST-423: one pin order inside the window
+  // and one swapped attempt after it, both driven by cardkb_logic.h. No delay(), so the UI runs
+  // between probes; found() is false until the keyboard answers, so nothing polls it early. Off = no
+  // window.
   om::cardkb::step(nowMs);
   // EST-417 rule 8: the keyboard was pulled out. The driver has already logged once, closed the bus
   // and dropped Grove power; all that is left is the short toast. Checked before the gate, because

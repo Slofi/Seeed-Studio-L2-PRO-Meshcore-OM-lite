@@ -137,31 +137,41 @@ inline bool lostAfterFailure(int consecutiveFailures) {
 // state machine says when the loop task should probe 0x5F, until the keyboard answers or the window
 // ends. Nothing here blocks, and nothing polls the keyboard while the window is open (found() is
 // false until the answer), so boot and the UI never wait for a keyboard.
-constexpr uint32_t kStartWindowMs = 3000;   // the ticket's ceiling, measured from the rail on
+//
+// EST-423: the window is TEN seconds and ONE pin order only. Every probe inside it uses the measured
+// order SDA 13 / SCL 14; the swap is never tried there, because driving the keyboard's SDA as SCL on
+// alternate attempts may leave its ATmega8A TWI in an error state and keep it from ever answering.
+// The swapped order (SDA 14 / SCL 13) is exactly ONE attempt AFTER the window has failed, so the two
+// candidate causes stay apart in the log: an answer at N inside the window is a start-up time, an
+// answer only on the fallback is a pin order the keyboard wanted.
+constexpr uint32_t kStartWindowMs = 10000;  // how long the one order is tried, from the rail on
 constexpr uint32_t kProbeIntervalMs = 100;  // one probe per ~100 ms inside the window
 
 enum class WindowAction : uint8_t {
   Idle = 0,   // no window open, or not due yet: this pass does nothing
-  Probe,      // probe 0x5F now, in the pin order the step names
-  TimedOut,   // the window is over with no answer: drop the rail, tell the user once
+  Probe,      // probe 0x5F now, SDA 13 / SCL 14 (the one order inside the window)
+  Fallback,   // the window is over: ONE probe with the pins swapped, SDA 14 / SCL 13
+  TimedOut,   // both orders failed: drop the rail, tell the user once
 };
 
 struct WindowStep {
   WindowAction action = WindowAction::Idle;
-  bool sda13First = true;   // Probe only: SDA 13 / SCL 14 (the measured order) or the swap
+  bool sda13First = true;   // Probe and Fallback: the pin order of this attempt
   uint32_t elapsedMs = 0;   // ms since the rail came on, the N in the found log
 };
 
 class StartWindow {
  public:
   // Power has just been applied. The first probe is due at once (elapsed 0) because the keyboard may
-  // answer immediately when the rail never went down; then one every kProbeIntervalMs. The window
-  // closes at kStartWindowMs whatever the attempts did. A second start() begins a fresh window.
+  // answer immediately when the rail never went down; then one every kProbeIntervalMs in the measured
+  // order. At kStartWindowMs the window stops probing and asks for the one swapped attempt; the
+  // TimedOut only follows that attempt's failure. A second start() begins a fresh window.
   void start(uint32_t nowMs) {
     active_ = true;
     startMs_ = nowMs;
     dueMs_ = nowMs;
     probes_ = 0;
+    fallbackUsed_ = false;
   }
 
   // Switch OFF mid-window: no more probes, no timeout toast. The driver drops the rail itself.
@@ -169,23 +179,33 @@ class StartWindow {
 
   bool active() const { return active_; }
   uint32_t probes() const { return probes_; }
+  bool fallbackUsed() const { return fallbackUsed_; }
   uint32_t elapsed(uint32_t nowMs) const { return nowMs - startMs_; }
 
-  // The one decision for this loop pass. Timeout is checked FIRST, so the window's last millisecond
-  // is 3000 and no probe is made at the closing instant. A slow pass cannot bunch probes up: the next
-  // due time is 100 ms after the attempt that really happened, never a catch-up burst.
+  // The one decision for this loop pass. The window's edge is checked FIRST, so the last probe inside
+  // it is the one due at kStartWindowMs - 100 and none is made at the closing instant. A slow pass
+  // cannot bunch probes up: the next due time is 100 ms after the attempt that really happened,
+  // never a catch-up burst. At the edge the state machine asks for the ONE swapped attempt and only
+  // after that attempt has failed does it say TimedOut (once: the window closes there).
   WindowStep next(uint32_t nowMs) {
     WindowStep s;
     if (!active_) return s;
     s.elapsedMs = elapsed(nowMs);
     if (s.elapsedMs >= kStartWindowMs) {
+      // EST-423: one order inside the window, one swapped attempt after it, then the end.
+      if (!fallbackUsed_) {
+        fallbackUsed_ = true;
+        s.action = WindowAction::Fallback;
+        s.sda13First = false;
+        return s;
+      }
       s.action = WindowAction::TimedOut;
       active_ = false;
       return s;
     }
     if ((int32_t)(nowMs - dueMs_) < 0) return s;
     s.action = WindowAction::Probe;
-    s.sda13First = (probes_ % 2) == 0;   // 13 first, then 14, then 13: the ticket's alternation
+    s.sda13First = true;   // EST-423: the measured order only, never the swap inside the window
     ++probes_;
     dueMs_ = nowMs + kProbeIntervalMs;
     return s;
@@ -193,6 +213,7 @@ class StartWindow {
 
  private:
   bool active_ = false;
+  bool fallbackUsed_ = false;
   uint32_t startMs_ = 0;
   uint32_t dueMs_ = 0;
   uint32_t probes_ = 0;

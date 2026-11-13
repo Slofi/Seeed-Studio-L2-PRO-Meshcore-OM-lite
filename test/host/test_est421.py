@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-# EST-421: the source half of the CardKB start-window fix. The C++ half (test_est421.cpp) proves the
+# EST-421: the source half of the CardKB start-window fix. EST-423 tightened the window (10000 ms,
+# one pin order inside it, one swapped attempt after it). The C++ half (test_est421.cpp) proves the
 # window's timing; this file pins how the driver and the shell use it:
 #  * `begin()` powers the rail and arms the window only: no probe, no settle, NO `delay(` anywhere in
 #    the keyboard driver (the old fixed 50 ms is gone);
 #  * `step(nowMs)` is the one place the window advances: it asks cardkb_logic.h's StartWindow, probes
-#    0x5F in the order the step names (SDA 13 first on the even attempts), logs
-#    `[kb] cardkb found (sda=.. scl=..) after N ms`, and at the window's end drops the rail, logs
-#    `[kb] cardkb not found after 3000 ms, Grove power off` and asks for one toast;
+#    0x5F in the measured order ONLY (SDA 13 / SCL 14) and logs
+#    `[kb] cardkb found (sda=.. scl=..) after N ms`; after the window it makes ONE swapped attempt
+#    (SDA 14 / SCL 13), logged as such, and only when that fails too does it drop the rail, log the
+#    ticket's `[kb] cardkb not found after 10000 ms (13/14) and one 14/13 try, Grove power off` and
+#    ask for one toast;
 #  * the switch OFF path cancels an open window;
 #  * the shell calls step() once per loop pass, before the gate, and shows the ticket's toast;
 #  * the poll stays the one call site behind shouldPoll(switch, found), so nothing is read while the
@@ -54,10 +57,14 @@ def main(argv):
     logic = (src / "cardkb_logic.h").read_text(encoding="utf-8")
 
     # --- the window's rules live in the tested header ----------------------------------------
-    need(logic, "constexpr uint32_t kStartWindowMs = 3000", "the 3000 ms window is missing")
+    need(logic, "constexpr uint32_t kStartWindowMs = 10000", "the 10000 ms window is missing")
     need(logic, "constexpr uint32_t kProbeIntervalMs = 100", "the ~100 ms probe spacing is missing")
     need(logic, "class StartWindow", "there is no start-window state machine")
-    need(logic, "s.sda13First = (probes_ % 2) == 0;", "the pin order does not alternate")
+    forbid(logic, "(probes_ % 2) == 0", "the pin order still alternates inside the window")
+    need(logic, "s.sda13First = true;", "the window is not the measured 13/14 order only")
+    need(logic, "WindowAction::Fallback", "there is no one swapped attempt after the window")
+    need(logic, "s.sda13First = false;", "the fallback is not the swapped 14/13 order")
+    need(logic, "if (!fallbackUsed_)", "the swapped attempt is not a one-shot")
     need(logic, "s.elapsedMs >= kStartWindowMs", "the window has no timeout edge")
     need(logic, "void cancel() { active_ = false; }", "the window cannot be cancelled")
     need(logic, "dueMs_ = nowMs + kProbeIntervalMs;",
@@ -81,15 +88,26 @@ def main(argv):
     need(step, "s_window.next(nowMs)", "step does not ask the tested state machine")
     need(step, "WindowAction::TimedOut", "step has no timeout branch")
     need(step, "WindowAction::Probe", "step has no probe branch")
+    need(step, "WindowAction::Fallback", "step has no one-shot fallback branch")
     need(step, "openAndProbe(sda, scl)", "step does not probe 0x5F")
-    need(step, "w.sda13First ? kPinGroveDat2 : kPinGroveDat1",
-         "SDA 13 is not the first order (kPinGroveDat2)")
-    need(step, "w.sda13First ? kPinGroveDat1 : kPinGroveDat2",
-         "the alternate (14, 13) order is missing")
-    need(step, "[kb] cardkb found (sda=%d scl=%d) after %lu ms",
+    if step.count("openAndProbe(sda, scl)") != 2:
+        fail("the window probe and the one fallback must be the only two attempts")
+    forbid(step, "w.sda13First ?", "the driver still alternates the pin order inside the window")
+    probe = block(step, "case WindowAction::Probe: {", "case WindowAction::Fallback: {")
+    need(probe, "const int sda = kPinGroveDat2;", "the window does not probe SDA 13")
+    need(probe, "const int scl = kPinGroveDat1;", "the window does not probe SCL 14")
+    fallback = block(step, "case WindowAction::Fallback: {", "  }\n}")
+    need(fallback, "const int sda = kPinGroveDat1;", "the fallback does not probe SDA 14")
+    need(fallback, "const int scl = kPinGroveDat2;", "the fallback does not probe SCL 13")
+    need(fallback, "openAndProbe(sda, scl)", "the fallback does not probe 0x5F")
+    need(fallback, "one swapped try (14/13)", "the fallback attempt is not logged as such")
+    if step.count("noteFound(sda, scl, w.elapsedMs)") != 2:
+        fail("both attempts must report N through the one found path")
+    found = block(driver, "void noteFound(", "void noteFailedRead()")
+    need(found, "[kb] cardkb found (sda=%d scl=%d) after %lu ms",
          "the found log does not print the measured N")
-    need(step, "s_window.cancel()", "a successful probe does not close the window")
-    need(step, '"[kb] cardkb not found after %lu ms, Grove power off\\n"',
+    need(found, "s_window.cancel()", "a successful probe does not close the window")
+    need(step, '"[kb] cardkb not found after %lu ms (13/14) and one 14/13 try, Grove power off\\n"',
          "the not-found log is not the ticket's line")
     need(step, "s_notFoundNotice = true;", "the timeout does not ask for the toast")
     if step.find("boardGrovePower(false)") > step.find("[kb] cardkb not found after"):
@@ -137,7 +155,8 @@ def main(argv):
     need(header, "bool takeNotFoundNotice();", "cardkb.h does not declare the not-found notice")
 
     if FAIL == 0:
-        print("est421: no delay in begin, one window step, alternating probes, after-N log, the timeout toast")
+        print("est421: no delay in begin, one window step of 10000 ms in the measured order, one "
+              "logged swapped fallback, after-N log, the timeout toast")
         return 0
     print(f"est421: {FAIL} failure(s)")
     return 1

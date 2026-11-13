@@ -698,13 +698,14 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est418.cpp \
   ../../src/power_log_logic.cpp ../../src/timekeeper.cpp -o "$BIN68"
 "$BIN68"
 
-# EST-421: the CardKB's non-blocking start window. C++: the state machine driven millisecond by
-# millisecond, an answer at 0/400/2900 ms found with that N, no answer a timeout at exactly 3000 ms,
-# the switch OFF mid-window cancelling it, ~100 ms spacing with the pin order alternating and no
-# catch-up burst after a slow pass. test_est421.py is the source half: begin() only powers and arms
-# (no probe, no blocking wait anywhere in the driver), step() is the one place the window advances,
-# the after-N found log, the 3000 ms not-found line with the rail dropped first, the OFF cancel, and
-# the shell's one call per pass plus the ticket's toast.
+# EST-421 / EST-423: the CardKB's non-blocking start window. C++: the state machine driven millisecond
+# by millisecond, an answer at 0/400/9900/9990 ms found with that N, no answer giving ONE swapped
+# fallback after the 10000 ms window and the timeout only after it, the switch OFF mid-window
+# cancelling it, ~100 ms spacing in the measured order only and no catch-up burst after a slow pass.
+# test_est421.py is the source half: begin() only powers and arms (no probe, no blocking wait anywhere
+# in the driver), step() is the one place the window advances, the after-N found log, the one logged
+# 14/13 attempt after the window, the ticket's not-found line with the rail dropped first, the OFF
+# cancel, and the shell's one call per pass plus the ticket's toast.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est421.cpp -o "$BIN69"
 "$BIN69"
 python3 -B test_est421.py

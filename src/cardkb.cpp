@@ -36,9 +36,11 @@ uint8_t s_lastCode = 0;
 uint32_t s_lastPoll = 0;
 int s_failRun = 0;             // EST-417: consecutive failed reads, reset by any good one
 
-// EST-421: the rail-on time and the probe schedule. The rules (3000 ms, one probe per 100 ms, the
-// alternating pin order, cancel and timeout) are cardkb_logic.h's, so test/host proves them with the
-// system g++; this file only turns a Probe into a Wire1 transaction. ONE window exists at a time.
+// EST-421: the rail-on time and the probe schedule. EST-423: one pin order inside the 10000 ms
+// window and exactly one swapped attempt after it. The rules (the window, the probe spacing, the
+// single fallback, cancel and timeout) are cardkb_logic.h's, so test/host proves them with the
+// system g++; this file only turns a Probe or the Fallback into a Wire1 transaction. ONE window
+// exists at a time.
 StartWindow s_window;
 
 bool probe() {
@@ -57,6 +59,16 @@ void busDown() {
   if (!s_busUp) return;
   Wire1.end();
   s_busUp = false;
+}
+
+// EST-421 / EST-423: the one answer path. The bus stays up (openAndProbe set s_busUp), the window is
+// closed, and N is the ms since the rail came on. That N is what tells the causes apart: an answer
+// inside the window is a start-up time, an answer only on the swapped fallback is a pin order.
+void noteFound(int sda, int scl, uint32_t elapsedMs) {
+  s_found = true;
+  s_window.cancel();
+  Serial.printf("[kb] cardkb found (sda=%d scl=%d) after %lu ms\n", sda, scl,
+                (unsigned long)elapsedMs);
 }
 
 // EST-417 rule 8: a read failed. One is noise; kFailLimit in a row means the keyboard was pulled
@@ -104,27 +116,40 @@ void step(uint32_t nowMs) {
     case WindowAction::TimedOut:
       // No hot-plug rescan: a rail left on here would only drain the battery all day when the switch
       // stays on and the keyboard is not carried. Toggling the switch off and on powers it up and
-      // opens one more window.
+      // opens one more window. EST-423: that is the ticket's exact line, after the one swapped try.
       busDown();
       boardGrovePower(false);
-      Serial.printf("[kb] cardkb not found after %lu ms, Grove power off\n",
+      Serial.printf("[kb] cardkb not found after %lu ms (13/14) and one 14/13 try, Grove power off\n",
                     (unsigned long)kStartWindowMs);
       s_notFoundNotice = true;
       return;
     case WindowAction::Probe: {
       // Seeed names the pins GROVE_DAT_1 = GPIO14 and GROVE_DAT_2 = GPIO13 but no board source says
-      // which is SDA. EST-417: Filip's probe answered at SDA = GPIO13, SCL = GPIO14, so that order is
-      // tried first on every even attempt; the other one on every odd attempt (EST-421 keeps it).
-      const int sda = w.sda13First ? kPinGroveDat2 : kPinGroveDat1;
-      const int scl = w.sda13First ? kPinGroveDat1 : kPinGroveDat2;
+      // which is SDA. EST-417: Filip's probe answered at SDA = GPIO13, SCL = GPIO14. EST-423: that is
+      // the ONLY order inside the window; alternate attempts used to drive the keyboard's SDA as SCL,
+      // which may leave its ATmega8A TWI in an error state.
+      const int sda = kPinGroveDat2;   // GPIO13
+      const int scl = kPinGroveDat1;   // GPIO14
       if (openAndProbe(sda, scl)) {
-        s_found = true;          // the bus stays up: the probe helper set s_busUp
-        s_window.cancel();
-        Serial.printf("[kb] cardkb found (sda=%d scl=%d) after %lu ms\n", sda, scl,
-                      (unsigned long)w.elapsedMs);
+        noteFound(sda, scl, w.elapsedMs);   // the bus stays up: the probe helper set s_busUp
         return;
       }
       busDown();   // a failed attempt closes its half-open bus before the next one
+      return;
+    }
+    case WindowAction::Fallback: {
+      // EST-423: the window is over with the measured order and nothing answered. This is the ONE
+      // extra attempt, with the pins swapped, and it is logged as such so the serial line separates
+      // it from the window. If it fails too, the next pass is TimedOut: rail off, one toast.
+      const int sda = kPinGroveDat1;   // GPIO14
+      const int scl = kPinGroveDat2;   // GPIO13
+      Serial.printf("[kb] no answer on 13/14 in %lu ms, one swapped try (14/13)\n",
+                    (unsigned long)kStartWindowMs);
+      if (openAndProbe(sda, scl)) {
+        noteFound(sda, scl, w.elapsedMs);
+        return;
+      }
+      busDown();
       return;
     }
   }

@@ -11,16 +11,18 @@ namespace cardkb {
 
 // EST-421: powers Grove through expander bit 7 and arms the non-blocking start window. It does NOT wait
 // and does NOT probe: the CardKB's ATmega needs longer than the old 50 ms settle, so step() probes
-// from the loop task until the keyboard answers or 3000 ms pass. True when the rail is on (the window
+// from the loop task until the keyboard answers or 10000 ms pass. True when the rail is on (the window
 // is running), false only when the expander write failed, so found() is still false when begin()
-// returns. EST-417: the measured order on Filip's unit is SDA = GPIO13, SCL = GPIO14, so that is tried
-// first and (14, 13) on the alternate attempts.
+// returns. EST-417: the measured order on Filip's unit is SDA = GPIO13, SCL = GPIO14. EST-423: that is
+// the ONLY order inside the window; (14, 13) is one extra attempt after it.
 bool begin();
 
 // EST-421: one pass of the start window. Call once per loop pass while the switch is on. Probes 0x5F
-// about every 100 ms, alternating the pin order, and on the answer logs `[kb] cardkb found (sda=.. scl=..)
-// after N ms` and stops; at 3000 ms it drops the rail, logs the not-found line and asks for one toast.
-// While the window is open found() is false, so nothing polls the keyboard. No delay() in here.
+// about every 100 ms in the measured order (SDA 13 / SCL 14) and on the answer logs
+// `[kb] cardkb found (sda=.. scl=..) after N ms` and stops. EST-423: after 10000 ms it makes ONE
+// swapped attempt (SDA 14 / SCL 13, logged as such); if that fails too, the next pass drops the rail,
+// logs the not-found line and asks for one toast. While the window is open found() is false, so
+// nothing polls the keyboard. No delay() in here.
 void step(uint32_t nowMs);
 
 // Bus down (if it was up), Grove power off, and an open start window cancelled. Called for the switch's

@@ -26,15 +26,20 @@ namespace {
 constexpr uint8_t kAddr = 0x5F;          // M5Stack Unit CardKB
 constexpr uint32_t kBusHz = 100000;      // the ticket's 100 kHz
 constexpr uint32_t kPollMs = 30;         // the loop's cadence while the keyboard is on
-constexpr uint32_t kSettleMs = 50;       // the ATmega8A's boot before a probe; only when ON
 
 bool s_found = false;
 bool s_busUp = false;
 bool s_haveLast = false;
-bool s_lostNotice = false;   // EST-417: the one disconnected toast, taken by the shell once
+bool s_lostNotice = false;     // EST-417: the one disconnected toast, taken by the shell once
+bool s_notFoundNotice = false; // EST-421: the start window timed out, one toast, taken once
 uint8_t s_lastCode = 0;
 uint32_t s_lastPoll = 0;
-int s_failRun = 0;           // EST-417: consecutive failed reads, reset by any good one
+int s_failRun = 0;             // EST-417: consecutive failed reads, reset by any good one
+
+// EST-421: the rail-on time and the probe schedule. The rules (3000 ms, one probe per 100 ms, the
+// alternating pin order, cancel and timeout) are cardkb_logic.h's, so test/host proves them with the
+// system g++; this file only turns a Probe into a Wire1 transaction. ONE window exists at a time.
+StartWindow s_window;
 
 bool probe() {
   Wire1.beginTransmission(kAddr);
@@ -73,42 +78,62 @@ void noteFailedRead() {
 
 bool begin() {
   busDown();
+  s_window.cancel();   // a re-enable always starts a fresh window (and probe order 13 first)
   s_found = false;
   s_haveLast = false;
   s_failRun = 0;
   s_lostNotice = false;
+  s_notFoundNotice = false;
   if (!boardGrovePower(true)) {
     Serial.println("[kb] Grove power FAILED (expander)");
     return false;
   }
-  delay(kSettleMs);
-  // Seeed names the pins GROVE_DAT_1 = GPIO14 and GROVE_DAT_2 = GPIO13 but no board source says
-  // which is SDA. EST-417: Filip's probe answered at SDA = GPIO13, SCL = GPIO14, so that order goes
-  // first now; the other one is still tried once. Only these two probes, on enable only.
-  if (openAndProbe(kPinGroveDat2, kPinGroveDat1)) {
-    s_found = true;
-    s_busUp = true;
-    Serial.printf("[kb] cardkb found (sda=%d scl=%d)\n", kPinGroveDat2, kPinGroveDat1);
-    return true;
+  // EST-421: the rail is on and this returns AT ONCE. The ATmega8A needs longer than the old 50 ms
+  // settle, so step() (the loop task) probes 0x5F every ~100 ms until the keyboard answers or the
+  // window of kStartWindowMs ends. Nothing waits here: boot and the UI run on, and found() stays
+  // false until a keyboard answers, so no key is read early.
+  s_window.start(millis());
+  return true;
+}
+
+void step(uint32_t nowMs) {
+  const WindowStep w = s_window.next(nowMs);
+  switch (w.action) {
+    case WindowAction::Idle:
+      return;
+    case WindowAction::TimedOut:
+      // No hot-plug rescan: a rail left on here would only drain the battery all day when the switch
+      // stays on and the keyboard is not carried. Toggling the switch off and on powers it up and
+      // opens one more window.
+      busDown();
+      boardGrovePower(false);
+      Serial.printf("[kb] cardkb not found after %lu ms, Grove power off\n",
+                    (unsigned long)kStartWindowMs);
+      s_notFoundNotice = true;
+      return;
+    case WindowAction::Probe: {
+      // Seeed names the pins GROVE_DAT_1 = GPIO14 and GROVE_DAT_2 = GPIO13 but no board source says
+      // which is SDA. EST-417: Filip's probe answered at SDA = GPIO13, SCL = GPIO14, so that order is
+      // tried first on every even attempt; the other one on every odd attempt (EST-421 keeps it).
+      const int sda = w.sda13First ? kPinGroveDat2 : kPinGroveDat1;
+      const int scl = w.sda13First ? kPinGroveDat1 : kPinGroveDat2;
+      if (openAndProbe(sda, scl)) {
+        s_found = true;          // the bus stays up: the probe helper set s_busUp
+        s_window.cancel();
+        Serial.printf("[kb] cardkb found (sda=%d scl=%d) after %lu ms\n", sda, scl,
+                      (unsigned long)w.elapsedMs);
+        return;
+      }
+      busDown();   // a failed attempt closes its half-open bus before the next one
+      return;
+    }
   }
-  busDown();
-  if (openAndProbe(kPinGroveDat1, kPinGroveDat2)) {
-    s_found = true;
-    s_busUp = true;
-    Serial.printf("[kb] cardkb found (sda=%d scl=%d)\n", kPinGroveDat1, kPinGroveDat2);
-    return true;
-  }
-  busDown();
-  // Review fix (Claude): there is no hot-plug rescan, so a rail left on here would only drain the
-  // battery all day when the switch stays on and the keyboard is not carried. Toggling the switch
-  // off and on again powers it up and probes once more.
-  boardGrovePower(false);
-  Serial.println("[kb] cardkb not found, Grove power off");
-  return false;
 }
 
 void end() {
-  const bool wasOn = s_busUp || boardGrovePowerOn();
+  const bool wasOn = s_busUp || boardGrovePowerOn() || s_window.active();
+  s_window.cancel();   // EST-421: switching OFF mid-window cancels it, so no timeout toast follows
+  s_notFoundNotice = false;
   busDown();
   s_found = false;
   s_haveLast = false;
@@ -123,6 +148,12 @@ bool found() { return s_found && s_busUp; }
 bool takeLostNotice() {
   if (!s_lostNotice) return false;
   s_lostNotice = false;
+  return true;
+}
+
+bool takeNotFoundNotice() {
+  if (!s_notFoundNotice) return false;
+  s_notFoundNotice = false;
   return true;
 }
 

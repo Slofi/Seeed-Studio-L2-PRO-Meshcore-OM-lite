@@ -63,17 +63,22 @@ def main(argv):
     rptrc = (src / "screens" / "rptr_tab.cpp").read_text(encoding="utf-8")
     rptrh = (src / "screens" / "rptr_tab.h").read_text(encoding="utf-8")
 
-    # --- the measured pin order: SDA 13 first, the fallback kept ------------------------------
-    begin = block(driver, "bool begin() {", "void end() {")
-    first = begin.find("openAndProbe(kPinGroveDat2, kPinGroveDat1)")
-    second = begin.find("openAndProbe(kPinGroveDat1, kPinGroveDat2)")
-    if first < 0 or second < 0:
-        fail("the probe no longer tries both pin orders")
-    elif first > second:
+    # --- the measured pin order: SDA 13 first, the other order kept ----------------------------
+    # EST-421: the probe moved out of begin() into the start window's step(), which tries the
+    # measured order (SDA 13 / SCL 14) first and the swap on every alternate attempt.
+    begin = block(driver, "bool begin() {", "void step(uint32_t nowMs) {")
+    if "openAndProbe" in begin:
+        fail("begin() must not probe: the start window's step() does that now")
+    step = block(driver, "void step(uint32_t nowMs) {", "void end() {")
+    need(step, "w.sda13First ? kPinGroveDat2 : kPinGroveDat1",
+         "the probe no longer tries SDA = 13 (kPinGroveDat2) first")
+    need(step, "w.sda13First ? kPinGroveDat1 : kPinGroveDat2",
+         "the probe no longer tries the other pin order")
+    if step.find("w.sda13First ? kPinGroveDat2") > step.find("w.sda13First ? kPinGroveDat1"):
         fail("the probe still tries SDA=14 first (Filip measured SDA=13)")
-    if driver.count("openAndProbe(kPinGrove") != 2:
-        fail(f"the enable path must try exactly two pin orders, found "
-             f"{driver.count('openAndProbe(kPinGrove')}")
+    if driver.count("openAndProbe(") != 2:   # the helper's definition and its one call
+        fail(f"the enable path must have one probe call site, found "
+             f"{driver.count('openAndProbe(')} mentions")
 
     # --- the unplugged keyboard --------------------------------------------------------------
     lost = block(driver, "void noteFailedRead()", "}  // namespace")

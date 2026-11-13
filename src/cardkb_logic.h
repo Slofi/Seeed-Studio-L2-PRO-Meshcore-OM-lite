@@ -130,5 +130,73 @@ inline bool lostAfterFailure(int consecutiveFailures) {
   return consecutiveFailures >= kFailLimit;
 }
 
+// ------------------------------------------------------------------------------------------------
+// EST-421: the start window. The CardKB's ATmega8A needs longer than the old fixed 50 ms settle after
+// the Grove 5 V rail comes on (proven on Filip's unit on 2026-11-13: the keyboard only answered after
+// the rail had been on for about a minute). So the enable no longer waits: it powers the rail and this
+// state machine says when the loop task should probe 0x5F, until the keyboard answers or the window
+// ends. Nothing here blocks, and nothing polls the keyboard while the window is open (found() is
+// false until the answer), so boot and the UI never wait for a keyboard.
+constexpr uint32_t kStartWindowMs = 3000;   // the ticket's ceiling, measured from the rail on
+constexpr uint32_t kProbeIntervalMs = 100;  // one probe per ~100 ms inside the window
+
+enum class WindowAction : uint8_t {
+  Idle = 0,   // no window open, or not due yet: this pass does nothing
+  Probe,      // probe 0x5F now, in the pin order the step names
+  TimedOut,   // the window is over with no answer: drop the rail, tell the user once
+};
+
+struct WindowStep {
+  WindowAction action = WindowAction::Idle;
+  bool sda13First = true;   // Probe only: SDA 13 / SCL 14 (the measured order) or the swap
+  uint32_t elapsedMs = 0;   // ms since the rail came on, the N in the found log
+};
+
+class StartWindow {
+ public:
+  // Power has just been applied. The first probe is due at once (elapsed 0) because the keyboard may
+  // answer immediately when the rail never went down; then one every kProbeIntervalMs. The window
+  // closes at kStartWindowMs whatever the attempts did. A second start() begins a fresh window.
+  void start(uint32_t nowMs) {
+    active_ = true;
+    startMs_ = nowMs;
+    dueMs_ = nowMs;
+    probes_ = 0;
+  }
+
+  // Switch OFF mid-window: no more probes, no timeout toast. The driver drops the rail itself.
+  void cancel() { active_ = false; }
+
+  bool active() const { return active_; }
+  uint32_t probes() const { return probes_; }
+  uint32_t elapsed(uint32_t nowMs) const { return nowMs - startMs_; }
+
+  // The one decision for this loop pass. Timeout is checked FIRST, so the window's last millisecond
+  // is 3000 and no probe is made at the closing instant. A slow pass cannot bunch probes up: the next
+  // due time is 100 ms after the attempt that really happened, never a catch-up burst.
+  WindowStep next(uint32_t nowMs) {
+    WindowStep s;
+    if (!active_) return s;
+    s.elapsedMs = elapsed(nowMs);
+    if (s.elapsedMs >= kStartWindowMs) {
+      s.action = WindowAction::TimedOut;
+      active_ = false;
+      return s;
+    }
+    if ((int32_t)(nowMs - dueMs_) < 0) return s;
+    s.action = WindowAction::Probe;
+    s.sda13First = (probes_ % 2) == 0;   // 13 first, then 14, then 13: the ticket's alternation
+    ++probes_;
+    dueMs_ = nowMs + kProbeIntervalMs;
+    return s;
+  }
+
+ private:
+  bool active_ = false;
+  uint32_t startMs_ = 0;
+  uint32_t dueMs_ = 0;
+  uint32_t probes_ = 0;
+};
+
 }  // namespace cardkb
 }  // namespace om

@@ -75,17 +75,28 @@ def main(argv):
     need(boardh, "bool boardGrovePower(bool on)", "board.h has no Grove power setter")
     need(boardc, "setOutput(kBitGrovePower, on)", "the setter does not write expander bit 7")
 
-    # --- the enabled path: ONE second bus, two pin orders, no more ---------------------------
+    # --- the enabled path: ONE second bus, the two pin orders, no more -----------------------
     need(driver, "constexpr uint8_t kAddr = 0x5F", "the driver does not probe 0x5F")
     need(driver, "constexpr uint32_t kBusHz = 100000", "the bus is not 100 kHz")
     need(driver, "Wire1.begin(sda, scl, kBusHz)", "the driver does not open Wire1")
-    tries = driver.count("openAndProbe(kPinGrove")
-    if tries != 2:
-        fail(f"the enable path must try BOTH pin orders exactly once each, found {tries} calls")
+    # EST-421: the probes moved out of begin() into the start window (one attempt per call), so the
+    # two measured orders now live in step(); the window itself is test_est421's subject.
+    need(driver, "openAndProbe(sda, scl)", "the start window never probes the keyboard")
+    need(driver, "w.sda13First ? kPinGroveDat2 : kPinGroveDat1",
+         "SDA = 13 is no longer the first order")
+    need(driver, "w.sda13First ? kPinGroveDat1 : kPinGroveDat2",
+         "the (14, 13) fallback order is missing")
+    if driver.count("openAndProbe(") != 2:   # the helper's definition and its one call
+        fail(f"the enable path must have one probe call site, found "
+             f"{driver.count('openAndProbe(')} mentions")
     need(driver, "[kb] cardkb found", "the found log line is missing")
-    need(driver, "[kb] cardkb not found", "the not-found log line is missing")
-    # Review fix (Claude): no rescan, so a not-found probe must drop the 5 V rail again.
-    need(driver, "boardGrovePower(false);\n  Serial.println(\"[kb] cardkb not found, Grove power off\");", "a not-found probe leaves the Grove 5 V rail on")
+    need(driver, "[kb] cardkb not found after", "the not-found log line is missing")
+    # Review fix (Claude): no rescan, so a not-found window must drop the 5 V rail again. EST-421:
+    # that now happens at the end of the 3000 ms window, before the log line.
+    timeout = block(driver, "case WindowAction::TimedOut:", "case WindowAction::Probe:")
+    need(timeout, "boardGrovePower(false);", "a timed-out window leaves the Grove 5 V rail on")
+    if timeout.find("boardGrovePower(false)") > timeout.find("[kb] cardkb not found after"):
+        fail("the not-found log comes before the Grove rail is dropped")
     need(boardh, "kPinGroveDat1 = 14", "Grove DAT_1 is not GPIO14")
     need(boardh, "kPinGroveDat2 = 13", "Grove DAT_2 is not GPIO13")
     forbid(driver, "malloc(", "the keyboard driver must not allocate")
@@ -109,7 +120,10 @@ def main(argv):
     need(toggle, "cardkb::end()", "the OFF action does not close the bus and the power")
     need(toggle, 'mapLayerPrefWrite(nullptr, "grovekb", g_kbEnabled)',
          "the switch does not write the shared bool key")
-    need(toggle, "CardKB not found", "the not-found toast is missing")
+    # EST-421: begin() no longer knows whether the keyboard answered, so the toggle cannot toast
+    # "not found"; the loop's cardKbStep() does, after the 3000 ms window.
+    forbid(toggle, 'showToast("CardKB not found")',
+           "a non-blocking begin() cannot report a missing keyboard")
 
     # --- polling: one call site, in the loop, behind the gate --------------------------------
     field = block(maincpp, "static bool textFieldOpen()", "static om::IdleBlockers idleBlockersNow")

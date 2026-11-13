@@ -96,7 +96,8 @@ BIN65="$(mktemp /tmp/om-lite-est414.XXXXXX)"
 BIN66="$(mktemp /tmp/om-lite-est416.XXXXXX)"
 BIN67="$(mktemp /tmp/om-lite-est417.XXXXXX)"
 BIN68="$(mktemp /tmp/om-lite-est418.XXXXXX)"
-trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65" "$BIN66" "$BIN67" "$BIN68"' EXIT
+BIN69="$(mktemp /tmp/om-lite-est421.XXXXXX)"
+trap 'rm -f "$BIN" "$BIN2" "$BIN3" "$BIN4" "$BIN5" "$BIN6" "$BIN7" "$BIN8" "$BIN9" "$BIN10" "$BIN11" "$BIN12" "$BIN13" "$BIN14" "$BIN15" "$BIN16" "$BIN17" "$BIN18" "$BIN19" "$BIN20" "$BIN21" "$BIN22" "$BIN23" "$BIN24" "$BIN25" "$BIN26" "$BIN27" "$BIN28" "$BIN29" "$BIN30" "$BIN31" "$BIN32" "$BIN33" "$BIN34" "$BIN35" "$BIN36" "$BIN37" "$BIN38" "$BIN39" "$BIN40" "$BIN41" "$BIN42" "$BIN43" "$BIN44" "$BIN45" "$BIN46" "$BIN47" "$BIN48" "$BIN49" "$BIN50" "$BIN51" "$BIN52" "$BIN53" "$BIN54" "$BIN55" "$BIN56" "$BIN57" "$BIN58" "$BIN59" "$BIN60" "$BIN61" "$BIN62" "$BIN63" "$BIN64" "$BIN65" "$BIN66" "$BIN67" "$BIN68" "$BIN69"' EXIT
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_layout.cpp -o "$BIN"
 "$BIN"
 # Migration (EST-340): identity bytes, the 16-byte -> 32-byte channel secret mapping, the
@@ -695,3 +696,14 @@ python3 -B test_est417.py
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est418.cpp \
   ../../src/power_log_logic.cpp ../../src/timekeeper.cpp -o "$BIN68"
 "$BIN68"
+
+# EST-421: the CardKB's non-blocking start window. C++: the state machine driven millisecond by
+# millisecond, an answer at 0/400/2900 ms found with that N, no answer a timeout at exactly 3000 ms,
+# the switch OFF mid-window cancelling it, ~100 ms spacing with the pin order alternating and no
+# catch-up burst after a slow pass. test_est421.py is the source half: begin() only powers and arms
+# (no probe, no blocking wait anywhere in the driver), step() is the one place the window advances,
+# the after-N found log, the 3000 ms not-found line with the rail dropped first, the OFF cancel, and
+# the shell's one call per pass plus the ticket's toast.
+g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../src test_est421.cpp -o "$BIN69"
+"$BIN69"
+python3 -B test_est421.py

@@ -2760,7 +2760,8 @@ static void handleSettingsRow(uint16_t id) {
     }
     // EST-412: the Grove keyboard switch. The setting is RAM first and NVS after (a failed write is
     // said out loud but does not undo the switch), exactly like the other saved bools. ON powers
-    // Grove, opens the second bus and probes 0x5F once in each pin order; OFF closes the bus and
+    // Grove and opens the start window (cardkb::begin() returns at once; the loop probes for up to
+    // 3000 ms and toasts if nothing answers); OFF cancels a window still running, closes the bus and
     // drops the 5 V rail. Nothing here runs while the switch is off.
     case A_GroveKeyboard: {
       g_kbEnabled = !g_kbEnabled;
@@ -2768,7 +2769,7 @@ static void handleSettingsRow(uint16_t id) {
       if (!saved) showToast("Keyboard setting not saved");
       Serial.printf("[kb] switch %s (saved=%d)\n", g_kbEnabled ? "on" : "off", saved ? 1 : 0);
       if (g_kbEnabled) {
-        if (!om::cardkb::begin()) showToast("CardKB not found");
+        if (!om::cardkb::begin()) showToast("Grove power failed");
       } else {
         om::cardkb::end();
       }
@@ -3540,15 +3541,16 @@ void setup() {
   loadEmojiRecent();
   // EST-412: the Grove keyboard switch. DEFAULT OFF and a missing key means OFF (cardkb_logic.h's
   // enabledFromNvs), so an upgrade from an image without this key powers nothing and opens no bus.
-  // Only a saved ON runs the 50 ms settle, the power bit and the probe; the OFF path here is one
-  // NVS read and nothing else.
+  // EST-421: a saved ON powers the rail and opens the start window (cardkb::begin() returns at once);
+  // the loop's cardKbStep() probes until the keyboard answers, so boot never waits. The OFF path here
+  // is one NVS read and nothing else.
   {
     bool saved = false;
     const bool present = mapLayerPrefRead(nullptr, "grovekb", false, saved);
     g_kbEnabled = om::cardkb::enabledFromNvs(present, saved);
     Serial.printf("[kb] switch %s (%s)\n", g_kbEnabled ? "on" : "off",
                   present ? "saved" : "default");
-    if (g_kbEnabled && !om::cardkb::begin()) showToast("CardKB not found");
+    if (g_kbEnabled && !om::cardkb::begin()) showToast("Grove power failed");
   }
   // EST-405: the screen auto-off switch and time. DEFAULT OFF and 1 min; a missing key writes
   // nothing, so an upgrade from an image without them changes no NVS byte. The timer starts its
@@ -4329,10 +4331,17 @@ static void cardKbKey(uint8_t code) {
 // now only decides what a key does). cardkb::poll() meters itself to ~30 ms and returns one new
 // press at a time.
 static void cardKbStep(uint32_t nowMs) {
+  // EST-421: the start window. This is the ONLY place it advances: one call per loop pass, metered
+  // inside to one probe per ~100 ms and closed at 3000 ms. No delay(), so the UI runs between
+  // probes; found() is false until the keyboard answers, so nothing polls it early. Off = no window.
+  om::cardkb::step(nowMs);
   // EST-417 rule 8: the keyboard was pulled out. The driver has already logged once, closed the bus
   // and dropped Grove power; all that is left is the short toast. Checked before the gate, because
   // found() is false by now. The switch stays ON: off and on again probes.
   if (om::cardkb::takeLostNotice()) showToast("Keyboard disconnected");
+  // EST-421: the window ran out with no answer. The driver has already dropped the rail; this is the
+  // ticket's toast. Switching the keyboard off and on again opens a fresh window.
+  if (om::cardkb::takeNotFoundNotice()) showToast("CardKB not found (switch off/on to retry)");
   if (!om::cardkb::shouldPoll(g_kbEnabled, om::cardkb::found())) return;
   const int code = om::cardkb::poll(nowMs);
   if (code > 0) cardKbKey((uint8_t)code);

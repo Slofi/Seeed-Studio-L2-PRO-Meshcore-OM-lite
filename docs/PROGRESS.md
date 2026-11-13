@@ -9782,3 +9782,113 @@ Claude: review and commit. Filip: after a flash, `log power tail` should show th
 `,heard` on a NEW day file (fresh card or a new date), and the last number of each row should follow
 the heartbeat's `heard=`, not `used=`; a night in a window should show `sats 0` with a `heard` that
 is still above zero whenever the GPS can hear the sky.
+
+## EST-421 CardKB start window
+
+**The bug (Filip, 2026-11-13):** on startup the L2 said "CardKB not found" although the keyboard was
+plugged in and the switch ON, and also after toggling the switch. **The cause, proven on the device by
+Claude 08:52-08:54:** `cardkb::begin()` powered the Grove 5 V rail, waited a fixed `kSettleMs = 50`,
+probed twice and, on no answer, dropped the rail again. The CardKB's own ATmega8A needs longer than
+50 ms after power-up: with the switch OFF, `grove on` over USB, about 70 s of waiting and then the
+switch ON, it logged `[kb] cardkb found (sda=13 scl=14)` at once and worked. Yesterday's "works" at
+14:27 was masked the same way (`grove on` had been sent minutes earlier). Not the pin order, not the
+EST-417 lost-keyboard rule.
+
+### What changed
+- `src/cardkb_logic.h`: new `StartWindow` state machine, plain C++ (no Arduino, no Wire) so `test/host`
+  proves it. `kStartWindowMs = 3000`, `kProbeIntervalMs = 100`. `next(nowMs)` returns one of
+  `WindowAction::Idle / Probe / TimedOut` in a `WindowStep` (the pin order for that attempt and the
+  elapsed ms). The first probe is due at once (elapsed 0, the keyboard may answer immediately if the
+  rail never went down), then one every 100 ms; even attempts are SDA 13 / SCL 14 (Filip's measured
+  order, EST-417), odd attempts swap. The timeout is checked BEFORE the due time, so the last probe is
+  at 2900 ms and the window ends at exactly 3000 ms with no probe at the edge. The next due time is
+  `nowMs + 100`, not `due += 100`, so a slow loop pass cannot bunch two probes up. `cancel()` closes
+  the window (switch OFF), `start()` resets time, order and count.
+- `src/cardkb.cpp`: `begin()` now powers the rail and arms the window, then returns at once: no
+  `delay(`, no probe, no settle. Its bool now means "the rail is on / the window is running" and is
+  false only when the expander write failed. New `step(nowMs)` is the only place the window advances:
+  on `Probe` it opens `Wire1` in the step's order, probes 0x5F, keeps the bus on the answer and logs
+  `[kb] cardkb found (sda=%d scl=%d) after %lu ms` (N = ms since the rail went on), closing the
+  window; on a failed attempt it closes that half-open bus. On `TimedOut` it closes the bus, drops the
+  Grove rail and logs `[kb] cardkb not found after 3000 ms, Grove power off`, setting a one-shot
+  not-found notice for the shell. `end()` also cancels an open window and clears that notice, so
+  switching OFF mid-window means no probes, no timeout and no toast. `found()` is still
+  `s_found && s_busUp`, so while a window is open it is false and `shouldPoll()` reads nothing.
+  `takeNotFoundNotice()` is the driver's one flag to the shell, exactly like EST-417's lost notice.
+  No allocation, no task, no second call site.
+- `src/cardkb.h`: `step()` and `takeNotFoundNotice()` declared, `begin()`/`end()` comments say what
+  they now do.
+- `src/main.cpp`: the boot and the Settings toggle call `cardkb::begin()` and do not wait; a false
+  return (expander only) toasts "Grove power failed". `cardKbStep()` calls `om::cardkb::step(nowMs)`
+  once per loop pass BEFORE the gate (so the window advances on every pass, on any screen), then takes
+  the EST-417 lost notice and the new not-found notice, which toasts
+  "CardKB not found (switch off/on to retry)". Then the unchanged
+  `shouldPoll(g_kbEnabled, om::cardkb::found())` and the one `poll` call. Turning the switch OFF
+  during the window goes through `end()` and cancels it. `textFieldOpen`/arrow handling untouched.
+- Kept from EST-412/417: OFF means no power and no bus, the lost-keyboard rule and its toast, the
+  arrows, the pin order, the one poll call site and the gate.
+
+### Tests
+- New `test/host/test_est421.cpp` (plain g++, no Arduino), in `run.sh` as `$BIN69`. It drives the
+  state machine 1 ms at a time: an answer at 0, 400 and 2900 ms is found with N = 0, 400, 2900 and
+  the right attempt count (1, 5, 30); no answer is a timeout at exactly 3000 ms (the loop to 2999
+  never times out, the closing millisecond does, and later passes are Idle, so no second toast); the
+  switch OFF at 150 ms leaves 2 probes, no timeout; cancel before the first probe probes nothing;
+  cancel after the answer changes nothing; attempts are exactly 100 ms apart and alternate
+  (13 first on even attempts); a slow 250 ms pass gives one probe then the next at 350, not a burst;
+  a fresh `start()` after OFF/ON probes at once with 13 first and count 0; `kStartWindowMs == 3000`
+  and `kProbeIntervalMs == 100`.
+- New `test/host/test_est421.py`, the source half: the constants and the state machine exist; `begin()`
+  has `boardGrovePower(true)` + `s_window.start(millis())` and no probe and no blocking wait (no
+  `delay(` anywhere in `cardkb.cpp`, no `kSettleMs`); `step()` asks the state machine, probes through
+  `openAndProbe(sda, scl)` in both orders, prints the after-N line, cancels on the answer, and in the
+  timeout branch drops the rail BEFORE the not-found line and raises the notice; `end()` cancels the
+  window and clears the notice; the shell advances the window once, before the gate, and shows both
+  toasts; the boot/toggle paths no longer claim "CardKB not found" from `begin()`; the poll still has
+  one call site.
+- Updated for the new enable path: `test_est412.py` (the two probe orders now live in `step()`, one
+  probe call site, the not-found line is the 3000 ms one with the rail dropped first, and the toggle
+  no longer toasts "not found") and `test_est417.py` (SDA 13 first is checked in `step()`, `begin()`
+  must not probe, one probe call site). Their C++ halves are unchanged.
+- `sh test/host/run.sh`: REAL exit 0, 0 `FAIL` lines, including the new EST-421 test (`est421: CardKB
+  start window: answers at 0/400/2900 -> found N, timeout at 3000, cancel, 100 ms alternating probes`
+  and the source line).
+- **Armed against the current 50 ms code.** The new `test_est421.cpp` against an export of HEAD
+  (`git archive HEAD`, the pre-fix tree): compile error, exit 1 (no `StartWindow`, no
+  `kStartWindowMs`). `test_est421.py` against the same export: exit 1 with 33 failures (the old
+  `delay(`, the two probes in `begin()`, no `step()`, the old toast). Mutations of the new header,
+  one at a time in /tmp: `kStartWindowMs = 3001` -> exit 1 (4 failures, the exact 3000 timeout);
+  `sda13First = true` (no alternation) -> exit 1 (17); `cancel()` empty -> exit 1 (14); first probe
+  after 100 ms -> exit 1 (13); `kProbeIntervalMs = 50` -> exit 1 (12); timeout 100 ms early -> exit 1
+  (11); `dueMs_ += kProbeIntervalMs` (the catch-up burst) -> exit 1 (3). Restored, exit 0.
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0 (clean build, 191.6 s).
+  RAM **160,912 B** (49.1% of 327,680), was 160,896 B, **+16 B** (the `StartWindow`'s bool plus its
+  three `uint32_t`s and the one new notice bool fit the padding the old scalars already had).
+  Flash **3,002,189 B** (45.8% of 6,553,600), was 3,001,973 B, **+216 B**.
+  `firmware.bin` 3,002,560 B, was 3,002,336 B (+224 B).
+- `sh test/host/run.sh`: REAL exit 0, 0 `FAIL` lines (the full suite).
+- A second build after this entry was written (incremental, 22.5 s): REAL exit 0 and the same RAM
+  160,912 B / Flash 3,002,189 B, so the numbers above are the final tree's.
+
+### Could not check (no device in this run)
+- Nothing about the glass or the keyboard: no L2 was flashed and no CardKB was probed here. Not tested
+  on hardware: that the real start-up time after a cold rail is inside 3000 ms (the 08:52 proof only
+  says "longer than 50 ms", and the after-N log will tell us the real number), that 30 probes at
+  100 ms do not disturb the keyboard's own boot, that a key pressed during the window is not lost in
+  a way the user notices (nothing is read until the answer, by design), and that the timeout toast
+  reads right on the glass. The rail drop on timeout is host-tested only as a source ordering check
+  (state machine says TimedOut, `cardkb.cpp` drops the rail before logging); no meter was attached.
+- The 5 V/safety note of EST-412 still stands unchanged (about 3.3 V expected on SDA/SCL, above
+  3.6 V stop).
+- The heap cost of a window's 30 `Wire1.begin()`/`end()` pairs (Arduino allocates 2 x 128 B per
+  begin and frees them in end, the same size every time) was not measured: the boot line prints the
+  static RAM only, and no device was attached. Nothing else allocates on this path.
+
+### Next step
+Claude: review and commit. Filip: flash with the keyboard switch ON and the keyboard plugged in; the
+boot should NOT pause and `[kb] cardkb found (sda=13 scl=14) after N ms` should appear within a second
+or so, N telling us the real start-up time. Then: boot with the keyboard unplugged (after 3000 ms one
+`[kb] cardkb not found after 3000 ms, Grove power off` and the toast, rail off), switch it OFF during
+a window (no toast, rail off), and switch it on again with the keyboard plugged in.

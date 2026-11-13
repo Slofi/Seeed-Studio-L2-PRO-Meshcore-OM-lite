@@ -124,10 +124,14 @@ def main(argv):
     boot = block(maincpp, "EST-412: the Grove keyboard switch.", "EST-405: the screen auto-off")
     need(boot, "cardkb::begin()", "a saved ON no longer enables the keyboard")
     need(boot, 'showToast("Grove power failed")', "an expander failure is not said out loud")
+    # EST-422: the switch asks first; the ON/OFF work (and so begin()/end()) moved into the one apply.
     toggle = block(maincpp, "case A_GroveKeyboard:", "case A_Sound:")
-    need(toggle, "cardkb::begin()", "the ON action does not arm the window")
-    need(toggle, "cardkb::end()", "the OFF action does not cancel and power down")
-    forbid(toggle, 'showToast("CardKB not found")',
+    need(toggle, "ConfirmKind::KeyboardSwitch", "the switch does not ask in the shared sheet")
+    apply_kb = block(maincpp, "case om::ui::ConfirmKind::KeyboardSwitch:",
+                     "case om::ui::ConfirmKind::Position:")
+    need(apply_kb, "cardkb::begin()", "the ON action does not arm the window")
+    need(apply_kb, "cardkb::end()", "the OFF action does not cancel and power down")
+    forbid(apply_kb, 'showToast("CardKB not found")',
            "a non-blocking begin() cannot know whether the keyboard answered")
     need(header, "void step(uint32_t nowMs);", "cardkb.h does not declare step()")
     need(header, "bool takeNotFoundNotice();", "cardkb.h does not declare the not-found notice")

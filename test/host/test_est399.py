@@ -43,73 +43,53 @@ def forbid(haystack, needle, what):
 def main():
     main_cpp = read("src/main.cpp")
 
-    # ---- 1. one arm per row ---------------------------------------------------------------------
+    # ---- 1. one pattern for every delete (EST-422) ---------------------------------------------
+    # EST-399 gave each delete row its own "tap again" arm. EST-422 replaced all of them with the ONE
+    # confirm sheet, so the arms are gone from the shell and every destructive call lives in the sheet's
+    # single apply, behind the user's Apply. The DeleteArm struct itself stays in ui/delete_arm.h and is
+    # still tested by test_est399.cpp; it simply has no caller in the shell any more.
     forbid(main_cpp, "g_deleteArmed", "the one shared delete flag")
-    for arm in ("g_wifiForgetArm", "g_chatDeleteArm", "g_chanDeleteArm"):
-        need(main_cpp, f"om::ui::DeleteArm {arm};", "main.cpp declares one arm per row family")
-    need(main_cpp, "#include \"ui/delete_arm.h\"", "main.cpp includes the arm")
+    forbid(main_cpp, "om::ui::DeleteArm", "a per-row delete arm in the shell")
+    forbid(main_cpp, "#include \"ui/delete_arm.h\"", "the arm include in the shell")
+    forbid(main_cpp, "clearDeleteArms", "the arm-clearing helper")
+    forbid(main_cpp, "Tap again to", "a \"tap again\" label on the glass")
 
-    # Every destructive call is guarded by the arm's own confirmation.
-    for call, arm in (("om::wifiForget(", "g_wifiForgetArm"),
-                      ("om::mcChannelRemove(g_chanPage)", "g_chanDeleteArm"),
-                      ("om::mcChannelRemove(ch)", "g_chatDeleteArm")):
-        idx = main_cpp.find(call)
-        if idx < 0:
-            fail(f"the destructive call {call} is missing")
-            continue
-        window = main_cpp[max(0, idx - 400):idx]
-        if f"{arm}.tap(" not in window:
-            fail(f"{call} is not behind {arm}.tap(...) == Confirmed")
-        if "om::ui::DeleteArm::Tap::Confirmed" not in window:
-            fail(f"{call} is not guarded by Tap::Confirmed")
+    # The one apply, and only the one apply, runs the destructive calls.
+    if main_cpp.count("static void settingsApplyConfirmed(") != 1:
+        fail("the confirm sheet's apply is not exactly one function")
+    apply_at = main_cpp.find("static void settingsApplyConfirmed(")
+    apply_end = main_cpp.find("\n}\n", apply_at)
+    apply_block = main_cpp[apply_at:apply_end] if apply_at >= 0 and apply_end > apply_at else ""
+    for call in ("om::wifiForget(", "om::mcChannelRemove(", "om::rptrForget(", "om::mcChannelRemove(",
+                 "om::meshNodeNameSet(", "om::meshPathHashSet(", "om::posSelectGps(",
+                 "om::posSelectFixed(", "om::wifiSetEnabled(", "om::bleSetEnabled("):
+        if call not in apply_block:
+            fail(f"the confirmed apply does not run {call}")
+    # Each of those ids is asked for first: the rows and the commit points call askChange()/g_ask.
+    for kind in ("Preset", "TxPower", "PathHash", "NodeName", "ChannelDelete", "WifiForget",
+                 "RepeaterForget", "WifiSwitch", "BtSwitch", "KeyboardSwitch", "Position",
+                 "ClearMessages"):
+        need(main_cpp, f"om::ui::ConfirmKind::{kind}", f"the {kind} change is not named")
 
-    # The labels are the arm's own answer, so a label can never outlive the window.
-    need(main_cpp, 'forgetArmed ? "Tap again to forget" : "Forget"', "the Wi-Fi row's own label")
-    need(main_cpp, "g_wifiForgetArm.armedRow(millis()) == i", "the Wi-Fi label comes from the arm")
-    need(main_cpp, 'chatDeleteArmed ? "Tap again to delete" : "Delete channel"', "the chat label")
-    need(main_cpp, "g_chatDeleteArm.armedRow(millis()) == ch", "the chat label comes from the arm")
-    need(main_cpp, 'chanDeleteArmed ? "Tap again to delete" : "Delete channel"', "the channel label")
-    need(main_cpp, "g_chanDeleteArm.armedRow(millis()) == (int)g_chanPage",
-         "the channel label comes from the arm")
+    # A row never runs a change itself: the delete rows are plain labels, and the tap asks.
+    need(main_cpp, 'setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Delete channel", "", false, true);',
+         "the Chat page's delete row is a plain Delete")
+    need(main_cpp, 'setAdd(om::ui::SetRowKind::Button, A_ChanDelete, "Delete channel", "", false, true);',
+         "the Channel page's delete row is a plain Delete")
+    need(main_cpp, 'setAdd(om::ui::SetRowKind::Button, (uint16_t)(A_WifiForgetBase + i), "Forget", "",',
+         "the Wi-Fi Forget row is a plain Forget")
 
-    # Any other tap on the page disarms (the ticket's \"disarm on any other tap\").
-    need(main_cpp, "if (id != A_ChatDelete) g_chatDeleteArm.clear();",
-         "another row's action disarms the chat delete")
-    need(main_cpp, "if (id != A_ChanDelete) g_chanDeleteArm.clear();",
-         "another row's action disarms the channel delete")
-    need(main_cpp, "if (id < A_WifiForgetBase || id >= A_WifiForgetBase + om::wifi::kMaxSaved) "
-                   "g_wifiForgetArm.clear();",
-         "another row's action disarms the Wi-Fi forget")
+    # The sheet is the highest layer of the tap path and of the pressed look.
+    need(main_cpp, "if (g_ask.open) {", "the tap path does not give the sheet the top layer")
+    need(main_cpp, "settingsApplyConfirmed(k, answered.arg, answered.value);",
+         "the sheet's Apply does not reach the one apply")
+    need(main_cpp, "om::ui::settingsAskHit(v, x, y)", "the sheet is not hit-tested from its own layout")
 
-    # Leaving a page disarms every arm: the three leave paths must call the one clear function.
-    # EST-414 moved settingsBack's leave-the-page clears into ONE helper, settingsLeaveState(), which
-    # Back and the RPTR "Open repeater" row both call, so the check follows the call into the helper
-    # and then proves Back still goes through it. The invariant is the same one EST-399 asked for.
-    clears = main_cpp.count("clearDeleteArms();")
-    if clears < 7:
-        fail(f"only {clears} clearDeleteArms() calls; every page-leave path needs one "
-             f"(setGo, setBack, openSettings, settingsLeaveState, the tab switch, the selector, "
-             f"A_ChatPick)")
-    for fn in ("static void setGo(SetPage p) {", "static void setBack() {",
-               "static void openSettings(int mainTab, om::ui::SettingsTab tab) {",
-               "static void settingsLeaveState() {"):
-        idx = main_cpp.find(fn)
-        if idx < 0:
-            fail(f"main.cpp: {fn} not found")
-            continue
-        if "clearDeleteArms();" not in main_cpp[idx:idx + 2500]:
-            fail(f"main.cpp: {fn} does not clear the delete arms on the way out")
-    idx = main_cpp.find("static void settingsBack() {")
-    if idx < 0:
-        fail("main.cpp: static void settingsBack() { not found")
-    elif "settingsLeaveState();" not in main_cpp[idx:idx + 2500]:
-        fail("main.cpp: settingsBack() does not leave through settingsLeaveState()")
-
-    # The timeout reaches the glass.
-    need(main_cpp, "static void deleteArmTick(uint32_t now)", "the arm timeout tick exists")
-    need(main_cpp, "deleteArmTick(millis());", "the loop runs the arm timeout tick")
-    need(main_cpp, "if (expired && g_settings && g_setEditor == om::ui::SettingsEditor::None) drawSettings();",
-         "an expired arm redraws the page it was shown on")
+    # Leaving a page closes the sheet (one ask, one page), the same invariant the arms had.
+    closes = main_cpp.count("g_ask.close();")
+    if closes < 7:
+        fail(f"only {closes} g_ask.close() calls; every page-leave path needs one "
+             f"(setGo, setBack, openSettings, settingsLeaveState, the tab switch, the selector, A_ChatPick)")
 
     # ---- 2. the batched emoji write -------------------------------------------------------------
     pick = main_cpp.find("static void chatEmojiPick(uint32_t cp)")
@@ -162,7 +142,7 @@ def main():
     if FAIL:
         print(f"{FAIL} est399 source check(s) FAILED")
         return 1
-    print("est399: per-row delete arms wired end to end, the emoji write batched and counted, the "
+    print("est399: one confirm sheet for every delete (EST-422), the emoji write batched and counted, the "
           "RPTR pressed plates scrolled, the guard's whitelist still minimal")
     return 0
 

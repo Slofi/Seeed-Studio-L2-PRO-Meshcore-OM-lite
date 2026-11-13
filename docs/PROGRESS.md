@@ -9892,3 +9892,97 @@ boot should NOT pause and `[kb] cardkb found (sda=13 scl=14) after N ms` should 
 or so, N telling us the real start-up time. Then: boot with the keyboard unplugged (after 3000 ms one
 `[kb] cardkb not found after 3000 ms, Grove power off` and the toast, rail off), switch it OFF during
 a window (no toast, rail off), and switch it on again with the keyboard plugged in.
+
+## EST-422 flick is not a tap + confirm important settings
+
+S495-phase run (DeepSeek, 2026-11-13). Two changes from Filip's use: a fast flick was taken as a tap
+(it changed the setting under the finger), and the settings that matter had no confirmation.
+
+### 1. A flick is not a tap (one rule, the whole app)
+
+`src/ui/tap_rule.h` is new and is the ONLY place that decides whether a release is a tap. Its
+`TapTrace` keeps the gesture's press point, the last point the panel reported and how many down
+samples the loop saw; `tapAllowed(releaseX, releaseY, drag, acted)` says:
+
+- not a tap if the loop's own drag latch fired, or a hold already acted (the old guard, unchanged);
+- not a tap if the finger was seen only ONCE. That is the reported flick: it began and ended between
+  two samples, so a tap cannot be proven, and tapping the press point is exactly the bug;
+- not a tap if the last reported point (or the release edge) is more than 12 px from the press point,
+  per axis. This also catches a sideways flick, which the old drag latch never saw (it only looked
+  at Y).
+
+The loop (`src/main.cpp`) feeds it: `g_tap.press()` on the press edge, `g_tap.sample()` on every pass
+the finger is down, and the release edge asks `tapAllowed`. `x`/`y` now start from
+`g_tap.lastX/lastY` each pass, because LovyanGFX's `getTouch` returns before writing x/y when the
+panel reports no finger (checked in LGFXBase.hpp), so the release pass carries the last real point
+instead of 0,0.
+
+**Why the flick is really caught:** the blind window was the fix's other half. With a 20 ms loop plus
+an ~11 ms frame push, a hard flick could travel 40+ px between two samples, so no sample ever crossed
+the 12 px drag test. While a finger is DOWN the loop now samples every ~2 ms (`idleDelay`), so a
+flick's first 12 px of travel are seen (a hard flick is about 2 px/ms) and the drag latch fires
+before it lifts; and a real tap of any human length is seen many times, which the one-sample rule
+needs. Everything else is untouched: a still finger of any duration is a tap, the long-press rules
+(EST-342/346) fire while the finger is down, and the map pan continuation (EST-416) still spends the
+gesture at the press. An ignored release logs one `[tap] x,y ignored: N sample(s), last x,y (flick,
+not a tap)` line.
+
+### 2. One confirm sheet for the settings that matter
+
+`src/ui/settings_actions.h` is new: the shell's `SetAct` ids (moved out of main.cpp), the ONE table
+`confirmKindForAction()` (presets and the custom preset, TX power, path hash, both channel deletes,
+Wi-Fi Forget, repeater Forget, the Wi-Fi / Bluetooth / keyboard switches, Clear messages) and the
+sheet's state machine `ConfirmAsk` + `confirmTap()`. Two changes name their kind at the commit point
+instead of through a row id: the node name (the editor's OK) and the Position mode (the GPS choice and
+the map picker's Save).
+
+The sheet itself is the EST-382 pop-up (`settingsModalLayoutFor`, Cancel on the left as the default
+side, a tap outside is Cancel and consumed), now drawn by `drawAsk` with the right key labelled Apply,
+Delete or Forget and red for the destructive ones. The shell's one apply is
+`settingsApplyConfirmed()`; Cancel and a tap outside never reach it. The two old confirmation pages
+(`ConfirmPreset`, `ConfirmHash`) and EST-399's per-row "tap again" arms are gone, so there is ONE
+confirmation pattern in the app: `ui/delete_arm.h` and its C++ test stay, but the shell has no caller
+for the struct any more (Claude: say if it should be deleted outright).
+
+Small switches still change at the touch: sounds, volume, brightness, auto-off, touch/DND/welcome
+sounds, share position, RPL auto-login, channel enabled/sound, the auto-off time rows.
+
+### Tests
+
+- `test/host/test_est422.cpp` (new, in run.sh): the tap rule against the old one. A still press taps;
+  press + release 40 px away with NO move sample between does NOT (the old rule taps, armed); 11 px
+  taps and 13 px does not; a gesture seen once does not (old rule taps); a sideways flick does not
+  (old rule taps); a drag and a fired hold never do. Then the confirm list (every listed setting asks,
+  every small switch does not), the flow (the question quotes the value, Cancel and Outside change
+  nothing, Apply runs once with kind/arg/value) and the keys (the modal layout's own rectangles are
+  the hit rects, the two keys are disjoint, the box fits 320x240).
+- The source checks of the earlier tickets were updated for the one sheet, not weakened: test_est381
+  (the release tap must be decided by `tapAllowed` with g_drag and g_acted), test_est392 (the id is
+  declared in the header now; the choice asks), test_est399 (no arms in the shell, every destructive
+  call inside the one apply), test_est412/est421 (the keyboard switch asks, the ON/OFF work is in the
+  apply), test_est417 (the pop-up list names `g_ask.open`).
+
+### Size, build and tests
+- Build with the REBUILD.md command: REAL exit 0 (full build 245.3 s; a second, incremental build of
+  the final tree 14.8 s, REAL exit 0, same numbers).
+  RAM **160,952 B** (49.1% of 327,680), was 160,912 B, **+40 B** (the gesture record: three `int`s
+  and the sample count, plus the ask sheet in place of two pointers and a bool).
+  Flash **3,002,869 B** (45.8% of 6,553,600), was 3,002,189 B, **+680 B** (the confirm table and its
+  question strings, the tap rule, and the one apply that absorbed the row code).
+  `firmware.bin` 3,003,232 B, was 3,002,560 B (+672 B).
+- `sh test/host/run.sh`: REAL exit 0, 0 FAIL lines (the whole suite, test_est422 included).
+
+### Could not check (no device in this run)
+- Nothing about the glass: no L2 was flashed and no touch was performed here. Not tested on
+  hardware: that a real tap still registers (the one-sample rule plus the ~2 ms sampling says it
+  will, and USB taps hold 90 ms so `tools/tap.sh` is unaffected), that a fast flick now scrolls
+  instead of tapping (it cannot be shown without a finger), that ~2 ms sampling during a touch does
+  not disturb the mesh/GPS pass timing in a way the glass notices, and the confirm sheet's look,
+  wrapping and key sizes on the panel.
+- A flick that is seen exactly once is refused rather than guessed; if Filip finds a flick that now
+  does nothing at all, the next step is the GT911's own last-point register, not a looser rule.
+
+### Next step
+Claude: review the diff (main.cpp, the three new ui headers, screen_settings' renamed sheet, the six
+updated source checks), flash, and have Filip test: flick through the Settings list (nothing may
+change), tap a row (must still work), then try each confirming setting's Cancel and Apply.

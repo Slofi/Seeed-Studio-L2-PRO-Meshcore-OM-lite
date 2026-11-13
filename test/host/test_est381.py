@@ -164,9 +164,14 @@ else:
     if len(calls) != 1:
         problems.append(f"main.cpp: {len(calls)} short-tap calls in the release branch, expected 1")
     for call in calls:
-        window = release[max(0, call.start() - 120):call.start()]
-        if "!g_drag && !g_acted" not in window:
-            problems.append("main.cpp: the release tap is not guarded by !g_drag && !g_acted")
+        # EST-422: the release tap is decided by the ONE tap rule (ui/tap_rule.h), which still refuses
+        # on a drag and on a hold that fired (it is given both), and also refuses a flick. The guard is
+        # no longer spelled out here because it moved into that header and its host test.
+        window = release[max(0, call.start() - 160):call.start()]
+        if "tapAllowed" not in window:
+            problems.append("main.cpp: the release tap is not decided by the tap rule (tapAllowed)")
+        elif "g_drag" not in window or "g_acted" not in window:
+            problems.append("main.cpp: the tap rule is not given g_drag and g_acted")
 
 # The map's pan and its press-continuation both live behind !g_spent.
 drag_at = main.find("if (g_drag && !g_spent) {")

@@ -70,10 +70,12 @@ constexpr bool settingsTabFits(SettingsTab t, int16_t width) {
 // rest are pages reached from a row.
 // EST-392: there is no Position PAGE any more. The one source control is the General page's Position
 // row and it opens a two-row choice, so this list holds no second place to choose the source.
+// EST-422: and there is no ConfirmPreset or ConfirmHash page either: those two confirm in the shared
+// sheet on the page they are chosen, so every confirmation in the app is one pattern.
 enum class SetPage : uint8_t {
   GeneralRoot = 0, NodesRoot, ChatRoot, MapRoot, RptrRoot,
   Preset, PresetCustom, Hash, Node, NameEdit, Channels, Channel, ChanAdd, ChanKey,
-  Sound, SoundPicker, Wifi, WifiSaved, WifiPass, Bt, Time, TimeEdit, ConfirmPreset, ConfirmHash,
+  Sound, SoundPicker, Wifi, WifiSaved, WifiPass, Bt, Time, TimeEdit,
   // EST-405: the screen auto-off time page, reached from General's DISPLAY section only while the
   // switch is on.
   AutoOff,

@@ -53,7 +53,6 @@
 #include "fonts.h"
 #include "ui/age.h"
 #include "ui/compose_text.h"
-#include "ui/delete_arm.h"        // EST-399: one "tap again" arm PER row, never one for all
 #include "ui/dm_delivery.h"
 #include "ui/emoji.h"
 #include "ui/emoji_persist.h"     // EST-399: the Recent row's batched NVS write
@@ -76,7 +75,9 @@
 #include "ui/screen_rptr.h"
 #include "ui/screen_nodes.h"
 #include "ui/screen_settings.h"
+#include "ui/settings_actions.h"   // EST-422: the action ids, which of them ask first, the sheet
 #include "ui/settings_prefs.h"
+#include "ui/tap_rule.h"          // EST-422: the one rule that decides a release is a tap
 #include "ui/notify.h"
 #include "ui/text_wrap.h"
 #include "ui/toast.h"
@@ -155,32 +156,17 @@ static int g_setAccentCol = -1;
 static uint32_t g_setAccentCp = 0;
 static bool g_setAccentPreview = false;
 static int g_chanPage = 0;           // the channel whose page is open
-// EST-399: "tap again" is armed PER ROW AND PER PAGE, never one flag for every delete in the shell
-// (EST-398 #1: one shared flag let Forget on network B delete B while network A was the armed row).
-// Each arm remembers its own row index and expires on its own; only a second tap on that same row
-// inside kDeleteArmMs is a confirmation.
-static om::ui::DeleteArm g_wifiForgetArm;   // index = the saved network's row
-static om::ui::DeleteArm g_chatDeleteArm;   // index = the channel shown on the Chat page
-static om::ui::DeleteArm g_chanDeleteArm;   // index = the channel the Channel page is showing
-// EST-399: leaving a page (or a tab, or Settings) disarms every delete row, so a button armed on one
-// page can never be the armed row on another.
-static void clearDeleteArms() {
-  g_wifiForgetArm.clear();
-  g_chatDeleteArm.clear();
-  g_chanDeleteArm.clear();
-}
-// EST-382: "Clear messages" asks first, in a pop-up (Filip's rule). Cancel is the default side and a
-// tap anywhere outside is a Cancel; the question names the channel and is built when it opens.
-static bool g_clearAsk = false;
-static char g_clearText[160];
+// EST-422: ONE confirm sheet for the settings that matter (ui/settings_actions.h holds the list, the
+// question and the state machine). EST-399's per-row "tap again" arms are gone: every Delete and
+// Forget, every important switch, the preset, the path hash, the node name and the position ask here,
+// with Cancel on the left (the default side) and Apply on the right.
+static om::ui::ConfirmAsk g_ask;
 // The shared editor buffer: a MeshCore name is 31 bytes, a Wi-Fi passphrase 63 (EST-354).
 static char g_editBuf[64];
 static bool g_editNew = false;       // the name editor is naming a NEW channel
 static int g_editCh = 0;             // the channel the name editor renames
 static int g_addKind = 0;            // 1 create private, 2 join private, 3 join #tag
 static char g_keyText[32];           // base64 key being typed (never printed)
-static int g_setPresetPending = -1;  // a preset waiting for its confirm
-static int g_setHashPending = 0;     // the path hash waiting for its confirm
 static int g_setSoundEvent = (int)SoundEvent::Message;   // the picker's SoundEvent
 static int g_setSoundPending = 0;    // the picker's chosen library id, or sound::kSoundOff
 static om::ui::CivilTime g_setTime;  // the manual-time steppers' civil time
@@ -322,6 +308,10 @@ static bool g_wakePrev = false;          // the wake button's last sampled level
 static bool g_down = false;
 static bool g_drag = false;
 static bool g_acted = false;
+// EST-422: the current gesture's own record (press point, last point, how many samples). ui/tap_rule.h
+// owns the decision; the loop feeds it and asks it on the release edge. Cleared by screenSleep() with
+// the rest of the gesture state.
+static om::ui::TapTrace g_tap;
 // EST-414: true only while a finger is dragging one of the scrolling lists past its end. The views'
 // own clamps (drawChat, nodes_tab's refreshNodes) keep the give while it is set and clamp absolutely
 // outside it, so a content that shrinks while nobody is dragging can never strand a gap at the end.
@@ -534,11 +524,12 @@ static bool appRedraw() { return redrawCurrentScreen(); }   // EST-410: RPTR's H
 static void screenSleep(const char* why, bool fromTimer) {
   if (!g_screenOn) return;
   // A gesture in flight is dropped, so the finger that was on the glass cannot turn into a tap in
-  // the dark. The same three resets the button path always did.
+  // the dark. The same three resets the button path always did, plus EST-422's gesture record.
   g_screenOn = false;
   g_down = false;
   g_drag = false;
   g_acted = false;
+  g_tap.reset();
   g_sleepPending = true;
   // EST-355: a screen change that is still running is abandoned; the fade-out below owns the light
   // from here and starts at whatever level the change had really reached.
@@ -1592,39 +1583,9 @@ static bool chatOpenForThread(int thread) {
 // drawn by ui/screen_settings.cpp; the rectangles, the tab row, the scroll clamp and the manual-time
 // arithmetic live in ui/settings_layout.h and are host-tested. The only geometry this file knows is
 // the action id in a row.
-enum SetAct : uint16_t {
-  A_None = 0,
-  A_Preset, A_TxPower, A_Hash, A_Node, A_NodeName, A_Channels, A_Wifi, A_WifiToggle, A_WifiScan, A_WifiSaved, A_Bt, A_BtToggle, A_BtNewPin, A_Sound,
-  A_Brightness, A_Time, A_AdvertPos,
-  // EST-412: the Grove keyboard switch (default OFF).
-  A_GroveKeyboard,
-  // EST-405: the screen auto-off switch and the row that opens its five time choices.
-  A_IdleAutoOff, A_IdleTime,
-  // EST-392: ONE position source control (the General page's `Position` row); it opens the small
-  // GPS / Fixed choice, so EST-384's page and its three actions are gone.
-  A_PosSource,
-  A_Apply, A_Cancel,
-  A_MapRecentre, A_MapClear, A_RptrForget, A_RptrAuto,
-  // EST-414: Settings > RPTR > "Open repeater" jumps to the open session's page on the RPTR tab.
-  A_RptrOpen,
-  A_ChatPick, A_ChatOpen, A_ChatEnabled, A_ChatSound, A_ChatRename, A_ChatDelete,
-  A_ChatMsgSound, A_ChatDmSound, A_ChatMenSound,
-  A_SoundMaster, A_SoundVolume, A_SoundBoot, A_SoundMsg, A_SoundDm, A_SoundMen, A_SoundSent,
-  A_SoundError, A_SoundNew, A_SoundBatt,
-  A_SoundTouch, A_SoundClick, A_SoundDnd, A_SoundWelcome, A_SoundPickUse,
-  A_ChanAdd, A_ChanRename, A_ChanEnabled, A_ChanSound, A_ChanClear, A_ChanDelete,
-  A_AddCreate, A_AddPrivate, A_AddPublic, A_AddHashtag,
-  A_TimeManual, A_TimeApply,
-  A_CustomOpen, A_CustomFreq, A_CustomBw, A_CustomSf, A_CustomCr, A_CustomApply,
-  A_PresetBase = 100,      // 100..103 the four presets
-  A_HashBase = 120,        // 120..122 = 1B / 2B / 3B
-  A_PickBase = 140,        // 140.. the shared sound library, then Off
-  A_ChanBase = 200,        // 200..207 one row per channel
-  A_TimeFieldBase = 220,   // 220..224 year / month / day / hour / minute
-  A_WifiNetBase = 240,     // 240..247 the scan rows on the Wi-Fi page (strongest first)
-  A_WifiForgetBase = 250,  // 250..254 the saved rows on the Saved networks page
-  A_IdleTimeBase = 260,    // 260..264 the five screen auto-off times, in kIdleTimes order
-};
+// EST-422: the ids (SetAct) live in ui/settings_actions.h now, next to the ONE list of which of them
+// ask before they change and the confirm sheet's state machine, so the shell and the host test read
+// the same numbers.
 
 // EST-350: where a page came from is the navigation history (ui/settings_layout.h SettingsNav), not a
 // flag per page, so Back needs no table and every page returns to the one that opened it. What is left
@@ -1663,8 +1624,7 @@ static void setGo(SetPage p) {
   g_setPage = p;
   g_setScroll = 0;
   g_setSelOpen = false;
-  clearDeleteArms();
-  g_clearAsk = false;
+  g_ask.close();   // EST-422: the confirm sheet never survives a page change
   g_posChoice = false;   // EST-392: leaving the page closes the Position choice
   // EST-352: every door into a text editor opens the shared sheet on the letters page with shift
   // off, exactly the chat sheet's rule; the accented-letter hold starts clean. EST-354: the Wi-Fi
@@ -1694,8 +1654,7 @@ static void setBack() {
     g_setScroll = scroll;
   }
   g_setSelOpen = false;
-  clearDeleteArms();
-  g_clearAsk = false;
+  g_ask.close();   // EST-422: the confirm sheet never survives a page change
   g_posChoice = false;   // EST-392: the choice never survives a Back
 }
 
@@ -1943,11 +1902,9 @@ static void buildSettingsRows() {
         setAdd(om::ui::SetRowKind::Chevron, A_ChatRename, "Rename", om::mcChannelName(ch));
         om::mcChannelKeyB64(ch, k, sizeof(k));
         setAdd(om::ui::SetRowKind::Value, A_None, "Key", k);
-        // EST-399: the label asks for the second tap only while THIS channel's arm is live, from the
-        // same DeleteArm the tap handler asks, so the label and the tap can never disagree.
-        const bool chatDeleteArmed = g_chatDeleteArm.armedRow(millis()) == ch;
-        setAdd(om::ui::SetRowKind::Button, A_ChatDelete,
-               chatDeleteArmed ? "Tap again to delete" : "Delete channel", "", false, true);
+        // EST-422: one pattern for every delete. The row is a plain Delete button; the shared confirm
+        // sheet asks once and Cancel leaves the channel alone (the EST-399 "tap again" arm is gone).
+        setAdd(om::ui::SetRowKind::Button, A_ChatDelete, "Delete channel", "", false, true);
       } else if (g_chatCount > 0 && g_chats[g_setChat].dm) {
         setAdd(om::ui::SetRowKind::Note, A_None, "Direct message settings are not built yet.");
       } else {
@@ -2141,10 +2098,8 @@ static void buildSettingsRows() {
              om::meshUnread(g_chanPage) ? "new, clear below" : "none");
       setAdd(om::ui::SetRowKind::Button, A_ChanClear, "Clear messages");
       setAdd(om::ui::SetRowKind::Value, A_None, "Key", key);
-      // EST-399: the arm of the channel page's own delete row, keyed to the channel this page shows.
-      const bool chanDeleteArmed = g_chanDeleteArm.armedRow(millis()) == (int)g_chanPage;
-      setAdd(om::ui::SetRowKind::Button, A_ChanDelete,
-             chanDeleteArmed ? "Tap again to delete" : "Delete channel", "", false, true);
+      // EST-422: the same shared confirm sheet as every other delete.
+      setAdd(om::ui::SetRowKind::Button, A_ChanDelete, "Delete channel", "", false, true);
       break;
     }
 
@@ -2302,11 +2257,9 @@ static void buildSettingsRows() {
           const om::wifi::SavedNetwork* n = om::wifiSavedAt(i);
           if (n == nullptr) continue;
           setAdd(om::ui::SetRowKind::Value, A_None, n->ssid, "saved");
-          // EST-399: each saved network's Forget row carries its OWN arm, and the row that is armed
-          // says so on the glass (the channel page's delete has done this all along).
-          const bool forgetArmed = g_wifiForgetArm.armedRow(millis()) == i;
-          setAdd(om::ui::SetRowKind::Button, (uint16_t)(A_WifiForgetBase + i),
-                 forgetArmed ? "Tap again to forget" : "Forget", "", false, true);
+          // EST-422: Forget asks in the shared sheet, like every other delete, instead of a second tap.
+          setAdd(om::ui::SetRowKind::Button, (uint16_t)(A_WifiForgetBase + i), "Forget", "", false,
+                 true);
         }
         snprintf(v, sizeof(v), "%d of %d", om::wifiSavedCount(), om::wifi::kMaxSaved);
         setAdd(om::ui::SetRowKind::Note, A_None, v);
@@ -2382,30 +2335,9 @@ static void buildSettingsRows() {
       break;
     }
 
-    case SetPage::ConfirmPreset: {
-      char desc[40];
-      snprintf(g_setTitle, sizeof(g_setTitle), "Apply preset?");
-      presetDesc(g_setPresetPending, desc, sizeof(desc));
-      setAdd(om::ui::SetRowKind::Value, A_None, "Preset", desc);
-      setAdd(om::ui::SetRowKind::Warn, A_None,
-             "A node with the wrong preset is deaf: it hears nothing and reports no error.");
-      setAdd(om::ui::SetRowKind::Button, A_Apply, "Apply and save");
-      setAdd(om::ui::SetRowKind::Button, A_Cancel, "Cancel");
-      break;
-    }
-
-    case SetPage::ConfirmHash: {
-      char v[8];
-      snprintf(v, sizeof(v), "%uB", (unsigned)g_setHashPending);
-      snprintf(g_setTitle, sizeof(g_setTitle), "Change path hash?");
-      setAdd(om::ui::SetRowKind::Value, A_None, "Path hash", v);
-      setAdd(om::ui::SetRowKind::Warn, A_None,
-             "SLO runs 2B. 1B still works but diverges from everyone else, and 3B cuts the max "
-             "path to 21 hops.");
-      setAdd(om::ui::SetRowKind::Button, A_Apply, "Apply and save");
-      setAdd(om::ui::SetRowKind::Button, A_Cancel, "Cancel");
-      break;
-    }
+    // EST-422: ConfirmPreset and ConfirmHash are gone. A preset, a custom preset and a path hash are
+    // confirmed in the shared sheet on the page they are chosen, so there is ONE confirmation pattern
+    // for the whole app instead of a page, a sheet and a "tap again" arm.
   }
 }
 
@@ -2441,9 +2373,12 @@ static om::ui::SettingsView settingsView() {
   v.sel.nowSec = millis() / 1000;
   v.sel.nowWall = om::timeKeeper().now();
   v.sel.nowReal = om::timeKeeper().realSinceBoot();
-  // EST-382: the Clear-messages confirmation owns every tap while it is open.
-  v.clearAsk = g_clearAsk;
-  v.clearText = g_clearText;
+  // EST-422: the ONE confirm sheet ("Clear messages", a preset, a delete, a switch) owns every tap
+  // while it is open, over the rows, the tab row and Back.
+  v.ask = g_ask.open;
+  v.askText = g_ask.text;
+  v.askApply = om::ui::confirmApplyLabel(g_ask.kind);
+  v.askDanger = om::ui::confirmIsDangerous(g_ask.kind);
   // EST-392: the General page's Position choice, hung under the row the last build recorded.
   v.posChoice = g_posChoice && g_setPage == SetPage::GeneralRoot;
   v.posChoiceRow = g_posRowIndex;
@@ -2524,8 +2459,7 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
   g_setScroll = 0;
   g_setNav.reset();                 // a fresh door into Settings has no history behind it
   g_setEditor = om::ui::SettingsEditor::None;
-  clearDeleteArms();
-  g_clearAsk = false;
+  g_ask.close();   // EST-422: the confirm sheet never survives a page change
   g_setSelOpen = false;
   g_setSelScroll = 0;
   g_ownPick = false;      // EST-384: a fresh door into Settings never opens on the picker
@@ -2544,8 +2478,7 @@ static void openSettings(int mainTab, om::ui::SettingsTab tab) {
 static void settingsLeaveState() {
   g_settings = false;
   g_setEditor = om::ui::SettingsEditor::None;
-  clearDeleteArms();
-  g_clearAsk = false;
+  g_ask.close();   // EST-422: the confirm sheet never survives a page change
   g_setSelOpen = false;
   g_posChoice = false;   // EST-392
 }
@@ -2615,9 +2548,11 @@ static void ownPickCancel() {
 }
 
 static void ownPickSave() {
-  const bool ok = om::posSelectFixed((double)g_ownPickLatE6 / 1e6, (double)g_ownPickLonE6 / 1e6);
+  // EST-422: the Position mode is a setting that matters, so Save asks in the shared sheet. The point
+  // stays in g_ownPickLatE6/g_ownPickLonE6 until Apply; Cancel changes the source to nothing (the map
+  // picker closes, the Position page is back) and writes no position.
   g_ownPick = false;
-  showToast(ok ? "Fixed position saved" : "Position not saved");
+  g_ask.begin(om::ui::ConfirmKind::Position, 1, "a fixed point");
   drawSettings();
 }
 
@@ -2684,14 +2619,19 @@ static void openSoundPicker(SoundEvent ev) {
   drawSettings();
 }
 
+// EST-422: the ONE door into the confirm sheet. It never changes a value: it puts the question on the
+// glass with the change's kind, its payload and the value the question quotes, and closes whatever
+// dropdown or choice was open under it (so a tap on the sheet cannot fall through to them). The
+// caller's own drawSettings() paints the sheet; Apply runs settingsApplyConfirmed().
+static void askChange(om::ui::ConfirmKind kind, int arg, const char* value) {
+  if (!g_ask.begin(kind, arg, value)) return;
+  g_setSelOpen = false;
+  g_posChoice = false;
+  Serial.printf("[set] confirm: kind %d\n", (int)kind);
+}
+
 // One row's action. The id is the only thing the shell needs to know about a row.
 static void handleSettingsRow(uint16_t id) {
-  // EST-399: a "tap again" arm belongs to ONE row and survives nothing else. Any other action on the
-  // page (a toggle, Back's own row, another page's key) disarms it, so a stale armed button can never
-  // be waiting behind the next tap. The row's own id is exempt: that is the confirmation itself.
-  if (id < A_WifiForgetBase || id >= A_WifiForgetBase + om::wifi::kMaxSaved) g_wifiForgetArm.clear();
-  if (id != A_ChatDelete) g_chatDeleteArm.clear();
-  if (id != A_ChanDelete) g_chanDeleteArm.clear();
   if (g_setTab == om::ui::SettingsTab::Chat) refreshChats();
   const int ch = settingsChatChannel();
   switch (id) {
@@ -2722,14 +2662,14 @@ static void handleSettingsRow(uint16_t id) {
       g_setSelOpen = !g_setSelOpen;
       g_setSelScroll = 0;
       g_setScroll = 0;
-      clearDeleteArms();
+      g_ask.close();
       break;
     case A_Channels: setGo(SetPage::Channels); break;
     case A_Wifi:     setGo(SetPage::Wifi); break;
     case A_WifiToggle: {
+      // EST-422: a switch that matters, so the sheet asks first. The value does not move here.
       const bool on = !om::wifiIsEnabled();
-      om::wifiSetEnabled(on);
-      showToast(on ? "Wi-Fi on" : "Wi-Fi off");
+      askChange(om::ui::ConfirmKind::WifiSwitch, on ? 1 : 0, on ? "on" : "off");
       break;
     }
     case A_WifiScan:
@@ -2742,15 +2682,9 @@ static void handleSettingsRow(uint16_t id) {
     case A_WifiSaved: setGo(SetPage::WifiSaved); break;
     case A_Bt:       setGo(SetPage::Bt); break;
     case A_BtToggle: {
+      // EST-422: asks first. The old toast rule stays in the apply below.
       const bool on = !om::bleIsEnabled();
-      om::bleSetEnabled(on);
-      // EST-357: the start guard may have refused (not enough internal RAM); its own notice already
-      // carries the numbers, so "Bluetooth on" must not overwrite it with a claim that is not true.
-      if (!on) {
-        showToast("Bluetooth off");
-      } else if (om::bleIsEnabled()) {
-        showToast("Bluetooth on");
-      }
+      askChange(om::ui::ConfirmKind::BtSwitch, on ? 1 : 0, on ? "on" : "off");
       break;
     }
     case A_BtNewPin: {
@@ -2758,21 +2692,13 @@ static void handleSettingsRow(uint16_t id) {
       showToast(pin != 0 ? "New PIN saved" : "New PIN failed");
       break;
     }
-    // EST-412: the Grove keyboard switch. The setting is RAM first and NVS after (a failed write is
-    // said out loud but does not undo the switch), exactly like the other saved bools. ON powers
-    // Grove and opens the start window (cardkb::begin() returns at once; the loop probes for up to
-    // 3000 ms and toasts if nothing answers); OFF cancels a window still running, closes the bus and
-    // drops the 5 V rail. Nothing here runs while the switch is off.
+    // EST-412: the Grove keyboard switch. EST-422: it asks first, because switching it on powers the
+    // Grove rail. The apply below does the work: RAM first, NVS after (a failed write is said out
+    // loud but does not undo the switch). ON opens cardkb::begin()'s start window; OFF cancels a
+    // window still running, closes the bus and drops the 5 V rail.
     case A_GroveKeyboard: {
-      g_kbEnabled = !g_kbEnabled;
-      const bool saved = mapLayerPrefWrite(nullptr, "grovekb", g_kbEnabled);
-      if (!saved) showToast("Keyboard setting not saved");
-      Serial.printf("[kb] switch %s (saved=%d)\n", g_kbEnabled ? "on" : "off", saved ? 1 : 0);
-      if (g_kbEnabled) {
-        if (!om::cardkb::begin()) showToast("Grove power failed");
-      } else {
-        om::cardkb::end();
-      }
+      const bool on = !g_kbEnabled;
+      askChange(om::ui::ConfirmKind::KeyboardSwitch, on ? 1 : 0, on ? "on" : "off");
       break;
     }
     case A_Sound:    setGo(SetPage::Sound); break;
@@ -2809,17 +2735,12 @@ static void handleSettingsRow(uint16_t id) {
       showToast("Marker cleared");
       break;
     case A_RptrForget: {
-      // Forget the open repeater, or the last remembered one when the tab has none open.
-      // EST-410: the open session's name is owned by screens/rptr_tab.cpp.
+      // Forget the open repeater, or the last remembered one when the tab has none open. EST-422: the
+      // sheet asks first and carries the name; the apply does the logging out.
       const char* openName = om::rptr_tab::openNodeName();
       const char* name = openName[0] ? openName : om::rptrLastRemembered();
       if (name != nullptr && name[0]) {
-        om::rptrForget(name);
-        if (strcmp(name, openName) == 0) {
-          om::rptrLogout();
-          om::rptr_tab::clearSession();
-        }
-        showToast("Repeater forgotten");
+        askChange(om::ui::ConfirmKind::RepeaterForget, 0, name);
       }
       break;
     }
@@ -2861,19 +2782,9 @@ static void handleSettingsRow(uint16_t id) {
       break;
     case A_ChatDelete:
       if (ch >= 0) {
-        // EST-399: this row's OWN arm, keyed to the channel the page shows. Only a second tap on the
-        // same channel confirms; picking another chat in the selector, leaving the page or the arm's
-        // timeout disarms it. The label above comes from the same call, so it cannot say "tap again"
-        // for a row a tap would only arm.
-        if (g_chatDeleteArm.tap(ch, millis()) == om::ui::DeleteArm::Tap::Confirmed) {
-          om::mcChannelRemove(ch);
-          om::meshLinkReloadChannels();
-          refreshChats();
-          showToast("Channel removed");
-          g_setChat = g_chatCount > 0 ? (g_setChat < g_chatCount ? g_setChat : 0) : 0;
-          g_setPage = SetPage::ChatRoot;
-          g_setScroll = 0;
-        }
+        // EST-422: the shared sheet asks; the apply removes the channel (EST-399's second tap is gone,
+        // so every delete in the app asks the same way).
+        askChange(om::ui::ConfirmKind::ChannelDelete, ch, om::mcChannelName(ch));
       }
       break;
     case A_ChatMsgSound: openSoundPicker(SoundEvent::Message); return;
@@ -2959,21 +2870,13 @@ static void handleSettingsRow(uint16_t id) {
       om::mcChannelSetMuted(g_chanPage, !om::mcChannelMuted(g_chanPage));
       break;
     case A_ChanClear:
-      // EST-382: a destructive action confirms first, in a pop-up. Cancel is the default side; only
-      // the pop-up's Clear calls meshChatClear(). The name in the question is the channel's own.
-      snprintf(g_clearText, sizeof(g_clearText),
-               "Clear all messages in %s? This cannot be undone.", om::mcChannelName(g_chanPage));
-      g_clearAsk = true;
+      // EST-382's question, now the shared sheet (EST-422). Cancel is the default side; only the
+      // sheet's Clear calls meshChatClear(). The name in the question is the channel's own.
+      askChange(om::ui::ConfirmKind::ClearMessages, (int)g_chanPage, om::mcChannelName(g_chanPage));
       break;
     case A_ChanDelete:
-      // EST-399: the arm belongs to THIS page's channel, never to "a delete row somewhere".
-      if (g_chanDeleteArm.tap((int)g_chanPage, millis()) == om::ui::DeleteArm::Tap::Confirmed) {
-        om::mcChannelRemove(g_chanPage);
-        om::meshLinkReloadChannels();
-        refreshChats();
-        showToast("Channel removed");
-        setBack();                  // whichever page the channel was opened from
-      }
+      // EST-422: the same shared sheet every delete uses. The apply removes the channel and steps back.
+      askChange(om::ui::ConfirmKind::ChannelDelete, (int)g_chanPage, om::mcChannelName(g_chanPage));
       break;
 
     case A_CustomOpen:
@@ -2981,38 +2884,18 @@ static void handleSettingsRow(uint16_t id) {
       setGo(SetPage::PresetCustom);
       break;
     case A_CustomApply:
-      g_setPresetPending = om::ui::kRadioCustomPreset;
-      setGo(SetPage::ConfirmPreset);
+      askChange(om::ui::ConfirmKind::Preset, om::ui::kRadioCustomPreset, "the custom values");
       break;
     case A_TimeApply:
       // EST-400: the one apply (it shows the one toast too); on success leave the page.
       if (applyManualTime()) setBack();
       break;
     case A_Apply:
-      if (g_setPage == SetPage::ConfirmHash) {
-        if (om::meshPathHashSet((uint8_t)g_setHashPending)) showToast("Path hash saved");
-        else showToast("Path hash refused");
-      } else if (g_setPresetPending >= 0 &&
-                 g_setPresetPending < om::ui::kRadioPresetCount) {
-        if (g_radio.setPreset(g_setPresetPending)) {
-          g_custom = g_radio.prefs();
-          showToast("Radio preset saved");
-        } else {
-          showToast("Preset refused");
-        }
-      } else {
-        if (g_radio.setRadio(g_custom.freqKhz, g_custom.bwHz, g_custom.sf, g_custom.cr)) {
-          g_custom = g_radio.prefs();
-          showToast("Radio preset saved");
-        } else {
-          showToast("Preset refused");
-        }
-      }
-      setBack();                    // the confirm page's opener: Hash / Preset / Custom preset
+      // EST-422: the preset and path-hash pages are gone (they asked through the shared sheet), so
+      // these two ids have no row left that reaches them. Kept so the enum and the switch stay in
+      // step with ui/settings_actions.h.
       break;
     case A_Cancel:
-      if (g_setPresetPending == om::ui::kRadioCustomPreset) g_custom = g_radio.prefs();
-      setBack();
       break;
 
     default:
@@ -3034,21 +2917,18 @@ static void handleSettingsRow(uint16_t id) {
         }
       } else if (id >= A_WifiForgetBase && id < A_WifiForgetBase + om::wifi::kMaxSaved) {
         const int at = (int)(id - A_WifiForgetBase);
-        // EST-399: the arm belongs to THIS row (EST-398 #1: one shared flag forgot network B on its
-        // first tap while network A was the armed row). A tap on another row only arms that row, and
-        // the row's own label changes so the second tap is asked for on the glass.
-        if (g_wifiForgetArm.tap(at, millis()) == om::ui::DeleteArm::Tap::Confirmed) {
-          om::wifiForget(at);
-          showToast("Network forgotten");
-        } else {
-          showToast("Tap Forget again");
-        }
+        // EST-422: one shared confirm sheet per Forget row, and it names the network, so the row that
+        // was tapped and the row that is asked about can never differ (EST-398 #1's failure mode).
+        const om::wifi::SavedNetwork* n = om::wifiSavedAt(at);
+        if (n != nullptr) askChange(om::ui::ConfirmKind::WifiForget, at, n->ssid);
       } else if (id >= A_PresetBase && id < A_PresetBase + om::ui::kRadioPresetCount) {
-        g_setPresetPending = (int)(id - A_PresetBase);
-        setGo(SetPage::ConfirmPreset);
+        // EST-422: the sheet asks "Change region to X?" on the row itself.
+        const int idx = (int)(id - A_PresetBase);
+        askChange(om::ui::ConfirmKind::Preset, idx, om::ui::radioPresetAt(idx).name);
       } else if (id >= A_HashBase && id < A_HashBase + 3) {
-        g_setHashPending = (int)(id - A_HashBase) + 1;
-        setGo(SetPage::ConfirmHash);
+        char v[8];
+        snprintf(v, sizeof(v), "%uB", (unsigned)(id - A_HashBase) + 1);
+        askChange(om::ui::ConfirmKind::PathHash, (int)(id - A_HashBase) + 1, v);
       } else if (id >= A_PickBase && id < A_ChanBase) {
         const SoundEvent ev = (SoundEvent)g_setSoundEvent;
         const int count = om::sound::libraryCount();
@@ -3083,8 +2963,13 @@ static void handleSettingsStep(uint16_t id, int dir) {
   if (dir == 0) return;
   switch (id) {
     case A_TxPower: {
+      // EST-422: the stepper's +/- asks first; the row keeps showing the stored value until Apply.
       const int tx = (int)g_radio.prefs().tx + dir;
-      g_radio.setTx((int8_t)om::ui::clampTxPower(tx));
+      const int next = (int)om::ui::clampTxPower(tx);
+      if (next == (int)g_radio.prefs().tx) break;   // already at the end: nothing to ask
+      char v[16];
+      snprintf(v, sizeof(v), "%d dBm", next);
+      g_ask.begin(om::ui::ConfirmKind::TxPower, next, v);
       break;
     }
     case A_SoundVolume: {
@@ -3181,9 +3066,9 @@ static void settingsEditorOk() {
 
   if (g_setPage == SetPage::NameEdit) {
     if (s_setNameNode) {
-      om::meshNodeNameSet(g_editBuf);
-      showToast("Name saved");
-      setBack();                    // EST-350: back to the Node page, not to General
+      // EST-422: the node name is a setting that matters, so OK asks in the shared sheet and only its
+      // Apply writes the name. Cancel leaves the page as it is and the stored name untouched.
+      g_ask.begin(om::ui::ConfirmKind::NodeName, 0, g_editBuf);
     } else if (g_editNew) {
       if (g_addKind == 2) {   // join private: ask for the key next
         g_keyText[0] = 0;
@@ -3258,6 +3143,113 @@ static void settingsClearChannelMessages() {
   refreshChats();
 }
 
+// EST-422: the Apply side of the one shared confirm sheet. Every change that asked runs here, and only
+// here: Cancel and a tap outside never reach this function (ui/settings_actions.h confirmTap). Each
+// case is the code the row used to run straight from its tap, moved behind the sheet.
+static void settingsApplyConfirmed(om::ui::ConfirmKind kind, int arg, const char* value) {
+  switch (kind) {
+    case om::ui::ConfirmKind::Preset:
+      if (arg == om::ui::kRadioCustomPreset) {
+        if (g_radio.setRadio(g_custom.freqKhz, g_custom.bwHz, g_custom.sf, g_custom.cr)) {
+          g_custom = g_radio.prefs();
+          showToast("Radio preset saved");
+        } else {
+          showToast("Preset refused");
+        }
+      } else if (g_radio.setPreset(arg)) {
+        g_custom = g_radio.prefs();
+        showToast("Radio preset saved");
+      } else {
+        showToast("Preset refused");
+      }
+      break;
+    case om::ui::ConfirmKind::TxPower:
+      g_radio.setTx((int8_t)om::ui::clampTxPower(arg));
+      break;
+    case om::ui::ConfirmKind::PathHash:
+      if (om::meshPathHashSet((uint8_t)arg)) showToast("Path hash saved");
+      else showToast("Path hash refused");
+      break;
+    case om::ui::ConfirmKind::NodeName:
+      om::meshNodeNameSet(value);
+      showToast("Name saved");
+      setBack();                    // EST-350: back to the Node page, not to General
+      break;
+    case om::ui::ConfirmKind::ChannelDelete:
+      om::mcChannelRemove(arg);
+      om::meshLinkReloadChannels();
+      refreshChats();
+      showToast("Channel removed");
+      if (g_setPage == SetPage::Channel) {
+        setBack();                  // whichever page the channel was opened from
+      } else {
+        g_setChat = g_chatCount > 0 ? (g_setChat < g_chatCount ? g_setChat : 0) : 0;
+        g_setPage = SetPage::ChatRoot;
+        g_setScroll = 0;
+      }
+      break;
+    case om::ui::ConfirmKind::WifiForget:
+      om::wifiForget(arg);
+      showToast("Network forgotten");
+      break;
+    case om::ui::ConfirmKind::RepeaterForget: {
+      om::rptrForget(value);
+      const char* openName = om::rptr_tab::openNodeName();
+      if (value != nullptr && openName[0] && strcmp(value, openName) == 0) {
+        om::rptrLogout();
+        om::rptr_tab::clearSession();
+      }
+      showToast("Repeater forgotten");
+      break;
+    }
+    case om::ui::ConfirmKind::WifiSwitch:
+      om::wifiSetEnabled(arg != 0);
+      showToast(arg != 0 ? "Wi-Fi on" : "Wi-Fi off");
+      break;
+    case om::ui::ConfirmKind::BtSwitch: {
+      const bool on = arg != 0;
+      om::bleSetEnabled(on);
+      // EST-357: the start guard may have refused (not enough internal RAM); its own notice already
+      // carries the numbers, so "Bluetooth on" must not overwrite it with a claim that is not true.
+      if (!on) {
+        showToast("Bluetooth off");
+      } else if (om::bleIsEnabled()) {
+        showToast("Bluetooth on");
+      }
+      break;
+    }
+    case om::ui::ConfirmKind::KeyboardSwitch: {
+      g_kbEnabled = arg != 0;
+      const bool saved = mapLayerPrefWrite(nullptr, "grovekb", g_kbEnabled);
+      if (!saved) showToast("Keyboard setting not saved");
+      Serial.printf("[kb] switch %s (saved=%d)\n", g_kbEnabled ? "on" : "off", saved ? 1 : 0);
+      if (g_kbEnabled) {
+        if (!om::cardkb::begin()) showToast("Grove power failed");
+      } else {
+        om::cardkb::end();
+      }
+      break;
+    }
+    case om::ui::ConfirmKind::Position:
+      // 0 is GPS, 1 the point picked on the map (still in g_ownPickLatE6/g_ownPickLonE6).
+      if (arg == 0) {
+        if (om::posSelectGps()) showToast("Position: GPS");
+      } else if (om::posSelectFixed((double)g_ownPickLatE6 / 1e6, (double)g_ownPickLonE6 / 1e6)) {
+        showToast("Fixed position saved");
+      } else {
+        showToast("Position not saved");
+      }
+      g_ownPick = false;
+      break;
+    case om::ui::ConfirmKind::ClearMessages:
+      settingsClearChannelMessages();
+      break;
+    case om::ui::ConfirmKind::None:
+    default:
+      break;
+  }
+}
+
 // A tap on a settings page. All rectangles come from the view the drawing used.
 static void handleSettingsTap(int x, int y) {
   // EST-384: the own-position picker owns every tap while it is up (Cancel, zoom, GPS, Save, map).
@@ -3268,25 +3260,31 @@ static void handleSettingsTap(int x, int y) {
   buildSettingsRows();
   const om::ui::SettingsView v = settingsView();
 
-  // EST-382: the confirmation pop-up is the highest layer and owns every tap, including Back and the
-  // selector row behind it. Outside the box is Cancel, the default side, and is consumed.
-  if (g_clearAsk) {
-    const om::ui::SettingsModalHit h = om::ui::settingsClearAskHit(v, x, y);
-    g_clearAsk = false;
-    if (h == om::ui::SettingsModalHit::Confirm) settingsClearChannelMessages();
+  // EST-422: the ONE confirm sheet is the highest layer and owns every tap, including Back and the
+  // rows behind it. Cancel and a tap outside the box change NOTHING and are consumed.
+  if (g_ask.open) {
+    const om::ui::SettingsModalHit h = om::ui::settingsAskHit(v, x, y);
+    om::ui::ConfirmAsk answered = g_ask;   // answer() closes g_ask; arg/value stay readable here
+    const om::ui::ConfirmKind k = g_ask.answer(h);
+    if (k != om::ui::ConfirmKind::None) {
+      Serial.printf("[set] confirm: apply kind %d\n", (int)k);
+      settingsApplyConfirmed(k, answered.arg, answered.value);
+    } else {
+      Serial.println("[set] confirm: cancelled");
+    }
     drawSettings();
     return;
   }
 
   // EST-392: the Position choice owns every tap while it is down, Back and the row above it
-  // included. GPS switches the source; Fixed opens EST-384's map picker exactly as before; a tap
+  // included. GPS asks in the shared sheet; Fixed opens EST-384's map picker exactly as before; a tap
   // anywhere else is Cancel and changes neither the source nor the saved point.
   if (g_posChoice) {
     const int option = om::ui::settingsPositionChoiceHit(v, x, y);
     g_posChoice = false;
     switch (om::ui::posChoiceAction(option)) {
       case om::ui::PosChoiceAct::Gps:
-        if (om::posSelectGps()) showToast("Position: GPS");
+        askChange(om::ui::ConfirmKind::Position, 0, "GPS");
         break;
       case om::ui::PosChoiceAct::OpenPicker:
         // Already Fixed? Then the picker opens on the saved point, exactly like EST-384's Change row.
@@ -3311,7 +3309,7 @@ static void handleSettingsTap(int x, int y) {
       om::ui::selectorPickShown(press, &g_setChat);   // g_chatSel is deliberately untouched
       g_setSelOpen = false;
       g_setScroll = 0;
-      clearDeleteArms();
+      g_ask.close();
       // EST-399: which chat was picked (its index), never its name (rule 9).
       Serial.printf("[set] chat picked: %d of %d (chat screen still on %d)\n", g_setChat, g_chatCount,
                     wasOpen);
@@ -3384,7 +3382,7 @@ static void handleSettingsTap(int x, int y) {
     g_setPage = setRootForTab(g_setTab);
     g_setScroll = 0;
     g_setNav.reset();         // a tab is a new root: Back leaves Settings from it
-    clearDeleteArms();
+    g_ask.close();
     g_posChoice = false;      // EST-392: a tab is a new page, so no choice is left down
     drawSettings();
     return;
@@ -3823,13 +3821,13 @@ static bool pressTargetAt(int x, int y, om::ui::PressTarget* out) {
       *out = om::ui::pressTargetForRptrMapPick(om::ui::rptrMapPickLayoutFor(L, true), x, y);
       return out->valid();
     }
-    // The confirmation pop-up is the highest layer: only its two keys are targets, and a press
-    // outside the box is the consumed Cancel.
-    if (g_clearAsk) {
+    // The confirm sheet is the highest layer: only its two keys are targets, and a press outside the
+    // box is the consumed Cancel.
+    if (g_ask.open) {
       const om::ui::SettingsView v = settingsView();
       const om::ui::SettingsModalLayout m = om::ui::settingsModalLayoutFor(L.width, L.height);
       const bool confirm =
-          om::ui::settingsClearAskHit(v, x, y) == om::ui::SettingsModalHit::Confirm;
+          om::ui::settingsAskHit(v, x, y) == om::ui::SettingsModalHit::Confirm;
       *out = om::ui::pressTargetForModalKey(confirm, m.cancel, m.confirm, x, y);
       return out->valid();
     }
@@ -4075,21 +4073,8 @@ static bool redrawCurrentScreen() {
   return true;
 }
 
-// EST-399: the delete arms' own timeout, applied to the glass. Each arm is checked once per pass (two
-// comparisons); a page is redrawn only on the pass an arm actually ran out, so the "Tap again" label
-// can never outlive the window a tap honours. The editor sheet is left alone: it redraws on its own
-// keys, and a repaint under a finger is the one thing this must not do.
-static void deleteArmTick(uint32_t now) {
-  om::ui::DeleteArm* arms[3] = {&g_wifiForgetArm, &g_chatDeleteArm, &g_chanDeleteArm};
-  bool expired = false;
-  for (int i = 0; i < 3; ++i) {
-    if (arms[i]->expired(now)) {
-      arms[i]->clear();
-      expired = true;
-    }
-  }
-  if (expired && g_settings && g_setEditor == om::ui::SettingsEditor::None) drawSettings();
-}
+// EST-422: the delete arms' timeout is gone with the arms themselves; EST-399's DeleteArm has no
+// caller in the shell any more (see docs/PROGRESS.md).
 
 // EST-412: is a text field open right now? The same list the auto-off timer already had, now with
 // one owner and with the screen it belongs to: Settings owns its editors, the Chat tab owns the
@@ -4110,7 +4095,7 @@ static bool textFieldOpen() {
 static bool popupOpen() {
   // The own-position picker and the RPTR map picker are full frames, but the user is in the middle of
   // choosing a point, so they are sheets here too, exactly as they are for the timer.
-  return g_clearAsk || g_setSelOpen || g_posChoice || g_ownPick || g_selector || g_advertMenu ||
+  return g_ask.open || g_setSelOpen || g_posChoice || g_ownPick || g_selector || g_advertMenu ||
          g_bubMenuSeq != 0 || om::nodes_tab::modalOpen() ||
          om::rptr_tab::modalOpen() || om::rptr_tab::mapPickerOpen();
 }
@@ -4164,7 +4149,7 @@ static void keynavTabStep(int delta) {
     g_setPage = setRootForTab(g_setTab);
     g_setScroll = 0;
     g_setNav.reset();
-    clearDeleteArms();
+    g_ask.close();
     g_posChoice = false;
     drawSettings();
     return;
@@ -4957,7 +4942,11 @@ void loop() {
   // pushing is not the one the finger is looking at), and a finger that is already down when it ends
   // must lift first: the same TouchGate the wake path uses, with the change's own short window.
   // The change is fed "no finger" for its whole duration so that latch is never lost to a stale edge.
-  uint16_t x = 0, y = 0;
+  // EST-422: x/y start from the LAST point the panel reported, because LovyanGFX writes no coordinate
+  // on a pass where the panel reports no finger (LGFXBase.hpp getTouch returns before writing x/y). So
+  // on the release pass these are the last real point, and the tap rule can compare it with the press.
+  uint16_t x = (uint16_t)g_tap.lastX;
+  uint16_t y = (uint16_t)g_tap.lastY;
   bool rawDown = false;
   uint16_t injectedX = 0, injectedY = 0;
   bool injectedDown = false;
@@ -5013,8 +5002,13 @@ void loop() {
         } else if (setAccent) {
           settingsEditAppendAccent();   // the name field only; the filter refuses a base64 key
           drawSettings();
-        } else if (!g_drag && !g_acted) {
+        } else if (g_tap.tapAllowed((int)x, (int)y, g_drag, g_acted)) {
+          // EST-422: the ONE tap rule (ui/tap_rule.h). A gesture seen only once, or seen to end away
+          // from where it began, is a flick and not a tap: nothing under the finger changes.
           handleTap(g_sx, g_sy, false);
+        } else if (!g_drag && !g_acted) {
+          Serial.printf("[tap] %d,%d ignored: %d sample(s), last %d,%d (flick, not a tap)\n",
+                        (int)g_sx, (int)g_sy, g_tap.samples, g_tap.lastX, g_tap.lastY);
         }
         // EST-348/367: a pull PAST the oldest message the view holds asks the chat's own log for the
         // next older page. The clamp below then runs against the taller content; the scroll is
@@ -5096,6 +5090,7 @@ void loop() {
     g_downMs = millis();
     g_sx = x;
     g_sy = y;
+    g_tap.press((int)x, (int)y);   // EST-422: the gesture's own record, sample 1 of the tap rule
     g_chatScroll0 = g_chatScroll;
     g_selScroll0 = g_selScroll;
     g_emojiScroll0 = g_emojiScroll;
@@ -5221,6 +5216,10 @@ void loop() {
     g_lastX = panPress.baseX;
     g_lastY = panPress.baseY;
   } else {
+    // EST-422: every pass the finger is down on is a sample of the gesture, and the last one is what
+    // the release edge is compared with. (The drag latch below keeps its own, vertical-only 12 px rule
+    // for the lists; the tap rule also catches a sideways flick, which never set this.)
+    g_tap.sample((int)x, (int)y);
     const int dy = g_sy - (int)y;
     if (dy > 12 || dy < -12) g_drag = true;
     // A hold fires while the finger is still down: the menu opens under the finger. A spent gesture
@@ -5395,16 +5394,20 @@ void loop() {
                     (unsigned long)(worstUs / 1000UL), (unsigned long)presses);
     }
   }
-  // EST-399: the two deferred-write rules, both on this one pass and both event-free: a "tap again"
-  // arm that ran out stops saying so, and the emoji Recent row's one NVS write goes out when the
-  // emoji page is gone (however it was left) or after 30 s without a pick.
-  deleteArmTick(millis());
+  // EST-399: the emoji Recent row's one NVS write goes out when the emoji page is gone (however it was
+  // left) or after 30 s without a pick. EST-422: the delete arms' tick went away with the arms.
   emojiPersistStep(g_tab == 1 && !g_settings && g_kb.open && g_kb.emoji(), millis());
   om::radio::endPass(micros(), millis());
   // While the backlight ramps, tick at ~1 ms so the 8-bit PWM gets many real levels over the 300 ms
   // fade-in (150 ms out); otherwise keep the old 20 ms loop (mesh, touch, draw). EST-355: a screen
   // change's 40 ms out and 60 ms in need the same ~1 ms cadence.
-  delay((g_fade.active() || g_change.active()) ? 1 : 20);
+  // EST-422: while a finger is DOWN the panel is sampled every ~2 ms. The 20 ms loop plus an 11 ms
+  // frame push was a blind window long enough for a quick flick to begin and end in it: no sample ever
+  // crossed the 12 px drag test, so the release tapped the press point. At ~2 ms the finger cannot
+  // travel 12 px unseen (a hard flick is about 2 px/ms), so the flick is a drag before it lifts; and a
+  // real tap of any human length is seen many times, which is what the one-sample rule needs.
+  const uint32_t idleDelay = g_down ? 2 : 20;
+  delay((g_fade.active() || g_change.active()) ? 1 : idleDelay);
 }
 
 // ------------------------------------------------------------------- app_shell (EST-371)

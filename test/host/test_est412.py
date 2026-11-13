@@ -115,14 +115,18 @@ def main(argv):
     boot = block(maincpp, "EST-412: the Grove keyboard switch.", "EST-405: the screen auto-off")
     need(boot, "enabledFromNvs(present, saved)", "boot does not use the missing-key rule")
     need(boot, "cardkb::begin()", "a saved ON does not enable the keyboard")
+    # EST-422: the switch asks first, so the row only opens the shared confirm sheet; the ON/OFF work
+    # (the NVS write, begin/end) lives in the one apply, under ConfirmKind::KeyboardSwitch.
     toggle = block(maincpp, "case A_GroveKeyboard:", "case A_Sound:")
-    need(toggle, "cardkb::begin()", "the ON action does not enable the keyboard")
-    need(toggle, "cardkb::end()", "the OFF action does not close the bus and the power")
-    need(toggle, 'mapLayerPrefWrite(nullptr, "grovekb", g_kbEnabled)',
+    need(toggle, "ConfirmKind::KeyboardSwitch", "the switch does not ask in the shared sheet")
+    apply_kb = block(maincpp, "case om::ui::ConfirmKind::KeyboardSwitch:", "case om::ui::ConfirmKind::Position:")
+    need(apply_kb, "cardkb::begin()", "the ON action does not enable the keyboard")
+    need(apply_kb, "cardkb::end()", "the OFF action does not close the bus and the power")
+    need(apply_kb, 'mapLayerPrefWrite(nullptr, "grovekb", g_kbEnabled)',
          "the switch does not write the shared bool key")
     # EST-421: begin() no longer knows whether the keyboard answered, so the toggle cannot toast
     # "not found"; the loop's cardKbStep() does, after the 3000 ms window.
-    forbid(toggle, 'showToast("CardKB not found")',
+    forbid(apply_kb, 'showToast("CardKB not found")',
            "a non-blocking begin() cannot report a missing keyboard")
 
     # --- polling: one call site, in the loop, behind the gate --------------------------------

@@ -58,8 +58,10 @@ def main():
         fail("the Position row's value is not the selected source label")
     if count(main_cpp, "case A_PosSource:") != 1:
         fail("A_PosSource does not have exactly one handler")
-    if count(main_cpp, "A_PosSource") != 3:
-        fail("A_PosSource appears more than at its declaration, its row and its handler")
+    # EST-422: the id is DECLARED in ui/settings_actions.h now (the confirm table needs it), so only
+    # the row and the handler are left in the shell.
+    if count(main_cpp, "A_PosSource") != 2:
+        fail("A_PosSource appears more than at its row and its handler")
 
     # 2. The order of the section: the control, then the details that stay (satellites and fix).
     pos_block = block(main_cpp, "setSection(om::ui::kPosSectionLabel);", 'setSection("ABOUT")')
@@ -90,8 +92,11 @@ def main():
     if count(main_cpp, "om::posSelectFixed(") != 1:
         fail("the Fixed source is stored outside the one picker Save")
     choice_block = block(main_cpp, "if (g_posChoice) {", "// EST-350: while the chat selector")
+    # EST-422: GPS is no longer written from the choice itself: the choice opens the shared confirm
+    # sheet with the Position kind, and the one apply (settingsApplyConfirmed) writes it. So the
+    # handler must ASK, and must still not store a Fixed point of its own.
     for needle in ("settingsPositionChoiceHit", "posChoiceAction", "ownPickOpen",
-                   "om::posSelectGps()"):
+                   "ConfirmKind::Position"):
         if needle not in choice_block:
             fail(f"the choice handler does not use {needle}")
     if count(choice_block, "posSelectFixed") != 0:
@@ -136,7 +141,8 @@ def main():
         fail("the choice's drawing formats a float")
 
     # 8. The chat selector and the confirmation pop-up are untouched: the choice is its own layer.
-    if "drawChatSelector" not in screen or "drawClearAsk" not in screen:
+    # EST-422 renamed the pop-up's drawing to drawAsk (every important setting asks there now).
+    if "drawChatSelector" not in screen or "drawAsk" not in screen:
         fail("an existing overlay's drawing disappeared")
 
     if FAIL:

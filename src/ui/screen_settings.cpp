@@ -342,17 +342,18 @@ void drawEditor(lgfx::LovyanGFX* d, const SettingsLayout& L, const SettingsView&
   }
 }
 
-// EST-382: the Clear-messages confirmation. A scrim (the page behind stays readable but dimmed),
-// the question wrapped by the shared wrapper, then Cancel on the left as the DEFAULT key (gold, like
-// a page's commit key) and the destructive Clear on the right. A tap outside the box is Cancel.
-void drawClearAsk(lgfx::LovyanGFX* d, const SettingsView& v) {
+// EST-422: the ONE confirm sheet (EST-382's Clear-messages pop-up, now every important setting). A
+// scrim (the page behind stays readable but dimmed), the question wrapped by the shared wrapper, then
+// Cancel on the left as the DEFAULT key (gold, like a page's commit key) and Apply / Delete / Forget on
+// the right, red when the change destroys something. A tap outside the box is Cancel.
+void drawAsk(lgfx::LovyanGFX* d, const SettingsView& v) {
   const SettingsModalLayout m = settingsModalLayoutFor(l2().width, l2().height);
   d->fillRect(0, 0, l2().width, l2().height, kPanel2);
   d->fillRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kPanel);
   d->drawRoundRect(m.box.x, m.box.y, m.box.w, m.box.h, kRadius, kLine);
   // The shared UTF-8 wrapper, three lines at most, every line cut on a code-point boundary. The box
   // is sized for a 31-character channel name plus the sentence.
-  const char* text = v.clearText ? v.clearText : "";
+  const char* text = v.askText ? v.askText : "";
   WrapLine lines[3];
   const int n = wrapText(text, measureBody, d, m.text.w, m.text.w, lines, 3);
   char buf[160];
@@ -365,8 +366,13 @@ void drawClearAsk(lgfx::LovyanGFX* d, const SettingsView& v) {
     drawTextLeft(d, FontRole::SansBody, kInk, kPanel, m.text.x, m.text.y + 6 + i * 14, buf);
   }
 
+  const char* apply = (v.askApply != nullptr && v.askApply[0]) ? v.askApply : "Apply";
   drawKeyBox(d, m.cancel, kSelBg2, kAcc, "Cancel", kAccInk);
-  drawKeyBox(d, m.confirm, kDangerBg, kDangerLine, "Clear", kDangerInk);
+  if (v.askDanger) {
+    drawKeyBox(d, m.confirm, kDangerBg, kDangerLine, apply, kDangerInk);
+  } else {
+    drawKeyBox(d, m.confirm, kSelBg2, kAcc, apply, kAccInk);
+  }
 }
 
 // EST-392: the Position row's choice. The same panel the chat selector drops (kPanel, a kLine edge,
@@ -440,7 +446,7 @@ void settingsScreenDraw(const SettingsView& v) {
 
   // EST-382: the confirmation is the highest layer, over the status bar too: while it is up, nothing
   // behind it can be read as a tap target.
-  if (v.clearAsk) drawClearAsk(d, v);
+  if (v.ask) drawAsk(d, v);
 
   // The old direct-draw screens share the panel and set their own font; leave them the default.
   om::useAppFont(d);
@@ -490,7 +496,7 @@ SettingsKeyHit settingsEditorKeyAt(const SettingsView& v, int x, int y) {
   return editorKeyAt(g, field, v.editNums, v.editShift, x, y);
 }
 
-SettingsModalHit settingsClearAskHit(const SettingsView& v, int x, int y) {
+SettingsModalHit settingsAskHit(const SettingsView& v, int x, int y) {
   const SettingsModalLayout m = settingsModalLayoutFor(l2().width, l2().height);
   (void)v;
   return settingsModalHitAt(m, x, y);

@@ -174,7 +174,8 @@ def main(argv):
         fail("popupOpen must be defined once")
     if maincpp.count("popupOpen()") < 2:
         fail("popupOpen has fewer than two readers (the timer and the arrows)")
-    for word in ("g_clearAsk", "g_posChoice", "g_ownPick", "g_bubMenuSeq", "modalOpen()",
+    # EST-422: the confirmation state is g_ask (the one confirm sheet) and it is still a pop-up here.
+    for word in ("g_ask.open", "g_posChoice", "g_ownPick", "g_bubMenuSeq", "modalOpen()",
                  "mapPickerOpen()"):
         need(popup, word, f"popupOpen lost a pop-up: {word}")
     need(maincpp, "b.popup = popupOpen();", "the timer no longer uses the one pop-up list")
